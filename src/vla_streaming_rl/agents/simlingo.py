@@ -29,8 +29,6 @@ Caveats:
   viewpoints differ; closed-loop performance reflects that mismatch.
 """
 import os
-import sys
-from contextlib import contextmanager
 from pathlib import Path
 
 import carla
@@ -39,16 +37,7 @@ import numpy as np
 import torch
 from srunner.scenariomanager.timer import GameTime
 
-
-@contextmanager
-def _chdir(path: Path):
-    """Temporarily cd into ``path`` (SimLingo's setup uses relative paths)."""
-    prev = Path.cwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(prev)
+from vla_streaming_rl.simlingo.team_code.agent_simlingo import LingoAgent
 
 
 class _NoopRewardProcessor:
@@ -68,10 +57,6 @@ class SimLingoAgent:
     _HF_REPO_ID = "RenzKa/simlingo"
     _HF_CKPT_NAME = "pytorch_model.pt"
 
-    # SimLingo's source ships vendored under ``src/vla_streaming_rl/simlingo/``
-    # (a thinned team_code + the full simlingo_training package).
-    _SIMLINGO_ROOT = Path(__file__).resolve().parent.parent / "simlingo"
-
     def __init__(
         self,
         *,
@@ -89,27 +74,11 @@ class SimLingoAgent:
         self._scratch_dir.mkdir(parents=True, exist_ok=True)
         self._checkpoint_path = self._resolve_checkpoint(checkpoint_path)
 
-        # SimLingo's team_code uses bare imports (``from config import …``,
-        # ``from scenario_logger import …``) plus dotted ``team_code.* /
-        # simlingo_training.*`` imports. Both styles resolve when the
-        # vendor root and its ``team_code/`` are on ``sys.path``.
-        team_code = self._SIMLINGO_ROOT / "team_code"
-        if not team_code.exists():
-            raise FileNotFoundError(
-                f"vendored SimLingo team_code missing at {team_code} — "
-                f"was src/vla_streaming_rl/simlingo/ packaged?"
-            )
-        for entry in (str(self._SIMLINGO_ROOT), str(team_code)):
-            if entry not in sys.path:
-                sys.path.insert(0, entry)
-
         # ``LingoAgent.setup`` writes ``SAVE_PATH + save_path_root`` and
         # crashes if SAVE_PATH is unset. Redirect to a per-run scratch
         # dir; none of these files feed our downstream metrics
         # (CARLALeaderboardEnv's eval_writer owns those).
         os.environ["SAVE_PATH"] = str(self._scratch_dir) + "/"
-
-        from agent_simlingo import LingoAgent  # noqa: E402
 
         # ``AutonomousAgent.__init__`` calls ``self.get_hero()`` which scans
         # CarlaDataProvider for an actor with role_name='hero'. At
@@ -120,16 +89,15 @@ class SimLingoAgent:
             def get_hero(self):
                 self.hero_actor = None
 
-        with _chdir(self._SIMLINGO_ROOT):
-            self._lingo = _DeferredHero(carla_host="", carla_port=2000, debug=False)
-            # Use simlingo's upstream "<ckpt>+<save_path_root>" convention
-            # (eval_220routes.sh appends ``+$save_name`` via
-            # ``--agent-config``). ``route_index=None`` keeps
-            # ``self.save_path`` a plain str so the later
-            # ``save_path + "/debug_viz"`` concat works (passing a non-None
-            # value converts it to PosixPath, which doesn't support ``+``).
-            agent_config = f"{self._checkpoint_path}+vla_streaming_rl"
-            self._lingo.setup(agent_config, route_index=None)
+        self._lingo = _DeferredHero(carla_host="", carla_port=2000, debug=False)
+        # Use simlingo's upstream "<ckpt>+<save_path_root>" convention
+        # (eval_220routes.sh appends ``+$save_name`` via
+        # ``--agent-config``). ``route_index=None`` keeps
+        # ``self.save_path`` a plain str so the later
+        # ``save_path + "/debug_viz"`` concat works (passing a non-None
+        # value converts it to PosixPath, which doesn't support ``+``).
+        agent_config = f"{self._checkpoint_path}+vla_streaming_rl"
+        self._lingo.setup(agent_config, route_index=None)
 
         # Freeze the VLM — we never backprop. Empty trainable_state at
         # checkpoint time then writes a (harmless) empty dict.

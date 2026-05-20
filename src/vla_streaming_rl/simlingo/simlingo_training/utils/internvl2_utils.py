@@ -1,18 +1,18 @@
 # Description: This file contains utility functions for the InternVL2 model.
 # Partially taken from: https://huggingface.co/OpenGVLab/InternVL2-1B
 
-import importlib.util
-import os
-import sys
 from typing import Dict, List, Optional
 
 import numpy as np
 import torch
 import torchvision.transforms as T
-from hydra.utils import to_absolute_path
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoConfig
+
+from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored import (
+    conversation as conv_module,
+)
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -146,14 +146,6 @@ def get_custom_chat_template(
     IMG_END_TOKEN = "</img>"
     IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
     IMG_TOKEN = "<image>"
-
-    # Use the vendored ``conversation.py`` directly. simlingo upstream
-    # downloads the full HF snapshot of ``OpenGVLab/InternVL2-1B``
-    # (~1.5 GB) into ``pretrained/InternVL2-1B/`` purely to be able to
-    # ``importlib`` one stdlib-only file. The same module already lives
-    # in ``internvl2_vendored/conversation.py`` (used by
-    # ``modeling_internvl_chat``); reuse it.
-    from simlingo_training.models.encoder.internvl2_vendored import conversation as conv_module
 
     image_tokens_templates = (
         IMG_START_TOKEN + IMG_CONTEXT_TOKEN * num_image_tokens_total + IMG_END_TOKEN

@@ -11,14 +11,14 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 from hydra.utils import get_original_cwd
-from simlingo_training.models.adaptors.adaptors import (
+from vla_streaming_rl.simlingo.simlingo_training.models.adaptors.adaptors import (
     AdaptorList,
     DrivingAdaptor,
     LanguageAdaptor,
     WaypointInputAdaptor,
 )
-from simlingo_training.models.utils import summarise_losses
-from simlingo_training.utils.custom_types import (
+from vla_streaming_rl.simlingo.simlingo_training.models.utils import summarise_losses
+from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
     DrivingExample,
     DrivingInput,
     DrivingLabel,

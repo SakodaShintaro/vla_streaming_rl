@@ -19,7 +19,6 @@ import carla
 import cv2
 import hydra
 import numpy as np
-import scenario_logger
 import torch
 import ujson
 from filterpy.kalman import MerweScaledSigmaPoints
@@ -28,21 +27,24 @@ from hydra.utils import get_original_cwd, to_absolute_path
 from leaderboard.autoagents import autonomous_agent
 from omegaconf import OmegaConf
 from PIL import Image, ImageDraw, ImageFont
-from scenario_logger import ScenarioLogger
+from vla_streaming_rl.simlingo.team_code.scenario_logger import ScenarioLogger
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import fsolve
-from simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
-from simlingo_training.utils.internvl2_utils import (
+from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored import (
+    conversation as conv_module,
+)
+from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
+from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
     SIMLINGO_ADDITIONAL_SPECIAL_TOKENS,
     build_transform,
     dynamic_preprocess,
 )
 from transformers import AutoConfig, AutoProcessor
 
-import team_code.transfuser_utils as t_u
-from team_code.config_simlingo import GlobalConfig
-from team_code.nav_planner import LateralPIDController, RoutePlanner
-from team_code.simlingo_utils import (
+import vla_streaming_rl.simlingo.team_code.transfuser_utils as t_u
+from vla_streaming_rl.simlingo.team_code.config_simlingo import GlobalConfig
+from vla_streaming_rl.simlingo.team_code.nav_planner import LateralPIDController, RoutePlanner
+from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     get_camera_extrinsics,
     get_camera_intrinsics,
     get_rotation_matrix,
@@ -708,14 +710,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             for i in range(len(conv)):
                 questions.append(conv[i]["content"][0]["text"])
                 conv[i]["content"] = conv[i]["content"][0]["text"]
-
-        # Use the vendored ``conversation.py`` directly. simlingo upstream
-        # downloads the full HF snapshot of ``OpenGVLab/InternVL2-1B``
-        # (~1.5 GB) into ``pretrained/InternVL2-1B/`` purely to be able
-        # to ``importlib`` one stdlib-only file. The same module already
-        # lives in ``internvl2_vendored/conversation.py`` (used by
-        # ``modeling_internvl_chat``); reuse it.
-        from simlingo_training.models.encoder.internvl2_vendored import conversation as conv_module
 
         if not hasattr(self, "tmp_config"):
             self.tmp_config = AutoConfig.from_pretrained(
