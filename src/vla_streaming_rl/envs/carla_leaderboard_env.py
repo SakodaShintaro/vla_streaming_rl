@@ -7,6 +7,7 @@ from pathlib import Path
 import carla
 import gymnasium as gym
 import numpy as np
+import py_trees
 from srunner.scenariomanager.traffic_events import TrafficEventType
 
 from vla_streaming_rl.envs.bench2drive_scenario_runtime import Bench2DriveRuntime
@@ -198,7 +199,11 @@ class CARLALeaderboardEnv(gym.Env):
         # Observation / action contracts come from carla_obs (shared with the
         # Bench2Drive eval agent so training and eval stay bit-aligned).
         self.obs_cfg = CARLAObsConfig()
-        self.max_episode_steps = 2000
+        # Safety net only. Bench2Drive's scenario_tree (RouteCompletionTest /
+        # InRouteTest / AgentBlockedTest) is what actually ends the episode;
+        # this cap exists so a stuck CarlaDataProvider can't pin the env
+        # forever. 20 FPS × 600 s = 12000 covers the longest Town12 routes.
+        self.max_episode_steps = 12000
         self.render_mode = "rgb_array"
         self.fps = 20  # Simulation FPS
 
@@ -300,10 +305,6 @@ class CARLALeaderboardEnv(gym.Env):
 
         # Episode information
         self.episode_step = 0
-        self.negative_reward_count = 0  # Count of consecutive negative rewards
-        # Random-route mode (no Bench2Drive XML) lacks OutsideRouteLanesTest, so
-        # we use the lane invasion sensor as a strict off-lane terminator.
-        self._solid_lane_crossed = False
 
         # Vehicle physics information
         self.vehicle_physics = VehiclePhysics.create()
@@ -491,7 +492,6 @@ class CARLALeaderboardEnv(gym.Env):
         self._last_camera = None
         self._last_gnss = None
         self._last_imu = None
-        self.negative_reward_count = 0
         self.vehicle_physics = VehiclePhysics.create()
         self.physics_history = []
 
@@ -510,7 +510,6 @@ class CARLALeaderboardEnv(gym.Env):
         # The lane invasion sensor can fire spuriously on the spawn tick when
         # the ego is placed near a marking; clear here so only agent-driven
         # crossings count.
-        self._solid_lane_crossed = False
         self.lane_invasion_history = []
         self.infractions["lane_invasion"] = 0
 
@@ -554,8 +553,6 @@ class CARLALeaderboardEnv(gym.Env):
         # ``WARNING: Couldn't add noise to the ego because the control
         # couldn't be found`` every tick and skips its noise pass.
         if self.runtime is not None:
-            import py_trees
-
             py_trees.blackboard.Blackboard().set("AV_control", control, overwrite=True)
 
         self.world.tick()
@@ -577,49 +574,31 @@ class CARLALeaderboardEnv(gym.Env):
         # Update route tracking
         self.route_tracker.update(self.vehicle.get_location())
 
-        # Termination conditions
-        has_collision = (
-            self.infractions["collision_pedestrian"] > 0
-            or self.infractions["collision_vehicle"] > 0
-            or self.infractions["collision_static"] > 0
-        )
+        # Termination conditions — mirror Bench2Drive's ScenarioManager.
+        # Collision / off-route / red light / stop / min-speed are recorded
+        # as infractions by the scenario_tree's criteria and feed the
+        # StatisticsManager Driving Score, but they do NOT stop the route.
+        # The scenario_tree ends on:
+        #   - RouteCompletionTest = SUCCESS  (route_completion >= 1.0)
+        #   - InRouteTest = FAILURE          (30 m off-route)
+        #   - AgentBlockedTest = FAILURE     (60 s under 0.1 m/s)
+        # Reward = step delta of Bench2Drive score_composed; criteria
+        # update happens inside the scenario tick above.
+        reward = self._compute_reward()
 
-        # Calculate reward (also updates self._latest_off_route_pct from criteria).
-        reward = self._compute_reward(has_collision)
-
-        # Heavy off-route → terminate. Bench2Drive's score_composed at >=30%
-        # off-route is already <70 of route_completion; continuing wastes
-        # rollout steps with no recovery in practice. Overwrite the reward to
-        # the same -1 floor a collision delivers (delta-based reward at the
-        # crossing step is otherwise tiny and not a clear terminal signal).
-        heavy_off_route = self._latest_off_route_pct >= 30.0
-        # Random-route mode has no OutsideRouteLanesTest; fall back to the
-        # lane invasion sensor for solid-marking / curb crossings.
-        solid_lane_termination = self.runtime is None and self._solid_lane_crossed
-        if heavy_off_route or has_collision or solid_lane_termination:
-            reward = -1.0
-        terminated = (
-            has_collision
-            or self.route_tracker.route_completion >= 1.0
-            or heavy_off_route
-            or solid_lane_termination
-        )
-
-        # Negative reward count
-        if reward < 0:
-            self.negative_reward_count += 1
+        if self.runtime is not None and self.runtime.route_scenario is not None:
+            scenario_running = (
+                self.runtime.route_scenario.scenario_tree.status
+                == py_trees.common.Status.RUNNING
+            )
+            terminated = not scenario_running
         else:
-            self.negative_reward_count = 0
+            # Random-route mode (no Bench2DriveRuntime): no scenario_tree,
+            # so route completion is the only natural end. The
+            # max_episode_steps cap below catches everything else.
+            terminated = self.route_tracker.route_completion >= 1.0
 
-        # In random-route mode we sample a single-lane corridor, so 30 m of
-        # lateral drift means the ego is well outside any reasonable road
-        # surface — tighten to one lane-width worth of slack.
-        deviation_threshold = 30.0 if self.runtime is not None else 4.0
-        truncated = (
-            self.episode_step >= self.max_episode_steps
-            or self.negative_reward_count >= 100
-            or self.route_tracker.min_distance_to_route >= deviation_threshold
-        )
+        truncated = self.episode_step >= self.max_episode_steps
 
         self.episode_step += 1
 
@@ -746,7 +725,7 @@ class CARLALeaderboardEnv(gym.Env):
         raw_locations = [wp.transform.location for wp in route_waypoints]
         return raw_locations, start_pose
 
-    def _compute_reward(self, has_collision: bool) -> float:
+    def _compute_reward(self) -> float:
         """
         Reward = step delta of Bench2Drive ``score_composed`` (range ~[0, 100]).
 
@@ -924,17 +903,3 @@ class CARLALeaderboardEnv(gym.Env):
     def _on_lane_invasion(self, event):
         self.lane_invasion_history.append(event)
         self.infractions["lane_invasion"] += 1
-        # Crossing a solid marking or mounting a curb means the ego left its
-        # lane in a way real driving wouldn't recover from. Broken markings
-        # (lane changes / overtakes) are excluded so legitimate maneuvers
-        # don't terminate. Only consumed in random-route mode; XML mode
-        # uses OutsideRouteLanesTest instead.
-        terminal_types = {
-            carla.LaneMarkingType.Solid,
-            carla.LaneMarkingType.SolidSolid,
-            carla.LaneMarkingType.SolidBroken,
-            carla.LaneMarkingType.BrokenSolid,
-            carla.LaneMarkingType.Curb,
-        }
-        if any(m.type in terminal_types for m in event.crossed_lane_markings):
-            self._solid_lane_crossed = True
