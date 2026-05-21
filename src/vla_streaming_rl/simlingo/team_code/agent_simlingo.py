@@ -206,6 +206,17 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             {"additional_special_tokens": list(SIMLINGO_ADDITIONAL_SPECIAL_TOKENS)}
         )
         self.tokenizer.padding_side = "left"
+
+        # ``AutoConfig`` + ``trust_remote_code=True`` resolves to
+        # ``InternVLChatConfig``. Use the vendored class directly so the
+        # HF-hosted ``configuration_internvl_chat.py`` is no longer
+        # downloaded / executed at runtime.
+        tmp_config = InternVLChatConfig.from_pretrained(cfg.model.vision_model.variant)
+        image_size = tmp_config.force_image_size or tmp_config.vision_config.image_size
+        patch_size = tmp_config.vision_config.patch_size
+        self.num_image_token = int(
+            (image_size // patch_size) ** 2 * (tmp_config.downsample_ratio**2)
+        )
         # llm_tokenizer = AutoTokenizer.from_pretrained(cfg.model.language_model.variant)
         cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
         default_dtype = torch.get_default_dtype()
@@ -421,37 +432,32 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         rgbs = rgb
         image_sizes = None
 
-        if "internvl2" in self.cfg.model.vision_model.variant.lower():
-            T, C, H, W = rgbs.shape
-            transform = build_transform(input_size=448)
-            images_processed_tmp = []
-            images_sizes_tmp = []
+        T, C, H, W = rgbs.shape
+        transform = build_transform(input_size=448)
+        images_processed_tmp = []
+        images_sizes_tmp = []
 
-            image = Image.fromarray(rgbs.squeeze(0).transpose(1, 2, 0))
-            images = dynamic_preprocess(
-                image,
-                image_size=448,
-                use_thumbnail=self.cfg.model.vision_model.use_global_img,
-                max_num=2,
-            )
-            pixel_values = [transform(image) for image in images]
-            pixel_values = torch.stack(pixel_values)
-            images_processed_tmp.append(pixel_values)
-            images_sizes_tmp.append([image.size[1], image.size[0]])
+        image = Image.fromarray(rgbs.squeeze(0).transpose(1, 2, 0))
+        images = dynamic_preprocess(
+            image,
+            image_size=448,
+            use_thumbnail=self.cfg.model.vision_model.use_global_img,
+            max_num=2,
+        )
+        pixel_values = [transform(image) for image in images]
+        pixel_values = torch.stack(pixel_values)
+        images_processed_tmp.append(pixel_values)
+        images_sizes_tmp.append([image.size[1], image.size[0]])
 
-            images_processed = {
-                "pixel_values": torch.stack(images_processed_tmp),
-                "image_sizes": torch.tensor(images_sizes_tmp),
-            }
-            processed_image = images_processed["pixel_values"]
-            num_patches = processed_image.shape[1]
-            new_height = processed_image.shape[3]
-            new_width = processed_image.shape[4]
-            processed_image = processed_image.view(1, self.T, num_patches, C, new_height, new_width)
-
-        else:
-            encoder = OmegaConf.select(self.cfg, "data_module.encoder", default="unknown")
-            raise NotImplementedError(f"Encoder {encoder} not implemented yet")
+        images_processed = {
+            "pixel_values": torch.stack(images_processed_tmp),
+            "image_sizes": torch.tensor(images_sizes_tmp),
+        }
+        processed_image = images_processed["pixel_values"]
+        num_patches = processed_image.shape[1]
+        new_height = processed_image.shape[3]
+        new_width = processed_image.shape[4]
+        processed_image = processed_image.view(1, self.T, num_patches, C, new_height, new_width)
 
         gps_pos = self._route_planner.convert_gps_to_carla(input_data["gps"][1])
         gps_pos = gps_pos + np.array([self.bias["gps_x"], self.bias["gps_y"], 0.0])
@@ -625,23 +631,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             for i in range(len(conv)):
                 questions.append(conv[i]["content"][0]["text"])
                 conv[i]["content"] = conv[i]["content"][0]["text"]
-
-        if not hasattr(self, "tmp_config"):
-            # ``AutoConfig`` + ``trust_remote_code=True`` resolves to
-            # ``InternVLChatConfig``. Use the vendored class directly so
-            # the HF-hosted ``configuration_internvl_chat.py`` is no
-            # longer downloaded / executed at runtime.
-            self.tmp_config = InternVLChatConfig.from_pretrained(
-                self.cfg.model.vision_model.variant
-            )
-            image_size = (
-                self.tmp_config.force_image_size or self.tmp_config.vision_config.image_size
-            )
-            patch_size = self.tmp_config.vision_config.patch_size
-
-            self.num_image_token = int(
-                (image_size // patch_size) ** 2 * (self.tmp_config.downsample_ratio**2)
-            )
 
         prompt_batch_list = []
         for idx, conv in enumerate(conv_batch_list):
@@ -944,10 +933,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         del self.model
         del self.config
-        if OmegaConf.select(self.cfg, "data_module.encoder") == "llavanext" and hasattr(
-            self, "processor"
-        ):
-            del self.processor
 
 
 # Filter Functions
