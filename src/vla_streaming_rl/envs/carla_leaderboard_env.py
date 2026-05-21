@@ -548,6 +548,15 @@ class CARLALeaderboardEnv(gym.Env):
             steer=steer, throttle=throttle, brake=brake, hand_brake=False, manual_gear_shift=False
         )
         self.vehicle.apply_control(control)
+        # Publish to the py_trees Blackboard the leaderboard scenarios
+        # read for ControlLoss-style noise injection. Without this,
+        # ``NoiseControl.update`` prints
+        # ``WARNING: Couldn't add noise to the ego because the control
+        # couldn't be found`` every tick and skips its noise pass.
+        if self.runtime is not None:
+            import py_trees
+
+            py_trees.blackboard.Blackboard().set("AV_control", control, overwrite=True)
 
         self.world.tick()
 
