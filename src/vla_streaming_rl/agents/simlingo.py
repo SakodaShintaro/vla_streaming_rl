@@ -61,7 +61,6 @@ class SimLingoAgent:
         observation_space: gym.spaces.Box,
         action_space: gym.spaces.Box,
         env: gym.Env,
-        checkpoint_path: Path | None,
         scratch_dir: Path,
     ) -> None:
         self.observation_space = observation_space
@@ -70,7 +69,7 @@ class SimLingoAgent:
         self._env_unwrapped = env.unwrapped
         self._scratch_dir = Path(scratch_dir)
         self._scratch_dir.mkdir(parents=True, exist_ok=True)
-        self._checkpoint_path = self._resolve_checkpoint(checkpoint_path)
+        self._checkpoint_path = self._resolve_checkpoint()
 
         # ``LingoAgent.setup`` writes ``SAVE_PATH + save_path_root`` and
         # crashes if SAVE_PATH is unset. Redirect to a per-run scratch
@@ -139,8 +138,8 @@ class SimLingoAgent:
     # --- Internals ----------------------------------------------------------
 
     @classmethod
-    def _resolve_checkpoint(cls, checkpoint_path: Path | None) -> Path:
-        """Use ``checkpoint_path`` if given, else pull from HF.
+    def _resolve_checkpoint(cls) -> Path:
+        """Pull the SimLingo checkpoint from HF and return its local path.
 
         ``snapshot_download`` populates the HF cache; we pick the single
         ``pytorch_model.pt`` inside (excluding the blob-store hardlinks,
@@ -148,12 +147,6 @@ class SimLingoAgent:
         path that breaks SimLingo's
         ``Path(...).parent.parent.parent / .hydra/config.yaml`` lookup).
         """
-        if checkpoint_path is not None and str(checkpoint_path):
-            p = Path(checkpoint_path)
-            if not p.is_file():
-                raise FileNotFoundError(f"SimLingo checkpoint not found: {p}")
-            return p
-
         from huggingface_hub import snapshot_download
 
         snapshot = Path(snapshot_download(cls._HF_REPO_ID))

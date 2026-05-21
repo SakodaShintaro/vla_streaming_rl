@@ -12,6 +12,10 @@
 # observation_space) and a goal_predictor unconditionally — SimLingo
 # ignores both. We inherit cnn_streaming's bases so build_network has
 # the keys it needs; the resulting CNN sits idle.
+#
+# The SimLingo VLM checkpoint is always pulled from huggingface
+# (RenzKa/simlingo) into the local HF cache via snapshot_download —
+# nothing to configure here.
 defaults:
   - base_network
   - base_off_policy
@@ -27,9 +31,3 @@ agent_type: simlingo
 # cascade's final policy_type=diffusion). Mirrors cnn_streaming.yaml's
 # choice; the resulting RL net is built but unused by SimLingoAgent.
 network_class: actor_critic_with_action_value
-
-simlingo:
-  # pytorch_model.pt for the SimLingo VLM. ``null`` auto-downloads from
-  # huggingface RenzKa/simlingo into the local HF cache; set to a path
-  # to override (e.g. a locally fine-tuned checkpoint).
-  checkpoint: null
