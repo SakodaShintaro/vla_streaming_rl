@@ -13,6 +13,10 @@ from transformers import (
     LlavaNextProcessor,
 )
 
+from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.modeling_internvl_chat import (
+    InternVLChatModel,
+)
+
 CONFIGS: Dict[str, Dict[str, Any]] = {
     "debug": dict(num_hidden_layers=2, num_attention_heads=2, hidden_size=32, intermediate_size=64),
     "legacy-tiny": dict(
@@ -125,11 +129,6 @@ class LLM(nn.Module):
             self.model = self.model.language_model
             self.model.embed_tokens = self.model.base_model.embed_tokens
         elif "internvl" in self.variant.lower():
-            # Use vendored InternVLChatModel; see internvl2_vendored/ for why.
-            from simlingo_training.models.encoder.internvl2_vendored.modeling_internvl_chat import (
-                InternVLChatModel,
-            )
-
             self.model = InternVLChatModel.from_pretrained(self.variant)
             self.model = self.model.language_model
             try:
