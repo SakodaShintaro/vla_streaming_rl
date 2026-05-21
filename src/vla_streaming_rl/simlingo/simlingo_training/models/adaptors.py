@@ -176,19 +176,24 @@ class DrivingAdaptor(nn.Module):
         label = example.driving_label
         assert label is not None
 
+        labels_by_type = {
+            "route": label.path,
+            "speed_wps": label.waypoints[:, : self.future_speed_waypoints + 1],
+        }
+
         current_index = 0
         loss_dict = {}
         for i, input_type in enumerate(self.order):
             size = self.sizes[input_type]
             features_tmp = adaptor_features[:, current_index : current_index + size]
-            label = locals()[f"label_{input_type}"]
+            label_tensor = labels_by_type[input_type]
 
             prediction = self.heads[input_type](features_tmp).cumsum(1)
-            loss = F.smooth_l1_loss(prediction, label, reduction="none").sum(-1)
+            loss = F.smooth_l1_loss(prediction, label_tensor, reduction="none").sum(-1)
 
             loss_dict[f"{input_type}_loss"] = (loss, torch.ones_like(loss, dtype=torch.long))
             loss_dict[f"{input_type}_prediction"] = prediction
-            loss_dict[f"{input_type}_label"] = label
+            loss_dict[f"{input_type}_label"] = label_tensor
             current_index += size
 
         return loss_dict
@@ -237,10 +242,7 @@ class LanguageAdaptor(nn.Module):
     ) -> Dict[str, Tuple[Tensor, Tensor]]:
         del example
 
-        if adaptor_logits is None:
-            adaptor_logits = self.lm_head(outputs[:, :-1])
-        else:
-            adaptor_logits = adaptor_logits[:, :-1]
+        adaptor_logits = adaptor_logits[:, :-1]
         labels = torch.where(inputs["_ids_mask"], inputs["_ids"], -1)
         # Shift by 1 for next token prediction
         labels = labels[:, 1:]

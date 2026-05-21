@@ -11,8 +11,7 @@
 # leaderboard-compatible sensor stack (rgb / gps / imu / speed) via
 # info["sensors"], so no external simlingo checkout is referenced.
 # The checkpoint is auto-downloaded from huggingface (RenzKa/simlingo)
-# into the local HF cache on first run; override with
-# ``simlingo.checkpoint=/path/to/pytorch_model.pt``.
+# into the local HF cache on first run.
 set -eux
 
 suffix=${1:-""}

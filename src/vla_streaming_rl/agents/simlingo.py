@@ -41,7 +41,6 @@ class SimLingoAgent:
     """SimLingo policy with the RL-agent surface ``scripts/train.py`` expects."""
 
     # huggingface_hub repo id of the published SimLingo VLM weights.
-    # Used when ``checkpoint_path`` is not provided.
     _HF_REPO_ID = "RenzKa/simlingo"
     _HF_CKPT_NAME = "pytorch_model.pt"
 

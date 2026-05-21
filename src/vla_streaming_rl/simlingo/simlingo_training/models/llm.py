@@ -1,81 +1,12 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    GPTNeoXForCausalLM,
-    LlamaConfig,
-    LlamaModel,
-    LlavaNextForConditionalGeneration,
-    LlavaNextProcessor,
-)
 
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.modeling_internvl_chat import (
     InternVLChatModel,
 )
-
-CONFIGS: Dict[str, Dict[str, Any]] = {
-    "debug": dict(num_hidden_layers=2, num_attention_heads=2, hidden_size=32, intermediate_size=64),
-    "legacy-tiny": dict(
-        num_hidden_layers=8, num_attention_heads=16, hidden_size=2048, intermediate_size=4096
-    ),
-    # -- auto-regressive driving models --
-    "tiny": dict(
-        num_hidden_layers=12, num_attention_heads=8, hidden_size=512, intermediate_size=2048
-    ),  # 50M
-    "x-small": dict(
-        num_hidden_layers=14, num_attention_heads=8, hidden_size=1024, intermediate_size=4096
-    ),  # 235M
-    "small": dict(
-        num_hidden_layers=22, num_attention_heads=8, hidden_size=1024, intermediate_size=4096
-    ),  # 369M
-    "medium": dict(
-        num_hidden_layers=22, num_attention_heads=12, hidden_size=1536, intermediate_size=4096
-    ),  # 623M
-    "large": dict(
-        num_hidden_layers=22, num_attention_heads=16, hidden_size=2048, intermediate_size=5632
-    ),  # 1.1B
-    # -- gaia world models --
-    "gaia-large": dict(
-        num_hidden_layers=22, num_attention_heads=16, hidden_size=1536, intermediate_size=4096
-    ),  # 623M
-    # -- language models --
-    "7B": dict(
-        num_hidden_layers=32, num_attention_heads=32, hidden_size=4096, intermediate_size=11008
-    ),  # 6476M
-    "13B": dict(
-        num_hidden_layers=40, num_attention_heads=40, hidden_size=5120, intermediate_size=11008
-    ),
-    "70B": dict(
-        num_hidden_layers=80,
-        num_attention_heads=64,
-        hidden_size=8192,
-        intermediate_size=28672,
-        num_key_value_heads=8,
-    ),
-    "tiny-llama-1.1b": dict(  # 969M
-        num_hidden_layers=22,
-        num_attention_heads=32,
-        hidden_size=2048,
-        intermediate_size=5632,
-        num_key_value_heads=4,
-    ),
-    "phi": dict(
-        num_hidden_layers=24,
-        num_attention_heads=32,
-        hidden_size=2048,
-        intermediate_size=8192,
-        partial_rotary_factor=0.5,
-        bias=True,
-        vocab_size=51200,
-        norm_type="layer_norm",
-        mlp_type="gelu_new",
-        parallel_attn_mlp=True,
-    ),
-}
 
 
 class LLM(nn.Module):
@@ -87,65 +18,15 @@ class LLM(nn.Module):
         for key, value in cfg.items():
             setattr(self, key, value)
 
-        if "pythia" in self.variant:
-            raise ValueError(f"Carefull: Variant {self.variant} not tested.")
-            self.variant = f"EleutherAI/{self.variant}"
-            self.model = GPTNeoXForCausalLM.from_pretrained(self.variant, trust_remote_code=True)
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.variant, torch_dtype="auto", trust_remote_code=True
-            )
-            self.model.embed_tokens = self.model.base_model.embed_in
-        elif "paligemma" in self.variant:
-            raise ValueError(f"Carefull: Variant {self.variant} not tested.")
-            self.variant = f"google/{self.variant}"
-            from transformers import AutoProcessor, PaliGemmaForConditionalGeneration
-
-            self.model = PaliGemmaForConditionalGeneration.from_pretrained(
-                self.variant,
-                torch_dtype="auto",
-                revision="float16",
-            ).language_model
+        assert "internvl" in self.variant.lower(), (
+            f"Variant {self.variant} not supported (only InternVL2 variants are tested)."
+        )
+        self.model = InternVLChatModel.from_pretrained(self.variant)
+        self.model = self.model.language_model
+        try:
             self.model.embed_tokens = self.model.base_model.embed_tokens
-            self.tokenizer = AutoProcessor.from_pretrained(
-                self.variant, torch_dtype="auto"
-            ).tokenizer
-        elif "TinyLlama" in self.variant:
-            raise ValueError(f"Carefull: Variant {self.variant} not tested.")
-            print("Loading pretrained model")
-            self.model = AutoModelForCausalLM.from_pretrained(self.variant, trust_remote_code=True)
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.variant, torch_dtype="auto", trust_remote_code=True
-            )
-            self.model.embed_tokens = self.model.base_model.embed_tokens
-        elif "llava-v1.6" in self.variant:
-            raise ValueError(f"Carefull: Variant {self.variant} not tested.")
-            print("Loading pretrained model")
-            self.model = LlavaNextForConditionalGeneration.from_pretrained(
-                self.variant, trust_remote_code=True
-            )
-            self.tokenizer = LlavaNextProcessor.from_pretrained(
-                self.variant, torch_dtype="auto", trust_remote_code=True
-            ).tokenizer
-            self.model = self.model.language_model
-            self.model.embed_tokens = self.model.base_model.embed_tokens
-        elif "internvl" in self.variant.lower():
-            self.model = InternVLChatModel.from_pretrained(self.variant)
-            self.model = self.model.language_model
-            try:
-                self.model.embed_tokens = self.model.base_model.embed_tokens
-            except:
-                self.model.embed_tokens = self.model.model.tok_embeddings
-        else:
-            raise ValueError(f"Carefull: Variant {self.variant} not tested.")
-            config_overrides = CONFIGS[self.variant].copy()
-            configuration = LlamaConfig(**config_overrides)
-            # Initializing a model from the llama-7b style configuration
-            # self.model = LlamaForCausalLM(configuration)
-            self.model = LlamaModel(configuration)
-            self.tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-1_5")
-            self.model.embed_tokens = self.model.base_model.embed_tokens
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
+        except:
+            self.model.embed_tokens = self.model.model.tok_embeddings
 
         if self.lora:
             from peft import LoraConfig, get_peft_model
