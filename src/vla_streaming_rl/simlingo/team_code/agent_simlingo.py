@@ -148,10 +148,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         self.last_command = -1
         self.last_command_tmp = -1
-        self.user_command = None
-        self.user_flag = None
-        self.running = True
-        self.custom_prompt = None
 
         self.route_path = os.environ.get("ROUTES", "")
         route_type = self.route_path.split("data/benchmarks/")[-1].split("/")[0]
@@ -175,11 +171,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.carla_frame_rate = 1.0 / 20.0  # CARLA frame rate in milliseconds
         self.data_save_freq = 5
         self.lidar_seq_len = 1
-        self.logging_freq = 10  # Log every 10 th frame
-        self.logger_region_of_interest = 30.0  # Meters around the car that will be logged.
-        self.dense_route_planner_min_distance = 1.0
-        self.dense_route_planner_max_distance = 50.0
-        self.log_route_planner_min_distance = 4.0
         self.route_planner_max_distance = 50.0
         self.route_planner_min_distance = 7.5
 
@@ -580,17 +571,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         else:
             prompt = f"Current speed: {speed} m/s. {prompt_tp} Predict the waypoints."
 
-        if self.custom_prompt is not None:
-            if self.user_flag == 2 or self.user_flag == 3:
-                prompt = f"Current speed: {speed} m/s. {self.custom_prompt}"
-            else:
-                prompt = f"Current speed: {speed} m/s. {prompt_tp} {self.custom_prompt}"
-
-        if self.user_flag == 1 or self.user_flag == 2:
-            prompt = f"<INSTRUCTION_FOLLOWING> {prompt}"
-        elif self.user_flag == 0:
-            prompt = f"<SAFETY> {prompt}"
-
         result["speed"] = (
             torch.FloatTensor([speed]).unsqueeze(0).to(self.device, dtype=torch.float32)
         )
@@ -602,7 +582,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         speed = round(speed, 1)
 
-        self.prompt_tp = prompt_tp
         self.prompt = prompt
 
         conversation_all = [
