@@ -72,10 +72,7 @@ class SimLingoAgent:
         self._lingo = _DeferredHero(carla_host="", carla_port=2000, debug=False)
         self._lingo.setup(
             checkpoint_path=str(self._checkpoint_path),
-            save_path_root="vla_streaming_rl",
-            save_path_prefix=str(self._scratch_dir) + "/",
-            route_path="",
-            bias_config_path=None,
+            scratch_dir=self._scratch_dir,
         )
 
         # Freeze the VLM — we never backprop. Empty trainable_state at

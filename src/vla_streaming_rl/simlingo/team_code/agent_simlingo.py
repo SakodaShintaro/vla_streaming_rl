@@ -5,8 +5,6 @@ partially taken from https://github.com/autonomousvision/carla_garage/blob/leade
 
 import json
 import math
-import pathlib
-import time
 from collections import deque
 from pathlib import Path
 
@@ -70,89 +68,47 @@ DEBUG = False  # saves images during evaluation; off here — simlingo's
 # the metrics we need (no debug images required).
 
 
-def _load_sensor_bias(bias_config_path):
-    """Load sensor bias config from a YAML path.
-
-    Returns a flat dict; all zeros (no bias) if ``bias_config_path`` is ``None``.
-    """
-    bias = {
-        "speed_scale": 1.0,
-        "speed_offset": 0.0,
-        "gps_x": 0.0,
-        "gps_y": 0.0,
-        "compass_rad": 0.0,
-        "cam_dx": 0.0,
-        "cam_dy": 0.0,
-        "cam_dz": 0.0,
-        "cam_roll_deg": 0.0,
-        "cam_pitch_deg": 0.0,
-        "cam_yaw_deg": 0.0,
-    }
-
-    if not bias_config_path:
-        print("[LingoAgent] bias_config_path not provided; using zero sensor bias")
-        return bias
-
-    cfg = OmegaConf.load(bias_config_path)
-    bias.update(
-        {
-            "speed_scale": float(cfg.speed.scale),
-            "speed_offset": float(cfg.speed.offset),
-            "gps_x": float(cfg.gps.x),
-            "gps_y": float(cfg.gps.y),
-            "compass_rad": math.radians(float(cfg.compass.deg)),
-            "cam_dx": float(cfg.camera.dx),
-            "cam_dy": float(cfg.camera.dy),
-            "cam_dz": float(cfg.camera.dz),
-            "cam_roll_deg": float(cfg.camera.roll_deg),
-            "cam_pitch_deg": float(cfg.camera.pitch_deg),
-            "cam_yaw_deg": float(cfg.camera.yaw_deg),
-        }
-    )
-    print(f"[LingoAgent] loaded sensor bias from {bias_config_path}: {bias}")
-    return bias
-
-
 class LingoAgent(autonomous_agent.AutonomousAgent):
     """
     Main class that runs the agents with the run_step function
     """
 
-    def setup(
-        self, checkpoint_path, save_path_root, save_path_prefix, route_path, bias_config_path
-    ):
+    def setup(self, checkpoint_path, scratch_dir):
         """Sets up the agent.
 
         Args:
             checkpoint_path: Path to the SimLingo VLM ``pytorch_model.pt``.
-            save_path_root: Sub-directory name under ``save_path_prefix``.
-            save_path_prefix: Output root directory (must end with ``/``).
-            route_path: Route XML path (used only for debug-viz naming).
-            bias_config_path: Optional YAML path for sensor bias overrides.
+            scratch_dir: Output directory for the agent's per-step metric file.
         """
 
         torch.cuda.empty_cache()
         self.track = autonomous_agent.Track.SENSORS
         self.config_path = checkpoint_path
         print(f"Config path: {self.config_path}")
-        self.save_path_root = save_path_root
-        print(f"Save path root: {self.save_path_root}")
         self.step = -1
         self.initialized = False
         self.device = torch.device("cuda")
         self.DrivingInput = {}
         self.config = GlobalConfig()
-        self.bias = _load_sensor_bias(bias_config_path)
+        self.bias = {
+            "speed_scale": 1.0,
+            "speed_offset": 0.0,
+            "gps_x": 0.0,
+            "gps_y": 0.0,
+            "compass_rad": 0.0,
+            "cam_dx": 0.0,
+            "cam_dy": 0.0,
+            "cam_dz": 0.0,
+            "cam_roll_deg": 0.0,
+            "cam_pitch_deg": 0.0,
+            "cam_yaw_deg": 0.0,
+        }
 
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = self.model.route_as
 
         self.last_command = -1
         self.last_command_tmp = -1
-
-        self.route_path = route_path
-        route_type = self.route_path.split("data/benchmarks/")[-1].split("/")[0]
-        route_number = str(pathlib.Path(self.route_path).stem)
 
         self.speed_controller = PIDController(
             k_p=self.config.speed_kp,
@@ -227,8 +183,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         ).to(self.device)
         torch.set_default_dtype(default_dtype)
         self.model.load_state_dict(torch.load(self.config_path))
-        self.iter = self.config_path.split("epoch=")[-1].split("/")[0]
-        self.session = self.config_path.split("/")[-4]
 
         self.T = 1
         self.stuck_detector = 0
@@ -268,19 +222,13 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.state_log = deque(maxlen=max((self.lidar_seq_len * self.data_save_freq), 2))
 
         # Path to where visualizations and other debug output gets stored
-        self.save_path = save_path_prefix + self.save_path_root
+        scratch_dir = str(scratch_dir)
 
-        self.debug_save_path = (
-            self.save_path
-            + "/debug_viz"
-            + f"/{self.session}/iter_{self.iter}/{route_type}/{route_number}_{time.strftime('%Y_%m_%d_%H_%M_%S')}"
-        )
-        Path(self.debug_save_path).mkdir(parents=True, exist_ok=True)
-        self.save_path_metric = self.debug_save_path + "/metric"
+        self.save_path_metric = scratch_dir + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
         if DEBUG:
-            self.save_path_img = self.debug_save_path + "/images"
+            self.save_path_img = scratch_dir + "/images"
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
 
     def _init(self):
