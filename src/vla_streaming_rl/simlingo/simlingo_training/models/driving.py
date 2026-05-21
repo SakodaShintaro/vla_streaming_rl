@@ -20,7 +20,6 @@ from vla_streaming_rl.simlingo.simlingo_training.models.adaptors.adaptors import
 )
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.vlm import VLMEncoderModel
 from vla_streaming_rl.simlingo.simlingo_training.models.language_model.llm import LLM
-from vla_streaming_rl.simlingo.simlingo_training.models.utils import summarize_losses
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
     DrivingExample,
     DrivingInput,
@@ -34,6 +33,37 @@ pprint = PrettyPrinter().pprint
 
 def decode_uint8(encoded: torch.Tensor) -> List[str]:
     return [row.tobytes().decode("utf-8").rstrip("\0") for row in encoded.cpu().numpy()]
+
+
+def summarize_losses(loss_dict: Dict[str, Tuple[Tensor, Tensor]]) -> TrainingOutput:
+    """
+    Computes the total loss from a dictionary of losses and their counts.
+
+    The loss dict should contain two tensor for each key:
+    - The loss value for each batch sample; shape [B].
+    - The loss count for each batch sample; shape [B]. This is the number of items to average over, i.e.
+      number of tokens, number of cuboids etc. For the case where each batch sample has a loss, you
+      can set it to a ones tensor of shape [B].
+
+    Args:
+        loss_dict: A dictionary of losses and their counts, for each batch sample.
+
+    Returns:
+        A TrainingOutput object with the total loss and its components.
+    """
+
+    loss_values = {k: v for k, (v, _) in loss_dict.items()}
+    loss_counts = {k: n for k, (_, n) in loss_dict.items()}
+    loss_averages = {
+        k: torch.where(n.sum() > 0, v.sum() / n.sum(), 0.0) for k, (v, n) in loss_dict.items()
+    }
+    loss = torch.stack(list(loss_averages.values())).sum()
+    return TrainingOutput(
+        loss=loss,
+        loss_values=loss_values,
+        loss_counts=loss_counts,
+        loss_averages=loss_averages,
+    )
 
 
 class NormZeroOne(nn.Module):
