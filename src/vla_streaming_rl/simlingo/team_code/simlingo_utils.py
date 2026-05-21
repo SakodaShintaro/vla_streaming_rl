@@ -74,8 +74,8 @@ def get_camera_intrinsics(w, h, fov):
 def get_camera_extrinsics():
     """
     Get camera extrinsics matrix for the carla camera.
-    extrinsics: A float32 tensor of shape ``[4, 4]`` containing the extrinic calibration matrix for
-      the carla camera. The extriniscs are specified as homogeneous matrices of the form ``[R t; 0 1]``
+    extrinsics: A float32 tensor of shape ``[4, 4]`` containing the extrinsic calibration matrix for
+      the carla camera. The extrinsics are specified as homogeneous matrices of the form ``[R t; 0 1]``
     """
     extrinsics = np.zeros((4, 4), dtype=np.float32)
     extrinsics[3, 3] = 1.0

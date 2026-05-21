@@ -459,7 +459,7 @@ class DrivingModel(pl.LightningModule):
             waypoints_gt_1d.append(waypoints_gt_1d_tmp)
         waypoints_gt_1d = torch.tensor(waypoints_gt_1d)
 
-        # calculate ade and fde for samples seperatly whihc have <SAFETY> in prompt and for <INSTRUCTION_FOLLOWING>
+        # calculate ade and fde for samples separately which have <SAFETY> in prompt and for <INSTRUCTION_FOLLOWING>
         samples_safety = [i for i, l in enumerate(self.prediction["prompt"]) if "<SAFETY>" in l]
         samples_instruction = [
             i for i, l in enumerate(self.prediction["prompt"]) if "<INSTRUCTION_FOLLOWING>" in l
@@ -613,7 +613,7 @@ class DrivingModel(pl.LightningModule):
                 current_speed = float(prompts[i].split("Current speed: ")[-1].split(" ")[0])
 
                 if mode == "stop":
-                    # route doesnt matter
+                    # route doesn't matter
                     paths_by_mode[mode].append(sample_path)
                     if name == "instruction" or name == "neither":
                         if np.min(pred_speeds) < 0.1:

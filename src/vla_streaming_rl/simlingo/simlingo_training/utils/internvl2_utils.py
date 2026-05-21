@@ -78,7 +78,7 @@ def get_assistant_loss_mask(user_starts, assistant_starts, prompt_tokenized_ids)
 def get_chat_tokens(
     tokenizer, prompts: List[str], user_start_token_str: str, assistant_start_token_str: str
 ) -> Dict:
-    # this handles also multi-round conversations, which is not used by simlingo -> code would simplify by a lot if only condering one round
+    # this handles also multi-round conversations, which is not used by simlingo -> code would simplify by a lot if only considering one round
     # but since i have already implemented it, i will keep it
     prompt_tokenized = tokenizer(
         prompts, padding=True, return_tensors="pt", add_special_tokens=False
