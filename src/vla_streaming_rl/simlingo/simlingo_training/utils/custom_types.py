@@ -10,7 +10,6 @@ class DatasetOutput(NamedTuple):
     image_ff: Optional[Tensor]
     image_ff_org_size: Optional[Tensor]
     waypoints: Optional[List[Tuple[float, float]]]
-    waypoints_1d: Optional[List[Tuple[float, float]]]
     path: Optional[str]
     target_points: Optional[List[Tuple[float, float]]]
     speed: Optional[float]

@@ -91,7 +91,6 @@ class DrivingModel(pl.LightningModule):
         driving = None
         driving = DrivingAdaptor(
             self.language_model.hidden_size,
-            speed_wps_mode=self.speed_wps_mode,
         )
 
         self.adaptors = AdaptorList(

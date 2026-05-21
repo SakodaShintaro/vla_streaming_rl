@@ -110,13 +110,10 @@ class DrivingAdaptor(nn.Module):
         self,
         hidden_size: int,
         mlp_dim=256,
-        speed_wps_mode=False,
     ):
         super().__init__()
         self.heads = {}
         self.order = []
-
-        self.speed_wps_mode = speed_wps_mode
 
         self.future_waypoints = 20
         self.query_embeds_wps = nn.Parameter(
@@ -135,12 +132,7 @@ class DrivingAdaptor(nn.Module):
         self.heads["route"] = self.route_head
         self.order.append("route")
 
-        if speed_wps_mode == "2d":
-            dim = 2
-        elif speed_wps_mode == "1d":
-            dim = 1
-        else:
-            raise ValueError(f"speed_wps_mode must be '1d' or '2d', not {speed_wps_mode}")
+        dim = 2
         self.future_speed_waypoints = 10  # TODO: read from config
         self.query_embeds_speed = nn.Parameter(
             0.02 * torch.randn((1, self.future_speed_waypoints, hidden_size))
@@ -198,15 +190,6 @@ class DrivingAdaptor(nn.Module):
     ) -> Dict[str, Tuple[Tensor, Tensor]]:
         label = example.driving_label
         assert label is not None
-
-        label_route = label.path
-
-        if self.speed_wps_mode == "2d":
-            label_speed_wps = label.waypoints[:, : self.future_waypoints + 1]
-        elif self.speed_wps_mode == "1d":
-            label_speed_wps = label.waypoints_1d
-        else:
-            label_speed_wps = None
 
         current_index = 0
         loss_dict = {}
