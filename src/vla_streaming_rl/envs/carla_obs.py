@@ -18,9 +18,10 @@ import scipy.interpolate
 
 @dataclass(frozen=True)
 class CARLAObsConfig:
-    # image_size: tuple[int, int] = (256, 256)  # (width, height)
-    # image_size: tuple[int, int] = (832, 480)  # (width, height) aligned to Wan 2.1
-    image_size: tuple[int, int] = (416, 240)  # (width, height) aligned to Wan 2.1, half
+    # Matches simlingo's camera_width_0 / camera_height_0 in
+    # config_simlingo.py — the SimLingo VLM was trained at this resolution
+    # and crops/resamples internally, so we feed it the same.
+    image_size: tuple[int, int] = (1024, 512)  # (width, height)
     fov: float = 110.0
     # Mount position copied from simlingo/team_code/config_simlingo.py
     # (camera_pos_0 = [-1.5, 0.0, 2.0]). Training/eval observation must
