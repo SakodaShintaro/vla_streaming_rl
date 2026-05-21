@@ -17,16 +17,6 @@ spawn its own multi-camera stack or wire a leaderboard
 ``SensorInterface``. New-episode handover (set_global_plan, hero_actor,
 re-init) is detected automatically via ``env.unwrapped.vehicle.id``
 changing between ticks.
-
-Caveats:
-- SimLingo's PID/speed controllers were tuned for 20 FPS leaderboard
-  ticks; this env runs at 10 FPS. Behavior is slightly different than
-  under ``leaderboard_evaluator.py`` — acceptable for relative
-  comparison against the RL policy on the same env, not directly
-  comparable to simlingo's published eval numbers.
-- The env's front camera is at ``(x=+1.5, z=2.4)``, while simlingo was
-  trained at ``(x=-1.5, z=2.0)`` (config_simlingo.camera_pos_0). The
-  viewpoints differ; closed-loop performance reflects that mismatch.
 """
 import os
 from pathlib import Path
