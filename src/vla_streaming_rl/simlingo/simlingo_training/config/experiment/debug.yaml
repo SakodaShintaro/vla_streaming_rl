@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
-  - /data_module: carla_no_buckets #carla_no_buckets #carla_bucket_v12
-  - /model/vision_model: vlm 
+  - /data_module: carla_bucket_v12
+  - /model/vision_model: vlm
   - /data_module/base_dataset: dataset
 
 model:
