@@ -69,7 +69,6 @@ DEBUG = False  # saves images during evaluation; off here — simlingo's
 # debug-viz block tries to load ``arial.ttf`` from cwd, which doesn't
 # ship with this vendor copy. CARLALeaderboardEnv's eval_writer captures
 # the metrics we need (no debug images required).
-USE_UKF = True
 
 
 def _load_sensor_bias():
@@ -249,31 +248,30 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.target_point_prev = [1e5, 1e5, 1e5]
 
         # Filtering
-        if USE_UKF:
-            self.points = MerweScaledSigmaPoints(
-                n=4, alpha=0.00001, beta=2, kappa=0, subtract=residual_state_x
-            )
-            self.ukf = UKF(
-                dim_x=4,
-                dim_z=4,
-                fx=bicycle_model_forward,
-                hx=measurement_function_hx,
-                dt=self.carla_frame_rate,
-                points=self.points,
-                x_mean_fn=state_mean,
-                z_mean_fn=measurement_mean,
-                residual_x=residual_state_x,
-                residual_z=residual_measurement_h,
-            )
+        self.points = MerweScaledSigmaPoints(
+            n=4, alpha=0.00001, beta=2, kappa=0, subtract=residual_state_x
+        )
+        self.ukf = UKF(
+            dim_x=4,
+            dim_z=4,
+            fx=bicycle_model_forward,
+            hx=measurement_function_hx,
+            dt=self.carla_frame_rate,
+            points=self.points,
+            x_mean_fn=state_mean,
+            z_mean_fn=measurement_mean,
+            residual_x=residual_state_x,
+            residual_z=residual_measurement_h,
+        )
 
-            # State noise, same as measurement because we
-            # initialize with the first measurement later
-            self.ukf.P = np.diag([0.5, 0.5, 0.000001, 0.000001])
-            # Measurement noise
-            self.ukf.R = np.diag([0.5, 0.5, 0.000000000000001, 0.000000000000001])
-            self.ukf.Q = np.diag([0.0001, 0.0001, 0.001, 0.001])  # Model noise
-            # Used to set the filter state equal the first measurement
-            self.filter_initialized = False
+        # State noise, same as measurement because we
+        # initialize with the first measurement later
+        self.ukf.P = np.diag([0.5, 0.5, 0.000001, 0.000001])
+        # Measurement noise
+        self.ukf.R = np.diag([0.5, 0.5, 0.000000000000001, 0.000000000000001])
+        self.ukf.Q = np.diag([0.0001, 0.0001, 0.001, 0.001])  # Model noise
+        # Used to set the filter state equal the first measurement
+        self.filter_initialized = False
         # Stores the last filtered positions of the ego vehicle. Need at least 2 for LiDAR 10 Hz realignment
         self.state_log = deque(maxlen=max((self.lidar_seq_len * self.data_save_freq), 2))
 
@@ -472,21 +470,18 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             input_data["speed"][1]["speed"] * self.bias["speed_scale"] + self.bias["speed_offset"]
         )
 
-        if USE_UKF:
-            if not self.filter_initialized:
-                self.ukf.x = np.array([gps_pos[0], gps_pos[1], normalize_angle(compass), speed])
-                self.filter_initialized = True
+        if not self.filter_initialized:
+            self.ukf.x = np.array([gps_pos[0], gps_pos[1], normalize_angle(compass), speed])
+            self.filter_initialized = True
 
-            self.ukf.predict(
-                steer=self.control.steer, throttle=self.control.throttle, brake=self.control.brake
-            )
-            self.ukf.update(np.array([gps_pos[0], gps_pos[1], normalize_angle(compass), speed]))
-            filtered_state = self.ukf.x
+        self.ukf.predict(
+            steer=self.control.steer, throttle=self.control.throttle, brake=self.control.brake
+        )
+        self.ukf.update(np.array([gps_pos[0], gps_pos[1], normalize_angle(compass), speed]))
+        filtered_state = self.ukf.x
 
-            self.state_log.append(filtered_state)
-            result["gps"] = filtered_state[0:2]
-        else:
-            result["gps"] = np.array([gps_pos[0], gps_pos[1]])
+        self.state_log.append(filtered_state)
+        result["gps"] = filtered_state[0:2]
 
         speed = round(speed, 1)
 
