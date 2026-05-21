@@ -13,42 +13,6 @@ import numpy as np
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
-class PIDController(object):
-    """
-    PID controller
-    """
-
-    def __init__(self, k_p=1.0, k_i=0.0, k_d=0.0, n=20):
-        self.k_p = k_p
-        self.k_i = k_i
-        self.k_d = k_d
-
-        self._saved_window = deque([0 for _ in range(n)], maxlen=n)
-        self._window = deque([0 for _ in range(n)], maxlen=n)
-        self._max = 0.0
-        self._min = 0.0
-
-    def reset_error_integral(self):
-        self._window = deque(len(self._window) * [0])
-
-    def step(self, error):
-        self._window.append(error)
-        if len(self._window) >= 2:
-            integral = sum(self._window) / len(self._window)
-            derivative = self._window[-1] - self._window[-2]
-        else:
-            integral = 0.0
-            derivative = 0.0
-
-        return self.k_p * error + self.k_i * integral + self.k_d * derivative
-
-    def save(self):
-        self._saved_window = deepcopy(self._window)
-
-    def load(self):
-        self._window = self._saved_window
-
-
 class LateralPIDController(object):
     """
     PID controller
