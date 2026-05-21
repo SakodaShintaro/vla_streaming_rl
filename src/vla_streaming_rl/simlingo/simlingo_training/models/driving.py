@@ -66,16 +66,6 @@ def summarize_losses(loss_dict: Dict[str, Tuple[Tensor, Tensor]]) -> TrainingOut
     )
 
 
-class NormZeroOne(nn.Module):
-    def __init__(self, min_max: Tuple[float, float]):
-        super().__init__()
-        self.register_buffer("min_max", torch.tensor(min_max, dtype=torch.float), persistent=False)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Normalise tensor to [0, 1] using values from min_max"""
-        return (x - self.min_max[0]) / (self.min_max[1] - self.min_max[0])
-
-
 class DrivingModel(pl.LightningModule):
     def __init__(
         self,
@@ -124,7 +114,6 @@ class DrivingModel(pl.LightningModule):
             token_size=self.language_model.hidden_size,
             hidden_size=256,
             hidden_size2=512,
-            # norm_layer=NormZeroOne(min_max=(-32.0, 32.0)),
         )
 
         if "tokenizer" in self.processor.__dict__:

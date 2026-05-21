@@ -35,16 +35,6 @@ def cross_track_error(points: Tensor, path: Tensor):
     return (points - pt1).mul(normal).sum(-1).abs()
 
 
-class NormZeroOne(nn.Module):
-    def __init__(self, min_max: Tuple[float, float]):
-        super().__init__()
-        self.register_buffer("min_max", torch.tensor(min_max, dtype=torch.float), persistent=False)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Normalize tensor to [0, 1] using values from min_max"""
-        return (x - self.min_max[0]) / (self.min_max[1] - self.min_max[0])
-
-
 class FocalLoss(nn.Module):
     def __init__(self, gamma: float = 0, size_average: bool = True):
         super(FocalLoss, self).__init__()
@@ -69,7 +59,6 @@ class WaypointInputAdaptor(nn.Module):
     Args:
         token_size: feature dimension of output tensor.
         hidden_size: hidden dimension used in Linear layers under the hood.
-        norm_layer: the `Module` to use to normalize the values of the input tensor.
     """
 
     def __init__(
@@ -77,11 +66,9 @@ class WaypointInputAdaptor(nn.Module):
         token_size: int = 258,
         hidden_size: int = 64,
         hidden_size2: int = 128,
-        norm_layer: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        self.norm_layer = norm_layer
 
         self.mlp = nn.Sequential(
             nn.Linear(2, hidden_size),
@@ -99,8 +86,6 @@ class WaypointInputAdaptor(nn.Module):
         Returns:
             Output with dims [B, N, token_size]
         """
-        if self.norm_layer is not None:
-            x = self.norm_layer(x)
         x = self.mlp(x)
         return x
 
