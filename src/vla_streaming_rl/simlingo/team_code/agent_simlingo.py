@@ -26,7 +26,6 @@ from scipy.interpolate import PchipInterpolator
 from scipy.optimize import fsolve
 from transformers import Qwen2Tokenizer
 
-import vla_streaming_rl.simlingo.team_code.transfuser_utils as t_u
 from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored import (
     conversation as conv_module,
@@ -44,11 +43,16 @@ from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
     dynamic_preprocess,
 )
 from vla_streaming_rl.simlingo.team_code.config_simlingo import GlobalConfig
-from vla_streaming_rl.simlingo.team_code.nav_planner import LateralPIDController, RoutePlanner
+from vla_streaming_rl.simlingo.team_code.pid_controller import LateralPIDController, PIDController
+from vla_streaming_rl.simlingo.team_code.route_planner import RoutePlanner
 from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
+    command_to_one_hot,
     get_camera_extrinsics,
     get_camera_intrinsics,
     get_rotation_matrix,
+    inverse_conversion_2d,
+    normalize_angle,
+    preprocess_compass,
     project_points,
 )
 
@@ -164,12 +168,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         route_type = self.route_path.split("data/benchmarks/")[-1].split("/")[0]
         route_number = str(pathlib.Path(self.route_path).stem)
 
-        # PID controller for turning - used in earlier versions of the agent
-        # self.turn_controller = t_u.PIDController(k_p=self.config.turn_kp,
-        #                                          k_i=self.config.turn_ki,
-        #                                          k_d=self.config.turn_kd,
-        #                                          n=self.config.turn_n)
-        self.speed_controller = t_u.PIDController(
+        self.speed_controller = PIDController(
             k_p=self.config.speed_kp,
             k_i=self.config.speed_ki,
             k_d=self.config.speed_kd,
@@ -489,7 +488,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         gps_pos = self._route_planner.convert_gps_to_carla(input_data["gps"][1])
         gps_pos = gps_pos + np.array([self.bias["gps_x"], self.bias["gps_y"], 0.0])
 
-        compass = t_u.preprocess_compass(input_data["imu"][1][-1]) + self.bias["compass_rad"]
+        compass = preprocess_compass(input_data["imu"][1][-1]) + self.bias["compass_rad"]
 
         result = {
             "rgb": rgb,
@@ -501,13 +500,13 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         if USE_UKF:
             if not self.filter_initialized:
-                self.ukf.x = np.array([gps_pos[0], gps_pos[1], t_u.normalize_angle(compass), speed])
+                self.ukf.x = np.array([gps_pos[0], gps_pos[1], normalize_angle(compass), speed])
                 self.filter_initialized = True
 
             self.ukf.predict(
                 steer=self.control.steer, throttle=self.control.throttle, brake=self.control.brake
             )
-            self.ukf.update(np.array([gps_pos[0], gps_pos[1], t_u.normalize_angle(compass), speed]))
+            self.ukf.update(np.array([gps_pos[0], gps_pos[1], normalize_angle(compass), speed]))
             filtered_state = self.ukf.x
 
             self.state_log.append(filtered_state)
@@ -537,18 +536,16 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             self.target_point_prev = target_point
             self.commands.append(far_command.value)
 
-        one_hot_command = t_u.command_to_one_hot(self.commands[-2])
+        one_hot_command = command_to_one_hot(self.commands[-2])
         result["command"] = torch.from_numpy(one_hot_command[np.newaxis]).to(
             self.device, dtype=torch.float32
         )
 
-        ego_target_point = t_u.inverse_conversion_2d(
-            target_point[:2], result["gps"], result["compass"]
-        )
+        ego_target_point = inverse_conversion_2d(target_point[:2], result["gps"], result["compass"])
         ego_target_point_torch = torch.from_numpy(ego_target_point[np.newaxis]).to(
             self.device, dtype=torch.float32
         )
-        ego_next_target_point = t_u.inverse_conversion_2d(
+        ego_next_target_point = inverse_conversion_2d(
             next_target_point[:2], result["gps"], result["compass"]
         )
 
@@ -1099,11 +1096,11 @@ def measurement_mean(state, wm):
 
 def residual_state_x(a, b):
     y = a - b
-    y[2] = t_u.normalize_angle(y[2])
+    y[2] = normalize_angle(y[2])
     return y
 
 
 def residual_measurement_h(a, b):
     y = a - b
-    y[2] = t_u.normalize_angle(y[2])
+    y[2] = normalize_angle(y[2])
     return y
