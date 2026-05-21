@@ -8,6 +8,7 @@ import carla
 import gymnasium as gym
 import numpy as np
 import py_trees
+from leaderboard.utils.statistics_manager import PENALTY_PERC_DICT, PENALTY_VALUE_DICT
 from srunner.scenariomanager.traffic_events import TrafficEventType
 
 from vla_streaming_rl.envs.bench2drive_scenario_runtime import Bench2DriveRuntime
@@ -23,24 +24,6 @@ from vla_streaming_rl.envs.eval_writer import Bench2DriveEvalWriter
 from vla_streaming_rl.envs.vehicle_graph import overlay_vehicle_graphs
 
 DT = 0.05  # [s] (20 FPS)
-
-# Bench2Drive scoring (mirrors statistics_manager.py PENALTY_VALUE_DICT/PENALTY_PERC_DICT).
-# score_composed = score_route(0-100) * Π(score_penalty in (0,1])
-B2D_PENALTY_VALUE_DICT = {
-    TrafficEventType.COLLISION_PEDESTRIAN: 0.5,
-    TrafficEventType.COLLISION_VEHICLE: 0.6,
-    TrafficEventType.COLLISION_STATIC: 0.65,
-    TrafficEventType.TRAFFIC_LIGHT_INFRACTION: 0.7,
-    TrafficEventType.STOP_INFRACTION: 0.8,
-    TrafficEventType.SCENARIO_TIMEOUT: 0.7,
-    TrafficEventType.YIELD_TO_EMERGENCY_VEHICLE: 0.7,
-}
-# OUTSIDE_ROUTE_LANES_INFRACTION uses penalty_value=0, type='increases' →
-# score_penalty *= (1 - off_route_pct/100); 70% off-route ≈ 0.3 multiplier.
-B2D_PENALTY_PERC_DICT = {
-    TrafficEventType.OUTSIDE_ROUTE_LANES_INFRACTION: (0.0, "increases"),
-    TrafficEventType.MIN_SPEED_INFRACTION: (0.7, "unused"),
-}
 
 
 @dataclass
@@ -578,8 +561,7 @@ class CARLALeaderboardEnv(gym.Env):
 
         if self.runtime is not None and self.runtime.route_scenario is not None:
             scenario_running = (
-                self.runtime.route_scenario.scenario_tree.status
-                == py_trees.common.Status.RUNNING
+                self.runtime.route_scenario.scenario_tree.status == py_trees.common.Status.RUNNING
             )
             terminated = not scenario_running
         else:
@@ -751,10 +733,10 @@ class CARLALeaderboardEnv(gym.Env):
         for criterion in self.runtime.route_scenario.get_criteria():
             for event in criterion.events:
                 event_type = event.get_type()
-                if event_type in B2D_PENALTY_VALUE_DICT:
-                    score_penalty *= B2D_PENALTY_VALUE_DICT[event_type]
-                elif event_type in B2D_PENALTY_PERC_DICT:
-                    pv, pt = B2D_PENALTY_PERC_DICT[event_type]
+                if event_type in PENALTY_VALUE_DICT:
+                    score_penalty *= PENALTY_VALUE_DICT[event_type]
+                elif event_type in PENALTY_PERC_DICT:
+                    pv, pt = PENALTY_PERC_DICT[event_type]
                     if pt == "increases":
                         pct = event.get_dict()["percentage"]
                         score_penalty *= 1 - (1 - pv) * pct / 100.0
@@ -780,7 +762,6 @@ class CARLALeaderboardEnv(gym.Env):
         # No criterion-equivalent off-route check in random-route mode.
         self._latest_off_route_pct = 0.0
         return score_route, score_penalty
-
 
     def _update_spectator(self):
         """Move spectator camera to follow the vehicle from behind and above."""
