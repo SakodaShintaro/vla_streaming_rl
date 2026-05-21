@@ -6,7 +6,7 @@ from torch import Tensor
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import TrainingOutput
 
 
-def summarise_losses(
+def summarize_losses(
     loss_dict: Dict[str, Tuple[Tensor, Tensor]], weights: Optional[Dict[str, float]] = None
 ) -> TrainingOutput:
     """

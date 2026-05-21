@@ -20,7 +20,7 @@ from vla_streaming_rl.simlingo.simlingo_training.models.adaptors.adaptors import
 )
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.vlm import VLMEncoderModel
 from vla_streaming_rl.simlingo.simlingo_training.models.language_model.llm import LLM
-from vla_streaming_rl.simlingo.simlingo_training.models.utils import summarise_losses
+from vla_streaming_rl.simlingo.simlingo_training.models.utils import summarize_losses
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
     DrivingExample,
     DrivingInput,
@@ -270,7 +270,7 @@ class DrivingModel(pl.LightningModule):
         if per_sample:
             return loss_dict_only_losses, pred_labels
 
-        return summarise_losses(loss_dict_only_losses), loss_logs
+        return summarize_losses(loss_dict_only_losses), loss_logs
 
     def training_step(self, batch: DrivingExample, _batch_idx: int = 0):
         output, loss_logs = self.forward_loss(batch)
