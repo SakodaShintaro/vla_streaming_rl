@@ -41,7 +41,7 @@ class NormZeroOne(nn.Module):
         self.register_buffer("min_max", torch.tensor(min_max, dtype=torch.float), persistent=False)
 
     def forward(self, x: Tensor) -> Tensor:
-        """Normalise tensor to [0, 1] using values from min_max"""
+        """Normalize tensor to [0, 1] using values from min_max"""
         return (x - self.min_max[0]) / (self.min_max[1] - self.min_max[0])
 
 
@@ -110,7 +110,6 @@ class DrivingAdaptor(nn.Module):
         self,
         hidden_size: int,
         mlp_dim=256,
-        predict_route_as_wps=False,
         speed_wps_mode=False,
     ):
         super().__init__()
@@ -118,25 +117,23 @@ class DrivingAdaptor(nn.Module):
         self.order = []
 
         self.speed_wps_mode = speed_wps_mode
-        self.predict_route_as_wps = predict_route_as_wps
 
-        if predict_route_as_wps:
-            self.future_waypoints = 20
-            self.query_embeds_wps = nn.Parameter(
-                0.02 * torch.randn((1, self.future_waypoints, hidden_size))
-            )
-            self.route_head = nn.Sequential(
-                nn.Linear(hidden_size, mlp_dim * 2),
-                nn.SiLU(True),
-                nn.Linear(mlp_dim * 2, mlp_dim),
-                nn.SiLU(True),
-                nn.Linear(mlp_dim, 2, bias=False),
-            )
+        self.future_waypoints = 20
+        self.query_embeds_wps = nn.Parameter(
+            0.02 * torch.randn((1, self.future_waypoints, hidden_size))
+        )
+        self.route_head = nn.Sequential(
+            nn.Linear(hidden_size, mlp_dim * 2),
+            nn.SiLU(True),
+            nn.Linear(mlp_dim * 2, mlp_dim),
+            nn.SiLU(True),
+            nn.Linear(mlp_dim, 2, bias=False),
+        )
 
-            self.queries = {"route": self.query_embeds_wps}
-            self.sizes = {"route": self.future_waypoints}
-            self.heads["route"] = self.route_head
-            self.order.append("route")
+        self.queries = {"route": self.query_embeds_wps}
+        self.sizes = {"route": self.future_waypoints}
+        self.heads["route"] = self.route_head
+        self.order.append("route")
 
         if speed_wps_mode == "2d":
             dim = 2
@@ -202,10 +199,7 @@ class DrivingAdaptor(nn.Module):
         label = example.driving_label
         assert label is not None
 
-        if self.predict_route_as_wps:
-            label_route = label.path
-        else:
-            label_route = None
+        label_route = label.path
 
         if self.speed_wps_mode == "2d":
             label_speed_wps = label.waypoints[:, : self.future_waypoints + 1]
@@ -223,11 +217,6 @@ class DrivingAdaptor(nn.Module):
 
             prediction = self.heads[input_type](features_tmp).cumsum(1)
             loss = F.smooth_l1_loss(prediction, label, reduction="none").sum(-1)
-
-            # if input_type == 'waypoints' and self.predict_route_as_wps:
-            #     # compute cross track error
-            #     cte = cross_track_error(prediction, label_waypoints)
-            #     loss_dict[f"{input_type}_cte_loss"] = (cte, torch.ones_like(cte, dtype=torch.long))
 
             loss_dict[f"{input_type}_loss"] = (loss, torch.ones_like(loss, dtype=torch.long))
             loss_dict[f"{input_type}_prediction"] = prediction

@@ -6,7 +6,6 @@ defaults:
 
 model:
   lr: 3e-5
-  predict_route_as_wps: True
   speed_wps_mode: 2d
   language_model:
     variant: 'OpenGVLab/InternVL2-1B'
