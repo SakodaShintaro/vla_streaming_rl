@@ -1,6 +1,6 @@
 """
 partially taken from https://github.com/autonomousvision/carla_garage/blob/leaderboard_2/team_code/sensor_agent.py
-(MIT licence)
+(MIT license)
 """
 
 import json

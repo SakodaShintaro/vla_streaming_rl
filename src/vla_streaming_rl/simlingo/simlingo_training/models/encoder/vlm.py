@@ -35,7 +35,7 @@ class VLMEncoderModel(nn.Module):
 
         print("\033[91m" + f"Using {self.variant} as the image encoder." + "\033[0m")
 
-        # freeze the paramaeters -> no gradient updates
+        # freeze the parameters -> no gradient updates
         if self.freeze:
             print("\033[91m" + "Image encoder weights frozen." + "\033[0m")
             # for p in self.image_encoder.model.base_model.parameters():

@@ -85,17 +85,9 @@ class DrivingModel(pl.LightningModule):
         lm_kwargs = {k: v for k, v in self.language_model.items() if k != "_target_"}
         self.language_model = LLM(cache_dir=cache_dir, **lm_kwargs)
 
-        self.all_predictions = {}
-        self.all_losses = {}
-
-        driving = None
-        driving = DrivingAdaptor(
-            self.language_model.hidden_size,
-        )
-
         self.adaptors = AdaptorList(
             language=LanguageAdaptor(self.language_model),
-            driving=driving,
+            driving=DrivingAdaptor(self.language_model.hidden_size),
         )
 
         self.wp_encoder = WaypointInputAdaptor(
