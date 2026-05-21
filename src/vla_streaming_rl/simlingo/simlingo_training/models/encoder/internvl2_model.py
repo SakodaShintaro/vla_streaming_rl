@@ -19,10 +19,6 @@ class LingoInternVLModel(nn.Module):
         # is incompatible with transformers >=5.x. Weights are still pulled
         # from `variant` on HF Hub.
         self.model = InternVLChatModel.from_pretrained(variant)
-        try:
-            self.num_embeddings = self.model.language_model.model.embed_tokens.num_embeddings
-        except:
-            self.num_embeddings = self.model.language_model.vocab_size
         self.use_global_img = None
         self.processor = None
 
