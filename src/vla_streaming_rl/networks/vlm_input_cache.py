@@ -25,7 +25,6 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor
 
-
 _PROMPT_SENTINEL = "<<<<TASK_PROMPT_SENTINEL>>>>"
 
 
