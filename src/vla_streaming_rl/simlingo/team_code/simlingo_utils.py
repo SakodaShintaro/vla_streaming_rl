@@ -28,31 +28,6 @@ def project_points(points2D_list, K, tvec=None, rvec=None):
     return all_points_2d
 
 
-def get_rotation_matrix(roll, pitch, yaw):
-    roll = roll * np.pi / 180.0
-    pitch = pitch * np.pi / 180.0
-    yaw = yaw * np.pi / 180.0
-
-    yawMatrix = np.matrix(
-        [[math.cos(yaw), -math.sin(yaw), 0], [math.sin(yaw), math.cos(yaw), 0], [0, 0, 1]]
-    )
-
-    pitchMatrix = np.matrix(
-        [[math.cos(pitch), 0, math.sin(pitch)], [0, 1, 0], [-math.sin(pitch), 0, math.cos(pitch)]]
-    )
-
-    rollMatrix = np.matrix(
-        [[1, 0, 0], [0, math.cos(roll), -math.sin(roll)], [0, math.sin(roll), math.cos(roll)]]
-    )
-
-    R = pitchMatrix * yawMatrix * rollMatrix
-
-    # inverse rotation
-    R = R.T
-
-    return R
-
-
 def get_camera_intrinsics(w, h, fov):
     """
     Get camera intrinsics matrix from width, height and fov.

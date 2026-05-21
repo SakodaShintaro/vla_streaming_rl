@@ -47,7 +47,6 @@ from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     command_to_one_hot,
     get_camera_extrinsics,
     get_camera_intrinsics,
-    get_rotation_matrix,
     inverse_conversion_2d,
     normalize_angle,
     preprocess_compass,
@@ -70,7 +69,6 @@ DEBUG = False  # saves images during evaluation; off here — simlingo's
 # debug-viz block tries to load ``arial.ttf`` from cwd, which doesn't
 # ship with this vendor copy. CARLALeaderboardEnv's eval_writer captures
 # the metrics we need (no debug images required).
-HD_VIZ = False
 USE_UKF = True
 
 
@@ -361,25 +359,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 }
             ]
 
-        if HD_VIZ:
-            sensors += [
-                {
-                    "type": "sensor.camera.rgb",
-                    "x": -5.5,
-                    "y": 0.0,
-                    "z": 3.5,
-                    "roll": 0.0,
-                    "pitch": -15.0,
-                    "yaw": 0.0,
-                    # 'width': 960, 'height': 540, 'fov': 110,
-                    # 'width': 1280, 'height': 720, 'fov': 120,
-                    "width": 1920,
-                    "height": 1080,
-                    "fov": 110,
-                    "id": "rgb_viz",
-                }
-            ]
-
         sensors += [
             {
                 "type": "sensor.other.imu",
@@ -416,9 +395,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
     def tick(self, input_data):
         """Pre-processes sensor data and runs the Unscented Kalman Filter"""
         rgb = []
-
-        if HD_VIZ:
-            self.hd_cam_for_viz = input_data["rgb_viz"][1][:, :, :3]
 
         for camera_pos in self.config.num_cameras:
             rgb_cam = "rgb_" + str(camera_pos)
@@ -774,14 +750,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             tvec = None
             rvec = None
 
-            if HD_VIZ:
-                self.camera_for_viz = self.hd_cam_for_viz
-                tvec = np.array([[0.0, 3.5, 5.5]], np.float32)
-
-                cam_rots = [0.0, -15.0, 0.0]
-                rot_matrix = get_rotation_matrix(-cam_rots[0], -cam_rots[1], cam_rots[2])
-                rvec = cv2.Rodrigues(rot_matrix[:3, :3])[0].flatten()
-
             W = self.camera_for_viz.shape[1]
             H = self.camera_for_viz.shape[0]
             camera_intrinsics = np.asarray(get_camera_intrinsics(W, H, 110))
@@ -837,16 +805,10 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 image = image_all
                 draw = ImageDraw.Draw(image)
 
-                if HD_VIZ:
-                    font_size = 50
-                    line_width = 60
-                    y_dist = 60
-                    y_start = H + 20
-                else:
-                    font_size = 20
-                    line_width = 100
-                    y_dist = 30
-                    y_start = H + 20
+                font_size = 20
+                line_width = 100
+                y_dist = 30
+                y_start = H + 20
                 font = ImageFont.truetype("arial.ttf", font_size)
                 import textwrap
 
