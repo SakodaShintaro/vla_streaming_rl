@@ -12,14 +12,14 @@ from hydra.utils import get_original_cwd
 from torch import Tensor
 from torch.optim import AdamW
 
-from vla_streaming_rl.simlingo.simlingo_training.models.adaptors.adaptors import (
+from vla_streaming_rl.simlingo.simlingo_training.models.adaptors import (
     AdaptorList,
     DrivingAdaptor,
     LanguageAdaptor,
     WaypointInputAdaptor,
 )
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.vlm import VLMEncoderModel
-from vla_streaming_rl.simlingo.simlingo_training.models.language_model.llm import LLM
+from vla_streaming_rl.simlingo.simlingo_training.models.llm import LLM
+from vla_streaming_rl.simlingo.simlingo_training.models.vlm import VLMEncoderModel
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
     DrivingExample,
     DrivingInput,
