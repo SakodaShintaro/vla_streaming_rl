@@ -6,7 +6,7 @@
 
 import copy
 
-from transformers import AutoConfig, LlamaConfig, Qwen2Config
+from transformers import LlamaConfig, Qwen2Config
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 

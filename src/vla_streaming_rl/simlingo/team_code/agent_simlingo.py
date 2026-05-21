@@ -3,47 +3,49 @@ partially taken from https://github.com/autonomousvision/carla_garage/blob/leade
 (MIT licence)
 """
 
-import importlib.util
 import json
 import math
 import os
 import pathlib
 import random
-import sys
 import time
-import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 
 import carla
 import cv2
-import hydra
 import numpy as np
 import torch
 import ujson
 from filterpy.kalman import MerweScaledSigmaPoints
 from filterpy.kalman import UnscentedKalmanFilter as UKF
-from hydra.utils import get_original_cwd, to_absolute_path
 from leaderboard.autoagents import autonomous_agent
 from omegaconf import OmegaConf
 from PIL import Image, ImageDraw, ImageFont
-from vla_streaming_rl.simlingo.team_code.scenario_logger import ScenarioLogger
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import fsolve
+from transformers import Qwen2Tokenizer
+
+import vla_streaming_rl.simlingo.team_code.transfuser_utils as t_u
+from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored import (
     conversation as conv_module,
 )
-from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import DrivingInput, LanguageLabel
+from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (
+    InternVLChatConfig,
+)
+from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
+    DrivingInput,
+    LanguageLabel,
+)
 from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
     SIMLINGO_ADDITIONAL_SPECIAL_TOKENS,
     build_transform,
     dynamic_preprocess,
 )
-from transformers import AutoConfig, AutoProcessor
-
-import vla_streaming_rl.simlingo.team_code.transfuser_utils as t_u
 from vla_streaming_rl.simlingo.team_code.config_simlingo import GlobalConfig
 from vla_streaming_rl.simlingo.team_code.nav_planner import LateralPIDController, RoutePlanner
+from vla_streaming_rl.simlingo.team_code.scenario_logger import ScenarioLogger
 from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     get_camera_extrinsics,
     get_camera_intrinsics,
@@ -155,7 +157,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         self.LMDRIVE_AUGM = False
         if self.LMDRIVE_AUGM:
-            command_templates_file = f"data/augmented_templates/lmdrive.json"
+            command_templates_file = "data/augmented_templates/lmdrive.json"
             with open(command_templates_file, "r") as f:
                 self.command_templates = ujson.load(f)
 
@@ -208,9 +210,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.cfg = cfg
         self.cfg.model.vision_model.use_global_img = cfg.data_module.use_global_img
 
-        processor = AutoProcessor.from_pretrained(
-            cfg.model.vision_model.variant, trust_remote_code=True
-        )
+        # ``AutoProcessor`` + ``trust_remote_code=True`` resolves to
+        # ``Qwen2Tokenizer`` for InternVL2-1B (the custom remote processor
+        # class isn't actually used downstream). Name the concrete class
+        # directly so we don't depend on HF-hosted remote code.
+        processor = Qwen2Tokenizer.from_pretrained(cfg.model.vision_model.variant)
         if "tokenizer" in processor.__dict__:
             self.tokenizer = processor.tokenizer
         else:
@@ -223,12 +227,18 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
-        self.model = hydra.utils.instantiate(
-            cfg.model,
+        # Construct ``DrivingModel`` directly instead of going through
+        # ``hydra.utils.instantiate(cfg.model, ...)`` — the dispatch via
+        # ``_target_`` was only useful for simlingo's experiment-yaml
+        # model-class swap workflow, which we never exercise. Removing
+        # it also frees us from having to rewrite stale absolute module
+        # paths in the saved checkpoint config.
+        model_kwargs = {k: v for k, v in cfg.model.items() if k != "_target_"}
+        self.model = DrivingModel(
             cfg_data_module=cfg.data_module,
             processor=processor,
             cache_dir=cache_dir,
-            _recursive_=False,
+            **model_kwargs,
         ).to(self.device)
         torch.set_default_dtype(default_dtype)
         self.model.load_state_dict(torch.load(self.config_path))
@@ -712,8 +722,12 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 conv[i]["content"] = conv[i]["content"][0]["text"]
 
         if not hasattr(self, "tmp_config"):
-            self.tmp_config = AutoConfig.from_pretrained(
-                self.cfg.model.vision_model.variant, trust_remote_code=True
+            # ``AutoConfig`` + ``trust_remote_code=True`` resolves to
+            # ``InternVLChatConfig``. Use the vendored class directly so
+            # the HF-hosted ``configuration_internvl_chat.py`` is no
+            # longer downloaded / executed at runtime.
+            self.tmp_config = InternVLChatConfig.from_pretrained(
+                self.cfg.model.vision_model.variant
             )
             image_size = (
                 self.tmp_config.force_image_size or self.tmp_config.vision_config.image_size

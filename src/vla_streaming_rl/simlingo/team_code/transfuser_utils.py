@@ -15,7 +15,7 @@ import numpy as np
 import shapely
 import torch
 import torch.nn.functional as F
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 from torch import nn
 
 

@@ -7,14 +7,14 @@
 import warnings
 from typing import List, Optional, Tuple, Union
 
-import torch.utils.checkpoint
+import torch
 import transformers
 from torch import nn
 from torch.nn import CrossEntropyLoss
-from transformers import AutoModel, GenerationConfig, LlamaForCausalLM, Qwen2ForCausalLM
+from transformers import GenerationConfig, LlamaForCausalLM, Qwen2ForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import ModelOutput, logging
+from transformers.utils import logging
 
 from .configuration_internvl_chat import InternVLChatConfig
 from .conversation import get_conv_template

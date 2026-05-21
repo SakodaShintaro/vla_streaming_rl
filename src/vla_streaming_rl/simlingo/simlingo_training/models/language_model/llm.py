@@ -4,8 +4,6 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import (
-    AutoConfig,
-    AutoModel,
     AutoModelForCausalLM,
     AutoTokenizer,
     GPTNeoXForCausalLM,

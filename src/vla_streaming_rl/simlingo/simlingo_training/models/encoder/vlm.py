@@ -1,5 +1,8 @@
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_model import LingoInternVLModel
 from torch import nn
+
+from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_model import (
+    LingoInternVLModel,
+)
 
 
 class VLMEncoderModel(nn.Module):
@@ -34,7 +37,7 @@ class VLMEncoderModel(nn.Module):
 
         # freeze the paramaeters -> no gradient updates
         if self.freeze:
-            print("\033[91m" + f"Image encoder weights frozen." + "\033[0m")
+            print("\033[91m" + "Image encoder weights frozen." + "\033[0m")
             # for p in self.image_encoder.model.base_model.parameters():
             for p in self.parameters():
                 p.requires_grad = False

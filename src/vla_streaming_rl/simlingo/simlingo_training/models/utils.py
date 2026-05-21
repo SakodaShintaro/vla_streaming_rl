@@ -1,8 +1,9 @@
 from typing import Dict, Optional, Tuple
 
 import torch
-from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import TrainingOutput
 from torch import Tensor
+
+from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import TrainingOutput
 
 
 def summarise_losses(

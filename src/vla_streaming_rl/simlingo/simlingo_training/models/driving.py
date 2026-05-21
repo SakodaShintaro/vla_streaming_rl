@@ -1,22 +1,25 @@
 import datetime
 import json
 import os
-import random
 from pathlib import Path
 from pprint import PrettyPrinter
 from typing import Dict, List, Optional, Tuple
 
-import hydra
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from hydra.utils import get_original_cwd
+from torch import Tensor, nn
+from torch.optim import AdamW
+
 from vla_streaming_rl.simlingo.simlingo_training.models.adaptors.adaptors import (
     AdaptorList,
     DrivingAdaptor,
     LanguageAdaptor,
     WaypointInputAdaptor,
 )
+from vla_streaming_rl.simlingo.simlingo_training.models.encoder.vlm import VLMEncoderModel
+from vla_streaming_rl.simlingo.simlingo_training.models.language_model.llm import LLM
 from vla_streaming_rl.simlingo.simlingo_training.models.utils import summarise_losses
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
     DrivingExample,
@@ -25,8 +28,6 @@ from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
     DrivingOutput,
     TrainingOutput,
 )
-from torch import Tensor, nn
-from torch.optim import AdamW
 
 pprint = PrettyPrinter().pprint
 
@@ -67,17 +68,22 @@ class DrivingModel(pl.LightningModule):
 
         self.cfg_data_module = cfg_data_module
 
-        self.vision_model = hydra.utils.instantiate(
-            self.vision_model,
+        # ``self.vision_model`` / ``self.language_model`` are DictConfig
+        # nodes loaded from the checkpoint's ``.hydra/config.yaml``.
+        # Upstream used ``hydra.utils.instantiate(_target_=...)`` to pick
+        # the class — we always want VLMEncoderModel / LLM here, so
+        # construct them directly. Drops ``_target_`` from the kwargs
+        # since these classes take ``**cfg`` and don't expect that key.
+        vm_kwargs = {k: v for k, v in self.vision_model.items() if k != "_target_"}
+        self.vision_model = VLMEncoderModel(
             cfg_data_module=cfg_data_module,
             processor=self.processor,
             cache_dir=cache_dir,
-            _recursive_=False,
+            **vm_kwargs,
         )
 
-        self.language_model = hydra.utils.instantiate(
-            self.language_model, cache_dir=cache_dir, _recursive_=False
-        )
+        lm_kwargs = {k: v for k, v in self.language_model.items() if k != "_target_"}
+        self.language_model = LLM(cache_dir=cache_dir, **lm_kwargs)
 
         self.all_predictions = {}
         self.all_losses = {}

@@ -1,4 +1,4 @@
-from typing import Dict, List, NamedTuple, Optional, Tuple, TypedDict
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import torch
 from torch import Tensor

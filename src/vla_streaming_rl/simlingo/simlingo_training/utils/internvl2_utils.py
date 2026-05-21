@@ -8,10 +8,12 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
-from transformers import AutoConfig
 
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored import (
     conversation as conv_module,
+)
+from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (
+    InternVLChatConfig,
 )
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -37,7 +39,7 @@ SIMLINGO_ADDITIONAL_SPECIAL_TOKENS = (
 
 def get_num_image_tokens_per_patch(encoder_variant: str) -> int:
     # we want to know how many image tokens we use so that we can adjust the batch padding
-    tmp_config = AutoConfig.from_pretrained(encoder_variant, trust_remote_code=True)
+    tmp_config = InternVLChatConfig.from_pretrained(encoder_variant)
     image_size = tmp_config.force_image_size or tmp_config.vision_config.image_size
     patch_size = tmp_config.vision_config.patch_size
     num_image_tokens = int((image_size // patch_size) ** 2 * (tmp_config.downsample_ratio**2))

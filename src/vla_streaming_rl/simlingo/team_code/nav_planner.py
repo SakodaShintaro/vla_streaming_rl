@@ -3,18 +3,14 @@ Some helpful classes for planning and control for the privileged autopilot
 """
 
 import math
-import time
 import warnings
 import xml.etree.ElementTree as ET
 from collections import deque
 from copy import deepcopy
-from enum import IntEnum
 
 import carla
 import numpy as np
 from agents.navigation.global_route_planner import GlobalRoutePlanner
-from scipy.interpolate import interp1d
-from scipy.spatial import cKDTree
 
 
 class PIDController(object):

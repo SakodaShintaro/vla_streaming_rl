@@ -31,10 +31,8 @@ Caveats:
 import os
 from pathlib import Path
 
-import carla
 import gymnasium as gym
 import numpy as np
-import torch
 from srunner.scenariomanager.timer import GameTime
 
 from vla_streaming_rl.simlingo.team_code.agent_simlingo import LingoAgent
