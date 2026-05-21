@@ -7,7 +7,6 @@ import json
 import math
 import os
 import pathlib
-import random
 import time
 from collections import deque
 from pathlib import Path
@@ -16,7 +15,6 @@ import carla
 import cv2
 import numpy as np
 import torch
-import ujson
 from filterpy.kalman import MerweScaledSigmaPoints
 from filterpy.kalman import UnscentedKalmanFilter as UKF
 from leaderboard.autoagents import autonomous_agent
@@ -157,12 +155,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.user_flag = None
         self.running = True
         self.custom_prompt = None
-
-        self.LMDRIVE_AUGM = False
-        if self.LMDRIVE_AUGM:
-            command_templates_file = "data/augmented_templates/lmdrive.json"
-            with open(command_templates_file, "r") as f:
-                self.command_templates = ujson.load(f)
 
         self.route_path = os.environ.get("ROUTES", "")
         route_type = self.route_path.split("data/benchmarks/")[-1].split("/")[0]
@@ -587,36 +579,21 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 5: "do a lane change to the left",
                 6: "do a lane change to the right",
             }
-            command_template_mappings = {
-                1: [0, 2, 4, 7],
-                2: [1, 3, 5, 8],
-                3: [6, 9],
-                4: [38, 40, 42, 43, 44, 45],
-                5: [34, 36],
-                6: [35, 37],
-            }
-            if self.LMDRIVE_AUGM:
-                lmdrive_index = random.choice(command_template_mappings[far_command])
-                lmdrive_command = random.choice(self.command_templates[str(lmdrive_index)])
-                lmdrive_command = lmdrive_command.replace("[x]", str(dist_to_command))
-                prompt_tp = f"Command: {lmdrive_command}"
+            command = map_command[far_command]
+            next_command = map_command[next_far_command]
+            if self.last_command in [1, 2, 3] and far_command == 4:
+                next_command = command
+                command = map_command[self.last_command]
 
+            if command != next_command:
+                next_command = f" then {next_command}"
             else:
-                command = map_command[far_command]
-                next_command = map_command[next_far_command]
-                if self.last_command in [1, 2, 3] and far_command == 4:
-                    next_command = command
-                    command = map_command[self.last_command]
+                next_command = ""
 
-                if command != next_command:
-                    next_command = f" then {next_command}"
-                else:
-                    next_command = ""
-
-                if far_command == 4:
-                    prompt_tp = f"Command: {command}{next_command}."
-                else:
-                    prompt_tp = f"Command: {command} in {dist_to_command} meter{next_command}."
+            if far_command == 4:
+                prompt_tp = f"Command: {command}{next_command}."
+            else:
+                prompt_tp = f"Command: {command} in {dist_to_command} meter{next_command}."
 
         else:
             raise ValueError(f"Unsupported eval_route_as: {self.config.eval_route_as}")
