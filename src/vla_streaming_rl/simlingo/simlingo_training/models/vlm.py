@@ -10,7 +10,6 @@ class VLMEncoderModel(nn.Module):
         self,
         cfg_data_module,
         processor,
-        cache_dir,
         **cfg,
     ):
         super().__init__()
@@ -23,7 +22,7 @@ class VLMEncoderModel(nn.Module):
         self.token_size = self.embed_dim
 
         if "internvl2" in self.variant.lower():
-            self.image_encoder = LingoInternVLModel(self.variant, *cfg)
+            self.image_encoder = LingoInternVLModel(self.variant)
         else:
             raise ValueError(f"Unknown variant {self.variant}")
 

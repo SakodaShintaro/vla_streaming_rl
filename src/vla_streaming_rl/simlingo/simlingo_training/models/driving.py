@@ -97,7 +97,6 @@ class DrivingModel(pl.LightningModule):
         self.vision_model = VLMEncoderModel(
             cfg_data_module=cfg_data_module,
             processor=self.processor,
-            cache_dir=cache_dir,
             **vm_kwargs,
         )
 
