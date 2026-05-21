@@ -3,13 +3,13 @@ import json
 import os
 from pathlib import Path
 from pprint import PrettyPrinter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from hydra.utils import get_original_cwd
-from torch import Tensor, nn
+from torch import Tensor
 from torch.optim import AdamW
 
 from vla_streaming_rl.simlingo.simlingo_training.models.adaptors.adaptors import (
@@ -23,7 +23,6 @@ from vla_streaming_rl.simlingo.simlingo_training.models.language_model.llm impor
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
     DrivingExample,
     DrivingInput,
-    DrivingLabel,
     DrivingOutput,
     TrainingOutput,
 )
@@ -124,8 +123,6 @@ class DrivingModel(pl.LightningModule):
     def forward(
         self,
         example: DrivingExample,
-        return_language: Optional[bool] = None,
-        prompt_ids: Optional[Tensor] = None,
     ) -> DrivingOutput:
         """
         Samples a trajectory from the model.
@@ -218,8 +215,6 @@ class DrivingModel(pl.LightningModule):
         self,
         driving_input: DrivingInput,
         adaptor_dict: Dict,
-        driving_labels: DrivingLabel = None,
-        #   language_embeds: Tensor = None
     ) -> Tensor:
         """
         Forward model conditioned on the given driving input.
@@ -250,15 +245,15 @@ class DrivingModel(pl.LightningModule):
         features = outputs.hidden_states[-1]
         logits = outputs[0]
 
-        vision_features, adaptor_features = features.split(
+        _, adaptor_features = features.split(
             [features.size(1) - adaptor_embeds.size(1), adaptor_embeds.size(1)], dim=1
         )
-        vision_logits, adaptor_logits = logits.split(
+        _, adaptor_logits = logits.split(
             [logits.size(1) - adaptor_embeds.size(1), adaptor_embeds.size(1)], dim=1
         )
         return adaptor_features, adaptor_logits
 
-    def forward_loss(self, example: DrivingExample, per_sample=False) -> TrainingOutput:
+    def forward_loss(self, example: DrivingExample) -> TrainingOutput:
         """
         Forward pass of the model for a driving input, followed by
         computing the next token cross-entropy loss.
@@ -270,31 +265,19 @@ class DrivingModel(pl.LightningModule):
         """
 
         adaptor_dict = self.adaptors(example)
-        adaptor_embeds = adaptor_dict["inputs"]
-        adaptor_mask = adaptor_dict["inputs_mask"]
 
-        adaptor_features, adaptor_logits = self.forward_model(
-            example.driving_input, adaptor_dict, driving_labels=example.driving_label
-        )
+        adaptor_features, adaptor_logits = self.forward_model(example.driving_input, adaptor_dict)
         loss_dict = self.adaptors.compute_loss(
             adaptor_features, adaptor_logits, adaptor_dict, example
         )
 
         loss_dict_only_losses = {k: v for k, v in loss_dict.items() if k.endswith("loss")}
-        loss_logs = {k: v for k, v in loss_dict.items() if k.endswith("log")}
 
-        pred_labels = {
-            k: v for k, v in loss_dict.items() if not k.endswith("loss") and not k.endswith("log")
-        }
-        if per_sample:
-            return loss_dict_only_losses, pred_labels
-
-        return summarize_losses(loss_dict_only_losses), loss_logs
+        return summarize_losses(loss_dict_only_losses)
 
     def training_step(self, batch: DrivingExample, _batch_idx: int = 0):
-        output, loss_logs = self.forward_loss(batch)
-        logs = output  # .update(loss_logs)
-        self.log_training_output(logs, "train")
+        output = self.forward_loss(batch)
+        self.log_training_output(output, "train")
 
         # log the loss
         self.log("train/loss", output.loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
@@ -302,10 +285,8 @@ class DrivingModel(pl.LightningModule):
         return {"loss": output.loss, "outputs": output}
 
     def validation_step(self, batch: DrivingExample, _batch_idx: int = 0):
-
-        output, loss_logs = self.forward_loss(batch)
-        logs = output  # .update(loss_logs)
-        self.log_training_output(logs, "val")
+        output = self.forward_loss(batch)
+        self.log_training_output(output, "val")
 
         # log the loss
         self.log("val/loss", output.loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
@@ -315,9 +296,8 @@ class DrivingModel(pl.LightningModule):
     def predict_step(self, batch: DrivingExample, _batch_idx: int = 0):
         run_ids = decode_uint8(batch.run_id)
 
-        speed_wps, route, language = self.forward(batch, return_language=True)
+        speed_wps, route, language = self.forward(batch)
 
-        self.num_route_points = 20
         route_equal = []
         for i in range(len(route)):
             route_equal.append(self.equal_spacing_route(route[i].cpu()))
@@ -447,37 +427,6 @@ class DrivingModel(pl.LightningModule):
         waypoints_gt = self.prediction["waypoints_gt"]
         waypoints_gt = torch.cat(waypoints_gt, dim=0)
 
-        # calc distance between wps for 1d wps
-        waypoints_preds_1d = []
-        for i in range(len(waypoints_preds)):
-            waypoint_pred = waypoints_preds[i]
-            waypoints_preds_1d_tmp = torch.tensor(
-                [
-                    torch.linalg.norm(waypoint_pred[i + 1] - waypoint_pred[i])
-                    for i in range(len(waypoint_pred) - 1)
-                ]
-            )
-            # cumsum to get the distance from the start
-            waypoints_preds_1d_tmp = torch.cumsum(waypoints_preds_1d_tmp, dim=0)
-            waypoints_preds_1d_tmp = [[x, 0] for x in waypoints_preds_1d_tmp]
-            waypoints_preds_1d.append(waypoints_preds_1d_tmp)
-        waypoints_preds_1d = torch.tensor(waypoints_preds_1d)
-
-        waypoints_gt_1d = []
-        for i in range(len(waypoints_gt)):
-            waypoint_gt = waypoints_gt[i]
-            waypoints_gt_1d_tmp = torch.tensor(
-                [
-                    torch.linalg.norm(waypoint_gt[i + 1] - waypoint_gt[i])
-                    for i in range(len(waypoint_gt) - 1)
-                ]
-            )
-            # cumsum to get the distance from the start
-            waypoints_gt_1d_tmp = torch.cumsum(waypoints_gt_1d_tmp, dim=0)
-            waypoints_gt_1d_tmp = [[x, 0] for x in waypoints_gt_1d_tmp]
-            waypoints_gt_1d.append(waypoints_gt_1d_tmp)
-        waypoints_gt_1d = torch.tensor(waypoints_gt_1d)
-
         # calculate ade and fde for samples separately which have <SAFETY> in prompt and for <INSTRUCTION_FOLLOWING>
         samples_safety = [i for i, l in enumerate(self.prediction["prompt"]) if "<SAFETY>" in l]
         samples_instruction = [
@@ -505,34 +454,6 @@ class DrivingModel(pl.LightningModule):
             desired_speed = np.linalg.norm(prev_wp - last_wp) * 2.0
             return desired_speed
 
-        def get_desired_speed(wps):
-            wp_freq = 5
-            carla_fps = 20
-            # one WP every 0.25 seconds
-            # we want to get speed at the last WP
-            # last_wp = wps[-1] #.cpu().numpy()
-            # we want the WP half second earlier than the last WP
-            one_second = int(carla_fps // (wp_freq))
-            half_second = one_second // 2
-            wp_half_second = wps[half_second]  # .cpu().numpy()
-            wp_one_second = wps[one_second]  # .cpu().numpy()
-            desired_speed = np.linalg.norm(wp_half_second - wp_one_second) * 2.0
-            return desired_speed
-
-        def get_desired_avg_speed(wps):
-            wp_freq = 5
-            carla_fps = 20
-            # one WP every 0.25 seconds
-            # we want to get speed at the last WP
-            # last_wp = wps[-1] #.cpu().numpy()
-            # # we want the WP half second earlier than the last WP
-            # one_second = int(carla_fps // (wp_freq))
-            # half_second = one_second // 2
-            first_wp = wps[0]  # .cpu().numpy()
-            last_wp = wps[-1]  # .cpu().numpy()
-            desired_speed = np.linalg.norm(first_wp - last_wp) / (len(wps) * 0.25)
-            return desired_speed
-
         def get_1d_wps(wps):
             waypoints_1d = [np.linalg.norm(wps[i + 1] - wps[i]) for i in range(len(wps) - 1)]
             # cumsum to get the distance from the start
@@ -555,9 +476,7 @@ class DrivingModel(pl.LightningModule):
             route_preds_sample = route_preds[samples].cpu().numpy()
             route_gt_sample = route_gt[samples].cpu().numpy()
             waypoints_preds_sample = waypoints_preds[samples].cpu().numpy()
-            waypoints_gt_sample = waypoints_gt[samples].cpu().numpy()
             eval_infos_sample = [self.prediction["eval_infos"][i] for i in samples]
-            waypoints_org_sample = [eval_infos_sample[i]["org_wps"] for i in range(len(samples))]
             route_org_sample = [eval_infos_sample[i]["org_path"] for i in range(len(samples))]
             waypoints_instruction_sample = [
                 np.array(eval_infos_sample[i]["new_wps"]) for i in range(len(samples))
@@ -566,7 +485,6 @@ class DrivingModel(pl.LightningModule):
                 eval_infos_sample[i]["new_path"] for i in range(len(samples))
             ]
             prompts = [self.prediction["prompt"][i].replace("<IMG_CONTEXT>", "") for i in samples]
-            pred_language = [self.prediction["language"][i] for i in samples]
             paths = [self.prediction["path"][i] for i in samples]
 
             success_rate_all = []
@@ -592,31 +510,13 @@ class DrivingModel(pl.LightningModule):
 
                 # get desired speed form WPs
                 desired_end_speed_pred = get_desired_end_speed(waypoints_preds_sample[i])
-                desired_end_speed_gt = get_desired_end_speed(waypoints_gt_sample[i])
-                desired_end_speed_org = get_desired_end_speed(waypoints_org_sample[i])
                 desired_end_speed_instruction = get_desired_end_speed(
-                    waypoints_instruction_sample[i]
-                )
-
-                desired_speed_pred = get_desired_speed(waypoints_preds_sample[i])
-                desired_speed_gt = get_desired_speed(waypoints_gt_sample[i])
-                desired_speed_org = get_desired_speed(waypoints_org_sample[i])
-                desired_speed_instruction = get_desired_speed(waypoints_instruction_sample[i])
-
-                desired_avg_speed_pred = get_desired_avg_speed(waypoints_preds_sample[i])
-                desired_avg_speed_gt = get_desired_avg_speed(waypoints_gt_sample[i])
-                desired_avg_speed_org = get_desired_avg_speed(waypoints_org_sample[i])
-                desired_avg_speed_instruction = get_desired_avg_speed(
                     waypoints_instruction_sample[i]
                 )
 
                 pred_wps_1d = get_1d_wps(waypoints_preds_sample[i])
                 pred_wps_1d_diffs = np.diff(pred_wps_1d[:, 0])
                 pred_speeds = pred_wps_1d_diffs / (wp_freq / carla_fps)
-
-                org_wps_1d = get_1d_wps(waypoints_org_sample[i])
-                org_wps_1d_diffs = np.diff(org_wps_1d[:, 0])
-                org_speeds = org_wps_1d_diffs / (wp_freq / carla_fps)
 
                 instruction_wps_1d = get_1d_wps(waypoints_instruction_sample[i])
                 instruction_wps_1d_diffs = np.diff(instruction_wps_1d[:, 0])
@@ -625,9 +525,7 @@ class DrivingModel(pl.LightningModule):
                 x = np.arange(len(pred_speeds)) * 0.25
 
                 # linear regression np
-                slope_pred, intercept_pred = np.polyfit(x, pred_speeds, 1)
-                slope_org, intercept_org = np.polyfit(x, org_speeds, 1)
-                slope_instruction, intercept_instruction = np.polyfit(x, instruction_speeds, 1)
+                slope_pred, _ = np.polyfit(x, pred_speeds, 1)
 
                 current_speed = float(prompts[i].split("Current speed: ")[-1].split(" ")[0])
 
@@ -787,10 +685,6 @@ class DrivingModel(pl.LightningModule):
             else:
                 ade_fde.update({f"success_rate_total_{name}": 0})
 
-            min_samples_per_mode = min(
-                [len(success_rate_by_mode[mode]) for mode in success_rate_by_mode]
-            )
-            balanced_total_success_rate = 0
             # Calculate success rate for each mode
             for mode in success_rate_by_mode:
                 if len(success_rate_by_mode[mode]) > 0:
@@ -818,9 +712,7 @@ class DrivingModel(pl.LightningModule):
         with open(save_path_tmp, "w") as f:
             json.dump(ade_fde, f, indent=4)
 
-    def log_training_output(
-        self, training_output: TrainingOutput, mode: str, dataset: Optional[str] = None
-    ):
+    def log_training_output(self, training_output: TrainingOutput, mode: str):
         losses = {k: n.detach() for k, n in training_output.loss_averages.items()}
         counts = {k: n.detach().sum() for k, n in training_output.loss_counts.items()}
         losses["loss"] = training_output.loss.detach()
