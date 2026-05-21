@@ -4,13 +4,11 @@ Some helpful classes for planning and control for the privileged autopilot
 
 import math
 import warnings
-import xml.etree.ElementTree as ET
 from collections import deque
 from copy import deepcopy
 
 import carla
 import numpy as np
-from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
 class LateralPIDController(object):
@@ -115,51 +113,6 @@ class LateralPIDController(object):
 
     def load(self):
         self._window = self._saved_window.copy()
-
-
-def get_throttle(brake, target_speed, speed, restore=True):
-    if target_speed < 1e-5 or brake:
-        return 0.0, True
-    elif target_speed < 1.0 / 3.6:  # to avoid very small target speeds
-        target_speed = 1.0 / 3.6
-
-    speed = speed * 3.6
-    target_speed = target_speed * 3.6
-    params = [
-        1.1990342347353184,
-        -0.8057602384167799,
-        1.710818710950062,
-        0.921890257450335,
-        1.556497522998393,
-        -0.7013479734904027,
-        1.031266635497984,
-    ]
-    speed_error = target_speed - speed
-
-    # maximum acceleration 1.9 m/tick
-    if speed_error > 1.89:
-        return 1.0, False
-
-    if speed / target_speed > params[-1] or brake:
-        throttle, control_brake = 0.0, True
-        return throttle, control_brake
-
-    speed_error_cl = np.clip(speed_error, 0.0, np.inf) / 100.0
-    speed /= 100.0
-    features = np.array(
-        [
-            speed,
-            speed**2,
-            100 * speed_error_cl,
-            speed_error_cl**2,
-            speed * speed_error_cl,
-            speed**2 * speed_error_cl,
-        ]
-    )
-
-    throttle, control_brake = np.clip(features @ params[:-1], 0.0, 1.0), False
-
-    return throttle, control_brake
 
 
 class RoutePlanner(object):
@@ -304,135 +257,3 @@ class RoutePlanner(object):
         self.route = self.saved_route
         self.route_distances = self.saved_route_distances
         self.is_last = False
-
-
-def interpolate_trajectory(world_map, waypoints_trajectory, hop_resolution=1.0, max_len=400):
-    """
-    Given some raw keypoints interpolate a full dense trajectory to be used
-    by the user.
-    returns the full interpolated route both in GPS coordinates and also in
-    its original form.
-
-    Args:
-    - world: a reference to the CARLA world so we can use the planner
-    - waypoints_trajectory: the current coarse trajectory
-    - hop_resolution: is the resolution, how dense is the provided
-    trajectory going to be made
-    """
-
-    grp = GlobalRoutePlanner(world_map, hop_resolution)
-    # Obtain route plan
-    lat_ref, lon_ref = _get_latlon_ref(world_map)
-
-    route = []
-    gps_route = []
-
-    for i in range(len(waypoints_trajectory) - 1):
-        waypoint = waypoints_trajectory[i]
-        waypoint_next = waypoints_trajectory[i + 1]
-        if waypoint.x != waypoint_next.x or waypoint.y != waypoint_next.y:
-            interpolated_trace = grp.trace_route(waypoint, waypoint_next)
-            if len(interpolated_trace) > max_len:
-                waypoints_trajectory[i + 1] = waypoints_trajectory[i]
-            else:
-                # interpolated_trace = grp.trace_route(waypoint, waypoint_next)
-                for wp, connection in interpolated_trace:
-                    route.append((wp.transform, connection))
-                    gps_coord = _location_to_gps(lat_ref, lon_ref, wp.transform.location)
-                    gps_route.append((gps_coord, connection))
-
-    return gps_route, route
-
-
-def extrapolate_waypoint_route(waypoint_route, route_points):
-    # guard against inplace mutation
-    route = deepcopy(waypoint_route)
-
-    # determine length of route before extrapolation
-    remaining_waypoints = len(route)
-
-    # we start at the end of the unextrapolated route and move linearly
-    heading_vector = route[-1][0] - route[-2][0]
-    heading_vector = heading_vector / (np.linalg.norm(heading_vector) + 1.0e-7)
-
-    # we extrapolate 2 meters ahead for each point and skip the first two
-    extrapolation = []
-    for i in range(2, route_points + 2):
-        next_wp = route[-1][0] + i * 2 * heading_vector
-        extrapolation.append((next_wp, route[-1][1]))
-    route.extend(extrapolation)
-
-    # the waypoint_planner does not pop the last (few) waypoints in its
-    # route. We manually pop those when they are the only remaining points
-    # in the original route and only pass the extrapolation to the cost.
-    if remaining_waypoints == 2:
-        route.popleft()
-        route.popleft()
-    elif remaining_waypoints == 1:
-        route.popleft()
-    return route
-
-
-def location_route_to_gps(route, lat_ref, lon_ref):
-    """
-    Locate each waypoint of the route into gps, (lat long ) representations.
-    :param route:
-    :param lat_ref:
-    :param lon_ref:
-    :return:
-    """
-    gps_route = []
-
-    for transform, connection in route:
-        gps_point = _location_to_gps(lat_ref, lon_ref, transform.location)
-        gps_route.append((gps_point, connection))
-
-    return gps_route
-
-
-def _get_latlon_ref(world_map):
-    """
-    Convert from waypoints world coordinates to CARLA GPS coordinates
-    :return: tuple with lat and lon coordinates
-    """
-    xodr = world_map.to_opendrive()
-    tree = ET.ElementTree(ET.fromstring(xodr))
-
-    # default reference
-    lat_ref = 42.0
-    lon_ref = 2.0
-
-    for opendrive in tree.iter("OpenDRIVE"):
-        for header in opendrive.iter("header"):
-            for georef in header.iter("geoReference"):
-                if georef.text:
-                    str_list = georef.text.split(" ")
-                    for item in str_list:
-                        if "+lat_0" in item:
-                            lat_ref = float(item.split("=")[1])
-                        if "+lon_0" in item:
-                            lon_ref = float(item.split("=")[1])
-    return lat_ref, lon_ref
-
-
-def _location_to_gps(lat_ref, lon_ref, location):
-    """
-    Convert from world coordinates to GPS coordinates
-    :param lat_ref: latitude reference for the current map
-    :param lon_ref: longitude reference for the current map
-    :param location: location to translate
-    :return: dictionary with lat, lon and height
-    """
-
-    EARTH_RADIUS_EQUA = 6378137.0  # pylint: disable=invalid-name
-    scale = math.cos(lat_ref * math.pi / 180.0)
-    mx = scale * lon_ref * math.pi * EARTH_RADIUS_EQUA / 180.0
-    my = scale * EARTH_RADIUS_EQUA * math.log(math.tan((90.0 + lat_ref) * math.pi / 360.0))
-    mx += location.x
-    my -= location.y
-
-    lon = mx * 180.0 / (math.pi * EARTH_RADIUS_EQUA * scale)
-    lat = 360.0 * math.atan(math.exp(my / (EARTH_RADIUS_EQUA * scale))) / math.pi - 90.0
-    z = location.z
-
-    return {"lat": lat, "lon": lon, "z": z}

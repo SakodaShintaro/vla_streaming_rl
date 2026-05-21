@@ -17,7 +17,6 @@ class GlobalConfig:
         self.wp_dilation = 1  # Factor by which the wp are dilated compared to full CARLA 20 FPS
         self.data_save_freq = 5  # 5
 
-        self.max_throttle = 1  # 0.75  # upper limit on throttle signal value in dataset
         self.brake_speed = 0.4  # desired speed below which brake is triggered
         # ratio of speed to desired speed at which brake is triggered
         self.brake_ratio = 1.1
@@ -27,21 +26,6 @@ class GlobalConfig:
         # -----------------------------------------------------------------------------
         # PID controller
         # -----------------------------------------------------------------------------
-        # We are minimizing the angle to the waypoint that is at least aim_distance
-        # meters away, while driving
-        self.aim_distance_very_fast = 7.0  # 2.0
-        self.aim_distance_fast = 3.0  # 2.0
-        self.aim_distance_slow = 2.25
-        # Meters per second threshold switching between aim_distance_fast and
-        # aim_distance_slow
-        self.aim_distance_threshold = 5.5
-        self.aim_distance_threshold2 = 15
-        # Controller
-        self.turn_kp = 3.25  # 1.25 -- these were the values for LB1
-        self.turn_ki = 1.0  # 0.75
-        self.turn_kd = 1.0  # 0.3
-        self.turn_n = 20  # buffer size
-
         self.speed_kp = 1.75  # 5.0
         self.speed_ki = 1.0  # 0.5
         self.speed_kd = 2.0  # 1.0

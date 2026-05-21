@@ -45,7 +45,6 @@ from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
 )
 from vla_streaming_rl.simlingo.team_code.config_simlingo import GlobalConfig
 from vla_streaming_rl.simlingo.team_code.nav_planner import LateralPIDController, RoutePlanner
-from vla_streaming_rl.simlingo.team_code.scenario_logger import ScenarioLogger
 from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     get_camera_extrinsics,
     get_camera_intrinsics,
@@ -160,11 +159,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             command_templates_file = "data/augmented_templates/lmdrive.json"
             with open(command_templates_file, "r") as f:
                 self.command_templates = ujson.load(f)
-
-        # used for interactive eval of instruction following
-        # thread = threading.Thread(target=self.input_thread)
-        # thread.daemon = True  # This makes the thread exit when the main program exits
-        # thread.start()
 
         self.route_path = os.environ.get("ROUTES", "")
         route_type = self.route_path.split("data/benchmarks/")[-1].split("/")[0]
@@ -287,19 +281,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.save_path = os.environ.get("SAVE_PATH") + self.save_path_root
         # self.checkpoint_path = os.environ.get('CHECKPOINT_ENDPOINT').
 
-        # Logger that generates logs used for infraction replay in the results_parser.
         if self.save_path is not None and route_index is not None:
             self.save_path = pathlib.Path(self.save_path) / route_index
             pathlib.Path(self.save_path).mkdir(parents=True, exist_ok=True)
-
-            self.lon_logger = ScenarioLogger(
-                save_path=self.save_path,
-                route_index=route_index,
-                logging_freq=self.logging_freq,
-                log_only=True,
-                route_only=False,  # with vehicles
-                roi=self.logger_region_of_interest,
-            )
 
         self.debug_save_path = (
             self.save_path
@@ -313,35 +297,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         if DEBUG:
             self.save_path_img = self.debug_save_path + "/images"
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
-
-    def input_thread(self):
-        while self.running:
-            user_input = input(
-                "Enter a command for the vehicle. 1: turn left, 2: turn right, 3: lane change left, 4: lane change right, 5: stop, 6: accelerate: "
-            )
-            if user_input.isdigit():
-                self.user_flag = int(user_input)
-            # if int(user_input) == 1:
-            #   self.user_command = 'turn left at the next intersection'
-            # elif int(user_input) == 2:
-            #   self.user_command = 'turn right at the next intersection'
-            # elif int(user_input) == 3:
-            #   self.user_command = 'change one lane to the left'
-            # elif int(user_input) == 4:
-            #   self.user_command = 'change one lane to the right'
-            # elif int(user_input) == 5:
-            #   self.user_command = 'stop'
-            # elif int(user_input) == 6:
-            #   self.user_command = 'accelerate'
-
-            else:
-                self.user_command = str(user_input)
-
-            if user_input.strip().lower() == "exit":
-                self.running = False
-
-            print(f"User command: {self.user_command}")
-            print(f"User flag: {self.user_flag}")
 
     def _init(self):
         # The CARLA leaderboard does not expose the lat lon reference value of the GPS which make it impossible to use the
@@ -667,7 +622,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                     prompt_tp = f"Command: {command} in {dist_to_command} meter{next_command}."
 
         else:
-            result["route"] = route_img
+            raise ValueError(f"Unsupported eval_route_as: {self.config.eval_route_as}")
 
         if self.config.use_cot:
             prompt = f"Current speed: {speed} m/s. {prompt_tp} What should the ego do next?"
@@ -744,9 +699,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             if "<image>" not in question:
                 question = "<image>\n" + question
             template = conv_module.get_conv_template("internlm2-chat")
-            template_inference = None
-
-            template_inference = conv_module.get_conv_template("internlm2-chat")
             for conv_part_idx, conv_part in enumerate(conv):
                 if conv_part["role"] == "assistant":
                     # template.append_message(template.roles[1], conv_part['content'])
@@ -788,7 +740,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             add_special_tokens=False,
         )
         prompt_tokenized_ids = prompt_tokenized["input_ids"]
-        prompt_tokenized_char_offsets = prompt_tokenized["offset_mapping"].view(1, -1, 2)
         prompt_tokenized_valid = prompt_tokenized["input_ids"] != self.tokenizer.pad_token_id
         prompt_tokenized_mask = prompt_tokenized_valid
 

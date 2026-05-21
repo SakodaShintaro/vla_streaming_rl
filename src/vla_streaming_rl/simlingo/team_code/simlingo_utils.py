@@ -45,7 +45,6 @@ def get_rotation_matrix(roll, pitch, yaw):
         [[1, 0, 0], [0, math.cos(roll), -math.sin(roll)], [0, math.sin(roll), math.cos(roll)]]
     )
 
-    R = yawMatrix * pitchMatrix * rollMatrix
     R = pitchMatrix * yawMatrix * rollMatrix
 
     # inverse rotation
