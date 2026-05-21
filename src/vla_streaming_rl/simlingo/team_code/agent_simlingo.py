@@ -958,7 +958,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             throttle = max(self.config.creep_throttle, throttle)
             brake = False
             self.force_move -= 1
-            print(f"force_move: {self.force_move}")
 
         control = carla.VehicleControl(
             steer=float(steer), throttle=float(throttle), brake=float(brake)
