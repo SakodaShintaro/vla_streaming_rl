@@ -392,7 +392,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         return sensors
 
     @torch.inference_mode()  # Turns off gradient computation
-    def tick(self, input_data):
+    def _tick(self, input_data):
         """Pre-processes sensor data and runs the Unscented Kalman Filter"""
         rgb = []
 
@@ -694,11 +694,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             self._init()
             control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
             self.control = control
-            tick_data = self.tick(input_data)
+            tick_data = self._tick(input_data)
             return control
 
         # Need to run this every step for GPS filtering
-        tick_data = self.tick(input_data)
+        tick_data = self._tick(input_data)
 
         # initialize DrivingInput with dict self.DrivingInput
         model_input = DrivingInput(**self.DrivingInput)
@@ -792,7 +792,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             # save
             image.save(f"{self.save_path_img}/{self.step}.png")
 
-        steer, throttle, brake = self.control_pid(pred_route, gt_velocity, pred_speed_wps)
+        steer, throttle, brake = self._control_pid(pred_route, gt_velocity, pred_speed_wps)
 
         # # 0.1 is just an arbitrary low number to threshold when the car is stopped
         if gt_velocity < 0.1:
@@ -830,7 +830,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         return control
 
-    def control_pid(self, route_waypoints, velocity, speed_waypoints):
+    def _control_pid(self, route_waypoints, velocity, speed_waypoints):
         """
         Predicts vehicle control with a PID controller.
         Used for waypoint predictions
@@ -864,7 +864,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         throttle = np.clip(throttle, 0.0, self.config.clip_throttle)
         throttle = throttle if not brake else 0.0
 
-        route_interp = self.interpolate_waypoints(route_waypoints.squeeze())
+        route_interp = self._interpolate_waypoints(route_waypoints.squeeze())
 
         steer = self.turn_controller.step(route_interp, speed)
 
@@ -875,7 +875,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
     # In: Waypoints NxD
     # Out: Waypoints NxD equally spaced 0.1 across D
-    def interpolate_waypoints(self, waypoints):
+    def _interpolate_waypoints(self, waypoints):
         waypoints = waypoints.copy()
         waypoints = np.concatenate((np.zeros_like(waypoints[:1]), waypoints))
         shift = np.roll(waypoints, 1, axis=0)
