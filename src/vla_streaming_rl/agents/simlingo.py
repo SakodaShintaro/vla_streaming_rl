@@ -18,7 +18,7 @@ spawn its own multi-camera stack or wire a leaderboard
 re-init) is detected automatically via ``env.unwrapped.vehicle.id``
 changing between ticks.
 """
-import os
+
 from pathlib import Path
 
 import gymnasium as gym
@@ -60,12 +60,6 @@ class SimLingoAgent:
         self._scratch_dir.mkdir(parents=True, exist_ok=True)
         self._checkpoint_path = self._resolve_checkpoint()
 
-        # ``LingoAgent.setup`` writes ``SAVE_PATH + save_path_root`` and
-        # crashes if SAVE_PATH is unset. Redirect to a per-run scratch
-        # dir; none of these files feed our downstream metrics
-        # (CARLALeaderboardEnv's eval_writer owns those).
-        os.environ["SAVE_PATH"] = str(self._scratch_dir) + "/"
-
         # ``AutonomousAgent.__init__`` calls ``self.get_hero()`` which scans
         # CarlaDataProvider for an actor with role_name='hero'. At
         # construction time the env hasn't reset yet so there is no ego;
@@ -76,14 +70,13 @@ class SimLingoAgent:
                 self.hero_actor = None
 
         self._lingo = _DeferredHero(carla_host="", carla_port=2000, debug=False)
-        # Use simlingo's upstream "<ckpt>+<save_path_root>" convention
-        # (eval_220routes.sh appends ``+$save_name`` via
-        # ``--agent-config``). ``route_index=None`` keeps
-        # ``self.save_path`` a plain str so the later
-        # ``save_path + "/debug_viz"`` concat works (passing a non-None
-        # value converts it to PosixPath, which doesn't support ``+``).
-        agent_config = f"{self._checkpoint_path}+vla_streaming_rl"
-        self._lingo.setup(agent_config, route_index=None)
+        self._lingo.setup(
+            checkpoint_path=str(self._checkpoint_path),
+            save_path_root="vla_streaming_rl",
+            save_path_prefix=str(self._scratch_dir) + "/",
+            route_path="",
+            bias_config_path=None,
+        )
 
         # Freeze the VLM — we never backprop. Empty trainable_state at
         # checkpoint time then writes a (harmless) empty dict.
@@ -139,9 +132,7 @@ class SimLingoAgent:
         from huggingface_hub import snapshot_download
 
         snapshot = Path(snapshot_download(cls._HF_REPO_ID))
-        candidates = [
-            p for p in snapshot.rglob(cls._HF_CKPT_NAME) if "/blobs/" not in str(p)
-        ]
+        candidates = [p for p in snapshot.rglob(cls._HF_CKPT_NAME) if "/blobs/" not in str(p)]
         if not candidates:
             raise RuntimeError(
                 f"no {cls._HF_CKPT_NAME} in HF snapshot of {cls._HF_REPO_ID} at {snapshot}"
@@ -160,14 +151,10 @@ class SimLingoAgent:
 
         runtime = self._env_unwrapped.runtime
         if runtime is None or runtime.route_scenario is None:
-            raise RuntimeError(
-                "SimLingoAgent requires Bench2DriveRuntime with an active scenario"
-            )
+            raise RuntimeError("SimLingoAgent requires Bench2DriveRuntime with an active scenario")
         # ``set_global_plan`` is the standard leaderboard handover —
         # RouteScenario builds both gps_route and world-coord route.
-        self._lingo.set_global_plan(
-            runtime.route_scenario.gps_route, runtime.route_scenario.route
-        )
+        self._lingo.set_global_plan(runtime.route_scenario.gps_route, runtime.route_scenario.route)
         self._lingo.hero_actor = ego
         self._lingo.initialized = False
         self._attached_ego_id = ego.id

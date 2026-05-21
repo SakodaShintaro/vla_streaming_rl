@@ -5,7 +5,6 @@ partially taken from https://github.com/autonomousvision/carla_garage/blob/leade
 
 import json
 import math
-import os
 import pathlib
 import time
 from collections import deque
@@ -71,10 +70,10 @@ DEBUG = False  # saves images during evaluation; off here — simlingo's
 # the metrics we need (no debug images required).
 
 
-def _load_sensor_bias():
-    """Load sensor bias config from YAML pointed to by SIMLINGO_BIAS_CONFIG.
+def _load_sensor_bias(bias_config_path):
+    """Load sensor bias config from a YAML path.
 
-    Returns a flat dict; all zeros (no bias) if the env var is unset.
+    Returns a flat dict; all zeros (no bias) if ``bias_config_path`` is ``None``.
     """
     bias = {
         "speed_scale": 1.0,
@@ -90,9 +89,8 @@ def _load_sensor_bias():
         "cam_yaw_deg": 0.0,
     }
 
-    bias_config_path = os.environ.get("SIMLINGO_BIAS_CONFIG")
     if not bias_config_path:
-        print("[LingoAgent] SIMLINGO_BIAS_CONFIG not set; using zero sensor bias")
+        print("[LingoAgent] bias_config_path not provided; using zero sensor bias")
         return bias
 
     cfg = OmegaConf.load(bias_config_path)
@@ -120,28 +118,31 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
     Main class that runs the agents with the run_step function
     """
 
-    def setup(self, path_to_conf_file, route_index=None):
-        """Sets up the agent. route_index is for logging purposes"""
+    def setup(
+        self, checkpoint_path, save_path_root, save_path_prefix, route_path, bias_config_path
+    ):
+        """Sets up the agent.
+
+        Args:
+            checkpoint_path: Path to the SimLingo VLM ``pytorch_model.pt``.
+            save_path_root: Sub-directory name under ``save_path_prefix``.
+            save_path_prefix: Output root directory (must end with ``/``).
+            route_path: Route XML path (used only for debug-viz naming).
+            bias_config_path: Optional YAML path for sensor bias overrides.
+        """
 
         torch.cuda.empty_cache()
         self.track = autonomous_agent.Track.SENSORS
-        if "+" in path_to_conf_file:
-            print(f"path to conf file: {path_to_conf_file}")
-            self.config_path = path_to_conf_file.split("+")[0]
-            print(f"Config path: {self.config_path}")
-            self.save_path_root = path_to_conf_file.split("+")[1]
-            print(f"Save path root: {self.save_path_root}")
-        else:
-            self.config_path = path_to_conf_file
-            print(f"Config path: {self.config_path}")
-            self.save_path_root = route_index
-            print(f"Save path root: {self.save_path_root}")
+        self.config_path = checkpoint_path
+        print(f"Config path: {self.config_path}")
+        self.save_path_root = save_path_root
+        print(f"Save path root: {self.save_path_root}")
         self.step = -1
         self.initialized = False
         self.device = torch.device("cuda")
         self.DrivingInput = {}
         self.config = GlobalConfig()
-        self.bias = _load_sensor_bias()
+        self.bias = _load_sensor_bias(bias_config_path)
 
         if self.config.eval_route_as == -1:
             self.config.eval_route_as = self.model.route_as
@@ -149,7 +150,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.last_command = -1
         self.last_command_tmp = -1
 
-        self.route_path = os.environ.get("ROUTES", "")
+        self.route_path = route_path
         route_type = self.route_path.split("data/benchmarks/")[-1].split("/")[0]
         route_number = str(pathlib.Path(self.route_path).stem)
 
@@ -267,12 +268,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.state_log = deque(maxlen=max((self.lidar_seq_len * self.data_save_freq), 2))
 
         # Path to where visualizations and other debug output gets stored
-        self.save_path = os.environ.get("SAVE_PATH") + self.save_path_root
-        # self.checkpoint_path = os.environ.get('CHECKPOINT_ENDPOINT').
-
-        if self.save_path is not None and route_index is not None:
-            self.save_path = pathlib.Path(self.save_path) / route_index
-            pathlib.Path(self.save_path).mkdir(parents=True, exist_ok=True)
+        self.save_path = save_path_prefix + self.save_path_root
 
         self.debug_save_path = (
             self.save_path
