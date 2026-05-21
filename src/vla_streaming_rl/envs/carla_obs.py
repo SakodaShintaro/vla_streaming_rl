@@ -22,8 +22,12 @@ class CARLAObsConfig:
     # image_size: tuple[int, int] = (832, 480)  # (width, height) aligned to Wan 2.1
     image_size: tuple[int, int] = (416, 240)  # (width, height) aligned to Wan 2.1, half
     fov: float = 110.0
-    camera_x: float = 1.5
-    camera_z: float = 2.4
+    # Mount position copied from simlingo/team_code/config_simlingo.py
+    # (camera_pos_0 = [-1.5, 0.0, 2.0]). Training/eval observation must
+    # match the agent's calibration or the policy sees a different view
+    # than what simlingo was trained on.
+    camera_x: float = -1.5
+    camera_z: float = 2.0
     map_size: int = 512
     scale: float = 0.5  # meters/pixel on the overlay
     num_interp_points: int = 1000

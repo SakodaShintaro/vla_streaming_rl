@@ -31,7 +31,7 @@ COMFORT_MAX_ABS_LON_JERK = 4.13  # [m/s^3]
 COMFORT_MAX_ABS_YAW_RATE = 0.95  # [rad/s]
 COMFORT_MAX_ABS_YAW_ACCEL = 1.93  # [rad/s^2]
 
-DT = 0.1  # [s] (10 FPS)
+DT = 0.05  # [s] (20 FPS)
 
 # Bench2Drive scoring (mirrors statistics_manager.py PENALTY_VALUE_DICT/PENALTY_PERC_DICT).
 # score_composed = score_route(0-100) * Π(score_penalty in (0,1])
@@ -198,9 +198,9 @@ class CARLALeaderboardEnv(gym.Env):
         # Observation / action contracts come from carla_obs (shared with the
         # Bench2Drive eval agent so training and eval stay bit-aligned).
         self.obs_cfg = CARLAObsConfig()
-        self.max_episode_steps = 1000
+        self.max_episode_steps = 2000
         self.render_mode = "rgb_array"
-        self.fps = 10  # Simulation FPS
+        self.fps = 20  # Simulation FPS
 
         self.observation_space = make_obs_space(self.obs_cfg)
         self.action_space = make_action_space()
