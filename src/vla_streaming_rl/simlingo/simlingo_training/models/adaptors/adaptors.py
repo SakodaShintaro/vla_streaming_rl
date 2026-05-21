@@ -268,7 +268,7 @@ class AdaptorList(nn.Module):
 
     @property
     def adaptors(self):
-        dct: Dict[str, Adaptor] = {}
+        dct: Dict[str, DrivingAdaptor | LanguageAdaptor] = {}
         if self.language is not None:
             dct["language"] = self.language
         if self.driving is not None:
