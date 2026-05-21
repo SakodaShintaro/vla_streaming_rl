@@ -191,26 +191,20 @@ def compose_obs(
     return img.transpose(2, 0, 1).astype(np.float32) / 255.0
 
 
-# Lincoln MKZ 2020 needs roughly this much throttle from rest before its
-# automatic transmission engages first gear. Anything below sits in neutral,
-# so tiny positive actions produced no motion during early training and the
-# negative-reward cutoff truncated episodes before any progress signal.
-THROTTLE_FLOOR = 0.5
-
-
 def action_to_vehicle_control(action: np.ndarray) -> tuple[float, float, float]:
     """Map 2-D policy action to ``(steer, throttle, brake)``.
 
-    Matches the training env exactly, including the ``brake = 0`` behaviour:
-    a negative ``action[1]`` means "coast" (throttle 0), not "brake". Any
-    positive ``action[1]`` is bumped up to ``THROTTLE_FLOOR`` so the ego
-    actually moves instead of stalling in the gear-shift dead zone.
+    ``action[1] > 0`` → throttle, ``action[1] < 0`` → brake. No floor or
+    clamp beyond ``[-1, 1]``: external policies (e.g. SimLingo) round-trip
+    their ``carla.VehicleControl`` through this mapping and must see the
+    raw throttle/brake they emitted.
     """
     steer = float(np.clip(action[0], -1.0, 1.0))
     gas_or_brake = float(np.clip(action[1], -1.0, 1.0))
-    if gas_or_brake > 0.0:
-        throttle = max(gas_or_brake, THROTTLE_FLOOR)
+    if gas_or_brake >= 0.0:
+        throttle = gas_or_brake
+        brake = 0.0
     else:
         throttle = 0.0
-    brake = 0.0
+        brake = -gas_or_brake
     return steer, throttle, brake
