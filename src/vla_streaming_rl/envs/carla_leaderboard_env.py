@@ -22,16 +22,6 @@ from vla_streaming_rl.envs.carla_obs import (
 from vla_streaming_rl.envs.eval_writer import Bench2DriveEvalWriter
 from vla_streaming_rl.envs.vehicle_graph import overlay_vehicle_graphs
 
-# Comfort thresholds (from Alpamayo comfort_reward.py)
-# https://github.com/NVlabs/alpamayo/blob/main/finetune/rl/rewards/comfort_reward.py
-COMFORT_MAX_ABS_MAG_JERK = 8.37  # [m/s^3]
-COMFORT_MAX_ABS_LAT_ACCEL = 4.89  # [m/s^2]
-COMFORT_MAX_LON_ACCEL = 2.40  # [m/s^2]
-COMFORT_MIN_LON_ACCEL = -4.05  # [m/s^2]
-COMFORT_MAX_ABS_LON_JERK = 4.13  # [m/s^3]
-COMFORT_MAX_ABS_YAW_RATE = 0.95  # [rad/s]
-COMFORT_MAX_ABS_YAW_ACCEL = 1.93  # [rad/s^2]
-
 DT = 0.05  # [s] (20 FPS)
 
 # Bench2Drive scoring (mirrors statistics_manager.py PENALTY_VALUE_DICT/PENALTY_PERC_DICT).
@@ -733,8 +723,16 @@ class CARLALeaderboardEnv(gym.Env):
         any infraction (collision, off-route, red light, stop, ...) drops the
         score multiplicatively, so the delta is naturally negative on the step
         the infraction fires. Matches what eval reports in ``eval.json``.
+
+        Bench2Drive runtime reads the same ``RouteScenario`` criteria that
+        ``statistics_manager.compute_route_statistics`` reads at end-of-
+        episode; random-route mode falls back to a coarse, sensor-based
+        approximation (collisions only — no waypoint-aware off-route check).
         """
-        score_route, score_penalty = self._score_components()
+        if self.runtime is not None and self.runtime.route_scenario is not None:
+            score_route, score_penalty = self._score_from_criteria()
+        else:
+            score_route, score_penalty = self._score_from_sensors()
         new_score = max(score_route * score_penalty, 0.0)
 
         # Cache for info dict.
@@ -744,28 +742,7 @@ class CARLALeaderboardEnv(gym.Env):
 
         reward = new_score - self.prev_driving_score
         self.prev_driving_score = new_score
-
-        # Discourage stalling: when nothing happens (no progress, no infraction).
-        if reward == 0.0:
-            reward = -0.1
-
-        reward += self._compute_comfort_penalty()
-        # Clip the negative side so a single large drop (e.g. instant ×0.5
-        # multiplier on a high score) cannot dominate the gradient. Positive
-        # spikes are left intact.
-        return max(reward, -1.0)
-
-    def _score_components(self) -> tuple[float, float]:
-        """Return ``(score_route, score_penalty)`` matching Bench2Drive eval.
-
-        Runtime mode reads the same ``RouteScenario`` criteria that
-        ``statistics_manager.compute_route_statistics`` reads at end-of-episode.
-        Random-route mode falls back to a coarse, sensor-based approximation
-        (collisions only — no waypoint-aware off-route check).
-        """
-        if self.runtime is not None and self.runtime.route_scenario is not None:
-            return self._score_from_criteria()
-        return self._score_from_sensors()
+        return reward
 
     def _score_from_criteria(self) -> tuple[float, float]:
         score_route = 0.0
@@ -804,28 +781,6 @@ class CARLALeaderboardEnv(gym.Env):
         self._latest_off_route_pct = 0.0
         return score_route, score_penalty
 
-    def _compute_comfort_penalty(self) -> float:
-        """
-        Compute comfort penalty based on vehicle dynamics thresholds.
-        Penalty scales with how much the value exceeds the bound:
-          penalty = (value - bound) / |bound| + 1  (0 if within bounds)
-        """
-        physics = self.vehicle_physics
-        metrics = [
-            (physics.lat_acceleration, -COMFORT_MAX_ABS_LAT_ACCEL, COMFORT_MAX_ABS_LAT_ACCEL),
-            (physics.lon_acceleration, COMFORT_MIN_LON_ACCEL, COMFORT_MAX_LON_ACCEL),
-            (physics.jerk, -COMFORT_MAX_ABS_MAG_JERK, COMFORT_MAX_ABS_MAG_JERK),
-            (physics.lon_jerk, -COMFORT_MAX_ABS_LON_JERK, COMFORT_MAX_ABS_LON_JERK),
-            (physics.angular_velocity, -COMFORT_MAX_ABS_YAW_RATE, COMFORT_MAX_ABS_YAW_RATE),
-            (physics.angular_acceleration, -COMFORT_MAX_ABS_YAW_ACCEL, COMFORT_MAX_ABS_YAW_ACCEL),
-        ]
-        penalty = 0.0
-        for value, lo, hi in metrics:
-            if value > hi:
-                penalty += (value - hi) / hi + 1
-            elif value < lo:
-                penalty += (lo - value) / abs(lo) + 1
-        return -0.0 * penalty
 
     def _update_spectator(self):
         """Move spectator camera to follow the vehicle from behind and above."""
