@@ -36,6 +36,19 @@ torch.set_float32_matmul_precision("high")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
+def _viz_resize(image: np.ndarray, scale: float) -> np.ndarray:
+    """Downscale (or upscale) the obs / prediction render panels.
+
+    Loss computation (``pred_image - obs_for_render``) must run on the
+    native shape, so this is applied only to the copies that go into
+    ``concat_labeled_images`` / ``cv2.imshow``.
+    """
+    if scale == 1.0:
+        return image
+    h, w = image.shape[:2]
+    return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+
 def save_episode_data(
     video_dir: Path,
     image_dir: Path,
@@ -239,6 +252,16 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             pad_token_id=args.pad_token_id,
             goal_predictor=goal_predictor,
         )
+    elif args.agent_type == "simlingo":
+        from vla_streaming_rl.agents.simlingo import SimLingoAgent
+
+        agent = SimLingoAgent(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            env=env,
+            scratch_dir=(result_dir / "simlingo_scratch") if result_dir is not None
+                        else Path("/tmp/simlingo_scratch"),
+        )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
 
@@ -264,13 +287,14 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         # initial render
         obs_for_render = obs.copy().transpose(1, 2, 0)
+        obs_viz = _viz_resize(obs_for_render, args.render_scale)
         reward_image = create_reward_image(0.0, 0.0)
         initial_rgb_image = concat_labeled_images(
             env.render(),
-            obs_for_render,
-            np.zeros_like(obs_for_render),
+            obs_viz,
+            np.zeros_like(obs_viz),
             reward_image,
-            np.zeros_like(obs_for_render),
+            np.zeros_like(obs_viz),
         )
         bgr_image_list = [cv2.cvtColor(initial_rgb_image, cv2.COLOR_RGB2BGR)]
 
@@ -325,13 +349,15 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             wandb.log(data_dict)
 
             reward_image = create_reward_image(pred_reward, reward)
+            obs_viz = _viz_resize(obs_for_render, args.render_scale)
+            pred_viz = _viz_resize(pred_image, args.render_scale)
             goal_for_render = cv2.resize(
                 agent_info["goal_image"],
-                (obs_for_render.shape[1], obs_for_render.shape[0]),
+                (obs_viz.shape[1], obs_viz.shape[0]),
                 interpolation=cv2.INTER_LINEAR,
             )
             rgb_image = concat_labeled_images(
-                env.render(), obs_for_render, pred_image, reward_image, goal_for_render
+                env.render(), obs_viz, pred_viz, reward_image, goal_for_render
             )
             bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
             bgr_image_list.append(bgr_image)

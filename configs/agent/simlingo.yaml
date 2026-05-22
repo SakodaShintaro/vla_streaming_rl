@@ -1,0 +1,33 @@
+# @package _global_
+# SimLingo VLM agent (zero-shot baseline). Drops into scripts/train.py
+# unchanged via the agent_type=simlingo branch — SimLingoAgent fits the
+# same select_action / step / on_episode_end + network / reward_processor
+# surface as the RL agents in this directory.
+#
+# Sensors come from CARLALeaderboardEnv's info["sensors"] (rgb / gps /
+# imu / speed) — SimLingoAgent does NOT spawn its own sensor stack, so
+# the leaderboard SensorInterface + CallBack wiring isn't needed.
+#
+# The trainer still builds an RL ``network`` (consumes the env's
+# observation_space) and a goal_predictor unconditionally — SimLingo
+# ignores both. We inherit cnn_streaming's bases so build_network has
+# the keys it needs; the resulting CNN sits idle.
+#
+# The SimLingo VLM checkpoint is always pulled from huggingface
+# (RenzKa/simlingo) into the local HF cache via snapshot_download —
+# nothing to configure here.
+defaults:
+  - base_network
+  - base_off_policy
+  - base_on_policy
+  - base_streaming
+  - base_cnn
+  - base_vlm
+  - _self_
+
+agent_type: simlingo
+# Override base_on_policy's actor_critic_with_state_value (which only
+# accepts policy_type in {beta, categorical} and would crash given the
+# cascade's final policy_type=diffusion). Mirrors cnn_streaming.yaml's
+# choice; the resulting RL net is built but unused by SimLingoAgent.
+network_class: actor_critic_with_action_value

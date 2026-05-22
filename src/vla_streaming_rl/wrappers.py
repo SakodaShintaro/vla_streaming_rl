@@ -162,7 +162,7 @@ def make_env(env_id: str, env_factory, result_dir=None) -> gym.Env:
         eval_output_dir = str(result_dir / "eval") if result_dir is not None else None
         env = hydra.utils.instantiate(env_factory, eval_output_dir=eval_output_dir)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env.unwrapped.eval_range = 100
+        env.unwrapped.eval_range = 220
         return env
 
     elif env_id == "AnimalAI-v0":

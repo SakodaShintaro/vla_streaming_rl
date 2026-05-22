@@ -7,6 +7,8 @@ from pathlib import Path
 import carla
 import gymnasium as gym
 import numpy as np
+import py_trees
+from leaderboard.utils.statistics_manager import PENALTY_PERC_DICT, PENALTY_VALUE_DICT
 from srunner.scenariomanager.traffic_events import TrafficEventType
 
 from vla_streaming_rl.envs.bench2drive_scenario_runtime import Bench2DriveRuntime
@@ -21,35 +23,7 @@ from vla_streaming_rl.envs.carla_obs import (
 from vla_streaming_rl.envs.eval_writer import Bench2DriveEvalWriter
 from vla_streaming_rl.envs.vehicle_graph import overlay_vehicle_graphs
 
-# Comfort thresholds (from Alpamayo comfort_reward.py)
-# https://github.com/NVlabs/alpamayo/blob/main/finetune/rl/rewards/comfort_reward.py
-COMFORT_MAX_ABS_MAG_JERK = 8.37  # [m/s^3]
-COMFORT_MAX_ABS_LAT_ACCEL = 4.89  # [m/s^2]
-COMFORT_MAX_LON_ACCEL = 2.40  # [m/s^2]
-COMFORT_MIN_LON_ACCEL = -4.05  # [m/s^2]
-COMFORT_MAX_ABS_LON_JERK = 4.13  # [m/s^3]
-COMFORT_MAX_ABS_YAW_RATE = 0.95  # [rad/s]
-COMFORT_MAX_ABS_YAW_ACCEL = 1.93  # [rad/s^2]
-
-DT = 0.1  # [s] (10 FPS)
-
-# Bench2Drive scoring (mirrors statistics_manager.py PENALTY_VALUE_DICT/PENALTY_PERC_DICT).
-# score_composed = score_route(0-100) * Π(score_penalty in (0,1])
-B2D_PENALTY_VALUE_DICT = {
-    TrafficEventType.COLLISION_PEDESTRIAN: 0.5,
-    TrafficEventType.COLLISION_VEHICLE: 0.6,
-    TrafficEventType.COLLISION_STATIC: 0.65,
-    TrafficEventType.TRAFFIC_LIGHT_INFRACTION: 0.7,
-    TrafficEventType.STOP_INFRACTION: 0.8,
-    TrafficEventType.SCENARIO_TIMEOUT: 0.7,
-    TrafficEventType.YIELD_TO_EMERGENCY_VEHICLE: 0.7,
-}
-# OUTSIDE_ROUTE_LANES_INFRACTION uses penalty_value=0, type='increases' →
-# score_penalty *= (1 - off_route_pct/100); 70% off-route ≈ 0.3 multiplier.
-B2D_PENALTY_PERC_DICT = {
-    TrafficEventType.OUTSIDE_ROUTE_LANES_INFRACTION: (0.0, "increases"),
-    TrafficEventType.MIN_SPEED_INFRACTION: (0.7, "unused"),
-}
+DT = 0.05  # [s] (20 FPS)
 
 
 @dataclass
@@ -198,9 +172,13 @@ class CARLALeaderboardEnv(gym.Env):
         # Observation / action contracts come from carla_obs (shared with the
         # Bench2Drive eval agent so training and eval stay bit-aligned).
         self.obs_cfg = CARLAObsConfig()
-        self.max_episode_steps = 1000
+        # Safety net only. Bench2Drive's scenario_tree (RouteCompletionTest /
+        # InRouteTest / AgentBlockedTest) is what actually ends the episode;
+        # this cap exists so a stuck CarlaDataProvider can't pin the env
+        # forever. 20 FPS × 600 s = 12000 covers the longest Town12 routes.
+        self.max_episode_steps = 12000
         self.render_mode = "rgb_array"
-        self.fps = 10  # Simulation FPS
+        self.fps = 20  # Simulation FPS
 
         self.observation_space = make_obs_space(self.obs_cfg)
         self.action_space = make_action_space()
@@ -300,10 +278,6 @@ class CARLALeaderboardEnv(gym.Env):
 
         # Episode information
         self.episode_step = 0
-        self.negative_reward_count = 0  # Count of consecutive negative rewards
-        # Random-route mode (no Bench2Drive XML) lacks OutsideRouteLanesTest, so
-        # we use the lane invasion sensor as a strict off-lane terminator.
-        self._solid_lane_crossed = False
 
         # Vehicle physics information
         self.vehicle_physics = VehiclePhysics.create()
@@ -491,7 +465,6 @@ class CARLALeaderboardEnv(gym.Env):
         self._last_camera = None
         self._last_gnss = None
         self._last_imu = None
-        self.negative_reward_count = 0
         self.vehicle_physics = VehiclePhysics.create()
         self.physics_history = []
 
@@ -510,7 +483,6 @@ class CARLALeaderboardEnv(gym.Env):
         # The lane invasion sensor can fire spuriously on the spawn tick when
         # the ego is placed near a marking; clear here so only agent-driven
         # crossings count.
-        self._solid_lane_crossed = False
         self.lane_invasion_history = []
         self.infractions["lane_invasion"] = 0
 
@@ -554,8 +526,6 @@ class CARLALeaderboardEnv(gym.Env):
         # ``WARNING: Couldn't add noise to the ego because the control
         # couldn't be found`` every tick and skips its noise pass.
         if self.runtime is not None:
-            import py_trees
-
             py_trees.blackboard.Blackboard().set("AV_control", control, overwrite=True)
 
         self.world.tick()
@@ -577,49 +547,30 @@ class CARLALeaderboardEnv(gym.Env):
         # Update route tracking
         self.route_tracker.update(self.vehicle.get_location())
 
-        # Termination conditions
-        has_collision = (
-            self.infractions["collision_pedestrian"] > 0
-            or self.infractions["collision_vehicle"] > 0
-            or self.infractions["collision_static"] > 0
-        )
+        # Termination conditions — mirror Bench2Drive's ScenarioManager.
+        # Collision / off-route / red light / stop / min-speed are recorded
+        # as infractions by the scenario_tree's criteria and feed the
+        # StatisticsManager Driving Score, but they do NOT stop the route.
+        # The scenario_tree ends on:
+        #   - RouteCompletionTest = SUCCESS  (route_completion >= 1.0)
+        #   - InRouteTest = FAILURE          (30 m off-route)
+        #   - AgentBlockedTest = FAILURE     (60 s under 0.1 m/s)
+        # Reward = step delta of Bench2Drive score_composed; criteria
+        # update happens inside the scenario tick above.
+        reward = self._compute_reward()
 
-        # Calculate reward (also updates self._latest_off_route_pct from criteria).
-        reward = self._compute_reward(has_collision)
-
-        # Heavy off-route → terminate. Bench2Drive's score_composed at >=30%
-        # off-route is already <70 of route_completion; continuing wastes
-        # rollout steps with no recovery in practice. Overwrite the reward to
-        # the same -1 floor a collision delivers (delta-based reward at the
-        # crossing step is otherwise tiny and not a clear terminal signal).
-        heavy_off_route = self._latest_off_route_pct >= 30.0
-        # Random-route mode has no OutsideRouteLanesTest; fall back to the
-        # lane invasion sensor for solid-marking / curb crossings.
-        solid_lane_termination = self.runtime is None and self._solid_lane_crossed
-        if heavy_off_route or has_collision or solid_lane_termination:
-            reward = -1.0
-        terminated = (
-            has_collision
-            or self.route_tracker.route_completion >= 1.0
-            or heavy_off_route
-            or solid_lane_termination
-        )
-
-        # Negative reward count
-        if reward < 0:
-            self.negative_reward_count += 1
+        if self.runtime is not None and self.runtime.route_scenario is not None:
+            scenario_running = (
+                self.runtime.route_scenario.scenario_tree.status == py_trees.common.Status.RUNNING
+            )
+            terminated = not scenario_running
         else:
-            self.negative_reward_count = 0
+            # Random-route mode (no Bench2DriveRuntime): no scenario_tree,
+            # so route completion is the only natural end. The
+            # max_episode_steps cap below catches everything else.
+            terminated = self.route_tracker.route_completion >= 1.0
 
-        # In random-route mode we sample a single-lane corridor, so 30 m of
-        # lateral drift means the ego is well outside any reasonable road
-        # surface — tighten to one lane-width worth of slack.
-        deviation_threshold = 30.0 if self.runtime is not None else 4.0
-        truncated = (
-            self.episode_step >= self.max_episode_steps
-            or self.negative_reward_count >= 100
-            or self.route_tracker.min_distance_to_route >= deviation_threshold
-        )
+        truncated = self.episode_step >= self.max_episode_steps
 
         self.episode_step += 1
 
@@ -746,7 +697,7 @@ class CARLALeaderboardEnv(gym.Env):
         raw_locations = [wp.transform.location for wp in route_waypoints]
         return raw_locations, start_pose
 
-    def _compute_reward(self, has_collision: bool) -> float:
+    def _compute_reward(self) -> float:
         """
         Reward = step delta of Bench2Drive ``score_composed`` (range ~[0, 100]).
 
@@ -754,8 +705,16 @@ class CARLALeaderboardEnv(gym.Env):
         any infraction (collision, off-route, red light, stop, ...) drops the
         score multiplicatively, so the delta is naturally negative on the step
         the infraction fires. Matches what eval reports in ``eval.json``.
+
+        Bench2Drive runtime reads the same ``RouteScenario`` criteria that
+        ``statistics_manager.compute_route_statistics`` reads at end-of-
+        episode; random-route mode falls back to a coarse, sensor-based
+        approximation (collisions only — no waypoint-aware off-route check).
         """
-        score_route, score_penalty = self._score_components()
+        if self.runtime is not None and self.runtime.route_scenario is not None:
+            score_route, score_penalty = self._score_from_criteria()
+        else:
+            score_route, score_penalty = self._score_from_sensors()
         new_score = max(score_route * score_penalty, 0.0)
 
         # Cache for info dict.
@@ -765,28 +724,7 @@ class CARLALeaderboardEnv(gym.Env):
 
         reward = new_score - self.prev_driving_score
         self.prev_driving_score = new_score
-
-        # Discourage stalling: when nothing happens (no progress, no infraction).
-        if reward == 0.0:
-            reward = -0.1
-
-        reward += self._compute_comfort_penalty()
-        # Clip the negative side so a single large drop (e.g. instant ×0.5
-        # multiplier on a high score) cannot dominate the gradient. Positive
-        # spikes are left intact.
-        return max(reward, -1.0)
-
-    def _score_components(self) -> tuple[float, float]:
-        """Return ``(score_route, score_penalty)`` matching Bench2Drive eval.
-
-        Runtime mode reads the same ``RouteScenario`` criteria that
-        ``statistics_manager.compute_route_statistics`` reads at end-of-episode.
-        Random-route mode falls back to a coarse, sensor-based approximation
-        (collisions only — no waypoint-aware off-route check).
-        """
-        if self.runtime is not None and self.runtime.route_scenario is not None:
-            return self._score_from_criteria()
-        return self._score_from_sensors()
+        return reward
 
     def _score_from_criteria(self) -> tuple[float, float]:
         score_route = 0.0
@@ -795,10 +733,10 @@ class CARLALeaderboardEnv(gym.Env):
         for criterion in self.runtime.route_scenario.get_criteria():
             for event in criterion.events:
                 event_type = event.get_type()
-                if event_type in B2D_PENALTY_VALUE_DICT:
-                    score_penalty *= B2D_PENALTY_VALUE_DICT[event_type]
-                elif event_type in B2D_PENALTY_PERC_DICT:
-                    pv, pt = B2D_PENALTY_PERC_DICT[event_type]
+                if event_type in PENALTY_VALUE_DICT:
+                    score_penalty *= PENALTY_VALUE_DICT[event_type]
+                elif event_type in PENALTY_PERC_DICT:
+                    pv, pt = PENALTY_PERC_DICT[event_type]
                     if pt == "increases":
                         pct = event.get_dict()["percentage"]
                         score_penalty *= 1 - (1 - pv) * pct / 100.0
@@ -824,29 +762,6 @@ class CARLALeaderboardEnv(gym.Env):
         # No criterion-equivalent off-route check in random-route mode.
         self._latest_off_route_pct = 0.0
         return score_route, score_penalty
-
-    def _compute_comfort_penalty(self) -> float:
-        """
-        Compute comfort penalty based on vehicle dynamics thresholds.
-        Penalty scales with how much the value exceeds the bound:
-          penalty = (value - bound) / |bound| + 1  (0 if within bounds)
-        """
-        physics = self.vehicle_physics
-        metrics = [
-            (physics.lat_acceleration, -COMFORT_MAX_ABS_LAT_ACCEL, COMFORT_MAX_ABS_LAT_ACCEL),
-            (physics.lon_acceleration, COMFORT_MIN_LON_ACCEL, COMFORT_MAX_LON_ACCEL),
-            (physics.jerk, -COMFORT_MAX_ABS_MAG_JERK, COMFORT_MAX_ABS_MAG_JERK),
-            (physics.lon_jerk, -COMFORT_MAX_ABS_LON_JERK, COMFORT_MAX_ABS_LON_JERK),
-            (physics.angular_velocity, -COMFORT_MAX_ABS_YAW_RATE, COMFORT_MAX_ABS_YAW_RATE),
-            (physics.angular_acceleration, -COMFORT_MAX_ABS_YAW_ACCEL, COMFORT_MAX_ABS_YAW_ACCEL),
-        ]
-        penalty = 0.0
-        for value, lo, hi in metrics:
-            if value > hi:
-                penalty += (value - hi) / hi + 1
-            elif value < lo:
-                penalty += (lo - value) / abs(lo) + 1
-        return -0.0 * penalty
 
     def _update_spectator(self):
         """Move spectator camera to follow the vehicle from behind and above."""
@@ -924,17 +839,3 @@ class CARLALeaderboardEnv(gym.Env):
     def _on_lane_invasion(self, event):
         self.lane_invasion_history.append(event)
         self.infractions["lane_invasion"] += 1
-        # Crossing a solid marking or mounting a curb means the ego left its
-        # lane in a way real driving wouldn't recover from. Broken markings
-        # (lane changes / overtakes) are excluded so legitimate maneuvers
-        # don't terminate. Only consumed in random-route mode; XML mode
-        # uses OutsideRouteLanesTest instead.
-        terminal_types = {
-            carla.LaneMarkingType.Solid,
-            carla.LaneMarkingType.SolidSolid,
-            carla.LaneMarkingType.SolidBroken,
-            carla.LaneMarkingType.BrokenSolid,
-            carla.LaneMarkingType.Curb,
-        }
-        if any(m.type in terminal_types for m in event.crossed_lane_markings):
-            self._solid_lane_crossed = True

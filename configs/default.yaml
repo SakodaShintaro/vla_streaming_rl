@@ -16,6 +16,7 @@ env_factory: null
 trial_num: 1
 seed: -1
 render: 1
+render_scale: 1.0
 off_wandb: false
 wandb_group: default_group
 

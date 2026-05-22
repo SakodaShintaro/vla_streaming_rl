@@ -31,11 +31,9 @@ dependencies = [
     "pytesseract",
     "pyautogui",
     "pynput",
-    # CUDA拡張パッケージ（プリビルドホイール使用）
     "mamba-ssm",
     "causal-conv1d",
     "flash-attn",
-    # PyTorch 2.7系に固定（プリビルドホイールとの互換性のため）
     "torch>=2.7,<2.8",
     "torchvision>=0.22,<0.23",
     "transformers>=5.2.0",
@@ -54,17 +52,19 @@ dependencies = [
     "networkx>=3.6.1",
     "psutil>=7.2.2",
     "setuptools<81",
-    # Self-Forcing (vendored under src/vla_streaming_rl/self_forcing/)
     "huggingface_hub",
     "einops",
     "ftfy",
     "regex",
     "tqdm",
-    # CARLA (path resolved via tool.uv.sources below)
     "carla",
     "animalai==5.0.1",
     "mlagents-envs==1.0.0",
     "protobuf==3.20.3",
+    "ujson",
+    "filterpy",
+    "rdp",
+    "pytorch-lightning",
 ]
 
 [build-system]

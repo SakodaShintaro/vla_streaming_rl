@@ -18,12 +18,17 @@ import scipy.interpolate
 
 @dataclass(frozen=True)
 class CARLAObsConfig:
-    # image_size: tuple[int, int] = (256, 256)  # (width, height)
-    # image_size: tuple[int, int] = (832, 480)  # (width, height) aligned to Wan 2.1
-    image_size: tuple[int, int] = (416, 240)  # (width, height) aligned to Wan 2.1, half
+    # Matches simlingo's camera_width_0 / camera_height_0 in
+    # config_simlingo.py — the SimLingo VLM was trained at this resolution
+    # and crops/resamples internally, so we feed it the same.
+    image_size: tuple[int, int] = (1024, 512)  # (width, height)
     fov: float = 110.0
-    camera_x: float = 1.5
-    camera_z: float = 2.4
+    # Mount position copied from simlingo/team_code/config_simlingo.py
+    # (camera_pos_0 = [-1.5, 0.0, 2.0]). Training/eval observation must
+    # match the agent's calibration or the policy sees a different view
+    # than what simlingo was trained on.
+    camera_x: float = -1.5
+    camera_z: float = 2.0
     map_size: int = 512
     scale: float = 0.5  # meters/pixel on the overlay
     num_interp_points: int = 1000
@@ -187,26 +192,20 @@ def compose_obs(
     return img.transpose(2, 0, 1).astype(np.float32) / 255.0
 
 
-# Lincoln MKZ 2020 needs roughly this much throttle from rest before its
-# automatic transmission engages first gear. Anything below sits in neutral,
-# so tiny positive actions produced no motion during early training and the
-# negative-reward cutoff truncated episodes before any progress signal.
-THROTTLE_FLOOR = 0.5
-
-
 def action_to_vehicle_control(action: np.ndarray) -> tuple[float, float, float]:
     """Map 2-D policy action to ``(steer, throttle, brake)``.
 
-    Matches the training env exactly, including the ``brake = 0`` behaviour:
-    a negative ``action[1]`` means "coast" (throttle 0), not "brake". Any
-    positive ``action[1]`` is bumped up to ``THROTTLE_FLOOR`` so the ego
-    actually moves instead of stalling in the gear-shift dead zone.
+    ``action[1] > 0`` → throttle, ``action[1] < 0`` → brake. No floor or
+    clamp beyond ``[-1, 1]``: external policies (e.g. SimLingo) round-trip
+    their ``carla.VehicleControl`` through this mapping and must see the
+    raw throttle/brake they emitted.
     """
     steer = float(np.clip(action[0], -1.0, 1.0))
     gas_or_brake = float(np.clip(action[1], -1.0, 1.0))
-    if gas_or_brake > 0.0:
-        throttle = max(gas_or_brake, THROTTLE_FLOOR)
+    if gas_or_brake >= 0.0:
+        throttle = gas_or_brake
+        brake = 0.0
     else:
         throttle = 0.0
-    brake = 0.0
+        brake = -gas_or_brake
     return steer, throttle, brake
