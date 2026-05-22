@@ -265,10 +265,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 return [eq1, eq2]
 
             initial_guess = [0.0, 0.0]
-            solution = fsolve(equations, initial_guess)
+            solution, _, ier, msg = fsolve(equations, initial_guess, full_output=True)
+            if ier != 1:
+                raise RuntimeError(msg)
             self.lat_ref, self.lon_ref = solution[0], solution[1]
         except Exception as e:
-            print(e, flush=True)
             self.lat_ref, self.lon_ref = 0.0, 0.0
         self._route_planner = RoutePlanner(
             self.route_planner_min_distance,
