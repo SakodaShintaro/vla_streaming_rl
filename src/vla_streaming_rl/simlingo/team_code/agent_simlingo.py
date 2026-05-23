@@ -12,8 +12,6 @@ import carla
 import cv2
 import numpy as np
 import torch
-from filterpy.kalman import MerweScaledSigmaPoints
-from filterpy.kalman import UnscentedKalmanFilter as UKF
 from leaderboard.autoagents import autonomous_agent
 from omegaconf import OmegaConf
 from PIL import Image, ImageDraw, ImageFont
@@ -37,13 +35,13 @@ from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
     dynamic_preprocess,
 )
 from vla_streaming_rl.simlingo.team_code.config_simlingo import GlobalConfig
+from vla_streaming_rl.simlingo.team_code.ego_state_filter import EgoStateFilter
 from vla_streaming_rl.simlingo.team_code.route_planner import RoutePlanner
 from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     command_to_one_hot,
     get_camera_extrinsics,
     get_camera_intrinsics,
     inverse_conversion_2d,
-    normalize_angle,
     preprocess_compass,
     project_points,
 )
@@ -161,9 +159,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.image_buffer = deque(maxlen=image_fps * image_history_length)
 
         # config
-        self.carla_frame_rate = 1.0 / 20.0  # CARLA frame rate in milliseconds
-        self.data_save_freq = 5
-        self.lidar_seq_len = 1
         self.route_planner_max_distance = 50.0
         self.route_planner_min_distance = 7.5
 
@@ -229,33 +224,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.commands.append(4)
         self.target_point_prev = [1e5, 1e5, 1e5]
 
-        # Filtering
-        self.points = MerweScaledSigmaPoints(
-            n=4, alpha=0.00001, beta=2, kappa=0, subtract=residual_state_x
-        )
-        self.ukf = UKF(
-            dim_x=4,
-            dim_z=4,
-            fx=bicycle_model_forward,
-            hx=measurement_function_hx,
-            dt=self.carla_frame_rate,
-            points=self.points,
-            x_mean_fn=state_mean,
-            z_mean_fn=measurement_mean,
-            residual_x=residual_state_x,
-            residual_z=residual_measurement_h,
-        )
-
-        # State noise, same as measurement because we
-        # initialize with the first measurement later
-        self.ukf.P = np.diag([0.5, 0.5, 0.000001, 0.000001])
-        # Measurement noise
-        self.ukf.R = np.diag([0.5, 0.5, 0.000000000000001, 0.000000000000001])
-        self.ukf.Q = np.diag([0.0001, 0.0001, 0.001, 0.001])  # Model noise
-        # Used to set the filter state equal the first measurement
-        self.filter_initialized = False
-        # Stores the last filtered positions of the ego vehicle. Need at least 2 for LiDAR 10 Hz realignment
-        self.state_log = deque(maxlen=max((self.lidar_seq_len * self.data_save_freq), 2))
+        self.ego_state_filter = EgoStateFilter(dt=1.0 / 20.0, state_log_maxlen=5)
 
         # Path to where visualizations and other debug output gets stored
         scratch_dir = str(scratch_dir)
@@ -442,17 +411,15 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             input_data["speed"][1]["speed"] * self.bias["speed_scale"] + self.bias["speed_offset"]
         )
 
-        if not self.filter_initialized:
-            self.ukf.x = np.array([gps_pos[0], gps_pos[1], normalize_angle(compass), speed])
-            self.filter_initialized = True
-
-        self.ukf.predict(
-            steer=self.control.steer, throttle=self.control.throttle, brake=self.control.brake
+        filtered_state = self.ego_state_filter.update(
+            gps_x=gps_pos[0],
+            gps_y=gps_pos[1],
+            compass_rad=compass,
+            speed=speed,
+            steer=self.control.steer,
+            throttle=self.control.throttle,
+            brake=self.control.brake,
         )
-        self.ukf.update(np.array([gps_pos[0], gps_pos[1], normalize_angle(compass), speed]))
-        filtered_state = self.ukf.x
-
-        self.state_log.append(filtered_state)
         result["gps"] = filtered_state[0:2]
 
         speed = round(speed, 1)
@@ -822,98 +789,3 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         del self.model
         del self.config
-
-
-# Filter Functions
-def bicycle_model_forward(x, dt, steer, throttle, brake):
-    # Kinematic bicycle model.
-    # Numbers are the tuned parameters from World on Rails
-    front_wb = -0.090769015
-    rear_wb = 1.4178275
-
-    steer_gain = 0.36848336
-    brake_accel = -4.952399
-    throt_accel = 0.5633837
-
-    locs_0 = x[0]
-    locs_1 = x[1]
-    yaw = x[2]
-    speed = x[3]
-
-    if brake:
-        accel = brake_accel
-    else:
-        accel = throt_accel * throttle
-
-    wheel = steer_gain * steer
-
-    beta = math.atan(rear_wb / (front_wb + rear_wb) * math.tan(wheel))
-    next_locs_0 = locs_0.item() + speed * math.cos(yaw + beta) * dt
-    next_locs_1 = locs_1.item() + speed * math.sin(yaw + beta) * dt
-    next_yaws = yaw + speed / rear_wb * math.sin(beta) * dt
-    next_speed = speed + accel * dt
-    next_speed = next_speed * (next_speed > 0.0)  # Fast ReLU
-
-    next_state_x = np.array([next_locs_0, next_locs_1, next_yaws, next_speed])
-
-    return next_state_x
-
-
-def measurement_function_hx(vehicle_state):
-    """
-    For now we use the same internal state as the measurement state
-    :param vehicle_state: VehicleState vehicle state variable containing
-                                                an internal state of the vehicle from the filter
-    :return: np array: describes the vehicle state as numpy array.
-                                         0: pos_x, 1: pos_y, 2: rotatoion, 3: speed
-    """
-    return vehicle_state
-
-
-def state_mean(state, wm):
-    """
-    We use the arctan of the average of sin and cos of the angle to calculate
-    the average of orientations.
-    :param state: array of states to be averaged. First index is the timestep.
-    :param wm:
-    :return:
-    """
-    x = np.zeros(4)
-    sum_sin = np.sum(np.dot(np.sin(state[:, 2]), wm))
-    sum_cos = np.sum(np.dot(np.cos(state[:, 2]), wm))
-    x[0] = np.sum(np.dot(state[:, 0], wm))
-    x[1] = np.sum(np.dot(state[:, 1], wm))
-    x[2] = math.atan2(sum_sin, sum_cos)
-    x[3] = np.sum(np.dot(state[:, 3], wm))
-
-    return x
-
-
-def measurement_mean(state, wm):
-    """
-    We use the arctan of the average of sin and cos of the angle to
-    calculate the average of orientations.
-    :param state: array of states to be averaged. First index is the
-    timestep.
-    """
-    x = np.zeros(4)
-    sum_sin = np.sum(np.dot(np.sin(state[:, 2]), wm))
-    sum_cos = np.sum(np.dot(np.cos(state[:, 2]), wm))
-    x[0] = np.sum(np.dot(state[:, 0], wm))
-    x[1] = np.sum(np.dot(state[:, 1], wm))
-    x[2] = math.atan2(sum_sin, sum_cos)
-    x[3] = np.sum(np.dot(state[:, 3], wm))
-
-    return x
-
-
-def residual_state_x(a, b):
-    y = a - b
-    y[2] = normalize_angle(y[2])
-    return y
-
-
-def residual_measurement_h(a, b):
-    y = a - b
-    y[2] = normalize_angle(y[2])
-    return y
