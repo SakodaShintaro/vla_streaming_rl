@@ -112,11 +112,7 @@ class SimLingoAgent:
         # ``Qwen2Tokenizer`` for InternVL2-1B (the custom remote processor
         # class isn't actually used downstream). Name the concrete class
         # directly so we don't depend on HF-hosted remote code.
-        processor = Qwen2Tokenizer.from_pretrained(cfg.model.vision_model.variant)
-        if "tokenizer" in processor.__dict__:
-            tokenizer = processor.tokenizer
-        else:
-            tokenizer = processor
+        tokenizer = Qwen2Tokenizer.from_pretrained(cfg.model.vision_model.variant)
         tokenizer.add_special_tokens(
             {"additional_special_tokens": list(SIMLINGO_ADDITIONAL_SPECIAL_TOKENS)}
         )
@@ -144,7 +140,7 @@ class SimLingoAgent:
         model_kwargs = {k: v for k, v in cfg.model.items() if k != "_target_"}
         self.model = DrivingModel(
             cfg_data_module=cfg.data_module,
-            processor=processor,
+            processor=tokenizer,
             cache_dir=cache_dir,
             **model_kwargs,
         ).to(self.device)
