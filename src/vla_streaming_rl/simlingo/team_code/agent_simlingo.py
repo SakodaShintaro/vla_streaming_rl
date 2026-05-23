@@ -11,7 +11,7 @@ import carla
 import cv2
 import numpy as np
 import torch
-from leaderboard.autoagents import autonomous_agent
+from leaderboard.utils.route_manipulation import downsample_route
 from omegaconf import OmegaConf
 from PIL import Image
 from transformers import Qwen2Tokenizer
@@ -51,27 +51,23 @@ def get_entry_point():
     return "LingoAgent"
 
 
-class LingoAgent(autonomous_agent.AutonomousAgent):
+class LingoAgent:
     """
     Main class that runs the agents with the run_step function
     """
 
-    # ``AutonomousAgent.__init__`` originally needed ``carla_host`` /
-    # ``carla_port`` to talk to a CARLA server directly, but in this
-    # project the env owns the CARLA connection and the agent never
-    # uses these. ``debug`` is likewise unused — the leaderboard's
-    # debug-image saving path is disabled in this vendored copy.
     _HF_REPO_ID = "RenzKa/simlingo"
     _HF_CKPT_NAME = "pytorch_model.pt"
 
     def __init__(self, scratch_dir):
-        # ``AutonomousAgent.__init__`` internally calls ``self.get_hero()``;
-        # our override below short-circuits the CarlaDataProvider lookup since
-        # the env hasn't reset yet at construction time.
-        super().__init__("", 2000, False)
+        # Per-episode handover state; ``hero_actor`` and global plans are
+        # filled in by the wrapping ``SimLingoAgent`` via ``set_global_plan``
+        # before the first ``run_step``.
+        self.hero_actor = None
+        self._global_plan = None
+        self._global_plan_world_coord = None
 
         torch.cuda.empty_cache()
-        self.track = autonomous_agent.Track.SENSORS
         self.config_path = str(self._resolve_checkpoint())
         print(f"Config path: {self.config_path}")
         self.step = -1
@@ -180,11 +176,31 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.save_path_metric = scratch_dir + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
-    def get_hero(self):
-        # Defer the ego lookup — the env-driven handover in the wrapping
-        # ``SimLingoAgent`` sets ``hero_actor`` explicitly once the env
-        # has reset and spawned its ego.
-        self.hero_actor = None
+    def set_global_plan(self, global_plan_gps, global_plan_world_coord):
+        """Downsample the route (matches leaderboard ``AutonomousAgent.set_global_plan``)
+        so ``_global_plan`` / ``_global_plan_world_coord`` are populated for
+        ``_init`` to construct the ``RoutePlanner`` on the first tick.
+        """
+        ds_ids = downsample_route(global_plan_world_coord, 50)
+        self._global_plan_world_coord = [
+            (global_plan_world_coord[x][0], global_plan_world_coord[x][1]) for x in ds_ids
+        ]
+        self._global_plan = [global_plan_gps[x] for x in ds_ids]
+
+    def get_metric_info(self):
+        """Per-frame ego pose / velocity snapshot. Inlined from leaderboard
+        ``AutonomousAgent.get_metric_info``."""
+        def v(vec, rot=False):
+            return [vec.roll, vec.pitch, vec.yaw] if rot else [vec.x, vec.y, vec.z]
+        hero = self.hero_actor
+        return {
+            "acceleration": v(hero.get_acceleration()),
+            "angular_velocity": v(hero.get_angular_velocity()),
+            "forward_vector": v(hero.get_transform().get_forward_vector()),
+            "right_vector": v(hero.get_transform().get_right_vector()),
+            "location": v(hero.get_transform().location),
+            "rotation": v(hero.get_transform().rotation, rot=True),
+        }
 
     @classmethod
     def _resolve_checkpoint(cls):
