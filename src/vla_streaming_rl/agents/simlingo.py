@@ -177,9 +177,9 @@ class SimLingoAgent:
         self._scratch_dir = Path(scratch_dir)
         self._scratch_dir.mkdir(parents=True, exist_ok=True)
 
-        # Per-episode handover state; ``hero_actor`` and global plans are
-        # filled in by ``_set_global_plan`` before the first ``run_step``.
-        self.hero_actor = None
+        # Per-episode handover state; populated by
+        # ``_maybe_handover_episode`` / ``_set_global_plan`` before
+        # they are first read by ``run_step`` / ``get_metric_info``.
         self._global_plan = None
         self._global_plan_world_coord = None
 
