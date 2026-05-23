@@ -25,16 +25,8 @@ import gymnasium as gym
 import numpy as np
 from srunner.scenariomanager.timer import GameTime
 
+from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.simlingo.team_code.agent_simlingo import LingoAgent
-
-
-class _NoopRewardProcessor:
-    """RL trainer calls ``reward_processor.update(score)`` after each
-    episode when ``normalizing_by_return`` is on. SimLingo doesn't train,
-    so this is a sink."""
-
-    def update(self, score: float) -> None:  # noqa: D401
-        return None
 
 
 class SimLingoAgent:
@@ -66,7 +58,7 @@ class SimLingoAgent:
         # ``agent.network.parameters()`` for the parameter count print,
         # ``agent.network.named_parameters()`` for the checkpoint save.
         self.network = self._lingo.model
-        self.reward_processor = _NoopRewardProcessor()
+        self.reward_processor = RewardProcessor("none", 1.0)
 
         # ``CARLALeaderboardEnv`` re-spawns the ego on every reset; a
         # changed actor id is our "new episode" signal.
