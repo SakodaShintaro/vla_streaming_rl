@@ -99,13 +99,12 @@ _ACTION_DIM = (_ROUTE_LEN + _SPEED_WPS_LEN) * _WP_DIM
 _SEQ_LEN = 3
 
 
-def _maybe_apply_lora(language_model: nn.Module, use_lora: bool) -> nn.Module:
-    """No-op when ``use_lora`` is false. Otherwise wraps the SimLingo LLM
-    with peft adapters and returns the wrapped model."""
-    if not use_lora:
-        return language_model
+def _apply_lora(module: nn.Module) -> nn.Module:
+    """Wrap an nn.Module with peft LoRA adapters (``target_modules="all-linear"``)
+    and return the wrapped model. Logs the trainable-parameter count.
+    """
     wrapped = get_peft_model(
-        language_model,
+        module,
         LoraConfig(
             inference_mode=False,
             r=8,
@@ -139,7 +138,7 @@ class SimLingoAgent:
     the waypoint output with ``base + Δ + exploration_sigma·𝒩(0, 1)`` and
     stashes ``driving_features`` (pooled as the critic state). The noise
     is applied on every call (``select_action`` and ``step`` alike) — the
-    policy is the sole source of stochasticity, same as the other RL
+    policy is the sole source of randomness, same as the other RL
     agents in this directory. ``step`` additionally runs the critic +
     actor updates after the action is emitted. ``run_step`` PID,
     stuck-rescue and ``initial_frames_delay`` branches are inlined from
@@ -280,20 +279,23 @@ class SimLingoAgent:
         # --- RL setup ---------------------------------------------------
 
         # Freeze everything by default; LoRA (when enabled) re-introduces
-        # trainable params on the LLM only. The peft wrap happens AFTER
-        # the checkpoint load — vanilla SimLingo cfg has ``lora=False``
-        # at checkpoint time so the loaded state_dict has no LoRA tensors.
+        # trainable params on both the vision encoder and the LLM —
+        # driving is visually dominated, so adapting the ViT alongside
+        # the language model matters as much as (or more than) just the
+        # LLM. The peft wrap happens AFTER the checkpoint load —
+        # vanilla SimLingo cfg has ``lora=False`` at checkpoint time so
+        # the loaded state_dict has no LoRA tensors.
         for p in self.model.parameters():
             p.requires_grad_(False)
-        self.model.language_model.model = _maybe_apply_lora(
-            self.model.language_model.model, use_lora
-        )
+        if use_lora:
+            self.model.vision_model = _apply_lora(self.model.vision_model)
+            self.model.language_model.model = _apply_lora(self.model.language_model.model)
 
         # SimLingo runs in bfloat16; the RL heads run in float32 to keep
         # value targets numerically stable.
         feature_dim = int(self.model.language_model.hidden_size)
         # Residual on top of SimLingo's base waypoints. ``zero_init_output``
-        # makes the agent start behaviourally identical to the
+        # makes the agent start behaviorally identical to the
         # pretrained SimLingo policy.
         self.delta_head = DeterministicPolicy(
             state_dim=feature_dim,
