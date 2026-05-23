@@ -125,9 +125,7 @@ class SimLingoAgent:
         tmp_config = InternVLChatConfig.from_pretrained(cfg.model.vision_model.variant)
         image_size = tmp_config.force_image_size or tmp_config.vision_config.image_size
         patch_size = tmp_config.vision_config.patch_size
-        num_image_token = int(
-            (image_size // patch_size) ** 2 * (tmp_config.downsample_ratio**2)
-        )
+        num_image_token = int((image_size // patch_size) ** 2 * (tmp_config.downsample_ratio**2))
         cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
@@ -272,8 +270,10 @@ class SimLingoAgent:
     def get_metric_info(self):
         """Per-frame ego pose / velocity snapshot. Inlined from leaderboard
         ``AutonomousAgent.get_metric_info``."""
+
         def v(vec, rot=False):
             return [vec.roll, vec.pitch, vec.yaw] if rot else [vec.x, vec.y, vec.z]
+
         hero = self.hero_actor
         return {
             "acceleration": v(hero.get_acceleration()),
@@ -445,9 +445,7 @@ class SimLingoAgent:
 
         gt_velocity = driving_input_kwargs["vehicle_speed"]
 
-        steer, throttle, brake = self.trajectory_to_control(
-            pred_route, gt_velocity, pred_speed_wps
-        )
+        steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed_wps)
 
         # # 0.1 is just an arbitrary low number to threshold when the car is stopped
         if gt_velocity < 0.1:
