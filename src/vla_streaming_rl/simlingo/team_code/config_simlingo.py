@@ -13,7 +13,7 @@ class GlobalConfig:
         self.stuck_threshold = 800
         self.creep_duration = 15  # Number of frames we will creep forward
         self.creep_throttle = 0.4
-        self.inital_frames_delay = 2.0 / self.carla_frame_rate
+        self.initial_frames_delay = 2.0 / self.carla_frame_rate
         self.wp_dilation = 1  # Factor by which the wp are dilated compared to full CARLA 20 FPS
         self.data_save_freq = 5  # 5
 

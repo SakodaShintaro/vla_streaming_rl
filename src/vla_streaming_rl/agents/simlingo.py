@@ -479,7 +479,7 @@ class SimLingoAgent:
 
         # CARLA will not let the car drive in the initial frames.
         # We set the action to brake so that the filter does not get confused.
-        if self._frame_step < self.config.inital_frames_delay:
+        if self._frame_step < self.config.initial_frames_delay:
             self.control = carla.VehicleControl(0.0, 0.0, 1.0)
         else:
             self.control = control
