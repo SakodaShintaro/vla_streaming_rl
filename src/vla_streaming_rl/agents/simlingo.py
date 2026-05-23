@@ -40,10 +40,6 @@ class _NoopRewardProcessor:
 class SimLingoAgent:
     """SimLingo policy with the RL-agent surface ``scripts/train.py`` expects."""
 
-    # huggingface_hub repo id of the published SimLingo VLM weights.
-    _HF_REPO_ID = "RenzKa/simlingo"
-    _HF_CKPT_NAME = "pytorch_model.pt"
-
     def __init__(
         self,
         *,
@@ -58,22 +54,8 @@ class SimLingoAgent:
         self._env_unwrapped = env.unwrapped
         self._scratch_dir = Path(scratch_dir)
         self._scratch_dir.mkdir(parents=True, exist_ok=True)
-        self._checkpoint_path = self._resolve_checkpoint()
 
-        # ``AutonomousAgent.__init__`` calls ``self.get_hero()`` which scans
-        # CarlaDataProvider for an actor with role_name='hero'. At
-        # construction time the env hasn't reset yet so there is no ego;
-        # defer the lookup to the first ``select_action`` (we set
-        # hero_actor explicitly there).
-        class _DeferredHero(LingoAgent):
-            def get_hero(self):
-                self.hero_actor = None
-
-        self._lingo = _DeferredHero(carla_host="", carla_port=2000, debug=False)
-        self._lingo.setup(
-            checkpoint_path=str(self._checkpoint_path),
-            scratch_dir=self._scratch_dir,
-        )
+        self._lingo = LingoAgent(self._scratch_dir)
 
         # Freeze the VLM — we never backprop. Empty trainable_state at
         # checkpoint time then writes a (harmless) empty dict.
@@ -115,26 +97,6 @@ class SimLingoAgent:
         return {}
 
     # --- Internals ----------------------------------------------------------
-
-    @classmethod
-    def _resolve_checkpoint(cls) -> Path:
-        """Pull the SimLingo checkpoint from HF and return its local path.
-
-        ``snapshot_download`` populates the HF cache; we pick the single
-        ``pytorch_model.pt`` inside (excluding the blob-store hardlinks,
-        which point to the same file but live under a content-addressed
-        path that breaks SimLingo's
-        ``Path(...).parent.parent.parent / .hydra/config.yaml`` lookup).
-        """
-        from huggingface_hub import snapshot_download
-
-        snapshot = Path(snapshot_download(cls._HF_REPO_ID))
-        candidates = [p for p in snapshot.rglob(cls._HF_CKPT_NAME) if "/blobs/" not in str(p)]
-        if not candidates:
-            raise RuntimeError(
-                f"no {cls._HF_CKPT_NAME} in HF snapshot of {cls._HF_REPO_ID} at {snapshot}"
-            )
-        return candidates[0]
 
     def _maybe_handover_episode(self) -> None:
         """When the env reset to a new scenario, hand the agent the new
