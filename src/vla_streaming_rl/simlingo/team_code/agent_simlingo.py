@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from leaderboard.autoagents import autonomous_agent
 from omegaconf import OmegaConf
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from scipy.optimize import fsolve
 from transformers import Qwen2Tokenizer
 
@@ -43,7 +43,6 @@ from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     get_camera_intrinsics,
     inverse_conversion_2d,
     preprocess_compass,
-    project_points,
 )
 from vla_streaming_rl.simlingo.team_code.trajectory_to_control import TrajectoryToControl
 
@@ -57,12 +56,6 @@ torch.backends.cudnn.allow_tf32 = True
 # Leaderboard function that selects the class used as agent.
 def get_entry_point():
     return "LingoAgent"
-
-
-DEBUG = False  # saves images during evaluation; off here — simlingo's
-# debug-viz block tries to load ``arial.ttf`` from cwd, which doesn't
-# ship with this vendor copy. CARLALeaderboardEnv's eval_writer captures
-# the metrics we need (no debug images required).
 
 
 class LingoAgent(autonomous_agent.AutonomousAgent):
@@ -232,10 +225,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.save_path_metric = scratch_dir + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
-        if DEBUG:
-            self.save_path_img = scratch_dir + "/images"
-            Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
-
     def _init(self):
         # The CARLA leaderboard does not expose the lat lon reference value of the GPS which make it impossible to use the
         # GPS because the scale is not known. In the past this was not an issue since the reference was constant 0.0
@@ -349,8 +338,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         for camera_pos in self.config.num_cameras:
             rgb_cam = "rgb_" + str(camera_pos)
             camera = input_data[rgb_cam][1][:, :, :3]
-            if camera_pos == 0:
-                self.camera_for_viz = camera.copy()
 
             # Also add jpg artifacts at test time, because the training data was saved as jpg.
             _, compressed_image_i = cv2.imencode(".jpg", camera)
@@ -459,7 +446,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         result["target_point"] = ego_target_point_torch
 
-        self.target_points = None
         placeholder_batch_list = []
 
         if (
@@ -467,7 +453,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             or self.config.eval_route_as == "target_point_command"
         ):
             target_points = [ego_target_point, ego_next_target_point]
-            self.target_points = target_points.copy()
             target_points_np = np.array(target_points)
             target_points = (
                 torch.from_numpy(target_points_np).to(self.device, dtype=torch.float32).unsqueeze(0)
@@ -529,8 +514,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         assert C == 3
 
         speed = round(speed, 1)
-
-        self.prompt = prompt
 
         conversation_all = [
             {
@@ -650,95 +633,12 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         # initialize DrivingInput with dict self.DrivingInput
         model_input = DrivingInput(**self.DrivingInput)
-        pred_speed_wps, pred_route, language = self.model(model_input)
+        pred_speed_wps, pred_route, _ = self.model(model_input)
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 
         # prepare velocity input
         gt_velocity = tick_data["speed"]
-
-        if DEBUG and self.step % 5 == 0:
-            tvec = None
-            rvec = None
-
-            W = self.camera_for_viz.shape[1]
-            H = self.camera_for_viz.shape[0]
-            camera_intrinsics = np.asarray(get_camera_intrinsics(W, H, 110))
-
-            # bgr to rgb
-            self.camera_for_viz = cv2.cvtColor(self.camera_for_viz, cv2.COLOR_BGR2RGB)
-
-            # draw the predicted waypoints
-            image = Image.fromarray(self.camera_for_viz)
-            draw = ImageDraw.Draw(image)
-
-            if self.target_points is not None:
-                target_point_img_coords = project_points(
-                    self.target_points, camera_intrinsics, tvec=tvec, rvec=rvec
-                )
-                for points_2d in target_point_img_coords:
-                    # in blue
-                    draw.ellipse(
-                        (points_2d[0] - 4, points_2d[1] - 4, points_2d[0] + 4, points_2d[1] + 4),
-                        fill=(0, 0, 255, 255),
-                    )
-
-            if pred_route is not None:
-                pred_route_img_coords = project_points(
-                    pred_route[0].detach().cpu().numpy(), camera_intrinsics, tvec=tvec, rvec=rvec
-                )
-                for points_2d in pred_route_img_coords:
-                    draw.ellipse(
-                        (points_2d[0] - 3, points_2d[1] - 3, points_2d[0] + 3, points_2d[1] + 3),
-                        fill=(255, 0, 0, 255),
-                    )
-
-            if pred_speed_wps is not None:
-                pred_speed_wps_img_coords = project_points(
-                    pred_speed_wps[0].detach().cpu().numpy(),
-                    camera_intrinsics,
-                    tvec=tvec,
-                    rvec=rvec,
-                )
-                for points_2d in pred_speed_wps_img_coords:
-                    draw.ellipse(
-                        (points_2d[0] - 2, points_2d[1] - 2, points_2d[0] + 2, points_2d[1] + 2),
-                        fill=(0, 255, 0, 255),
-                    )
-
-            if language is not None:
-                # write the language to the bottom of the image
-                black_box = Image.new("RGBA", (W, 400), (0, 0, 0, 255))
-                # concatenate the images
-                image_all = Image.new("RGBA", (W, H + 400))
-                image_all.paste(image, (0, 0))
-                image_all.paste(black_box, (0, H))
-                image = image_all
-                draw = ImageDraw.Draw(image)
-
-                font_size = 20
-                line_width = 100
-                y_dist = 30
-                y_start = H + 20
-                font = ImageFont.truetype("arial.ttf", font_size)
-                import textwrap
-
-                lines = textwrap.wrap(f"Prompt: {self.prompt}", width=line_width)
-                for idx, line in enumerate(lines):
-                    draw.text(
-                        (10, y_start + y_dist * (idx)), line, font=font, fill=(255, 255, 255, 255)
-                    )
-
-                y_start = H + 20 + y_dist * (idx + 1)
-
-                lines = textwrap.wrap(f"Answer: {language[0]}", width=line_width)
-                for idx, line in enumerate(lines):
-                    draw.text(
-                        (10, y_start + y_dist * (idx)), line, font=font, fill=(255, 255, 255, 255)
-                    )
-
-            # save
-            image.save(f"{self.save_path_img}/{self.step}.png")
 
         steer, throttle, brake = self.trajectory_to_control(
             pred_route, gt_velocity, pred_speed_wps
