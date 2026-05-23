@@ -17,16 +17,10 @@ from PIL import Image
 from transformers import Qwen2Tokenizer
 
 from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored import (
-    conversation as conv_module,
-)
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (
     InternVLChatConfig,
 )
-from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
-    DrivingInput,
-    LanguageLabel,
-)
+from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import DrivingInput
 from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
     SIMLINGO_ADDITIONAL_SPECIAL_TOKENS,
     build_transform,
@@ -34,6 +28,7 @@ from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
 )
 from vla_streaming_rl.simlingo.team_code.config_simlingo import GlobalConfig
 from vla_streaming_rl.simlingo.team_code.ego_state_filter import EgoStateFilter
+from vla_streaming_rl.simlingo.team_code.prompt_builder import PromptBuilder
 from vla_streaming_rl.simlingo.team_code.route_planner import RoutePlanner
 from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     command_to_one_hot,
@@ -136,12 +131,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             "cam_yaw_deg": 0.0,
         }
 
-        if self.config.eval_route_as == -1:
-            self.config.eval_route_as = self.model.route_as
-
-        self.last_command = -1
-        self.last_command_tmp = -1
-
         self.trajectory_to_control = TrajectoryToControl(self.config)
 
         image_fps = 5
@@ -216,6 +205,12 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.target_point_prev = [1e5, 1e5, 1e5]
 
         self.ego_state_filter = EgoStateFilter(dt=1.0 / 20.0, state_log_maxlen=5)
+        self.prompt_builder = PromptBuilder(
+            config=self.config,
+            tokenizer=self.tokenizer,
+            num_image_token=self.num_image_token,
+            device=self.device,
+        )
 
         # Path to where visualizations and other debug output gets stored
         scratch_dir = str(scratch_dir)
@@ -373,18 +368,14 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         if len(waypoint_route) > 2:
             target_point, far_command = waypoint_route[1]
-            next_target_point, next_far_command = waypoint_route[2]
+            next_target_point, _ = waypoint_route[2]
         elif len(waypoint_route) > 1:
             target_point, far_command = waypoint_route[1]
-            next_target_point, next_far_command = waypoint_route[1]
+            next_target_point, _ = waypoint_route[1]
         else:
             target_point, far_command = waypoint_route[0]
-            next_target_point, next_far_command = waypoint_route[0]
+            next_target_point, _ = waypoint_route[0]
 
-        if self.last_command_tmp != far_command:
-            self.last_command = self.last_command_tmp
-
-        self.last_command_tmp = far_command
         if (target_point != self.target_point_prev).all():
             self.target_point_prev = target_point
             self.commands.append(far_command.value)
@@ -403,65 +394,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         )
 
         result["target_point"] = ego_target_point_torch
-
-        placeholder_batch_list = []
-
-        if (
-            self.config.eval_route_as == "target_point"
-            or self.config.eval_route_as == "target_point_command"
-        ):
-            target_points = [ego_target_point, ego_next_target_point]
-            target_points_np = np.array(target_points)
-            target_points = (
-                torch.from_numpy(target_points_np).to(self.device, dtype=torch.float32).unsqueeze(0)
-            )
-            result["route"] = target_points
-
-            placeholder_values = {"<TARGET_POINT>": target_points_np}
-            tmp = {}
-            for key, value in placeholder_values.items():
-                token_nr_key = self.tokenizer.convert_tokens_to_ids(key)
-                tmp[token_nr_key] = value
-            placeholder_batch_list.append(tmp)
-
-            prompt_tp = "Target waypoint: <TARGET_POINT><TARGET_POINT>."
-
-        elif self.config.eval_route_as == "command":
-            # get distance from target_point
-            dist_to_command = np.linalg.norm(ego_target_point)
-            dist_to_command = int(dist_to_command)
-            map_command = {
-                1: "go left at the next intersection",
-                2: "go right at the next intersection",
-                3: "go straight at the next intersection",
-                4: "follow the road",
-                5: "do a lane change to the left",
-                6: "do a lane change to the right",
-            }
-            command = map_command[far_command]
-            next_command = map_command[next_far_command]
-            if self.last_command in [1, 2, 3] and far_command == 4:
-                next_command = command
-                command = map_command[self.last_command]
-
-            if command != next_command:
-                next_command = f" then {next_command}"
-            else:
-                next_command = ""
-
-            if far_command == 4:
-                prompt_tp = f"Command: {command}{next_command}."
-            else:
-                prompt_tp = f"Command: {command} in {dist_to_command} meter{next_command}."
-
-        else:
-            raise ValueError(f"Unsupported eval_route_as: {self.config.eval_route_as}")
-
-        if self.config.use_cot:
-            prompt = f"Current speed: {speed} m/s. {prompt_tp} What should the ego do next?"
-        else:
-            prompt = f"Current speed: {speed} m/s. {prompt_tp} Predict the waypoints."
-
         result["speed"] = (
             torch.FloatTensor([speed]).unsqueeze(0).to(self.device, dtype=torch.float32)
         )
@@ -471,87 +403,10 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         assert T == self.T
         assert C == 3
 
-        speed = round(speed, 1)
-
-        conversation_all = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image"},
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "Waypoints:"},
-                ],
-            },
-        ]
-        conv_batch_list = [conversation_all]
-        questions = []
-        for conv in conv_batch_list:
-            for i in range(len(conv)):
-                questions.append(conv[i]["content"][0]["text"])
-                conv[i]["content"] = conv[i]["content"][0]["text"]
-
-        prompt_batch_list = []
-        for idx, conv in enumerate(conv_batch_list):
-            question = questions[idx]
-            if "<image>" not in question:
-                question = "<image>\n" + question
-            template = conv_module.get_conv_template("internlm2-chat")
-            for conv_part_idx, conv_part in enumerate(conv):
-                if conv_part["role"] == "assistant":
-                    # template.append_message(template.roles[1], conv_part['content'])
-                    template.append_message(template.roles[1], None)
-                elif conv_part["role"] == "user":
-                    if conv_part_idx == 0 and "<image>" not in conv_part["content"]:
-                        # add image token
-                        conv_part["content"] = "<image>\n" + conv_part["content"]
-                    template.append_message(template.roles[0], conv_part["content"])
-                else:
-                    raise ValueError(f"Role {conv_part['role']} not supported")
-
-            query = template.get_prompt()
-            # remove system prompt
-            system_prompt = (
-                template.system_template.replace("{system_message}", template.system_message)
-                + template.sep
-            )
-            query = query.replace(system_prompt, "")
-
-            IMG_START_TOKEN = "<img>"
-            IMG_END_TOKEN = "</img>"
-            IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
-            num_patches_all = 2  # sum(grid_nums)
-
-            image_tokens = (
-                IMG_START_TOKEN
-                + IMG_CONTEXT_TOKEN * self.num_image_token * num_patches_all
-                + IMG_END_TOKEN
-            )
-            query = query.replace("<image>", image_tokens, 1)
-            prompt_batch_list.append(query)
-
-        prompt_tokenized = self.tokenizer(
-            prompt_batch_list,
-            padding=True,
-            return_tensors="pt",
-            return_offsets_mapping=True,
-            add_special_tokens=False,
-        )
-        prompt_tokenized_ids = prompt_tokenized["input_ids"]
-        prompt_tokenized_valid = prompt_tokenized["input_ids"] != self.tokenizer.pad_token_id
-        prompt_tokenized_mask = prompt_tokenized_valid
-
-        ll = LanguageLabel(
-            phrase_ids=prompt_tokenized_ids.to(self.device),
-            phrase_valid=prompt_tokenized_valid.to(self.device),
-            phrase_mask=prompt_tokenized_mask.to(self.device),
-            placeholder_values=placeholder_batch_list,
-            language_string=prompt_batch_list,
-            loss_masking=None,
+        ll = self.prompt_builder.build(
+            speed=speed,
+            ego_target_point=ego_target_point,
+            ego_next_target_point=ego_next_target_point,
         )
 
         self.DrivingInput["camera_images"] = processed_image.to(self.device).bfloat16()
