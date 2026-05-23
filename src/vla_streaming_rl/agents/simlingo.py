@@ -197,14 +197,9 @@ class SimLingoAgent:
         self.observation_space = observation_space
         self.action_space = action_space
         self._env_unwrapped = env.unwrapped
-        self._scratch_dir = Path(scratch_dir)
-        self._scratch_dir.mkdir(parents=True, exist_ok=True)
 
-        # Per-episode handover state; populated by
-        # ``_maybe_handover_episode`` / ``_set_global_plan`` before
-        # they are first read by ``run_step`` / ``get_metric_info``.
-        self._global_plan = None
-        self._global_plan_world_coord = None
+        scratch_dir = Path(scratch_dir)
+        scratch_dir.mkdir(parents=True, exist_ok=True)
 
         self.gamma = gamma
         self.tau = tau
@@ -215,8 +210,8 @@ class SimLingoAgent:
         self.max_grad_norm = max_grad_norm
 
         torch.cuda.empty_cache()
-        self.config_path = str(self._resolve_checkpoint())
-        print(f"Config path: {self.config_path}")
+        config_path = str(self._resolve_checkpoint())
+        print(f"Config path: {config_path}")
         self._frame_step = -1
         self.initialized = False
         self.device = torch.device("cuda")
@@ -235,7 +230,7 @@ class SimLingoAgent:
         self.route_planner_min_distance = 7.5
 
         # load config from .hydra folder
-        config_load_path = Path(self.config_path).parent.parent.parent / ".hydra" / "config.yaml"
+        config_load_path = Path(config_path).parent.parent.parent / ".hydra" / "config.yaml"
         with open(config_load_path, "r") as file:
             cfg = OmegaConf.load(file)
         self.cfg = cfg
@@ -245,15 +240,11 @@ class SimLingoAgent:
         # ``Qwen2Tokenizer`` for InternVL2-1B (the custom remote processor
         # class isn't actually used downstream). Name the concrete class
         # directly so we don't depend on HF-hosted remote code.
-        processor = Qwen2Tokenizer.from_pretrained(cfg.model.vision_model.variant)
-        if "tokenizer" in processor.__dict__:
-            self.tokenizer = processor.tokenizer
-        else:
-            self.tokenizer = processor
-        self.tokenizer.add_special_tokens(
+        tokenizer = Qwen2Tokenizer.from_pretrained(cfg.model.vision_model.variant)
+        tokenizer.add_special_tokens(
             {"additional_special_tokens": list(SIMLINGO_ADDITIONAL_SPECIAL_TOKENS)}
         )
-        self.tokenizer.padding_side = "left"
+        tokenizer.padding_side = "left"
 
         # ``AutoConfig`` + ``trust_remote_code=True`` resolves to
         # ``InternVLChatConfig``. Use the vendored class directly so the
@@ -262,9 +253,7 @@ class SimLingoAgent:
         tmp_config = InternVLChatConfig.from_pretrained(cfg.model.vision_model.variant)
         image_size = tmp_config.force_image_size or tmp_config.vision_config.image_size
         patch_size = tmp_config.vision_config.patch_size
-        self.num_image_token = int(
-            (image_size // patch_size) ** 2 * (tmp_config.downsample_ratio**2)
-        )
+        num_image_token = int((image_size // patch_size) ** 2 * (tmp_config.downsample_ratio**2))
         cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
@@ -277,12 +266,12 @@ class SimLingoAgent:
         model_kwargs = {k: v for k, v in cfg.model.items() if k != "_target_"}
         self.model = DrivingModel(
             cfg_data_module=cfg.data_module,
-            processor=processor,
+            processor=tokenizer,
             cache_dir=cache_dir,
             **model_kwargs,
         ).to(self.device)
         torch.set_default_dtype(default_dtype)
-        self.model.load_state_dict(torch.load(self.config_path))
+        self.model.load_state_dict(torch.load(config_path))
 
         self.T = 1
         self.stuck_detector = 0
@@ -291,12 +280,12 @@ class SimLingoAgent:
         self.ego_state_filter = EgoStateFilter(dt=1.0 / 20.0, state_log_maxlen=5)
         self.prompt_builder = PromptBuilder(
             config=self.config,
-            tokenizer=self.tokenizer,
-            num_image_token=self.num_image_token,
+            tokenizer=tokenizer,
+            num_image_token=num_image_token,
             device=self.device,
         )
 
-        self.save_path_metric = str(self._scratch_dir) + "/metric"
+        self.save_path_metric = str(scratch_dir) + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
         # --- RL setup ---------------------------------------------------
