@@ -274,6 +274,55 @@ class BetaPolicy(nn.Module):
         return result["action"], result["a_logp"]
 
 
+class DeterministicPolicy(nn.Module):
+    """State → action MLP that emits a deterministic vector. Mirrors the
+    SimbaBlock + LayerNorm body of the other policy heads in this file.
+
+    ``zero_init_output`` zeros the final linear layer's weight and bias
+    at init so the head emits an all-zero action until trained — useful
+    when the head produces a residual to be added to an externally
+    supplied base action (e.g. on top of a frozen pretrained policy).
+    """
+
+    def __init__(
+        self,
+        *,
+        state_dim: int,
+        action_dim: int,
+        horizon: int,
+        hidden_dim: int,
+        block_num: int,
+        sparsity: float,
+        zero_init_output: bool,
+    ) -> None:
+        super().__init__()
+        self.horizon = horizon
+        self.action_dim = action_dim
+        total_action_dim = action_dim * horizon
+        self.fc_in = nn.Linear(state_dim, hidden_dim)
+        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.fc_out = nn.Linear(hidden_dim, total_action_dim)
+        if zero_init_output:
+            nn.init.zeros_(self.fc_out.weight)
+            nn.init.zeros_(self.fc_out.bias)
+        self.sparse_mask = (
+            None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
+        )
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        x = self.fc_in(x)
+        x = self.fc_mid(x)
+        x = self.norm(x)
+        out = self.fc_out(x).view(-1, self.horizon, self.action_dim)
+        return {"activation": x, "output": out}
+
+    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        result = self.forward(x)
+        dummy_log_p = torch.zeros((x.size(0), 1), device=x.device)
+        return result["output"], dummy_log_p
+
+
 class CategoricalPolicy(nn.Module):
     def __init__(self, hidden_dim: int, action_dim: int, horizon: int) -> None:
         super().__init__()

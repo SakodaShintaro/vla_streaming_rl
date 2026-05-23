@@ -1,14 +1,36 @@
 # SPDX-License-Identifier: MIT
-"""SimLingo zero-shot agent — drops into ``scripts/train.py`` like an RL agent.
+"""DDPG-style RL agent built on top of SimLingo (SARSA-style target).
 
-Implements the same surface (``select_action`` / ``step`` /
-``on_episode_end`` + ``network`` + ``reward_processor`` attributes) the
-RL agents in this directory expose, so the trainer's loop runs unchanged.
-The agent brings up the SimLingo VLM, then on each step feeds it the
-per-frame sensor snapshot that :class:`CARLALeaderboardEnv` already
-publishes in ``info["sensors"]`` (rgb / gps / imu / speed), and converts
-the resulting ``carla.VehicleControl`` to the env's 2-D
-``[steer, throttle_or_brake]`` action.
+The action trained against is SimLingo's full waypoint output:
+``pred_route`` (20×2) concatenated with ``pred_speed_wps`` (10×2),
+flattened to a 60-D continuous vector. The deterministic PID controller
+that turns waypoints into ``carla.VehicleControl`` is treated as part
+of the environment — the policy emits waypoints, PID emits 2-D control,
+env sees ``[steer, throttle - brake]``.
+
+  μ(s) = base_wps(VLM(s)) + Δ(features(s))    (Δ : DeterministicPolicy)
+  Q(s, a) = ActionValueHead(features(s), a)
+
+Critic update (off-policy, batch from replay):
+  y = r + γ (1 − done) Q_target(s', a' stored)            (SARSA target)
+  L_critic = MSE(Q(s, a), y)
+
+Actor update (on-policy, the live forward at this step):
+  L_actor = −Q(features_live, base_live + Δ(features_live))
+
+The SARSA-style target removes the need to recompute SimLingo's base
+waypoints at training time.
+
+Setting ``actor_lr`` / ``critic_lr`` / ``exploration_sigma`` to zero
+collapses the agent to the zero-shot SimLingo baseline: Δ stays at its
+zero initialisation, no exploration noise is added, the optimizer is a
+no-op, and ``run_step``'s PID + stuck-rescue + ``initial_frames_delay``
+logic produces the same control as the upstream SimLingo agent.
+
+VLM gradients only flow when ``use_lora`` is true: peft wraps the
+SimLingo LLM after the checkpoint load and the live actor loss
+backprops into the LoRA parameters via the cached live VLM features.
+With ``use_lora`` false, the VLM is fully frozen and only Δ and Q learn.
 
 Because the env owns the sensor lifecycle, SimLingoAgent does **not**
 spawn its own multi-camera stack or wire a leaderboard
@@ -17,6 +39,7 @@ re-init) is detected automatically via ``env.unwrapped.vehicle.id``
 changing between ticks.
 """
 
+import copy
 import json
 from pathlib import Path
 
@@ -27,9 +50,14 @@ import numpy as np
 import torch
 from leaderboard.utils.route_manipulation import downsample_route
 from omegaconf import OmegaConf
+from peft import LoraConfig, get_peft_model
 from PIL import Image
+from torch import nn, optim
 from transformers import Qwen2Tokenizer
 
+from vla_streaming_rl.networks.policy_head import DeterministicPolicy
+from vla_streaming_rl.networks.value_head import ActionValueHead
+from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (
@@ -59,9 +87,64 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.allow_tf32 = True
 
+# SimLingo's driving adaptor emits 20 route waypoints + 10 speed
+# waypoints, each 2-D — see DrivingAdaptor in
+# simlingo_training/models/adaptors.py.
+_ROUTE_LEN = 20
+_SPEED_WPS_LEN = 10
+_WP_DIM = 2
+_ACTION_DIM = (_ROUTE_LEN + _SPEED_WPS_LEN) * _WP_DIM
+
+# SARSA needs three contiguous indices to read (s_t, s_{t+1}, a_{t+1}).
+_SEQ_LEN = 3
+
+
+def _maybe_apply_lora(language_model: nn.Module, use_lora: bool) -> nn.Module:
+    """No-op when ``use_lora`` is false. Otherwise wraps the SimLingo LLM
+    with peft adapters and returns the wrapped model."""
+    if not use_lora:
+        return language_model
+    wrapped = get_peft_model(
+        language_model,
+        LoraConfig(
+            inference_mode=False,
+            r=8,
+            lora_alpha=8,
+            lora_dropout=0.05,
+            target_modules="all-linear",
+        ),
+    )
+    wrapped.print_trainable_parameters()
+    return wrapped
+
+
+def _waypoints_to_action_vec(route: torch.Tensor, speed_wps: torch.Tensor) -> torch.Tensor:
+    return torch.cat([route.reshape(-1), speed_wps.reshape(-1)], dim=0).to(torch.float32)
+
+
+def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    route_flat = a[: _ROUTE_LEN * _WP_DIM]
+    speed_flat = a[_ROUTE_LEN * _WP_DIM :]
+    return (
+        route_flat.view(1, _ROUTE_LEN, _WP_DIM),
+        speed_flat.view(1, _SPEED_WPS_LEN, _WP_DIM),
+    )
+
 
 class SimLingoAgent:
-    """SimLingo policy with the RL-agent surface ``scripts/train.py`` expects."""
+    """DDPG-style off-policy agent built on SimLingo's waypoint output.
+
+    Mechanics: ``DrivingModel.forward`` returns ``(speed_wps, route,
+    language, driving_features)``; a forward hook on the model rewrites
+    the waypoint output with ``base + Δ + exploration_sigma·𝒩(0, 1)`` and
+    stashes ``driving_features`` (pooled as the critic state). The noise
+    is applied on every call (``select_action`` and ``step`` alike) — the
+    policy is the sole source of stochasticity, same as the other RL
+    agents in this directory. ``step`` additionally runs the critic +
+    actor updates after the action is emitted. ``run_step`` PID,
+    stuck-rescue and ``initial_frames_delay`` branches are inlined from
+    the upstream SimLingo agent.
+    """
 
     _HF_REPO_ID = "RenzKa/simlingo"
     _HF_CKPT_NAME = "pytorch_model.pt"
@@ -73,6 +156,21 @@ class SimLingoAgent:
         action_space: gym.spaces.Box,
         env: gym.Env,
         scratch_dir: Path,
+        use_lora: bool,
+        gamma: float,
+        tau: float,
+        exploration_sigma: float,
+        replay_capacity: int,
+        batch_size: int,
+        learning_starts: int,
+        critic_hidden_dim: int,
+        critic_block_num: int,
+        delta_hidden_dim: int,
+        delta_block_num: int,
+        delta_scale: float,
+        actor_lr: float,
+        critic_lr: float,
+        max_grad_norm: float,
     ) -> None:
         self.observation_space = observation_space
         self.action_space = action_space
@@ -85,6 +183,14 @@ class SimLingoAgent:
         self.hero_actor = None
         self._global_plan = None
         self._global_plan_world_coord = None
+
+        self.gamma = gamma
+        self.tau = tau
+        self.exploration_sigma = exploration_sigma
+        self.batch_size = batch_size
+        self.learning_starts = learning_starts
+        self.delta_scale = delta_scale
+        self.max_grad_norm = max_grad_norm
 
         torch.cuda.empty_cache()
         self.config_path = str(self._resolve_checkpoint())
@@ -171,44 +277,168 @@ class SimLingoAgent:
         self.save_path_metric = str(self._scratch_dir) + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
-        # Freeze the VLM — we never backprop. Empty trainable_state at
-        # checkpoint time then writes a (harmless) empty dict.
+        # --- RL setup ---------------------------------------------------
+
+        # Freeze everything by default; LoRA (when enabled) re-introduces
+        # trainable params on the LLM only. The peft wrap happens AFTER
+        # the checkpoint load — vanilla SimLingo cfg has ``lora=False``
+        # at checkpoint time so the loaded state_dict has no LoRA tensors.
         for p in self.model.parameters():
             p.requires_grad_(False)
+        self.model.language_model.model = _maybe_apply_lora(
+            self.model.language_model.model, use_lora
+        )
 
-        # Duck-type the RL agent surface the trainer uses:
-        # ``agent.network.parameters()`` for the parameter count print,
-        # ``agent.network.named_parameters()`` for the checkpoint save.
-        self.network = self.model
-        self.reward_processor = RewardProcessor("none", 1.0)
+        # SimLingo runs in bfloat16; the RL heads run in float32 to keep
+        # value targets numerically stable.
+        feature_dim = int(self.model.language_model.hidden_size)
+        # Residual on top of SimLingo's base waypoints. ``zero_init_output``
+        # makes the agent start behaviourally identical to the
+        # pretrained SimLingo policy.
+        self.delta_head = DeterministicPolicy(
+            state_dim=feature_dim,
+            action_dim=_ACTION_DIM,
+            horizon=1,
+            hidden_dim=delta_hidden_dim,
+            block_num=delta_block_num,
+            sparsity=0.0,
+            zero_init_output=True,
+        ).to(self.device)
+        # Dueling Q(s, a) head from networks.value_head. ``num_bins=1``
+        # collapses the distributional output to a scalar.
+        self.critic = ActionValueHead(
+            in_channels=feature_dim,
+            action_dim=_ACTION_DIM,
+            horizon=1,
+            hidden_dim=critic_hidden_dim,
+            block_num=critic_block_num,
+            num_bins=1,
+            sparsity=0.0,
+        ).to(self.device)
+        self.target_critic = copy.deepcopy(self.critic).to(self.device)
+        for p in self.target_critic.parameters():
+            p.requires_grad_(False)
 
-        # ``CARLALeaderboardEnv`` re-spawns the ego on every reset; a
-        # changed actor id is our "new episode" signal.
+        # Filter picks up LoRA params when use_lora=True, otherwise the
+        # list reduces to the delta head alone.
+        actor_params = list(self.delta_head.parameters()) + [
+            p for p in self.model.parameters() if p.requires_grad
+        ]
+        self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=0.0)
+        self.critic_optimizer = optim.AdamW(
+            self.critic.parameters(), lr=critic_lr, weight_decay=0.0
+        )
+
+        # Standard ReplayBuffer. ``obs_z`` carries our pooled features;
+        # the unused slots (obs, rnn_state, log_prob, value, token ids)
+        # get shape-(1,) / 0 / empty dummies so the buffer machinery
+        # still type-checks.
+        self.rb = ReplayBuffer(
+            size=replay_capacity,
+            seq_len=_SEQ_LEN,
+            obs_shape=(1,),
+            obs_z_shape=(feature_dim,),
+            rnn_state_shape=(1,),
+            action_shape=(_ACTION_DIM,),
+            output_device=self.device,
+            storage_device=torch.device("cpu"),
+            max_new_tokens=0,
+            max_prompt_tokens=0,
+            pad_token_id=0,
+        )
+        self._dummy_obs = torch.zeros(1, device=self.device)
+        self._dummy_rnn_state = torch.zeros(1, device=self.device)
+
+        # Populated by the action forward hook on every model call —
+        # the critic / actor losses pick them up after ``_act``.
+        self._current_pooled: torch.Tensor = torch.empty(0)
+        self._current_base_action: torch.Tensor = torch.empty(0)
+        self._current_action_taken: torch.Tensor = torch.empty(0)
+        self._install_action_hook()
+
+        # The replay buffer's convention is that ``action`` at index t is
+        # the action selected at step t-1. We carry the previously-taken
+        # action across calls; the buffer takes care of pairing it with
+        # the freshly-observed (obs, reward, done).
         self._attached_ego_id: int | None = None
+        self._prev_action = torch.zeros(_ACTION_DIM, device=self.device)
+
+        # Trainer-facing surface (parameter count print + checkpoint).
+        self.network = self.model
+        # "none" makes ``normalize`` a clamped identity; ``update`` still
+        # mutates the running stats but nothing reads them.
+        self.reward_processor = RewardProcessor("none", 1.0)
 
     # --- RL-agent protocol surface used by scripts/train.py -----------------
 
-    def select_action(self, global_step, obs, reward, terminated, truncated, task_prompt):
+    @torch.no_grad()
+    def select_action(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+    ) -> tuple[np.ndarray, dict]:
         self._maybe_handover_episode()
-        return self._act(), self._dummy_agent_info()
+        env_action = self._act()
+        return env_action, self._build_info(env_action)
 
-    def step(self, global_step, obs, reward, terminated, truncated, task_prompt):
+    def step(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+    ) -> tuple[np.ndarray, dict]:
         self._maybe_handover_episode()
-        return self._act(), self._dummy_agent_info()
+        episode_done = terminated or truncated
+        env_action = self._act()
+        info = self._build_info(env_action)
 
-    def _dummy_agent_info(self) -> dict:
-        """Trainer reads ``agent_info["goal_image"]`` (and ``next_image``/
-        ``next_reward`` via ``.get(...)``) for its rendering pipeline. The
-        zero-shot policy doesn't predict a goal, so hand back zeroed
-        arrays shaped like the obs the env returns."""
-        h, w = self.observation_space.shape[1], self.observation_space.shape[2]
-        zero_hwc = np.zeros((h, w, 3), dtype=np.float32)
-        return {"goal_image": zero_hwc}
+        # Add (features at step t, action_{t-1}, reward, done). Mirrors
+        # off_policy.OffPolicyAgent.select_action's add semantics so
+        # later sampling and indexing match the project convention.
+        self.rb.add(
+            self._dummy_obs,
+            self._current_pooled,
+            reward,
+            episode_done,
+            self._dummy_rnn_state,
+            self._prev_action,
+            0.0,
+            0.0,
+            [],
+            [],
+        )
+
+        info.update(self._maybe_train(global_step))
+
+        # Advance: the action just selected becomes the prev for the
+        # next add. (off_policy carries it across episode boundaries
+        # too — the buffer's done flag handles bootstrap correctness.)
+        self._prev_action = self._current_action_taken
+
+        return env_action, info
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         # Force re-init on the next select_action.
         self._attached_ego_id = None
         return {}
+
+    def _build_info(self, env_action: np.ndarray) -> dict:
+        """Trainer reads ``agent_info["goal_image"]`` for its rendering
+        pipeline. The waypoint policy doesn't predict a goal, so hand
+        back a zeroed frame shaped like the obs the env returns.
+        ``action_norm`` is included as a scalar telemetry hook."""
+        h, w = self.observation_space.shape[1], self.observation_space.shape[2]
+        return {
+            "goal_image": np.zeros((h, w, 3), dtype=np.float32),
+            "action_norm": float(np.linalg.norm(env_action)),
+        }
 
     # --- Episode handover --------------------------------------------------
 
@@ -281,8 +511,10 @@ class SimLingoAgent:
     def get_metric_info(self):
         """Per-frame ego pose / velocity snapshot. Inlined from leaderboard
         ``AutonomousAgent.get_metric_info``."""
+
         def v(vec, rot=False):
             return [vec.roll, vec.pitch, vec.yaw] if rot else [vec.x, vec.y, vec.z]
+
         hero = self.hero_actor
         return {
             "acceleration": v(hero.get_acceleration()),
@@ -294,6 +526,34 @@ class SimLingoAgent:
         }
 
     # --- Per-tick inference ------------------------------------------------
+
+    def _install_action_hook(self) -> None:
+        """Forward hook on ``DrivingModel`` that rewrites the waypoint
+        output with ``base + Δ + noise``. The model's forward returns
+        ``(speed_wps, route, language, driving_features)`` — we pool the
+        features for the critic state, build the residual action, and
+        hand the rewritten waypoints (plus the unchanged language /
+        features) back to ``run_step`` which then runs PID, stuck
+        rescue, and ``initial_frames_delay`` transparently."""
+
+        def hook(_module, _args, output):
+            speed_wps, route, lang, driving_features = output
+            pooled = driving_features.mean(dim=1).squeeze(0).to(torch.float32)
+            base_action = _waypoints_to_action_vec(route, speed_wps)
+            delta = self.delta_scale * self.delta_head(pooled.unsqueeze(0))["output"].view(-1)
+            action_live = base_action + delta
+            action_taken = (
+                action_live + torch.randn_like(action_live) * self.exploration_sigma
+            ).detach()
+
+            self._current_pooled = pooled
+            self._current_base_action = base_action
+            self._current_action_taken = action_taken
+
+            new_route, new_speed_wps = _action_vec_to_waypoints(action_taken)
+            return new_speed_wps, new_route, lang, driving_features
+
+        self.model.register_forward_hook(hook)
 
     def _act(self) -> np.ndarray:
         """One inference tick + 2-D env-action conversion.
@@ -323,9 +583,14 @@ class SimLingoAgent:
         gas_or_brake = float(control.throttle) - float(control.brake)
         return np.array([steer, gas_or_brake], dtype=np.float32)
 
-    @torch.inference_mode()  # Turns off gradient computation
     def _tick(self, input_data) -> dict:
-        """Pre-process sensor data, run the UKF, return DrivingInput kwargs."""
+        """Pre-process sensor data, run the UKF, return DrivingInput kwargs.
+
+        Grad context is controlled by the caller: ``select_action`` is
+        wrapped in ``@torch.no_grad`` for eval, ``step`` runs grad-on so
+        the live actor loss can backprop through the VLM when LoRA is
+        active.
+        """
         rgb = []
         for camera_pos in self.config.num_cameras:
             rgb_cam = "rgb_" + str(camera_pos)
@@ -433,8 +698,11 @@ class SimLingoAgent:
             "prompt_inference": ll,
         }
 
-    @torch.no_grad()
     def run_step(self, input_data):
+        """Grad context is controlled by callers: ``select_action`` wraps
+        this in ``@torch.no_grad`` for eval, ``step`` runs grad-on so the
+        live actor loss can backprop through the VLM when LoRA is active.
+        """
         self._frame_step += 1
 
         if not self.initialized:
@@ -448,15 +716,16 @@ class SimLingoAgent:
         driving_input_kwargs = self._tick(input_data)
 
         model_input = DrivingInput(**driving_input_kwargs)
-        pred_speed_wps, pred_route, _ = self.model(model_input)
+        # ``DrivingModel.forward`` returns 4-tuple — the last entry is
+        # ``driving_features`` consumed by the action hook for the
+        # critic state vector.
+        pred_speed_wps, pred_route, _, _ = self.model(model_input)
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 
         gt_velocity = driving_input_kwargs["vehicle_speed"]
 
-        steer, throttle, brake = self.trajectory_to_control(
-            pred_route, gt_velocity, pred_speed_wps
-        )
+        steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed_wps)
 
         # # 0.1 is just an arbitrary low number to threshold when the car is stopped
         if gt_velocity < 0.1:
@@ -493,3 +762,60 @@ class SimLingoAgent:
             outfile.close()
 
         return control
+
+    # --- Off-policy training step -----------------------------------------
+
+    def _maybe_train(self, global_step: int) -> dict:
+        # The buffer's ``sample`` requires ``curr_size > seq_len``; the
+        # learning_starts warmup is set high enough that this is
+        # implicitly satisfied.
+        if global_step < self.learning_starts:
+            return {}
+
+        batch = self.rb.sample(self.batch_size)
+        # SARSA window mapping: at sampled indices (t, t+1, t+2)
+        #   obs_z[:, 0]   = s_t                  obs_z[:, 1]   = s_{t+1}
+        #   actions[:, 1] = a_t                  actions[:, 2] = a_{t+1}
+        #   rewards[:, 1] = r from a_t           dones[:, 1]   = terminated after a_t
+        s = batch.obs_z[:, 0]
+        a = batch.actions[:, 1]
+        r = batch.rewards[:, 1, 0]
+        s_next = batch.obs_z[:, 1]
+        a_next = batch.actions[:, 2]
+        done = batch.dones[:, 1, 0]
+
+        # --- critic update (SARSA target) ----------------------------------
+        with torch.no_grad():
+            next_q = self.target_critic(s_next, a_next.unsqueeze(1))["output"].view(-1)
+            target_q = r + self.gamma * (1.0 - done) * next_q
+        current_q = self.critic(s, a.unsqueeze(1))["output"].view(-1)
+        critic_loss = nn.functional.mse_loss(current_q, target_q)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        critic_loss.backward()
+        nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+        self.critic_optimizer.step()
+
+        # --- actor update (on-policy, live forward) ------------------------
+        # Backprops into Δ unconditionally; into LoRA when active via
+        # the cached live VLM features.
+        live_features = self._current_pooled.unsqueeze(0)
+        live_base = self._current_base_action.unsqueeze(0)
+        live_delta = self.delta_scale * self.delta_head(live_features)["output"].squeeze(1)
+        live_action = live_base + live_delta
+        actor_loss = -self.critic(live_features, live_action.unsqueeze(1))["output"].mean()
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        nn.utils.clip_grad_norm_(self.actor_optimizer.param_groups[0]["params"], self.max_grad_norm)
+        self.actor_optimizer.step()
+
+        # --- Polyak target update -----------------------------------------
+        with torch.no_grad():
+            for tp, sp in zip(self.target_critic.parameters(), self.critic.parameters()):
+                tp.data.mul_(1.0 - self.tau).add_(sp.data, alpha=self.tau)
+
+        return {
+            "losses/critic_loss": float(critic_loss.item()),
+            "losses/actor_loss": float(actor_loss.item()),
+            "losses/q_value": float(current_q.mean().item()),
+            "losses/target_q": float(target_q.mean().item()),
+        }

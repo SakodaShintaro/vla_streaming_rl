@@ -255,12 +255,29 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     elif args.agent_type == "simlingo":
         from vla_streaming_rl.agents.simlingo import SimLingoAgent
 
+        sl = args.simlingo
         agent = SimLingoAgent(
             observation_space=env.observation_space,
             action_space=env.action_space,
             env=env,
-            scratch_dir=(result_dir / "simlingo_scratch") if result_dir is not None
-                        else Path("/tmp/simlingo_scratch"),
+            scratch_dir=(result_dir / "simlingo_scratch")
+            if result_dir is not None
+            else Path("/tmp/simlingo_scratch"),
+            use_lora=bool(sl.use_lora),
+            gamma=float(sl.gamma),
+            tau=float(sl.tau),
+            exploration_sigma=float(sl.exploration_sigma),
+            replay_capacity=int(sl.replay_capacity),
+            batch_size=int(sl.batch_size),
+            learning_starts=int(sl.learning_starts),
+            critic_hidden_dim=int(sl.critic_hidden_dim),
+            critic_block_num=int(sl.critic_block_num),
+            delta_hidden_dim=int(sl.delta_hidden_dim),
+            delta_block_num=int(sl.delta_block_num),
+            delta_scale=float(sl.delta_scale),
+            actor_lr=float(sl.actor_lr),
+            critic_lr=float(sl.critic_lr),
+            max_grad_norm=float(sl.max_grad_norm),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

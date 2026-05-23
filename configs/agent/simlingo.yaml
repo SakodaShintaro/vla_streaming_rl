@@ -1,8 +1,5 @@
 # @package _global_
-# SimLingo VLM agent (zero-shot baseline). Drops into scripts/train.py
-# unchanged via the agent_type=simlingo branch — SimLingoAgent fits the
-# same select_action / step / on_episode_end + network / reward_processor
-# surface as the RL agents in this directory.
+# SimLingo VLM + DDPG-style RL on top of waypoint output.
 #
 # Sensors come from CARLALeaderboardEnv's info["sensors"] (rgb / gps /
 # imu / speed) — SimLingoAgent does NOT spawn its own sensor stack, so
@@ -16,6 +13,9 @@
 # The SimLingo VLM checkpoint is always pulled from huggingface
 # (RenzKa/simlingo) into the local HF cache via snapshot_download —
 # nothing to configure here.
+#
+# Set ``simlingo.actor_lr=0 simlingo.critic_lr=0 simlingo.exploration_sigma=0``
+# on the CLI to reproduce the zero-shot SimLingo baseline.
 defaults:
   - base_network
   - base_off_policy
@@ -26,8 +26,27 @@ defaults:
   - _self_
 
 agent_type: simlingo
-# Override base_on_policy's actor_critic_with_state_value (which only
-# accepts policy_type in {beta, categorical} and would crash given the
-# cascade's final policy_type=diffusion). Mirrors cnn_streaming.yaml's
-# choice; the resulting RL net is built but unused by SimLingoAgent.
+# Built-but-unused RL net (the trainer still builds one against the
+# env's observation_space). Mirrors cnn_streaming.yaml's choice.
 network_class: actor_critic_with_action_value
+
+simlingo:
+  use_lora: false
+  gamma: 0.99
+  tau: 0.005
+  exploration_sigma: 0.05
+  replay_capacity: 20000
+  batch_size: 64
+  learning_starts: 1000
+  critic_hidden_dim: 512
+  critic_block_num: 1
+  delta_hidden_dim: 256
+  delta_block_num: 1
+  # Scale applied to the delta head output before adding to base
+  # waypoints. Combined with the zero-init final layer in
+  # DeterministicPolicy, this means Δ stays identically zero until
+  # the actor optimizer moves it.
+  delta_scale: 0.1
+  actor_lr: 1e-5
+  critic_lr: 1e-4
+  max_grad_norm: 1.0
