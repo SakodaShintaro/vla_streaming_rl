@@ -117,6 +117,31 @@ def _apply_lora(module: nn.Module) -> nn.Module:
     return wrapped
 
 
+def _to_device(obj, device):
+    """Recursively move every Tensor inside ``obj`` to ``device``.
+
+    Handles nested tuples / lists / dicts and dataclass instances (so a
+    ``LanguageLabel`` carrying tensor fields round-trips correctly when
+    we shuffle a ``DrivingInput`` between CPU storage and GPU compute).
+    Non-tensor leaves are returned as-is.
+    """
+    if obj is None:
+        return None
+    if torch.is_tensor(obj):
+        return obj.detach().to(device)
+    if isinstance(obj, tuple):
+        return tuple(_to_device(x, device) for x in obj)
+    if isinstance(obj, list):
+        return [_to_device(x, device) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _to_device(v, device) for k, v in obj.items()}
+    if hasattr(obj, "__dataclass_fields__"):
+        return type(obj)(
+            **{f: _to_device(getattr(obj, f), device) for f in obj.__dataclass_fields__}
+        )
+    return obj
+
+
 def _waypoints_to_action_vec(route: torch.Tensor, speed_wps: torch.Tensor) -> torch.Tensor:
     return torch.cat([route.reshape(-1), speed_wps.reshape(-1)], dim=0).to(torch.float32)
 
@@ -134,15 +159,13 @@ class SimLingoAgent:
     """DDPG-style off-policy agent built on SimLingo's waypoint output.
 
     Mechanics: ``DrivingModel.forward`` returns ``(speed_wps, route,
-    language, driving_features)``; a forward hook on the model rewrites
-    the waypoint output with ``base + Δ + exploration_sigma·𝒩(0, 1)`` and
-    stashes ``driving_features`` (pooled as the critic state). The noise
-    is applied on every call (``select_action`` and ``step`` alike) — the
-    policy is the sole source of randomness, same as the other RL
-    agents in this directory. ``step`` additionally runs the critic +
-    actor updates after the action is emitted. ``run_step`` PID,
-    stuck-rescue and ``initial_frames_delay`` branches are inlined from
-    the upstream SimLingo agent.
+    language, driving_features)``. ``run_step`` pools ``driving_features``
+    into the critic state, runs the residual head Δ, adds
+    ``exploration_sigma·𝒩(0, 1)``, and feeds the modified waypoints to
+    the PID. Noise is applied on every call (``select_action`` and
+    ``step`` alike) — the policy is the sole source of randomness, same
+    as the other RL agents in this directory. ``step`` additionally runs
+    the critic + actor updates after the action is emitted.
     """
 
     _HF_REPO_ID = "RenzKa/simlingo"
@@ -351,12 +374,24 @@ class SimLingoAgent:
         self._dummy_obs = torch.zeros(1, device=self.device)
         self._dummy_rnn_state = torch.zeros(1, device=self.device)
 
-        # Populated by the action forward hook on every model call —
-        # the critic / actor losses pick them up after ``_act``.
+        # Parallel CPU storage of the ``DrivingInput`` kwargs at each
+        # step, indexed identically to the main replay buffer. ``step``
+        # appends the latest kwargs (captured by ``run_step`` into
+        # ``self._last_driving_input_kwargs``); ``_maybe_train`` pulls
+        # them out, moves them back to GPU, and re-runs the VLM so the
+        # critic loss flows fresh gradient through LoRA — without this,
+        # the cached ``obs_z`` features get stale as LoRA updates.
+        self._driving_input_buffer: list = [None] * replay_capacity
+        self._last_driving_input_kwargs: dict | None = None
+
+        # Populated by ``run_step`` after each model forward — the
+        # actor loss uses ``_current_pooled`` / ``_current_base_action``
+        # for the live gradient path, and ``step`` reads
+        # ``_current_action_taken`` to carry the previously-selected
+        # action across calls.
         self._current_pooled: torch.Tensor = torch.empty(0)
         self._current_base_action: torch.Tensor = torch.empty(0)
         self._current_action_taken: torch.Tensor = torch.empty(0)
-        self._install_action_hook()
 
         # The replay buffer's convention is that ``action`` at index t is
         # the action selected at step t-1. We carry the previously-taken
@@ -415,6 +450,12 @@ class SimLingoAgent:
             0.0,
             [],
             [],
+        )
+        # Mirror the buffer's write slot in the DrivingInput buffer so
+        # ``_maybe_train`` can re-forward the VLM at the same indices.
+        write_idx = (self.rb.idx - 1) % self.rb.size
+        self._driving_input_buffer[write_idx] = _to_device(
+            self._last_driving_input_kwargs, torch.device("cpu")
         )
 
         info.update(self._maybe_train(global_step))
@@ -528,34 +569,6 @@ class SimLingoAgent:
         }
 
     # --- Per-tick inference ------------------------------------------------
-
-    def _install_action_hook(self) -> None:
-        """Forward hook on ``DrivingModel`` that rewrites the waypoint
-        output with ``base + Δ + noise``. The model's forward returns
-        ``(speed_wps, route, language, driving_features)`` — we pool the
-        features for the critic state, build the residual action, and
-        hand the rewritten waypoints (plus the unchanged language /
-        features) back to ``run_step`` which then runs PID, stuck
-        rescue, and ``initial_frames_delay`` transparently."""
-
-        def hook(_module, _args, output):
-            speed_wps, route, lang, driving_features = output
-            pooled = driving_features.mean(dim=1).squeeze(0).to(torch.float32)
-            base_action = _waypoints_to_action_vec(route, speed_wps)
-            delta = self.delta_scale * self.delta_head(pooled.unsqueeze(0))["output"].view(-1)
-            action_live = base_action + delta
-            action_taken = (
-                action_live + torch.randn_like(action_live) * self.exploration_sigma
-            ).detach()
-
-            self._current_pooled = pooled
-            self._current_base_action = base_action
-            self._current_action_taken = action_taken
-
-            new_route, new_speed_wps = _action_vec_to_waypoints(action_taken)
-            return new_speed_wps, new_route, lang, driving_features
-
-        self.model.register_forward_hook(hook)
 
     def _act(self) -> np.ndarray:
         """One inference tick + 2-D env-action conversion.
@@ -716,14 +729,38 @@ class SimLingoAgent:
 
         # _tick runs every step for GPS filtering + DrivingInput refresh.
         driving_input_kwargs = self._tick(input_data)
+        # Capture for the parallel ``_driving_input_buffer`` written by
+        # ``step``; the training loop later re-forwards the VLM on a
+        # CPU-stored copy of this dict to get fresh features.
+        self._last_driving_input_kwargs = driving_input_kwargs
 
+        # ``DrivingModel.forward`` returns (speed_wps, route, language,
+        # driving_features). The fourth element is the (B, 30, hidden)
+        # last-hidden-state slice at the waypoint-query positions —
+        # pooled into the critic's state vector below.
         model_input = DrivingInput(**driving_input_kwargs)
-        # ``DrivingModel.forward`` returns 4-tuple — the last entry is
-        # ``driving_features`` consumed by the action hook for the
-        # critic state vector.
-        pred_speed_wps, pred_route, _, _ = self.model(model_input)
+        pred_speed_wps, pred_route, _, driving_features = self.model(model_input)
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
+
+        # Residual head on top of SimLingo's base waypoints, then
+        # exploration noise. ``action_taken`` is detached for the env /
+        # PID path (we only need μ(s) and ``base + Δ`` to be grad-live
+        # for the actor loss, which uses ``_current_pooled`` /
+        # ``_current_base_action`` below).
+        pooled = driving_features.mean(dim=1).squeeze(0).to(torch.float32)
+        base_action = _waypoints_to_action_vec(pred_route, pred_speed_wps)
+        delta = self.delta_scale * self.delta_head(pooled.unsqueeze(0))["output"].view(-1)
+        action_live = base_action + delta
+        action_taken = (
+            action_live + torch.randn_like(action_live) * self.exploration_sigma
+        ).detach()
+        self._current_pooled = pooled
+        self._current_base_action = base_action
+        self._current_action_taken = action_taken
+
+        # Feed the modified waypoints to the deterministic PID.
+        pred_route, pred_speed_wps = _action_vec_to_waypoints(action_taken)
 
         gt_velocity = driving_input_kwargs["vehicle_speed"]
 
@@ -774,39 +811,71 @@ class SimLingoAgent:
         if global_step < self.learning_starts:
             return {}
 
-        batch = self.rb.sample(self.batch_size)
+        # Sample SARSA indices directly so we can mirror them into the
+        # parallel ``_driving_input_buffer``. Mirrors ReplayBuffer.sample
+        # but exposes the indices.
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        start = torch.randint(0, curr_size - _SEQ_LEN, (self.batch_size,))
+        seq = start[:, None] + torch.arange(_SEQ_LEN)[None, :]
         # SARSA window mapping: at sampled indices (t, t+1, t+2)
-        #   obs_z[:, 0]   = s_t                  obs_z[:, 1]   = s_{t+1}
-        #   actions[:, 1] = a_t                  actions[:, 2] = a_{t+1}
-        #   rewards[:, 1] = r from a_t           dones[:, 1]   = terminated after a_t
-        s = batch.obs_z[:, 0]
-        a = batch.actions[:, 1]
-        r = batch.rewards[:, 1, 0]
-        s_next = batch.obs_z[:, 1]
-        a_next = batch.actions[:, 2]
-        done = batch.dones[:, 1, 0]
+        #   actions[:, 1] = a_t          actions[:, 2] = a_{t+1}
+        #   rewards[:, 1] = r from a_t   dones[:, 1]   = terminated after a_t
+        a = self.rb.actions[seq[:, 1]].to(self.device)
+        r = self.rb.rewards[seq[:, 1], 0].to(self.device)
+        a_next = self.rb.actions[seq[:, 2]].to(self.device)
+        done = self.rb.dones[seq[:, 1], 0].to(self.device)
 
-        # --- critic update (SARSA target) ----------------------------------
+        # Re-run the VLM on the stored DrivingInputs to get fresh
+        # features (with grad through LoRA). Reads ``driving_features``
+        # straight from the 4-tuple model output — no forward hook
+        # involved, so ``self._current_*`` from the env-step forward is
+        # left untouched for the actor loss below.
+        features_t = []
+        features_next = []
+        for i_t, i_next in zip(seq[:, 0].tolist(), seq[:, 1].tolist()):
+            di_t = _to_device(self._driving_input_buffer[i_t], self.device)
+            _, _, _, df_t = self.model(DrivingInput(**di_t))
+            features_t.append(df_t.mean(dim=1).squeeze(0).to(torch.float32))
+            di_next = _to_device(self._driving_input_buffer[i_next], self.device)
+            _, _, _, df_next = self.model(DrivingInput(**di_next))
+            features_next.append(df_next.mean(dim=1).squeeze(0).to(torch.float32))
+        s = torch.stack(features_t)
+        s_next = torch.stack(features_next)
+
+        # --- critic loss (SARSA target) -----------------------------------
         with torch.no_grad():
             next_q = self.target_critic(s_next, a_next.unsqueeze(1))["output"].view(-1)
             target_q = r + self.gamma * (1.0 - done) * next_q
         current_q = self.critic(s, a.unsqueeze(1))["output"].view(-1)
         critic_loss = nn.functional.mse_loss(current_q, target_q)
+
+        # --- actor loss (on-policy, live forward) -------------------------
+        # Backprops into Δ unconditionally; into LoRA when active via
+        # the cached live VLM features from ``run_step``.
+        live_features = self._current_pooled.unsqueeze(0)
+        live_action = self._current_base_action.unsqueeze(0) + self.delta_scale * self.delta_head(
+            live_features
+        )["output"].squeeze(1)
+        actor_loss = -self.critic(live_features, live_action.unsqueeze(1))["output"].mean()
+
+        # --- backward + optimizer step ------------------------------------
+        # critic_loss touches: critic params + LoRA (via re-forwarded s, s_next).
+        # actor_loss  touches: critic params (we toggle them off below),
+        #                     delta_head + LoRA (via live forward).
+        # Zero both optimizer's param grads up front, then accumulate
+        # critic-then-actor without zeroing in between so LoRA receives
+        # both signals.
         self.critic_optimizer.zero_grad(set_to_none=True)
+        self.actor_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
+        for p in self.critic.parameters():
+            p.requires_grad_(False)
+        actor_loss.backward()
+        for p in self.critic.parameters():
+            p.requires_grad_(True)
+
         nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.critic_optimizer.step()
-
-        # --- actor update (on-policy, live forward) ------------------------
-        # Backprops into Δ unconditionally; into LoRA when active via
-        # the cached live VLM features.
-        live_features = self._current_pooled.unsqueeze(0)
-        live_base = self._current_base_action.unsqueeze(0)
-        live_delta = self.delta_scale * self.delta_head(live_features)["output"].squeeze(1)
-        live_action = live_base + live_delta
-        actor_loss = -self.critic(live_features, live_action.unsqueeze(1))["output"].mean()
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        actor_loss.backward()
         nn.utils.clip_grad_norm_(self.actor_optimizer.param_groups[0]["params"], self.max_grad_norm)
         self.actor_optimizer.step()
 

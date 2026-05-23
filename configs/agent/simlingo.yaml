@@ -35,8 +35,13 @@ simlingo:
   gamma: 0.99
   tau: 0.005
   exploration_sigma: 0.05
-  replay_capacity: 20000
-  batch_size: 64
+  # Each replay slot also holds a CPU copy of that step's DrivingInput
+  # (camera_images is the dominant term, ~3 MB bfloat16) so the critic
+  # can re-forward the VLM at training time. 1024 ≈ 3 GB CPU RAM.
+  replay_capacity: 1024
+  # Each training step does ``batch_size`` extra VLM forwards on the
+  # re-sampled DrivingInputs — keep this small.
+  batch_size: 4
   learning_starts: 1000
   critic_hidden_dim: 512
   critic_block_num: 1
