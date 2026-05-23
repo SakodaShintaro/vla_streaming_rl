@@ -125,8 +125,16 @@ class DrivingModel(pl.LightningModule):
     ) -> DrivingOutput:
         """
         Samples a trajectory from the model.
+
+        Returns ``(speed_wps, route, language, driving_features)``. The
+        last element is the (B, 30, hidden) slice of the LLM's last
+        hidden state at the waypoint-query positions — i.e. the input
+        to the waypoint MLP heads. It's exposed so downstream RL
+        wrappers can use it as a state vector for a critic without
+        having to re-run the VLM.
         """
         self.speed_wps, self.route, self.language = None, None, []
+        driving_features = None
         try:
             driving_input = example.driving_input
         except AttributeError:
@@ -208,7 +216,7 @@ class DrivingModel(pl.LightningModule):
                 if v is not None:
                     setattr(self, k, v)
 
-        return self.speed_wps, self.route, self.language
+        return self.speed_wps, self.route, self.language, driving_features
 
     def forward_model(
         self,

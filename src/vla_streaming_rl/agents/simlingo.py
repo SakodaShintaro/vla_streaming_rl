@@ -439,7 +439,7 @@ class SimLingoAgent:
         driving_input_kwargs = self._tick(input_data)
 
         model_input = DrivingInput(**driving_input_kwargs)
-        pred_speed_wps, pred_route, _ = self.model(model_input)
+        pred_speed_wps, pred_route, _, _ = self.model(model_input)
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 
