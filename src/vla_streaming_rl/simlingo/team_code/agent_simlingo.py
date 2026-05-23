@@ -4,7 +4,6 @@ partially taken from https://github.com/autonomousvision/carla_garage/blob/leade
 """
 
 import json
-import math
 from collections import deque
 from pathlib import Path
 
@@ -15,7 +14,6 @@ import torch
 from leaderboard.autoagents import autonomous_agent
 from omegaconf import OmegaConf
 from PIL import Image
-from scipy.optimize import fsolve
 from transformers import Qwen2Tokenizer
 
 from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
@@ -226,52 +224,12 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
     def _init(self):
-        # The CARLA leaderboard does not expose the lat lon reference value of the GPS which make it impossible to use the
-        # GPS because the scale is not known. In the past this was not an issue since the reference was constant 0.0
-        # But town 13 has a different value in CARLA 0.9.15. The following code, adapted from Bench2DriveZoo estimates the
-        # lat, lon reference values by abusing the fact that the leaderboard exposes the route plan also in CARLA
-        # coordinates. The GPS plan is compared to the CARLA coordinate plan to estimate the reference point / scale
-        # of the GPS. It seems to work reasonably well, so we use this workaround for now.
-        try:
-            locx, locy = (
-                self._global_plan_world_coord[0][0].location.x,
-                self._global_plan_world_coord[0][0].location.y,
-            )
-            lon, lat = self._global_plan[0][0]["lon"], self._global_plan[0][0]["lat"]
-            earth_radius_equa = 6378137.0  # Constant from CARLA leaderboard GPS simulation
-
-            def equations(variables):
-                x, y = variables
-                eq1 = (
-                    lon * math.cos(x * math.pi / 180.0)
-                    - (locx * x * 180.0) / (math.pi * earth_radius_equa)
-                    - math.cos(x * math.pi / 180.0) * y
-                )
-                eq2 = (
-                    math.log(math.tan((lat + 90.0) * math.pi / 360.0))
-                    * earth_radius_equa
-                    * math.cos(x * math.pi / 180.0)
-                    + locy
-                    - math.cos(x * math.pi / 180.0)
-                    * earth_radius_equa
-                    * math.log(math.tan((90.0 + x) * math.pi / 360.0))
-                )
-                return [eq1, eq2]
-
-            initial_guess = [0.0, 0.0]
-            solution, _, ier, msg = fsolve(equations, initial_guess, full_output=True)
-            if ier != 1:
-                raise RuntimeError(msg)
-            self.lat_ref, self.lon_ref = solution[0], solution[1]
-        except Exception as e:
-            self.lat_ref, self.lon_ref = 0.0, 0.0
         self._route_planner = RoutePlanner(
             self.route_planner_min_distance,
             self.route_planner_max_distance,
-            self.lat_ref,
-            self.lon_ref,
+            self._global_plan,
+            self._global_plan_world_coord,
         )
-        self._route_planner.set_route(self._global_plan, True)
         self.initialized = True
         self.metric_info = {}
 
