@@ -17,7 +17,6 @@ from filterpy.kalman import UnscentedKalmanFilter as UKF
 from leaderboard.autoagents import autonomous_agent
 from omegaconf import OmegaConf
 from PIL import Image, ImageDraw, ImageFont
-from scipy.interpolate import PchipInterpolator
 from scipy.optimize import fsolve
 from transformers import Qwen2Tokenizer
 
@@ -38,7 +37,6 @@ from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
     dynamic_preprocess,
 )
 from vla_streaming_rl.simlingo.team_code.config_simlingo import GlobalConfig
-from vla_streaming_rl.simlingo.team_code.pid_controller import LateralPIDController, PIDController
 from vla_streaming_rl.simlingo.team_code.route_planner import RoutePlanner
 from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     command_to_one_hot,
@@ -49,6 +47,7 @@ from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     preprocess_compass,
     project_points,
 )
+from vla_streaming_rl.simlingo.team_code.trajectory_to_control import TrajectoryToControl
 
 # Configure pytorch for maximum performance
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -154,14 +153,7 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.last_command = -1
         self.last_command_tmp = -1
 
-        self.speed_controller = PIDController(
-            k_p=self.config.speed_kp,
-            k_i=self.config.speed_ki,
-            k_d=self.config.speed_kd,
-            n=self.config.speed_n,
-        )
-
-        self.turn_controller = LateralPIDController(inference_mode=False)
+        self.trajectory_to_control = TrajectoryToControl(self.config)
 
         image_fps = 5
         image_history_length = 1
@@ -781,7 +773,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             # save
             image.save(f"{self.save_path_img}/{self.step}.png")
 
-        steer, throttle, brake = self._control_pid(pred_route, gt_velocity, pred_speed_wps)
+        steer, throttle, brake = self.trajectory_to_control(
+            pred_route, gt_velocity, pred_speed_wps
+        )
 
         # # 0.1 is just an arbitrary low number to threshold when the car is stopped
         if gt_velocity < 0.1:
@@ -818,74 +812,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
             outfile.close()
 
         return control
-
-    def _control_pid(self, route_waypoints, velocity, speed_waypoints):
-        """
-        Predicts vehicle control with a PID controller.
-        Used for waypoint predictions
-        """
-        assert route_waypoints.size(0) == 1
-        route_waypoints = route_waypoints[0].data.cpu().numpy()
-        # ``velocity`` is a ``(1, 1)`` tensor; the legacy
-        # ``velocity[0].cpu().numpy()`` form gives a ``(1,)`` array,
-        # which under NumPy 2.x cascades into ``int(np.array([x]))``
-        # / ``float(np.array([x]))`` failures inside nav_planner and the
-        # speed-PID controller. ``.item()`` on the single-element
-        # tensor coerces to a Python ``float`` once at the boundary.
-        speed = velocity.item()
-        speed_waypoints = speed_waypoints[0].data.cpu().numpy()
-
-        # m / s required to drive
-        one_second = int(
-            self.config.carla_fps // (self.config.wp_dilation * self.config.data_save_freq)
-        )
-        half_second = one_second // 2
-        desired_speed = (
-            np.linalg.norm(speed_waypoints[half_second - 2] - speed_waypoints[one_second - 2]) * 2.0
-        )
-
-        brake = (desired_speed < self.config.brake_speed) or (
-            (speed / desired_speed) > self.config.brake_ratio
-        )
-
-        delta = np.clip(desired_speed - speed, 0.0, self.config.clip_delta)
-        throttle = self.speed_controller.step(delta)
-        throttle = np.clip(throttle, 0.0, self.config.clip_throttle)
-        throttle = throttle if not brake else 0.0
-
-        route_interp = self._interpolate_waypoints(route_waypoints.squeeze())
-
-        steer = self.turn_controller.step(route_interp, speed)
-
-        steer = np.clip(steer, -1.0, 1.0)
-        steer = round(steer, 3)
-
-        return steer, throttle, brake
-
-    # In: Waypoints NxD
-    # Out: Waypoints NxD equally spaced 0.1 across D
-    def _interpolate_waypoints(self, waypoints):
-        waypoints = waypoints.copy()
-        waypoints = np.concatenate((np.zeros_like(waypoints[:1]), waypoints))
-        shift = np.roll(waypoints, 1, axis=0)
-        shift[0] = shift[1]
-
-        dists = np.linalg.norm(waypoints - shift, axis=1)
-        dists = np.cumsum(dists)
-        dists += np.arange(0, len(dists)) * 1e-4  # Prevents dists not being strictly increasing
-
-        interp = PchipInterpolator(dists, waypoints, axis=0)
-
-        x = np.arange(0.1, dists[-1], 0.1)
-
-        interp_points = interp(x)
-
-        # There is a possibility that all points are at 0, meaning there is no point distanced 0.1
-        # In this case we output the last (assumed to be furthest) waypoint.
-        if interp_points.shape[0] == 0:
-            interp_points = waypoints[None, -1]
-
-        return interp_points
 
     def destroy(self, results=None):  # pylint: disable=locally-disabled, unused-argument
         """
