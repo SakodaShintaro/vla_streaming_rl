@@ -65,52 +65,14 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
     _HF_CKPT_NAME = "pytorch_model.pt"
 
     def __init__(self, scratch_dir):
-        # ``AutonomousAgent.__init__`` internally calls
-        # ``self.get_hero()``; our override below short-circuits the
-        # CarlaDataProvider lookup since the env hasn't reset yet at
-        # construction time. Setup (checkpoint load, model build,
-        # PID + UKF wiring) runs right after, so the agent is fully
-        # ready by the time __init__ returns.
+        # ``AutonomousAgent.__init__`` internally calls ``self.get_hero()``;
+        # our override below short-circuits the CarlaDataProvider lookup since
+        # the env hasn't reset yet at construction time.
         super().__init__("", 2000, False)
-        self.setup(str(self._resolve_checkpoint()), scratch_dir)
-
-    def get_hero(self):
-        # Defer the ego lookup — the env-driven handover in the wrapping
-        # ``SimLingoAgent`` sets ``hero_actor`` explicitly once the env
-        # has reset and spawned its ego.
-        self.hero_actor = None
-
-    @classmethod
-    def _resolve_checkpoint(cls):
-        """Pull the SimLingo checkpoint from HF and return its local path.
-
-        ``snapshot_download`` populates the HF cache; we pick the single
-        ``pytorch_model.pt`` inside (excluding the blob-store hardlinks,
-        which point to the same file but live under a content-addressed
-        path that breaks SimLingo's
-        ``Path(...).parent.parent.parent / .hydra/config.yaml`` lookup).
-        """
-        from huggingface_hub import snapshot_download
-
-        snapshot = Path(snapshot_download(cls._HF_REPO_ID))
-        candidates = [p for p in snapshot.rglob(cls._HF_CKPT_NAME) if "/blobs/" not in str(p)]
-        if not candidates:
-            raise RuntimeError(
-                f"no {cls._HF_CKPT_NAME} in HF snapshot of {cls._HF_REPO_ID} at {snapshot}"
-            )
-        return candidates[0]
-
-    def setup(self, checkpoint_path, scratch_dir):
-        """Sets up the agent.
-
-        Args:
-            checkpoint_path: Path to the SimLingo VLM ``pytorch_model.pt``.
-            scratch_dir: Output directory for the agent's per-step metric file.
-        """
 
         torch.cuda.empty_cache()
         self.track = autonomous_agent.Track.SENSORS
-        self.config_path = checkpoint_path
+        self.config_path = str(self._resolve_checkpoint())
         print(f"Config path: {self.config_path}")
         self.step = -1
         self.initialized = False
@@ -217,6 +179,32 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         self.save_path_metric = scratch_dir + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
+
+    def get_hero(self):
+        # Defer the ego lookup — the env-driven handover in the wrapping
+        # ``SimLingoAgent`` sets ``hero_actor`` explicitly once the env
+        # has reset and spawned its ego.
+        self.hero_actor = None
+
+    @classmethod
+    def _resolve_checkpoint(cls):
+        """Pull the SimLingo checkpoint from HF and return its local path.
+
+        ``snapshot_download`` populates the HF cache; we pick the single
+        ``pytorch_model.pt`` inside (excluding the blob-store hardlinks,
+        which point to the same file but live under a content-addressed
+        path that breaks SimLingo's
+        ``Path(...).parent.parent.parent / .hydra/config.yaml`` lookup).
+        """
+        from huggingface_hub import snapshot_download
+
+        snapshot = Path(snapshot_download(cls._HF_REPO_ID))
+        candidates = [p for p in snapshot.rglob(cls._HF_CKPT_NAME) if "/blobs/" not in str(p)]
+        if not candidates:
+            raise RuntimeError(
+                f"no {cls._HF_CKPT_NAME} in HF snapshot of {cls._HF_REPO_ID} at {snapshot}"
+            )
+        return candidates[0]
 
     def _init(self):
         self._route_planner = RoutePlanner(
