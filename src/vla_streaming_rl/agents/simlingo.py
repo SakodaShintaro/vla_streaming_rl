@@ -130,7 +130,7 @@ def _to_device(obj, device):
     if torch.is_tensor(obj):
         return obj.detach().to(device)
     if isinstance(obj, tuple):
-        return tuple(_to_device(x, device) for x in obj)
+        return tuple.__new__(type(obj), (_to_device(x, device) for x in obj))
     if isinstance(obj, list):
         return [_to_device(x, device) for x in obj]
     if isinstance(obj, dict):
