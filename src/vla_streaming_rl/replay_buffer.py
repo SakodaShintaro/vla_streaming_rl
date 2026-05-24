@@ -143,7 +143,9 @@ class ReplayBuffer:
 
         self.task_prompt_token_ids[self.idx].fill_(self.pad_token_id)
         if len(task_prompt_token_ids) > self.max_prompt_tokens:
-            print(f"[WARNING] task_prompt_token_ids exceeds max_prompt_tokens: len={len(task_prompt_token_ids)}, max_prompt_tokens={self.max_prompt_tokens}")
+            print(
+                f"[WARNING] task_prompt_token_ids exceeds max_prompt_tokens: len={len(task_prompt_token_ids)}, max_prompt_tokens={self.max_prompt_tokens}"
+            )
         prompt_len = min(len(task_prompt_token_ids), self.max_prompt_tokens)
         self.task_prompt_token_ids[self.idx, :prompt_len] = torch.tensor(
             task_prompt_token_ids[:prompt_len], dtype=torch.long, device=self.storage_device
@@ -197,5 +199,7 @@ class ReplayBuffer:
             self.log_probs[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.values[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.action_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.task_prompt_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.task_prompt_token_ids[indices]
+            .unsqueeze(0)
+            .to(self.output_device, non_blocking=True),
         )

@@ -19,6 +19,7 @@ We split the cost:
       processor's image-placeholder expansion. This keeps Chain-of-Thought-
       style varying prompts cheap.
 """
+
 from collections.abc import Sequence
 
 import torch
@@ -40,9 +41,7 @@ class VLMInputCache:
         image_mode: str,
     ) -> None:
         if len(observation_shape) != 3:
-            raise ValueError(
-                f"observation_shape must be (C, H, W); got {tuple(observation_shape)}"
-            )
+            raise ValueError(f"observation_shape must be (C, H, W); got {tuple(observation_shape)}")
         if image_mode not in ("mem", "sequence"):
             raise ValueError(f"Unknown image_mode: {image_mode}")
         self.tokenizer = processor.tokenizer
@@ -61,15 +60,13 @@ class VLMInputCache:
         #     constant and we can avoid recomputing it.
         C, H, W = self.observation_shape
         dummy_tensor = torch.zeros(C, H, W, dtype=torch.float32)
-        img_ref = self.image_processor(
-            images=[dummy_tensor], return_tensors="pt", do_rescale=False
-        )
+        img_ref = self.image_processor(images=[dummy_tensor], return_tensors="pt", do_rescale=False)
         single_grid = img_ref["image_grid_thw"].to(device)  # (1, 3)
         self.cached_single_grid = single_grid
         self.cached_all_image_grid_thw = single_grid.repeat(seq_len, 1)
         # Prompt-image grid: 1 row for mem, T rows for sequence (per batch element).
         self.cached_prompt_image_grid_thw = single_grid.repeat(self.num_prompt_images, 1)
-        merge_length = self.image_processor.merge_size ** 2
+        merge_length = self.image_processor.merge_size**2
         self.num_image_tokens = int(single_grid[0].prod().item() // merge_length)
 
         # --- Chat template cache: render the template once with a sentinel
@@ -109,9 +106,7 @@ class VLMInputCache:
         if T != self.seq_len:
             raise ValueError(f"T mismatch: cache expects seq_len={self.seq_len}, got T={T}")
         if len(task_prompts) != B:
-            raise ValueError(
-                f"task_prompts length {len(task_prompts)} != batch size {B}"
-            )
+            raise ValueError(f"task_prompts length {len(task_prompts)} != batch size {B}")
 
         device = images.device
 

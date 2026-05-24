@@ -81,7 +81,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--fps", type=int, default=_WAN_FPS, help="Mp4 playback fps (bench2drive native rate is 10)."
+        "--fps",
+        type=int,
+        default=_WAN_FPS,
+        help="Mp4 playback fps (bench2drive native rate is 10).",
     )
     args = parser.parse_args()
     if args.checkpoint_path is None and args.out_root is None:
@@ -120,7 +123,9 @@ def _per_frame_psnr(pred: np.ndarray, ref: np.ndarray) -> float:
 def _annotate(frame: np.ndarray, label: str) -> np.ndarray:
     out = frame.copy()
     cv2.putText(out, label, (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(out, label, (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(
+        out, label, (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA
+    )
     return out
 
 
@@ -195,13 +200,8 @@ def main() -> None:
             goal_frame_idx = (block_pix - predict_interval) + cycle_step
             target_offset = goal_frame_idx + 1
             label_real = f"real t+{delta}"
-            label_pred = (
-                f"pred {cycle_step}f ago, +{target_offset}f from pred  "
-                f"PSNR {psnr:.1f}dB"
-            )
-            row = np.concatenate(
-                [_annotate(ref, label_real), _annotate(pred, label_pred)], axis=1
-            )
+            label_pred = f"pred {cycle_step}f ago, +{target_offset}f from pred  PSNR {psnr:.1f}dB"
+            row = np.concatenate([_annotate(ref, label_real), _annotate(pred, label_pred)], axis=1)
             compare_frames.append(row)
 
         mean_psnr = float(np.mean(psnrs)) if psnrs else float("nan")

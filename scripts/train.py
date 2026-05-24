@@ -259,8 +259,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             observation_space=env.observation_space,
             action_space=env.action_space,
             env=env,
-            scratch_dir=(result_dir / "simlingo_scratch") if result_dir is not None
-                        else Path("/tmp/simlingo_scratch"),
+            scratch_dir=(result_dir / "simlingo_scratch")
+            if result_dir is not None
+            else Path("/tmp/simlingo_scratch"),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

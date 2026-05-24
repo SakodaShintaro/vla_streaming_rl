@@ -23,6 +23,7 @@ calls so the displayed lookahead stays constant at
 When ``enabled=False``, the heavy world-model pipeline is not loaded and every
 ``step`` call returns a pre-allocated black image.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -127,9 +128,7 @@ class WorldModelGoalPredictor:
         self._step_counter += 1
         return goal
 
-    def _build_pipeline(
-        self, config, checkpoint_path: str | None
-    ) -> CausalInferencePipeline:
+    def _build_pipeline(self, config, checkpoint_path: str | None) -> CausalInferencePipeline:
         from peft import LoraConfig, get_peft_model
 
         # Wan VAE downsamples 8x spatially, so latent dims = pixel dims / 8.
