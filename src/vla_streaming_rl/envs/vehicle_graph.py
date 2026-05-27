@@ -103,8 +103,16 @@ def render_vehicle_graphs(history, panel_w: int, panel_h: int) -> np.ndarray:
 
         # Label
         font_scale = 0.28
-        cv2.putText(img, cfg.label, (2, y0 + graph_h // 2 + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, bgr, 1, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            cfg.label,
+            (2, y0 + graph_h // 2 + 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            bgr,
+            1,
+            cv2.LINE_AA,
+        )
 
         gh = y1 - y0
 
@@ -128,7 +136,9 @@ def render_vehicle_graphs(history, panel_w: int, panel_h: int) -> np.ndarray:
         n = len(data)
         if n >= 2:
             xs = np.linspace(x0, x1, n).astype(np.int32)
-            ys = np.array([val_to_y(float(np.clip(v, cfg.ymin, cfg.ymax))) for v in data], dtype=np.int32)
+            ys = np.array(
+                [val_to_y(float(np.clip(v, cfg.ymin, cfg.ymax))) for v in data], dtype=np.int32
+            )
             pts = np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
             cv2.polylines(img, [pts], isClosed=False, color=bgr, thickness=1, lineType=cv2.LINE_AA)
 

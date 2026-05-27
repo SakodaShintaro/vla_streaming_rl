@@ -91,6 +91,7 @@ class EgoStateFilter:
 
 # --- filter callbacks (module-private) --------------------------------------
 
+
 def _bicycle_model_forward(x, dt, steer, throttle, brake):
     """Kinematic bicycle model — parameters tuned by World-on-Rails."""
     front_wb = -0.090769015

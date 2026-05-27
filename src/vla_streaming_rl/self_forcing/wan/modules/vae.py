@@ -533,9 +533,7 @@ class WanVAE_(nn.Module):
             # 对encode输入的x，按时间拆分为1、4、4、4....
             for i in range(iter_):
                 conv_idx = [0]
-                slice_ = (
-                    x[:, :, :1, :, :] if i == 0 else x[:, :, 1 + 4 * (i - 1) : 1 + 4 * i, :, :]
-                )
+                slice_ = x[:, :, :1, :, :] if i == 0 else x[:, :, 1 + 4 * (i - 1) : 1 + 4 * i, :, :]
                 chunk = self.encoder(slice_, feat_cache=cache, feat_idx=conv_idx)
                 out = chunk if i == 0 else torch.cat([out, chunk], 2)
         else:

@@ -96,9 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-k", "--keys", nargs="+", help="Metric keys to plot (omit to list available keys)"
     )
-    parser.add_argument(
-        "--list", action="store_true", help="List available keys and exit"
-    )
+    parser.add_argument("--list", action="store_true", help="List available keys and exit")
     parser.add_argument(
         "-x",
         "--x-key",
@@ -111,9 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-o", "--output", type=Path, help="Output image path (default: <run_dir>/plot.png)"
     )
-    parser.add_argument(
-        "--show", action="store_true", help="Show the figure interactively"
-    )
+    parser.add_argument("--show", action="store_true", help="Show the figure interactively")
     return parser.parse_args()
 
 

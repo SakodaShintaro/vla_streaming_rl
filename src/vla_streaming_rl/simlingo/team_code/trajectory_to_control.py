@@ -62,15 +62,11 @@ class TrajectoryToControl:
 
         half_second = self._one_second // 2
         desired_speed = (
-            np.linalg.norm(
-                speed_waypoints[half_second - 2] - speed_waypoints[self._one_second - 2]
-            )
+            np.linalg.norm(speed_waypoints[half_second - 2] - speed_waypoints[self._one_second - 2])
             * 2.0
         )
 
-        brake = (desired_speed < self._brake_speed) or (
-            (speed / desired_speed) > self._brake_ratio
-        )
+        brake = (desired_speed < self._brake_speed) or ((speed / desired_speed) > self._brake_ratio)
 
         delta = np.clip(desired_speed - speed, 0.0, self._clip_delta)
         throttle = self.speed_controller.step(delta)

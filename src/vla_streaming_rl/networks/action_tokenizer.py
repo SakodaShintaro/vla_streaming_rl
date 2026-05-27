@@ -27,7 +27,9 @@ if __name__ == "__main__":
 
     print(f"n_bins: {tok.n_bins}")
     print(f"action_token_begin_idx: {tok.action_token_begin_idx}")
-    print(f"token ID range: [{tok.action_token_begin_idx}, {tok.action_token_begin_idx + tok.n_bins - 1}]")
+    print(
+        f"token ID range: [{tok.action_token_begin_idx}, {tok.action_token_begin_idx + tok.n_bins - 1}]"
+    )
     print(f"bin width: {tok.bins[1] - tok.bins[0]:.6f}")
     print()
 

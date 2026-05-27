@@ -7,6 +7,7 @@ and evaluation agents (e.g. the Bench2Drive team-code agent). Nothing here
 touches ``carla.Client`` — only ``carla.Location`` / ``carla.Transform`` are
 referenced as value types, so these helpers stay testable in isolation.
 """
+
 from dataclasses import dataclass
 
 import carla
@@ -96,9 +97,7 @@ class RouteTracker:
         self._segment_t = 0.0
 
     @classmethod
-    def from_raw_waypoints(
-        cls, raw: list[carla.Location], cfg: CARLAObsConfig
-    ) -> "RouteTracker":
+    def from_raw_waypoints(cls, raw: list[carla.Location], cfg: CARLAObsConfig) -> "RouteTracker":
         """Interpolate to ``cfg.num_interp_points`` and wrap in a tracker."""
         arr = np.array([[w.x, w.y, w.z] for w in raw])
         t0 = np.linspace(0, 1, len(arr))
@@ -147,9 +146,7 @@ class RouteTracker:
     def min_distance_to_route(self) -> float:
         return self._min_distance
 
-    def render_overlay(
-        self, vehicle_loc: carla.Location, vehicle_yaw_rad: float
-    ) -> np.ndarray:
+    def render_overlay(self, vehicle_loc: carla.Location, vehicle_yaw_rad: float) -> np.ndarray:
         """Vehicle-centric top-down BGR image, ``(map_size, map_size, 3)`` uint8."""
         cfg = self.cfg
         size = cfg.map_size
