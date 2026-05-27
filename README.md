@@ -68,6 +68,27 @@ The training script (`train_animalai.sh`) expects the binary at
 `configs/env/animalai.yaml` (`env_factory.arena_yaml`); `null` falls back
 to the `GoodGoal_Random.yml` bundled inside the `animalai` package.
 
+### Setup pre-commit hooks
+
+Ruff lint (`--fix`) and ruff-format are applied to `*.py` / `*.pyi` files on every `git commit`.
+
+```bash
+uv tool install pre-commit
+pre-commit install
+```
+
+Useful commands:
+
+```bash
+# Run hooks against all files (not just staged ones).
+pre-commit run --all-files
+
+# Bypass hooks for a single commit.
+git commit --no-verify
+```
+
+If hooks rewrite files, the commit aborts — re-`git add` the changes and commit again.
+
 ## Usage
 
 ### Training
