@@ -1,5 +1,5 @@
 #!/bin/bash
-# SimLingo baseline runner for the Bench2Drive220 sweep.
+# SimLingo zero-shot baseline runner for the Bench2Drive220 sweep.
 # In-repo equivalent of simlingo/scripts/eval_220routes.sh, sharing
 # train.py + CARLALeaderboardEnv + eval_writer with the RL training
 # entry point (train_carla.sh) so the output files match. Same CARLA
@@ -12,6 +12,15 @@
 # info["sensors"], so no external simlingo checkout is referenced.
 # The checkpoint is auto-downloaded from huggingface (RenzKa/simlingo)
 # into the local HF cache on first run.
+#
+# Zero-shot reproduction is achieved by two overrides below:
+#   simlingo.delta_scale=0      → action == base waypoints (the DACER2
+#                                  diffusion policy still samples Δ but
+#                                  it is multiplied by 0).
+#   simlingo.learning_starts=1e9 → replay buffer never trains, so the
+#                                  per-step VLM forward stays the only
+#                                  GPU work and the actor / critic
+#                                  weights remain at their init values.
 set -eux
 
 suffix=${1:-""}
@@ -33,9 +42,10 @@ trap 'kill -TERM -- -$CARLA_PGID 2>/dev/null; kill 0' EXIT
 
 route_xml=${B2D_ROOT}/leaderboard/data/bench2drive220.xml
 
-# Same train.py as train_carla.sh, but with agent=simlingo: zero-shot
-# evaluation, no network/buffer/update; SimLingoAgent consumes the
-# env's info["sensors"] dict each step.
+# Same train.py as train_carla.sh, but with agent=simlingo. The
+# delta_scale=0 + learning_starts=1e9 overrides reduce SimLingoAgent to
+# the upstream pretrained policy (base waypoints → PID), so the eval
+# numbers match a zero-shot run.
 uv run python scripts/train.py \
   agent=simlingo \
   env=carla \
@@ -44,3 +54,5 @@ uv run python scripts/train.py \
   env_factory.sequence_mode=sequential \
   env_factory.start_index=0 \
   env_factory.loop=false \
+  simlingo.delta_scale=0 \
+  simlingo.learning_starts=1000000000 \
