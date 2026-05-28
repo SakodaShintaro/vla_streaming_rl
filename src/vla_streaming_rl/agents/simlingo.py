@@ -423,9 +423,10 @@ class SimLingoAgent:
 
         # Trainer-facing surface (parameter count print + checkpoint).
         self.network = self.model
-        # "none" makes ``normalize`` a clamped identity; ``update`` still
-        # mutates the running stats but nothing reads them.
-        self.reward_processor = RewardProcessor("none", 1.0)
+        # "carla" shapes the per-step Bench2Drive score delta: exact-zero
+        # rewards (stuck) get a small negative push and collision spikes
+        # are hard-clipped to keep the critic stable. See RewardProcessor.
+        self.reward_processor = RewardProcessor("carla", 1.0)
 
     # --- RL-agent protocol surface used by scripts/train.py -----------------
 
@@ -826,6 +827,7 @@ class SimLingoAgent:
         seq = start[:, None] + torch.arange(_SEQ_LEN)[None, :]
         a = self.rb.actions[seq[:, 1]].to(self.device)
         r = self.rb.rewards[seq[:, 1], 0].to(self.device)
+        r = self.reward_processor.normalize(r)
         done = self.rb.dones[seq[:, 1], 0].to(self.device)
 
         # Re-forward the VLM at each replay index. The same forward
