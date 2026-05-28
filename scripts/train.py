@@ -255,7 +255,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     elif args.agent_type == "simlingo":
         from vla_streaming_rl.agents.simlingo import SimLingoAgent
 
-        sl = args.simlingo
         agent = SimLingoAgent(
             observation_space=env.observation_space,
             action_space=env.action_space,
@@ -263,23 +262,23 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             scratch_dir=(result_dir / "simlingo_scratch")
             if result_dir is not None
             else Path("/tmp/simlingo_scratch"),
-            use_lora=bool(sl.use_lora),
-            gamma=float(sl.gamma),
-            tau=float(sl.tau),
-            replay_capacity=int(sl.replay_capacity),
-            batch_size=int(sl.batch_size),
-            learning_starts=int(sl.learning_starts),
-            critic_hidden_dim=int(sl.critic_hidden_dim),
-            critic_block_num=int(sl.critic_block_num),
-            actor_hidden_dim=int(sl.actor_hidden_dim),
-            actor_block_num=int(sl.actor_block_num),
-            denoising_time=float(sl.denoising_time),
-            denoising_steps=int(sl.denoising_steps),
-            dacer_loss_weight=float(sl.dacer_loss_weight),
-            delta_scale=float(sl.delta_scale),
-            actor_lr=float(sl.actor_lr),
-            critic_lr=float(sl.critic_lr),
-            max_grad_norm=float(sl.max_grad_norm),
+            use_lora=bool(args.use_lora),
+            gamma=float(args.gamma),
+            tau=float(args.tau),
+            buffer_size=int(args.buffer_size),
+            batch_size=int(args.batch_size),
+            learning_starts=int(args.learning_starts),
+            critic_hidden_dim=int(args.critic_hidden_dim),
+            critic_block_num=int(args.critic_block_num),
+            actor_hidden_dim=int(args.actor_hidden_dim),
+            actor_block_num=int(args.actor_block_num),
+            denoising_time=float(args.denoising_time),
+            denoising_steps=int(args.denoising_steps),
+            dacer_loss_weight=float(args.dacer_loss_weight),
+            delta_scale=float(args.delta_scale),
+            actor_lr=float(args.actor_lr),
+            critic_lr=float(args.critic_lr),
+            max_grad_norm=float(args.max_grad_norm),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

@@ -222,7 +222,7 @@ class SimLingoAgent:
         use_lora: bool,
         gamma: float,
         tau: float,
-        replay_capacity: int,
+        buffer_size: int,
         batch_size: int,
         learning_starts: int,
         critic_hidden_dim: int,
@@ -393,7 +393,7 @@ class SimLingoAgent:
         # shape-(1,) / 0 / empty dummies so the buffer machinery still
         # type-checks.
         self.rb = ReplayBuffer(
-            size=replay_capacity,
+            size=buffer_size,
             seq_len=_SEQ_LEN,
             obs_shape=(1,),
             obs_z_shape=(1,),
@@ -415,7 +415,7 @@ class SimLingoAgent:
         # ``self._last_driving_input_kwargs``); ``_maybe_train`` pulls
         # them out, moves them back to GPU, and re-runs the VLM so both
         # critic and actor losses flow fresh gradient through LoRA.
-        self._driving_input_buffer: list = [None] * replay_capacity
+        self._driving_input_buffer: list = [None] * buffer_size
         self._last_driving_input_kwargs: dict | None = None
 
         # ``_current_action_taken`` carries the action just selected by

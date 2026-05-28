@@ -27,31 +27,24 @@ agent_type: simlingo
 # env's observation_space). Mirrors cnn_streaming.yaml's choice.
 network_class: actor_critic_with_action_value
 
-simlingo:
-  use_lora: false
-  gamma: 0.99
-  tau: 0.005
-  # Each replay slot also holds a CPU copy of that step's DrivingInput
-  # (camera_images is the dominant term, ~3 MB bfloat16) so the critic
-  # can re-forward the VLM at training time. 1024 ≈ 3 GB CPU RAM.
-  replay_capacity: 1024
-  # Each training step does ``2 * batch_size`` extra VLM forwards on the
-  # re-sampled DrivingInputs (s_t and s_{t+1}) — keep this small.
-  batch_size: 4
-  learning_starts: 1000
-  critic_hidden_dim: 512
-  critic_block_num: 1
-  # DACER2 diffusion-policy hyperparameters (mirror the defaults in
-  # configs/network/base_network.yaml for DiffusionPolicy).
-  actor_hidden_dim: 256
-  actor_block_num: 1
-  denoising_time: 1.0
-  denoising_steps: 4
-  dacer_loss_weight: 0.05
-  # Scale applied to the tanh-bounded Δ before adding to base
-  # waypoints. With δ_scale=0.1 the residual is capped at ±0.1 per
-  # waypoint coord, matching the magnitude that PID can absorb.
-  delta_scale: 0.1
-  actor_lr: 1e-5
-  critic_lr: 1e-4
-  max_grad_norm: 1.0
+# Overrides of base_*/default values consumed by SimLingoAgent.
+batch_size: 4
+learning_starts: 1000
+actor_hidden_dim: 256
+critic_hidden_dim: 512
+denoising_time: 1.0
+denoising_steps: 4
+max_grad_norm: 1.0
+# Each replay slot also holds a CPU copy of that step's DrivingInput
+# (camera_images is the dominant term, ~3 MB bfloat16) so the critic
+# can re-forward the VLM at training time. 1024 ≈ 3 GB CPU RAM.
+buffer_size: 1024
+
+# SimLingo-specific keys (no equivalent in base_* / default).
+tau: 0.005
+# Scale applied to the tanh-bounded Δ before adding to base
+# waypoints. With δ_scale=0.1 the residual is capped at ±0.1 per
+# waypoint coord, matching the magnitude that PID can absorb.
+delta_scale: 0.1
+actor_lr: 1e-5
+critic_lr: 1e-4
