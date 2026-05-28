@@ -125,6 +125,8 @@ class CARLALeaderboardEnv(gym.Env):
         sequence_mode: str,
         start_index: int,
         loop: bool,
+        early_off_route_m: float | None,
+        early_blocked_steps: int | None,
         eval_output_dir: str | None,
     ):
         """Create the env.
@@ -149,6 +151,18 @@ class CARLALeaderboardEnv(gym.Env):
                 exhausted (the Bench2Drive220 fixed-sweep usage). In
                 ``sequence_mode='random'`` the flag is a no-op (random
                 never exhausts) and either value is accepted.
+            early_off_route_m: Tighter analogue of Bench2Drive's InRouteTest
+                (which terminates at 30 m). When set, the env additionally
+                terminates as soon as ``route_tracker.min_distance_to_route``
+                exceeds this value. ``None`` disables the early check (only
+                Bench2Drive's 30 m criterion applies). Useful in single-
+                scenario training loops to cut wasted steps after the agent
+                wanders off.
+            early_blocked_steps: Tighter analogue of Bench2Drive's
+                AgentBlockedTest (which terminates after 60 s = 1200 steps
+                @ 20 FPS under 0.1 m/s). When set, the env additionally
+                terminates after this many *consecutive* steps under
+                0.1 m/s. ``None`` disables the early check.
             eval_output_dir: If set, the env writes Bench2Drive-eval-
                 compatible artifacts (``eval_res/{idx:03d}_res.json``,
                 ``eval_viz/{save_name}/metric_info.json``) under this
@@ -170,6 +184,15 @@ class CARLALeaderboardEnv(gym.Env):
         self._route_id = route_id
         self._tm_port = 8000
         self.runtime: Bench2DriveRuntime | None = None
+
+        # Optional early-termination thresholds (Bench2Drive's
+        # InRouteTest=30m / AgentBlockedTest=60s are also active; these
+        # just trigger sooner). ``_blocked_step_counter`` accumulates
+        # consecutive sub-0.1m/s steps and is reset on every faster step
+        # and on ``reset()``.
+        self._early_off_route_m = early_off_route_m
+        self._early_blocked_steps = early_blocked_steps
+        self._blocked_step_counter = 0
 
         # Observation / action contracts come from carla_obs (shared with the
         # Bench2Drive eval agent so training and eval stay bit-aligned).
@@ -456,6 +479,7 @@ class CARLALeaderboardEnv(gym.Env):
 
         # Initialization
         self.episode_step = 0
+        self._blocked_step_counter = 0
         self.lane_invasion_history = []
         self.infractions = {k: 0 for k in self.infractions}
         self.prev_driving_score = 0.0
@@ -571,6 +595,23 @@ class CARLALeaderboardEnv(gym.Env):
             # so route completion is the only natural end. The
             # max_episode_steps cap below catches everything else.
             terminated = self.route_tracker.route_completion >= 1.0
+
+        # Tighter analogues of Bench2Drive's InRouteTest / AgentBlockedTest
+        # for fast-iteration training. Both mirror the upstream FAILURE
+        # semantics (terminated=True), so the agent learns to avoid them.
+        if (
+            self._early_off_route_m is not None
+            and self.route_tracker.min_distance_to_route > self._early_off_route_m
+        ):
+            terminated = True
+        if self._early_blocked_steps is not None:
+            speed = float(np.linalg.norm(self.vehicle_physics.velocity))
+            if speed < 0.1:
+                self._blocked_step_counter += 1
+                if self._blocked_step_counter >= self._early_blocked_steps:
+                    terminated = True
+            else:
+                self._blocked_step_counter = 0
 
         truncated = self.episode_step >= self.max_episode_steps
 

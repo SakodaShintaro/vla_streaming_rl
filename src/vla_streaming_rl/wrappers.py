@@ -85,6 +85,8 @@ def make_carla_env(
     sequence_mode: str,
     start_index: int,
     loop: bool,
+    early_off_route_m: float | None,
+    early_blocked_steps: int | None,
     eval_output_dir: str | None,
 ) -> gym.Env:
     """Hydra `_target_` factory for the raw CARLA env (no wrappers).
@@ -101,6 +103,8 @@ def make_carla_env(
         sequence_mode=sequence_mode,
         start_index=start_index,
         loop=loop,
+        early_off_route_m=early_off_route_m,
+        early_blocked_steps=early_blocked_steps,
         eval_output_dir=eval_output_dir,
     )
 

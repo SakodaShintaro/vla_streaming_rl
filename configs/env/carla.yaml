@@ -23,6 +23,14 @@ env_factory:
   #   after the last config so training continues indefinitely. Leave
   #   false for the Bench2Drive220 fixed-sweep usage. In random mode
   #   the flag is a no-op (random never exhausts).
+  # - early_off_route_m: tighter analogue of Bench2Drive's InRouteTest
+  #   (30 m). When set, the env terminates as soon as the distance to
+  #   the closest route waypoint exceeds this. null disables it (only
+  #   the upstream 30 m criterion applies).
+  # - early_blocked_steps: tighter analogue of Bench2Drive's
+  #   AgentBlockedTest (60 s = 1200 steps @ 20 FPS under 0.1 m/s).
+  #   Terminates after this many consecutive sub-0.1 m/s steps. null
+  #   disables it.
   #
   # The Bench2Drive eval artifacts (eval_res/, eval_viz/) are written
   # automatically under the Hydra run dir whenever route_xml is set —
@@ -32,3 +40,5 @@ env_factory:
   sequence_mode: random
   start_index: 0
   loop: true
+  early_off_route_m: null
+  early_blocked_steps: null
