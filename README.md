@@ -41,13 +41,9 @@ uv run huggingface-cli login
 
 ### (Optional) Setup CARLA
 
-```bash
-# Download binary from the following URL and extract to $HOME
-https://github.com/carla-simulator/carla/releases
-
-# Install dependencies
-pip install ~/CARLA_0.9.16/PythonAPI/carla/dist/carla-0.9.16-cp310-cp310-manylinux_2_31_x86_64.whl
-```
+`./setup.sh` downloads CARLA 0.9.16 and AdditionalMaps into `$HOME/CARLA_0.9.16`
+and runs `ImportAssets.sh` (~23 GB total, large download). The Python bindings
+are installed via `uv sync` from the wheel referenced in `pyproject.toml`.
 
 ### (Optional) Setup Animal-AI
 
