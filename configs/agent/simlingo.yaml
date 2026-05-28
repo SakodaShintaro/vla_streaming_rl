@@ -46,5 +46,5 @@ tau: 0.005
 # waypoints. With δ_scale=0.1 the residual is capped at ±0.1 per
 # waypoint coord, matching the magnitude that PID can absorb.
 delta_scale: 0.1
-actor_lr: 1e-5
-critic_lr: 1e-4
+actor_lr: 1e-6
+critic_lr: 1e-5
