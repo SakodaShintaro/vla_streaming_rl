@@ -470,7 +470,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             log_episode_writer.writerow(data_dict)
             log_episode_file.flush()
 
-        if episode_id % 5 == 0:
+        if episode_id % args.print_interval == 0:
             print(
                 f"Ep: {episode_id}\tStep: {global_step}\tLast score: {score:.2f}\tAverage score: {recent_average_score:.2f}\tLength: {env_info['episode']['l']:.2f}\tElapsed time: {elapsed_time_hour:.2f}h"
             )
