@@ -262,6 +262,22 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             scratch_dir=(result_dir / "simlingo_scratch")
             if result_dir is not None
             else Path("/tmp/simlingo_scratch"),
+            use_lora=bool(args.use_lora),
+            gamma=float(args.gamma),
+            buffer_size=int(args.buffer_size),
+            batch_size=int(args.batch_size),
+            learning_starts=int(args.learning_starts),
+            critic_hidden_dim=int(args.critic_hidden_dim),
+            critic_block_num=int(args.critic_block_num),
+            actor_hidden_dim=int(args.actor_hidden_dim),
+            actor_block_num=int(args.actor_block_num),
+            denoising_time=float(args.denoising_time),
+            denoising_steps=int(args.denoising_steps),
+            dacer_loss_weight=float(args.dacer_loss_weight),
+            delta_scale=float(args.delta_scale),
+            actor_lr=float(args.actor_lr),
+            critic_lr=float(args.critic_lr),
+            max_grad_norm=float(args.max_grad_norm),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
