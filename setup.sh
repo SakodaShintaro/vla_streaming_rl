@@ -3,8 +3,6 @@ set -eux
 
 cd $(dirname $0)
 
-uv sync
-
 # CARLA 0.9.16 — pyproject.toml references the wheel at
 #   ../../CARLA_0.9.16/PythonAPI/carla/dist/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl
 # so the binary distribution must live at $HOME/CARLA_0.9.16.
