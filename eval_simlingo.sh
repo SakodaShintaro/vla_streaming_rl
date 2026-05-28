@@ -14,13 +14,11 @@
 # into the local HF cache on first run.
 #
 # Zero-shot reproduction is achieved by two overrides below:
-#   simlingo.delta_scale=0      → action == base waypoints (the DACER2
-#                                  diffusion policy still samples Δ but
-#                                  it is multiplied by 0).
-#   simlingo.learning_starts=1e9 → replay buffer never trains, so the
-#                                  per-step VLM forward stays the only
-#                                  GPU work and the actor / critic
-#                                  weights remain at their init values.
+#   delta_scale=0      → action == base waypoints (the DACER2 diffusion
+#                        policy still samples Δ but it is multiplied by 0).
+#   learning_starts=1e9 → replay buffer never trains, so the per-step
+#                        VLM forward stays the only GPU work and the
+#                        actor / critic weights remain at their init values.
 set -eux
 
 suffix=${1:-""}
@@ -54,5 +52,5 @@ uv run python scripts/train.py \
   env_factory.sequence_mode=sequential \
   env_factory.start_index=0 \
   env_factory.loop=false \
-  simlingo.delta_scale=0 \
-  simlingo.learning_starts=1000000000 \
+  delta_scale=0 \
+  learning_starts=1000000000 \
