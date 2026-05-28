@@ -146,7 +146,9 @@ class CARLALeaderboardEnv(gym.Env):
             loop: When ``True`` and ``sequence_mode='sequential'``, wrap
                 the cursor back to 0 after the last config so training
                 runs forever. When ``False``, sequential mode raises once
-                exhausted (the Bench2Drive220 fixed-sweep usage).
+                exhausted (the Bench2Drive220 fixed-sweep usage). In
+                ``sequence_mode='random'`` the flag is a no-op (random
+                never exhausts) and either value is accepted.
             eval_output_dir: If set, the env writes Bench2Drive-eval-
                 compatible artifacts (``eval_res/{idx:03d}_res.json``,
                 ``eval_viz/{save_name}/metric_info.json``) under this

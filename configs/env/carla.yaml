@@ -21,7 +21,8 @@ env_factory:
   #   from a specific position (e.g. after a crash).
   # - loop: when true (sequential only), wraps the cursor back to 0
   #   after the last config so training continues indefinitely. Leave
-  #   false for the Bench2Drive220 fixed-sweep usage.
+  #   false for the Bench2Drive220 fixed-sweep usage. In random mode
+  #   the flag is a no-op (random never exhausts).
   #
   # The Bench2Drive eval artifacts (eval_res/, eval_viz/) are written
   # automatically under the Hydra run dir whenever route_xml is set —

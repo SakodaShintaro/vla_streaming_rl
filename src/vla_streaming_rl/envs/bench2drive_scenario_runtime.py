@@ -75,8 +75,6 @@ class Bench2DriveRuntime:
             raise ValueError(
                 "sequence_mode='sequential' iterates the full XML; route_id must be None"
             )
-        if loop and sequence_mode != "sequential":
-            raise ValueError("loop=True is only meaningful with sequence_mode='sequential'")
 
         self.client = client
         self.traffic_manager_port = traffic_manager_port
