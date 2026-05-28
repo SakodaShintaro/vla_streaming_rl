@@ -37,7 +37,6 @@ re-init) is detected automatically via ``env.unwrapped.vehicle.id``
 changing between ticks.
 """
 
-import copy
 import json
 from pathlib import Path
 
@@ -221,7 +220,6 @@ class SimLingoAgent:
         scratch_dir: Path,
         use_lora: bool,
         gamma: float,
-        tau: float,
         buffer_size: int,
         batch_size: int,
         learning_starts: int,
@@ -245,7 +243,6 @@ class SimLingoAgent:
         scratch_dir.mkdir(parents=True, exist_ok=True)
 
         self.gamma = gamma
-        self.tau = tau
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.delta_scale = delta_scale
@@ -372,9 +369,6 @@ class SimLingoAgent:
             num_bins=1,
             sparsity=0.0,
         ).to(self.device)
-        self.target_critic = copy.deepcopy(self.critic).to(self.device)
-        for p in self.target_critic.parameters():
-            p.requires_grad_(False)
 
         # Filter picks up LoRA params when use_lora=True, otherwise the
         # list reduces to the diffusion policy alone.
@@ -859,7 +853,7 @@ class SimLingoAgent:
         with torch.no_grad():
             delta_next, _ = self.delta_head.get_action(s_next)
             a_next_target = base_next + self.delta_scale * delta_next.squeeze(1)
-            next_q = self.target_critic(s_next, a_next_target.unsqueeze(1))["output"].view(-1)
+            next_q = self.critic(s_next, a_next_target.unsqueeze(1))["output"].view(-1)
             target_q = r + self.gamma * (1.0 - done) * next_q
         current_q = self.critic(s, a.unsqueeze(1))["output"].view(-1)
         critic_loss = nn.functional.mse_loss(current_q, target_q)
@@ -908,11 +902,6 @@ class SimLingoAgent:
         nn.utils.clip_grad_norm_(self.actor_optimizer.param_groups[0]["params"], self.max_grad_norm)
         self.critic_optimizer.step()
         self.actor_optimizer.step()
-
-        # --- Polyak target update -----------------------------------------
-        with torch.no_grad():
-            for tp, sp in zip(self.target_critic.parameters(), self.critic.parameters()):
-                tp.data.mul_(1.0 - self.tau).add_(sp.data, alpha=self.tau)
 
         return {
             "losses/critic_loss": float(critic_loss.item()),

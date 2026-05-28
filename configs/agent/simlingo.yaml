@@ -41,7 +41,6 @@ max_grad_norm: 1.0
 buffer_size: 1024
 
 # SimLingo-specific keys (no equivalent in base_* / default).
-tau: 0.005
 # Scale applied to the tanh-bounded Δ before adding to base
 # waypoints. With δ_scale=0.1 the residual is capped at ±0.1 per
 # waypoint coord, matching the magnitude that PID can absorb.

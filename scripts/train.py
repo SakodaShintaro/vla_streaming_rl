@@ -264,7 +264,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             else Path("/tmp/simlingo_scratch"),
             use_lora=bool(args.use_lora),
             gamma=float(args.gamma),
-            tau=float(args.tau),
             buffer_size=int(args.buffer_size),
             batch_size=int(args.batch_size),
             learning_starts=int(args.learning_starts),
