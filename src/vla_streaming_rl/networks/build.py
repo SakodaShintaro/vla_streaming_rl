@@ -42,6 +42,7 @@ def build_network(
             predictor_hidden_dim=args.predictor_hidden_dim,
             predictor_block_num=args.predictor_block_num,
             disable_state_predictor=args.disable_state_predictor,
+            predictor_type=args.predictor_type,
         )
     elif args.network_class == "actor_critic_with_action_value":
         network = ActorCriticWithActionValue(
@@ -71,6 +72,7 @@ def build_network(
             detach_critic=args.detach_critic,
             detach_predictor=args.detach_predictor,
             disable_state_predictor=args.disable_state_predictor,
+            predictor_type=args.predictor_type,
         )
     elif args.network_class == "vlm_actor_critic_with_action_value":
         network = VLMActorCriticWithActionValue(
@@ -107,6 +109,7 @@ def build_network(
             predictor_block_num=args.predictor_block_num,
             sparsity=args.sparsity,
             image_mode=args.image_mode,
+            predictor_type=args.predictor_type,
         )
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")

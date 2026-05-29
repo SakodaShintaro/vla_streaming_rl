@@ -43,6 +43,7 @@ class ActorCriticWithActionValue(nn.Module):
         detach_critic: bool,
         detach_predictor: bool,
         disable_state_predictor: bool,
+        predictor_type: str,
     ) -> None:
         super().__init__()
         self.gamma = gamma
@@ -129,6 +130,7 @@ class ActorCriticWithActionValue(nn.Module):
             action_dim=self.action_dim,
             predictor_hidden_dim=predictor_hidden_dim,
             predictor_block_num=predictor_block_num,
+            predictor_type=predictor_type,
         )
 
         self.detach_actor = detach_actor
@@ -585,27 +587,11 @@ class ActorCriticWithActionValue(nn.Module):
             [target_state_next, target_reward_next.unsqueeze(1)], dim=1
         )  # (B, H'*W'+1, C')
 
-        # Flow Matching for state prediction
-        x0 = torch.randn_like(x1)
-        shape_t = (x0.shape[0],) + (1,) * (len(x0.shape) - 1)
-        t = torch.rand(shape_t, device=x1.device)
-
-        # Sample from interpolation path for state
-        xt = (1.0 - t) * x0 + t * x1
-
-        # Convert tensors
         curr_state = curr_state.view(B, -1, C)
+        pred_loss, activation, info_dict = self.prediction_head.compute_loss(
+            curr_state, curr_action, x1
+        )
 
-        # Predict velocity for state
-        pred_dict = self.prediction_head.state_predictor.forward(xt, t, curr_state, curr_action)
-        pred_vt = pred_dict["output"]  # (B, H*W, C)
-
-        # Flow Matching loss
-        vt = x1 - x0
-        pred_loss = F.mse_loss(pred_vt, vt)
-
-        activations_dict = {"state_predictor": pred_dict["activation"]}
-
-        info_dict = {"seq_loss": pred_loss.item()}
+        activations_dict = {"state_predictor": activation}
 
         return pred_loss, activations_dict, info_dict

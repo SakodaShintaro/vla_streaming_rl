@@ -39,6 +39,7 @@ class ActorCriticWithStateValue(nn.Module):
         predictor_hidden_dim: int,
         predictor_block_num: int,
         disable_state_predictor: bool,
+        predictor_type: str,
     ) -> None:
         super().__init__()
         self.gamma = gamma
@@ -111,6 +112,7 @@ class ActorCriticWithStateValue(nn.Module):
             action_dim=self.action_dim,
             predictor_hidden_dim=predictor_hidden_dim,
             predictor_block_num=predictor_block_num,
+            predictor_type=predictor_type,
         )
 
         self.disable_state_predictor = disable_state_predictor

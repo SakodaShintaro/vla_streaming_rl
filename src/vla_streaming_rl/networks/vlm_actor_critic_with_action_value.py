@@ -67,6 +67,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         predictor_block_num: int,
         sparsity: float,
         image_mode: str,
+        predictor_type: str,
     ) -> None:
         super().__init__()
         if image_mode not in ("mem", "sequence"):
@@ -166,6 +167,7 @@ class VLMActorCriticWithActionValue(nn.Module):
             action_dim=self.action_dim,
             predictor_hidden_dim=predictor_hidden_dim,
             predictor_block_num=predictor_block_num,
+            predictor_type=predictor_type,
         )
         # Project state output to match FluxDiT context_in_dim
         self.state_to_predictor_proj = nn.Linear(state_out_dim, hidden_image_dim)
@@ -742,21 +744,9 @@ class VLMActorCriticWithActionValue(nn.Module):
             [target_state_next, target_reward_next.unsqueeze(1)], dim=1
         )  # (B, H'*W'+1, C')
 
-        x0 = torch.randn_like(x1)
-        shape_t = (x0.shape[0],) + (1,) * (len(x0.shape) - 1)
-        t = torch.rand(shape_t, device=x1.device)
-
-        xt = (1.0 - t) * x0 + t * x1
-
-        pred_dict = self.prediction_head.state_predictor.forward(
-            xt, t, predictor_state, curr_action
+        pred_loss, activation, info_dict = self.prediction_head.compute_loss(
+            predictor_state, curr_action, x1
         )
-        pred_vt = pred_dict["output"]
 
-        vt = x1 - x0
-        pred_loss = F.mse_loss(pred_vt, vt)
-
-        activations_dict = {"state_predictor": pred_dict["activation"]}
-        info_dict = {"seq_loss": pred_loss.item()}
-
+        activations_dict = {"state_predictor": activation}
         return pred_loss, activations_dict, info_dict

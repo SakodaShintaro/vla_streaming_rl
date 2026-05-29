@@ -8,4 +8,5 @@ separate_critic: 0
 predictor_hidden_dim: 512
 predictor_block_num: 2
 predictor_step_num: 1
+predictor_type: flow_matching
 num_bins: 1
