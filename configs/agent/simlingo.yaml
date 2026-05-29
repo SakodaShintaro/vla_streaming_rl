@@ -29,12 +29,12 @@ network_class: actor_critic_with_action_value
 
 # Overrides of base_*/default values consumed by SimLingoAgent.
 print_interval: 1
-batch_size: 4
-learning_starts: 1000
+batch_size: 1
+learning_starts: 100
 actor_hidden_dim: 256
 critic_hidden_dim: 512
 denoising_time: 1.0
-denoising_steps: 4
+denoising_steps: 1
 max_grad_norm: 1.0
 # Each replay slot also holds a CPU copy of that step's DrivingInput
 # (camera_images is the dominant term, ~3 MB bfloat16) so the critic
