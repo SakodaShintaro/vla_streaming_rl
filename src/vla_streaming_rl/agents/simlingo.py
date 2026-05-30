@@ -20,8 +20,8 @@ Critic update (off-policy, batch from replay):
 Actor update (off-policy, batch from replay):
   Δ ~ π(·|s)
   L_actor = advantage-based loss + DACER2 flow-matching loss
-           (via networks.diffusion_utils.compute_actor_loss_with_dacer)
-  A small wrapper presents Q(s, base + δ_scale * Δ) to that helper, so
+           (via DiffusionPolicy.compute_actor_loss).
+  A small wrapper presents Q(s, base + δ_scale * Δ) to that method, so
   the policy is trained on Δ while Q sees the full action.
 
 VLM gradients only flow when ``use_lora`` is true: peft wraps the
@@ -52,7 +52,6 @@ from PIL import Image
 from torch import nn, optim
 from transformers import Qwen2Tokenizer
 
-from vla_streaming_rl.networks.diffusion_utils import compute_actor_loss_with_dacer
 from vla_streaming_rl.networks.policy_head import DiffusionPolicy
 from vla_streaming_rl.networks.value_head import ActionValueHead
 from vla_streaming_rl.replay_buffer import ReplayBuffer
@@ -164,10 +163,10 @@ def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
 
 class _BasedValueHead:
     """Thin shim around ``ActionValueHead`` that adds a fixed base action
-    before evaluating Q. Lets :func:`compute_actor_loss_with_dacer` treat
-    the policy's tanh-bounded Δ as the action (so the advantage / Q-grad
-    machinery applies cleanly) while the real critic still sees the full
-    ``base + δ_scale * Δ`` action.
+    before evaluating Q. Lets :meth:`DiffusionPolicy.compute_actor_loss`
+    treat the policy's tanh-bounded Δ as the action (so the advantage /
+    Q-grad machinery applies cleanly) while the real critic still sees
+    the full ``base + δ_scale * Δ`` action.
     """
 
     def __init__(
@@ -246,7 +245,6 @@ class SimLingoAgent:
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.delta_scale = delta_scale
-        self.dacer_loss_weight = dacer_loss_weight
         self.max_grad_norm = max_grad_norm
 
         torch.cuda.empty_cache()
@@ -357,6 +355,7 @@ class SimLingoAgent:
             sparsity=0.0,
             horizon=1,
             denoising_steps=denoising_steps,
+            dacer_loss_weight=dacer_loss_weight,
         ).to(self.device)
         # Dueling Q(s, a) head from networks.value_head. ``num_bins=1``
         # collapses the distributional output to a scalar.
@@ -860,8 +859,8 @@ class SimLingoAgent:
         current_q = self.critic(s, a.unsqueeze(1))["output"].view(-1)
         critic_loss = nn.functional.mse_loss(current_q, target_q)
 
-        # --- actor loss (DACER2 via the shared helper) --------------------
-        # ``_BasedValueHead`` lets compute_actor_loss_with_dacer treat the
+        # --- actor loss (delegated to DiffusionPolicy) --------------------
+        # ``_BasedValueHead`` lets DiffusionPolicy.compute_actor_loss treat the
         # tanh-bounded Δ as the action, while the real ``self.critic``
         # still sees ``base + δ_scale * Δ``. ``base_t`` is detached so the
         # advantage gradient flows to Δ (and through state to LoRA), not
@@ -871,22 +870,13 @@ class SimLingoAgent:
             base_action=base_t.detach().unsqueeze(1),
             delta_scale=self.delta_scale,
         )
-        delta_sample, _ = self.delta_head.get_action(s)
-
-        def predict_fn(a_t, t):
-            bs = a_t.size(0)
-            a_flat = a_t.view(bs, -1)
-            result = self.delta_head.forward(a_flat, t, s)
-            return result["output"].view(bs, 1, _ACTION_DIM)
-
-        actor_loss, _, actor_info = compute_actor_loss_with_dacer(
-            state=s,
-            action=delta_sample,
+        actor_loss, _, actor_info = self.delta_head.compute_actor_loss(
+            s,
+            None,
             value_head=based_value_head,
             hl_gauss_loss=None,
             num_bins=1,
-            dacer_loss_weight=self.dacer_loss_weight,
-            predict_fn=predict_fn,
+            detach_actor=False,
         )
 
         # --- backward + optimizer step ------------------------------------

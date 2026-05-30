@@ -7,8 +7,35 @@ from torch.distributions import Beta, Categorical
 from torch.nn import functional as F
 
 from .blocks import SimbaBlock
-from .diffusion_utils import compute_actor_loss_with_dacer, euler_denoise
 from .sparse_utils import apply_one_shot_pruning
+
+
+def _euler_denoise(
+    noise: torch.Tensor,
+    denoising_time: float,
+    denoising_steps: int,
+    predict_fn,
+) -> torch.Tensor:
+    """Euler denoising via flow matching (forward: 0 -> denoising_time).
+
+    Args:
+        predict_fn: callable(x_t, t) -> clean data x_1 (x-prediction).
+            Velocity is derived as v = (x_1_pred - x_t) / (1 - t).
+
+    Returns:
+        tanh(x_T), same shape as noise
+    """
+    x_t = noise
+    dt = denoising_time / denoising_steps
+    time_val = 0.0
+    for _ in range(denoising_steps):
+        t = torch.full((noise.shape[0],), time_val, device=noise.device)
+        pred = predict_fn(x_t, t)
+        denom = max(1e-4, 1.0 - time_val)
+        v = (pred - x_t) / denom
+        x_t = x_t + dt * v
+        time_val += dt
+    return torch.tanh(x_t)
 
 
 class TimestepEmbedder(nn.Module):
@@ -115,7 +142,7 @@ class DiffusionPolicy(nn.Module):
             x_flat = x_t.view(bs, -1)
             return self.forward(x_flat, t, x)["output"].view(bs, self.horizon, self.action_dim)
 
-        action = euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
+        action = _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
         dummy_log_p = torch.zeros((bs, 1), device=x.device)
         return action, dummy_log_p
@@ -125,34 +152,74 @@ class DiffusionPolicy(nn.Module):
         state: torch.Tensor,
         action_chunk: torch.Tensor,
         *,
-        value_head: nn.Module,
+        value_head,
         hl_gauss_loss,
         num_bins: int,
         detach_actor: bool,
     ) -> tuple[torch.Tensor, dict, dict]:
-        """Advantage-maximizing actor loss combined with DACER2 score matching."""
+        """Advantage-maximizing actor loss + DACER2 score matching
+        (https://arxiv.org/abs/2505.23426).
+        """
         del action_chunk
         if detach_actor:
             state = state.detach()
         action, log_pi = self.get_action(state)
-        bs = action.shape[0]
-        actor_activation = {}
+        B, horizon, action_dim = action.shape
+        device = action.device
 
-        def predict_fn(a_t, t):
-            a_flat = a_t.view(bs, -1)
-            result = self.forward(a_flat, t, state)
-            actor_activation["value"] = result["activation"]
-            return result["output"].view(bs, self.horizon, self.action_dim)
+        # Advantage term: maximize E[Q(s, π(s))] via the dueling advantage stream.
+        for param in value_head.parameters():
+            param.requires_grad_(False)
+        advantage_dict = value_head.get_advantage(state, action)
+        advantage = advantage_dict["output"]
+        if num_bins > 1:
+            advantage = hl_gauss_loss(advantage)
+        advantage = advantage.view(-1, 1)
+        actor_loss = -advantage.mean()
+        for param in value_head.parameters():
+            param.requires_grad_(True)
 
-        total_actor_loss, advantage_dict, info_dict = compute_actor_loss_with_dacer(
-            state, action, value_head, hl_gauss_loss, num_bins, self.dacer_loss_weight, predict_fn
-        )
+        # DACER2 score matching: regress the policy's x-prediction onto a
+        # Q-gradient-derived velocity target, with logarithmic time weighting.
+        eps = 1e-4
+        t = torch.rand((B, 1), device=device) * (1 - eps) + eps
+        w_t = torch.exp(0.4 * t + (-1.8))
+
+        actions = action.view(B, -1).clone().detach().requires_grad_(True)
+        actions_chunk = actions.view(B, horizon, action_dim)
+        q_output_dict = value_head(state, actions_chunk)
+        q_values = q_output_dict["output"]
+        if num_bins > 1:
+            q_values = hl_gauss_loss(q_values).unsqueeze(-1)
+        else:
+            q_values = q_values.unsqueeze(-1)
+        q_grad = torch.autograd.grad(q_values.sum(), actions, create_graph=True)[0]
+
+        noise = torch.randn_like(actions).clamp(-3.0, 3.0)
+        a_t = (1.0 - t) * noise + t * actions
+        with torch.no_grad():
+            v_target = (1 - t) / t * q_grad + 1 / t * actions
+            v_target = v_target / (v_target.norm(dim=1, keepdim=True) + 1e-8)
+            v_target = w_t * v_target
+            # Convert to x-space (policy outputs the clean action prediction).
+            target = a_t + (1 - t) * v_target
+
+        pred_dict = self.forward(a_t, t.squeeze(1), state)
+        pred = pred_dict["output"]
+        dacer_loss = F.mse_loss(pred, target)
+        total_loss = actor_loss + dacer_loss * self.dacer_loss_weight
+
         activations_dict = {
-            "actor": actor_activation["value"],
+            "actor": pred_dict["activation"],
             "critic": advantage_dict["activation"],
         }
-        info_dict["log_pi"] = log_pi.mean().item()
-        return total_actor_loss, activations_dict, info_dict
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "dacer_loss": dacer_loss.item(),
+            "advantage": advantage.mean().item(),
+            "log_pi": log_pi.mean().item(),
+        }
+        return total_loss, activations_dict, info_dict
 
 
 class CFGDiffusionPolicy(nn.Module):
@@ -254,7 +321,7 @@ class CFGDiffusionPolicy(nn.Module):
             out = (1 - self.cfgrl_beta) * out_unc + self.cfgrl_beta * out_pos
             return out.view(bs, self.horizon, self.action_dim)
 
-        action = euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
+        action = _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
         dummy_log_p = torch.zeros((bs, 1), device=device)
         return action, dummy_log_p
