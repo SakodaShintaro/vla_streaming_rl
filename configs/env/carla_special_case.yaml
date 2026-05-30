@@ -1,0 +1,15 @@
+# @package _global_
+env_id: CARLA-Leaderboard-v0
+step_limit: 500_000
+render_scale: 0.33
+
+env_factory:
+  _target_: vla_streaming_rl.wrappers.make_carla_env
+
+  route_xml: null
+  route_id: 26950
+  sequence_mode: random
+  start_index: 0
+  loop: true
+  early_off_route_m: 10
+  early_blocked_steps: 200

@@ -46,11 +46,6 @@ route_xml=${B2D_ROOT}/leaderboard/data/bench2drive220.xml
 # numbers match a zero-shot run.
 uv run python scripts/train.py \
   agent=simlingo \
-  env=carla \
+  env=carla_special_case \
   exp_name=simlingo$suffix \
   env_factory.route_xml=${route_xml} \
-  env_factory.sequence_mode=sequential \
-  env_factory.start_index=0 \
-  env_factory.loop=false \
-  delta_scale=0 \
-  learning_starts=1000000000 \

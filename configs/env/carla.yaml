@@ -37,7 +37,7 @@ env_factory:
   # nothing to configure here. weather.xml is picked up next to route_xml.
   route_xml: null
   route_id: null
-  sequence_mode: random
+  sequence_mode: sequential
   start_index: 0
   loop: true
   early_off_route_m: null
