@@ -222,6 +222,78 @@ class CFGDiffusionPolicy(nn.Module):
         return action, dummy_log_p
 
 
+class MeanFlowPolicy(nn.Module):
+    """One-step policy network u_θ(a_t, r, t, s) trained with the SOM objective.
+
+    Inference uses a single network evaluation:
+        a = ε - u_θ(ε, r=0, t=1, s),  ε ~ N(0, I)
+    matching the SOM/MeanFlow convention (t=1 noise, t=0 action).
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        block_num: int,
+        horizon: int,
+        sparsity: float,
+    ) -> None:
+        super().__init__()
+        time_embedding_size = 256
+        self.horizon = horizon
+        self.action_dim = action_dim
+        total_action_dim = action_dim * horizon
+        self.fc_in = nn.Linear(state_dim + total_action_dim + 2 * time_embedding_size, hidden_dim)
+        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.fc_out = nn.Linear(hidden_dim, total_action_dim)
+        self.t_embedder = TimestepEmbedder(time_embedding_size)
+        # Gap (t - r) embedding; at r=t it is r_embedder(0), recovering FM.
+        self.r_embedder = TimestepEmbedder(time_embedding_size)
+        self.sparse_mask = (
+            None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
+        )
+
+    def forward(
+        self,
+        a: torch.Tensor,
+        t: torch.Tensor,
+        r: torch.Tensor,
+        state: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Args:
+        a: noisy action (B, horizon*action_dim).
+        t: upper time (B,) — closer to noise in SOM convention (r ≤ t).
+        r: lower time (B,).
+        state: (B, state_dim).
+        """
+        result_dict = {}
+        t_emb = self.t_embedder(t)
+        r_emb = self.r_embedder(t - r)
+        x = torch.cat([a, t_emb, r_emb, state], 1)
+        x = self.fc_in(x)
+        x = self.fc_mid(x)
+        x = self.norm(x)
+        result_dict["activation"] = x
+        x = self.fc_out(x)
+        result_dict["output"] = x
+        return result_dict
+
+    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        bs = x.size(0)
+        device = x.device
+        eps = torch.randn(bs, self.horizon, self.action_dim, device=device)
+        eps_flat = eps.view(bs, -1)
+        t = torch.ones(bs, device=device)
+        r = torch.zeros(bs, device=device)
+        u = self.forward(eps_flat, t, r, x)["output"]
+        action_flat = eps_flat - u
+        action = torch.tanh(action_flat).view(bs, self.horizon, self.action_dim)
+        dummy_log_p = torch.zeros((bs, 1), device=device)
+        return action, dummy_log_p
+
+
 class BetaPolicy(nn.Module):
     def __init__(self, hidden_dim: int, action_dim: int, horizon: int) -> None:
         super().__init__()

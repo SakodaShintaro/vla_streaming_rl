@@ -7,7 +7,12 @@ from hl_gauss_pytorch import HLGaussLoss
 from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder, TemporalOnlyEncoder
 from vla_streaming_rl.networks.diffusion_utils import compute_actor_loss_with_dacer
 from vla_streaming_rl.networks.image_processor import ImageProcessor
-from vla_streaming_rl.networks.policy_head import BetaPolicy, CFGDiffusionPolicy, DiffusionPolicy
+from vla_streaming_rl.networks.policy_head import (
+    BetaPolicy,
+    CFGDiffusionPolicy,
+    DiffusionPolicy,
+    MeanFlowPolicy,
+)
 from vla_streaming_rl.networks.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.value_head import ActionValueHead, maybe_update_hl_gauss_range
@@ -114,6 +119,15 @@ class ActorCriticWithActionValue(nn.Module):
                 cfgrl_beta=1.5,
                 horizon=horizon,
                 denoising_steps=denoising_steps,
+            )
+        elif self.policy_type == "som":
+            self.policy_head = MeanFlowPolicy(
+                state_dim=self.encoder.output_dim,
+                action_dim=self.action_dim,
+                hidden_dim=actor_hidden_dim,
+                block_num=actor_block_num,
+                horizon=horizon,
+                sparsity=sparsity,
             )
         self.value_head = ActionValueHead(
             in_channels=self.encoder.output_dim,
@@ -238,6 +252,10 @@ class ActorCriticWithActionValue(nn.Module):
             actor_loss, actor_activations, actor_info = self._compute_actor_loss_cfgrl(
                 curr_state, action_chunk
             )
+        elif self.policy_type == "som":
+            actor_loss, actor_activations, actor_info = self._compute_actor_loss_som(
+                curr_state, action_chunk
+            )
         seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, curr_state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
@@ -291,6 +309,10 @@ class ActorCriticWithActionValue(nn.Module):
             actor_loss, actor_activations, actor_info = self._compute_actor_loss_pg(prev_state)
         elif self.policy_type == "cfgrl":
             actor_loss, actor_activations, actor_info = self._compute_actor_loss_cfgrl(
+                prev_state, action_chunk
+            )
+        elif self.policy_type == "som":
+            actor_loss, actor_activations, actor_info = self._compute_actor_loss_som(
                 prev_state, action_chunk
             )
         seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, prev_state)
@@ -556,6 +578,100 @@ class ActorCriticWithActionValue(nn.Module):
             "uncond_ratio": uncond_ratio,
         }
 
+        return actor_loss, activations_dict, info_dict
+
+    def _compute_actor_loss_som(self, curr_state, action_chunk):
+        """Score-based One-step MeanFlow Policy Optimization (SOM, arXiv:2605.23365).
+
+        The target velocity for MeanFlow is derived from the Q-function via an
+        iDEM-style Monte Carlo score estimator over a Boltzmann policy
+        p0(a|s) ∝ exp(α Q(s,a)) under the VP-SDE forward kernel
+        a_t = μ_t a_0 + σ_t ε. The MeanFlow identity is then enforced via a JVP.
+        Convention here matches the SOM paper: t=1 is noise, t=0 is action, r ≤ t.
+        """
+        # Defaults from the SOM paper (Appendix C ablations / Table 3).
+        som_alpha = 1.0
+        som_w = 25.0
+        som_mc_K = 100
+        som_beta_min = 0.1
+        som_beta_max = 20.0
+        if self.detach_actor:
+            curr_state = curr_state.detach()
+        B, horizon, action_dim = action_chunk.shape
+        D = horizon * action_dim
+        device = curr_state.device
+        a0 = action_chunk.view(B, D)
+
+        # Sample time pair: clamp away from boundaries for VP-SDE numerical safety.
+        t_eps = 1e-3
+        t = torch.rand(B, device=device) * (1 - 2 * t_eps) + t_eps
+        r = torch.rand(B, device=device) * t
+        # 25% FM mode (r = t) so the network also learns the boundary case.
+        fm_mask = torch.rand(B, device=device) < 0.25
+        r = torch.where(fm_mask, t, r)
+
+        # VP-SDE coefficients with linear β schedule β(t) = β_min + t(β_max - β_min).
+        int_beta = som_beta_min * t + 0.5 * (som_beta_max - som_beta_min) * t * t
+        mu_t = torch.exp(-0.5 * int_beta)
+        sigma_t = torch.sqrt(1.0 - mu_t * mu_t + 1e-8)
+        beta_t = som_beta_min + t * (som_beta_max - som_beta_min)
+
+        # Forward noising kernel sample.
+        noise = torch.randn(B, D, device=device)
+        at = mu_t.unsqueeze(1) * a0 + sigma_t.unsqueeze(1) * noise
+
+        # === Q-derived score estimator (iDEM, Eq. 5) ===
+        at_grad = at.detach().clone().requires_grad_(True)
+        proposal_std = (sigma_t / mu_t).unsqueeze(0).unsqueeze(2)  # (1, B, 1)
+        delta = torch.randn(som_mc_K, B, D, device=device) * proposal_std
+        a0_proposal = at_grad.unsqueeze(0) / mu_t.unsqueeze(0).unsqueeze(2) + delta
+        state_exp = (
+            curr_state.detach()
+            .unsqueeze(0)
+            .expand(som_mc_K, B, -1)
+            .reshape(-1, curr_state.shape[1])
+        )
+        a0_chunk_mc = a0_proposal.reshape(som_mc_K * B, horizon, action_dim)
+        q_dict = self.value_head(state_exp, a0_chunk_mc)
+        q_vals = q_dict["output"]
+        if self.num_bins > 1:
+            q_vals = self.hl_gauss_loss(q_vals)
+        q_vals = q_vals.view(som_mc_K, B)
+        # GRPO-style batch-wise normalization for scale-invariant training.
+        q_norm = (q_vals - q_vals.mean()) / (q_vals.std() + 1e-6)
+        log_sum_exp = torch.logsumexp(som_alpha * q_norm, dim=0)
+        score = torch.autograd.grad(log_sum_exp.sum(), at_grad, create_graph=False)[0]
+
+        # === PF-ODE target velocity (Eq. 8): unit-normalized score scaled by w ===
+        score_norm = score / (score.norm(dim=1, keepdim=True) + 1e-6)
+        v_t = -0.5 * beta_t.unsqueeze(1) * (at + som_w * score_norm)
+        v_t = v_t.detach()
+
+        # === MeanFlow identity via JVP: du/dt along (at, t) with tangents (v_t, 1) ===
+        def f(at_in: torch.Tensor, t_in: torch.Tensor) -> torch.Tensor:
+            return self.policy_head.forward(at_in, t_in, r, curr_state)["output"]
+
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            u, du_dt = torch.func.jvp(f, (at.detach(), t), (v_t, torch.ones_like(t)))
+
+        gap = (t - r).unsqueeze(1)
+        u_target = v_t - gap * du_dt
+        # Adaptive per-sample weighting (MeanFlow paper) to stabilize (t-r)·du/dt.
+        delta_sq = (u - u_target.detach()).pow(2)
+        w_loss = 1.0 / (delta_sq.detach().mean(dim=1, keepdim=True) + 1e-3)
+        actor_loss = (w_loss * delta_sq).mean()
+
+        activations_dict = {
+            "actor": torch.zeros((B, 1), device=device),
+        }
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "dacer_loss": 0.0,
+            "log_pi": 0.0,
+            "advantage": q_vals.mean().item(),
+            "som_score_norm": score.norm(dim=1).mean().item(),
+            "som_du_dt": du_dt.detach().abs().mean().item(),
+        }
         return actor_loss, activations_dict, info_dict
 
     def _compute_sequence_loss(self, data, curr_state):
