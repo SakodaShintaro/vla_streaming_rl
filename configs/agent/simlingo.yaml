@@ -31,9 +31,9 @@ network_class: actor_critic_with_action_value
 print_interval: 1
 batch_size: 1
 learning_starts: 100
-# Each replay slot also holds a CPU copy of that step's DrivingInput
-# (camera_images is the dominant term, ~3 MB bfloat16) so the critic
-# can re-forward the VLM at training time. 1024 ≈ 3 GB CPU RAM.
+# Each replay slot holds the pooled VLM state + base waypoints + action
+# for that step (a few KB), so the buffer is cheap; the frozen VLM is
+# never re-forwarded at training time.
 buffer_size: 1024
 
 # SimLingo-specific keys (no equivalent in base_* / default).

@@ -24,11 +24,10 @@ Actor update (off-policy, batch from replay):
   A small wrapper presents Q(s, base + δ_scale * Δ) to that method, so
   the policy is trained on Δ while Q sees the full action.
 
-VLM gradients only flow when ``use_lora`` is true: peft wraps the
-SimLingo LLM after the checkpoint load, and both critic and actor losses
-backprop into the LoRA parameters through the re-forwarded state at
-each replay sample. With ``use_lora`` false, the VLM is fully frozen
-and only Δ and Q learn.
+The VLM is fully frozen. ``run_step`` caches the pooled state and base
+waypoints it computes for each tick directly into the replay buffer, so
+training reads ``(state, base, action, reward, done)`` straight from the
+buffer with no VLM re-forward — only Δ and Q learn.
 
 Because the env owns the sensor lifecycle, SimLingoAgent does **not**
 spawn its own multi-camera stack or wire a leaderboard
@@ -47,7 +46,6 @@ import numpy as np
 import torch
 from leaderboard.utils.route_manipulation import downsample_route  # type: ignore
 from omegaconf import OmegaConf
-from peft import LoraConfig, get_peft_model
 from PIL import Image
 from torch import nn, optim
 from transformers import Qwen2Tokenizer
@@ -98,49 +96,6 @@ _ACTION_DIM = (_ROUTE_LEN + _SPEED_WPS_LEN) * _WP_DIM
 # ``off_policy.py`` (``seq_len=self.seq_len + self.horizon``).
 _SEQ_LEN = 1
 _HORIZON = 1
-
-
-def _apply_lora(module: nn.Module) -> nn.Module:
-    """Wrap an nn.Module with peft LoRA adapters (``target_modules="all-linear"``)
-    and return the wrapped model. Logs the trainable-parameter count.
-    """
-    wrapped = get_peft_model(
-        module,
-        LoraConfig(
-            inference_mode=False,
-            r=8,
-            lora_alpha=8,
-            lora_dropout=0.05,
-            target_modules="all-linear",
-        ),
-    )
-    wrapped.print_trainable_parameters()
-    return wrapped
-
-
-def _to_device(obj, device):
-    """Recursively move every Tensor inside ``obj`` to ``device``.
-
-    Handles nested tuples / lists / dicts and dataclass instances (so a
-    ``LanguageLabel`` carrying tensor fields round-trips correctly when
-    we shuffle a ``DrivingInput`` between CPU storage and GPU compute).
-    Non-tensor leaves are returned as-is.
-    """
-    if obj is None:
-        return None
-    if torch.is_tensor(obj):
-        return obj.detach().to(device)
-    if isinstance(obj, tuple):
-        return tuple.__new__(type(obj), (_to_device(x, device) for x in obj))
-    if isinstance(obj, list):
-        return [_to_device(x, device) for x in obj]
-    if isinstance(obj, dict):
-        return {k: _to_device(v, device) for k, v in obj.items()}
-    if hasattr(obj, "__dataclass_fields__"):
-        return type(obj)(
-            **{f: _to_device(getattr(obj, f), device) for f in obj.__dataclass_fields__}
-        )
-    return obj
 
 
 def _waypoints_to_action_vec(route_wps: torch.Tensor, speed_wps: torch.Tensor) -> torch.Tensor:
@@ -199,10 +154,11 @@ class SimLingoAgent:
 
     ``run_step`` is pure inference: VLM forward → base waypoints +
     sampled Δ from the DACER2 diffusion policy → PID. Training is
-    off-policy: ``step`` writes (state, action, reward, done) into the
-    replay buffer plus a CPU copy of the ``DrivingInput`` dict so
-    ``_maybe_train`` can re-forward the VLM at each replay sample and
-    keep critic / actor losses propagating fresh gradients into LoRA.
+    off-policy: ``step`` writes (state, base, action, reward, done) into
+    the replay buffer — the pooled VLM state and base waypoints cached by
+    ``run_step`` go into the obs / obs_z slots — so ``_maybe_train`` reads
+    everything it needs straight from the buffer without re-forwarding the
+    frozen VLM.
     """
 
     def __init__(
@@ -212,7 +168,6 @@ class SimLingoAgent:
         action_space: gym.spaces.Box,
         env: gym.Env,
         scratch_dir: Path,
-        use_lora: bool,
         gamma: float,
         buffer_size: int,
         batch_size: int,
@@ -319,18 +274,12 @@ class SimLingoAgent:
 
         # --- RL setup ---------------------------------------------------
 
-        # Freeze everything by default; LoRA (when enabled) re-introduces
-        # trainable params on both the vision encoder and the LLM —
-        # driving is visually dominated, so adapting the ViT alongside
-        # the language model matters as much as (or more than) just the
-        # LLM. The peft wrap happens AFTER the checkpoint load —
-        # vanilla SimLingo cfg has ``lora=False`` at checkpoint time so
-        # the loaded state_dict has no LoRA tensors.
+        # The VLM is fully frozen: it only serves as a fixed feature /
+        # base-waypoint extractor whose outputs are cached into the
+        # replay buffer at inference time. Only Δ (DiffusionPolicy) and
+        # Q (critic) learn.
         for p in self.network.parameters():
             p.requires_grad_(False)
-        if use_lora:
-            self.network.vision_model = _apply_lora(self.network.vision_model)
-            self.network.language_model.model = _apply_lora(self.network.language_model.model)
 
         # SimLingo runs in bfloat16; the RL heads run in float32 to keep
         # value targets numerically stable.
@@ -360,27 +309,26 @@ class SimLingoAgent:
             sparsity=0.0,
         ).to(self.device)
 
-        # Filter picks up LoRA params when use_lora=True, otherwise the
-        # list reduces to the diffusion policy alone.
-        actor_params = list(self.delta_head.parameters()) + [
-            p for p in self.network.parameters() if p.requires_grad
-        ]
-        self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=0.0)
+        # The frozen VLM contributes no trainable params, so the actor
+        # optimizer owns the diffusion policy alone.
+        self.actor_optimizer = optim.AdamW(
+            self.delta_head.parameters(), lr=actor_lr, weight_decay=0.0
+        )
         self.critic_optimizer = optim.AdamW(
             self.critic.parameters(), lr=critic_lr, weight_decay=0.0
         )
 
-        # Replay slots only carry (action, reward, done); state and base
-        # action are recomputed at training time by re-forwarding the
-        # VLM on the parallel ``_driving_input_buffer``. The unused
-        # slots (obs, obs_z, rnn_state, log_prob, value, token ids) get
-        # shape-(1,) / 0 / empty dummies so the buffer machinery still
-        # type-checks.
+        # ``run_step`` caches each tick's pooled VLM state and base
+        # waypoints; ``step`` stores them in the obs / obs_z slots so
+        # ``_maybe_train`` reads (state, base, action, reward, done)
+        # straight from the buffer. rnn_state / log_prob / value / token
+        # slots stay unused (shape-(1,) / 0 / empty) so the buffer
+        # machinery still type-checks.
         self.rb = ReplayBuffer(
             size=buffer_size,
             seq_len=_SEQ_LEN + _HORIZON,
-            obs_shape=(1,),
-            obs_z_shape=(1,),
+            obs_shape=(feature_dim,),
+            obs_z_shape=(_ACTION_DIM,),
             rnn_state_shape=(1,),
             action_shape=(_ACTION_DIM,),
             output_device=self.device,
@@ -389,23 +337,14 @@ class SimLingoAgent:
             max_prompt_tokens=0,
             pad_token_id=0,
         )
-        self._dummy_obs = torch.zeros(1, device=self.device)
-        self._dummy_obs_z = torch.zeros(1, device=self.device)
         self._dummy_rnn_state = torch.zeros(1, device=self.device)
 
-        # Parallel CPU storage of the ``DrivingInput`` kwargs at each
-        # step, indexed identically to the main replay buffer. ``step``
-        # appends the latest kwargs (captured by ``run_step`` into
-        # ``self._last_driving_input_kwargs``); ``_maybe_train`` pulls
-        # them out, moves them back to GPU, and re-runs the VLM so both
-        # critic and actor losses flow fresh gradient through LoRA.
-        self._driving_input_buffer: list = [None] * buffer_size
-        self._last_driving_input_kwargs: dict | None = None
-
-        # ``_current_action_taken`` carries the action just selected by
-        # ``run_step`` across to the next ``step``, which writes it as
-        # the buffer's ``actions[t]`` (= action that produced state t,
-        # per the project's convention).
+        # ``run_step`` writes the just-computed state / base / action into
+        # these so the next ``step`` can store them at the buffer index
+        # for the current timestep (the project's convention puts the
+        # action that produced state t at ``actions[t]``).
+        self._current_state: torch.Tensor = torch.zeros(feature_dim, device=self.device)
+        self._current_base: torch.Tensor = torch.zeros(_ACTION_DIM, device=self.device)
         self._current_action_taken: torch.Tensor = torch.zeros(_ACTION_DIM, device=self.device)
 
         self._attached_ego_id: int | None = None
@@ -446,12 +385,14 @@ class SimLingoAgent:
         env_action = self._act()
         info = self._build_info(env_action)
 
-        # Add (action_{t-1}, reward, done). Mirrors
-        # off_policy.OffPolicyAgent.select_action's add semantics so
-        # later sampling and indexing match the project convention.
+        # Store (state_t, base_t, action_{t-1}, reward, done). The pooled
+        # VLM state and base waypoints go into the obs / obs_z slots;
+        # ``action_{t-1}`` mirrors off_policy.OffPolicyAgent.select_action's
+        # add semantics so later sampling and indexing match the project
+        # convention.
         self.rb.add(
-            self._dummy_obs,
-            self._dummy_obs_z,
+            self._current_state,
+            self._current_base,
             reward,
             episode_done,
             self._dummy_rnn_state,
@@ -460,12 +401,6 @@ class SimLingoAgent:
             0.0,
             [],
             [],
-        )
-        # Mirror the buffer's write slot in the DrivingInput buffer so
-        # ``_maybe_train`` can re-forward the VLM at the same indices.
-        write_idx = (self.rb.idx - 1) % self.rb.size
-        self._driving_input_buffer[write_idx] = _to_device(
-            self._last_driving_input_kwargs, torch.device("cpu")
         )
 
         info.update(self._maybe_train(global_step))
@@ -738,10 +673,6 @@ class SimLingoAgent:
 
         # _tick runs every step for GPS filtering + DrivingInput refresh.
         driving_input_kwargs = self._tick(input_data)
-        # Capture for the parallel ``_driving_input_buffer`` written by
-        # ``step``; the training loop later re-forwards the VLM on a
-        # CPU-stored copy of this dict to get fresh features + base.
-        self._last_driving_input_kwargs = driving_input_kwargs
 
         model_input = DrivingInput(**driving_input_kwargs)
         pred_speed_wps, pred_route, _, driving_features = self.network(model_input)
@@ -753,6 +684,10 @@ class SimLingoAgent:
         delta_chunk, _ = self.delta_head.get_action(pooled.unsqueeze(0))
         delta = delta_chunk.squeeze(0).squeeze(0)
         action_taken = base_action + self.delta_scale * delta
+        # Cache state + base + action for ``step`` to write into the buffer
+        # at this timestep's index (no VLM re-forward needed at train time).
+        self._current_state = pooled
+        self._current_base = base_action
         self._current_action_taken = action_taken
 
         # Feed the modified waypoints to the deterministic PID.
@@ -807,10 +742,10 @@ class SimLingoAgent:
         if global_step < self.learning_starts:
             return {}
 
-        # Sample transition indices directly so we can mirror them into
-        # the parallel ``_driving_input_buffer``. seq[:, 0] = t,
-        # seq[:, 1] = t+1; the replay convention puts a_t at
-        # actions[t+1], r_t at rewards[t+1], done_t at dones[t+1].
+        # seq[:, 0] = t, seq[:, 1] = t+1; the replay convention puts a_t at
+        # actions[t+1], r_t at rewards[t+1], done_t at dones[t+1]. State and
+        # base waypoints were cached at write time into the obs / obs_z
+        # slots, so a transition reads straight out of the buffer.
         curr_size = self.rb.size if self.rb.full else self.rb.idx
         span = _SEQ_LEN + _HORIZON
         start = torch.randint(0, curr_size - span, (self.batch_size,))
@@ -820,26 +755,10 @@ class SimLingoAgent:
         r = self.reward_processor.normalize(r)
         done = self.rb.dones[seq[:, 1], 0].to(self.device)
 
-        # Re-forward the VLM at each replay index. The same forward
-        # gives both the pooled state and the base waypoints, so
-        # base_t / base_next come "for free" alongside features.
-        states_t = []
-        bases_t = []
-        states_next = []
-        bases_next = []
-        for i_t, i_next in zip(seq[:, 0].tolist(), seq[:, 1].tolist()):
-            di_t = _to_device(self._driving_input_buffer[i_t], self.device)
-            sp_t, rt_t, _, df_t = self.network(DrivingInput(**di_t))
-            states_t.append(df_t.mean(dim=1).squeeze(0).to(torch.float32))
-            bases_t.append(_waypoints_to_action_vec(rt_t.float(), sp_t.float()))
-            di_next = _to_device(self._driving_input_buffer[i_next], self.device)
-            sp_n, rt_n, _, df_n = self.network(DrivingInput(**di_next))
-            states_next.append(df_n.mean(dim=1).squeeze(0).to(torch.float32))
-            bases_next.append(_waypoints_to_action_vec(rt_n.float(), sp_n.float()))
-        s = torch.stack(states_t)
-        base_t = torch.stack(bases_t)
-        s_next = torch.stack(states_next)
-        base_next = torch.stack(bases_next)
+        s = self.rb.observations[seq[:, 0]].to(self.device)
+        base_t = self.rb.obs_z[seq[:, 0]].to(self.device)
+        s_next = self.rb.observations[seq[:, 1]].to(self.device)
+        base_next = self.rb.obs_z[seq[:, 1]].to(self.device)
 
         # --- critic loss --------------------------------------------------
         with torch.no_grad():
@@ -854,8 +773,7 @@ class SimLingoAgent:
         # ``_BasedValueHead`` lets DiffusionPolicy.compute_actor_loss treat the
         # tanh-bounded Δ as the action, while the real ``self.critic``
         # still sees ``base + δ_scale * Δ``. ``base_t`` is detached so the
-        # advantage gradient flows to Δ (and through state to LoRA), not
-        # back through the base path.
+        # advantage gradient flows to Δ only, not back through the base path.
         based_value_head = _BasedValueHead(
             value_head=self.critic,
             base_action=base_t.detach().unsqueeze(1),
@@ -871,13 +789,13 @@ class SimLingoAgent:
         )
 
         # --- backward + optimizer step ------------------------------------
-        # Combined backward: critic_loss + actor_loss share the LoRA
-        # graph via the re-forwarded state, so collapsing them into one
-        # backward pass avoids needing retain_graph. Each optimizer only
-        # owns its slice of parameters, so cross-bleed (e.g. actor's
-        # q-grad path depositing on critic) only affects critic.grad and
-        # is then stepped solely by critic_optimizer — same as a
-        # critic_loss-only update at that magnitude.
+        # Combined backward: states are detached buffer reads, so critic
+        # and actor losses build independent graphs (no shared saved
+        # tensors, no retain_graph). Each optimizer only owns its slice of
+        # parameters, so cross-bleed (the actor's q-grad path depositing on
+        # critic) only affects critic.grad and is then stepped solely by
+        # critic_optimizer — same as a critic_loss-only update at that
+        # magnitude.
         self.critic_optimizer.zero_grad(set_to_none=True)
         self.actor_optimizer.zero_grad(set_to_none=True)
         (critic_loss + actor_loss).backward()
