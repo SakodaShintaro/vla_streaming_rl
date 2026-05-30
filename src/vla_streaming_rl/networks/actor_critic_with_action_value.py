@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from hl_gauss_pytorch import HLGaussLoss
 
 from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder, TemporalOnlyEncoder
-from vla_streaming_rl.networks.diffusion_utils import compute_actor_loss_with_dacer
 from vla_streaming_rl.networks.image_processor import ImageProcessor
 from vla_streaming_rl.networks.policy_head import (
     BetaPolicy,
@@ -55,7 +54,6 @@ class ActorCriticWithActionValue(nn.Module):
         self.num_bins = num_bins
         self.sparsity = sparsity
         self.seq_len = seq_len
-        self.dacer_loss_weight = dacer_loss_weight
         self.critic_loss_weight = critic_loss_weight
 
         self.action_dim = action_space_shape[0]
@@ -101,6 +99,7 @@ class ActorCriticWithActionValue(nn.Module):
                 sparsity=sparsity,
                 horizon=horizon,
                 denoising_steps=denoising_steps,
+                dacer_loss_weight=dacer_loss_weight,
             )
         elif self.policy_type == "beta":
             self.policy_head = BetaPolicy(
@@ -119,6 +118,7 @@ class ActorCriticWithActionValue(nn.Module):
                 cfgrl_beta=1.5,
                 horizon=horizon,
                 denoising_steps=denoising_steps,
+                condition_drop_prob=0.1,
             )
         elif self.policy_type == "som":
             self.policy_head = MeanFlowPolicy(
@@ -129,6 +129,8 @@ class ActorCriticWithActionValue(nn.Module):
                 horizon=horizon,
                 sparsity=sparsity,
             )
+        else:
+            raise ValueError(f"Unknown policy_type: {self.policy_type}")
         self.value_head = ActionValueHead(
             in_channels=self.encoder.output_dim,
             action_dim=self.action_dim,
@@ -150,8 +152,6 @@ class ActorCriticWithActionValue(nn.Module):
         self.detach_actor = detach_actor
         self.detach_critic = detach_critic
         self.detach_predictor = detach_predictor
-        # CFGRL parameters
-        self.condition_drop_prob = 0.1
         self.disable_state_predictor = disable_state_predictor
 
         self.value_range = 1.0
@@ -244,18 +244,14 @@ class ActorCriticWithActionValue(nn.Module):
         critic_loss, critic_activations, critic_info = self._compute_critic_loss(
             curr_state, action_chunk, target_value
         )
-        if self.policy_type == "diffusion":
-            actor_loss, actor_activations, actor_info = self._compute_actor_loss(curr_state)
-        elif self.policy_type == "beta":
-            actor_loss, actor_activations, actor_info = self._compute_actor_loss_pg(curr_state)
-        elif self.policy_type == "cfgrl":
-            actor_loss, actor_activations, actor_info = self._compute_actor_loss_cfgrl(
-                curr_state, action_chunk
-            )
-        elif self.policy_type == "som":
-            actor_loss, actor_activations, actor_info = self._compute_actor_loss_som(
-                curr_state, action_chunk
-            )
+        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+            curr_state,
+            action_chunk,
+            value_head=self.value_head,
+            hl_gauss_loss=self.hl_gauss_loss if self.num_bins > 1 else None,
+            num_bins=self.num_bins,
+            detach_actor=self.detach_actor,
+        )
         seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, curr_state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
@@ -303,18 +299,14 @@ class ActorCriticWithActionValue(nn.Module):
         critic_loss, critic_activations, critic_info = self._compute_critic_loss(
             prev_state, action_chunk, target_value
         )
-        if self.policy_type == "diffusion":
-            actor_loss, actor_activations, actor_info = self._compute_actor_loss(prev_state)
-        elif self.policy_type == "beta":
-            actor_loss, actor_activations, actor_info = self._compute_actor_loss_pg(prev_state)
-        elif self.policy_type == "cfgrl":
-            actor_loss, actor_activations, actor_info = self._compute_actor_loss_cfgrl(
-                prev_state, action_chunk
-            )
-        elif self.policy_type == "som":
-            actor_loss, actor_activations, actor_info = self._compute_actor_loss_som(
-                prev_state, action_chunk
-            )
+        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+            prev_state,
+            action_chunk,
+            value_head=self.value_head,
+            hl_gauss_loss=self.hl_gauss_loss if self.num_bins > 1 else None,
+            num_bins=self.num_bins,
+            detach_actor=self.detach_actor,
+        )
         seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, prev_state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
@@ -437,242 +429,6 @@ class ActorCriticWithActionValue(nn.Module):
         }
 
         return critic_loss, activations_dict, info_dict
-
-    def _compute_actor_loss(self, curr_state):
-        """
-        Args:
-            curr_state: (B, state_dim)
-        """
-        if self.detach_actor:
-            curr_state = curr_state.detach()
-        action, log_pi = self.policy_head.get_action(curr_state)  # (B, horizon, action_dim)
-
-        bs = action.shape[0]
-        actor_activation = {}
-
-        def predict_fn(a_t, t):
-            a_flat = a_t.view(bs, -1)
-            result = self.policy_head.forward(a_flat, t, curr_state)
-            actor_activation["value"] = result["activation"]
-            return result["output"].view(bs, self.horizon, self.action_dim)
-
-        total_actor_loss, advantage_dict, info_dict = compute_actor_loss_with_dacer(
-            curr_state,
-            action,
-            self.value_head,
-            self.hl_gauss_loss if self.num_bins > 1 else None,
-            self.num_bins,
-            self.dacer_loss_weight,
-            predict_fn,
-        )
-
-        activations_dict = {
-            "actor": actor_activation["value"],
-            "critic": advantage_dict["activation"],
-        }
-        info_dict["log_pi"] = log_pi.mean().item()
-
-        return total_actor_loss, activations_dict, info_dict
-
-    def _compute_actor_loss_pg(self, curr_state):
-        if self.detach_actor:
-            curr_state = curr_state.detach()
-
-        policy_output = self.policy_head.forward(curr_state, None)
-        action = policy_output["action"]
-        log_pi = policy_output["a_logp"]
-        entropy = policy_output["entropy"]
-
-        advantage_dict = self.value_head.get_advantage(curr_state, action)
-        advantage = advantage_dict["output"]
-        if self.num_bins > 1:
-            advantage = self.hl_gauss_loss(advantage)
-        advantage = advantage.view(-1, 1)
-
-        actor_loss = -(log_pi * advantage.detach()).mean() - 0.02 * entropy.mean()
-
-        activations_dict = {
-            "actor": policy_output["activation"],
-            "critic": advantage_dict["activation"],
-        }
-
-        info_dict = {
-            "actor_loss": actor_loss.item(),
-            "dacer_loss": 0.0,
-            "log_pi": log_pi.mean().item(),
-            "advantage": advantage.mean().item(),
-            "entropy": entropy.mean().item(),
-        }
-
-        return actor_loss, activations_dict, info_dict
-
-    def _compute_actor_loss_cfgrl(self, curr_state, action_chunk):
-        """
-        CFGRL/pistar06 style conditional supervised learning
-
-        I=1 (positive) if advantage >= threshold, otherwise I=0 (negative)
-        Drop condition with condition_drop_prob probability (I=2, unconditional)
-
-        Args:
-            curr_state: (B, state_dim)
-            action_chunk: (B, horizon, action_dim)
-        """
-        if self.detach_actor:
-            curr_state = curr_state.detach()
-
-        batch_size = curr_state.shape[0]
-        device = curr_state.device
-
-        # Flatten action chunk: (B, horizon, action_dim) -> (B, horizon * action_dim)
-        action_flat = action_chunk.view(batch_size, -1)
-
-        # Calculate advantage and determine condition I
-        with torch.no_grad():
-            advantage_dict = self.value_head.get_advantage(curr_state, action_chunk)
-            advantage = advantage_dict["output"]
-            if self.num_bins > 1:
-                advantage = self.hl_gauss_loss(advantage)
-            advantage = advantage.view(-1)
-
-            # I = 1 if A >= median else 0 (use median as threshold)
-            threshold = advantage.median()
-            condition = (advantage >= threshold).long()
-
-            # Set to unconditional (I=2) with condition_drop_prob probability
-            drop_mask = torch.rand(batch_size, device=device) < self.condition_drop_prob
-            condition = torch.where(drop_mask, torch.full_like(condition, 2), condition)
-
-        # Flow Matching for conditional policy
-        eps = 1e-4
-        t = torch.rand((batch_size, 1), device=device) * (1 - eps) + eps
-
-        # Interpolation from noise to action_flat
-        noise = torch.randn_like(action_flat)
-        noise = torch.clamp(noise, -3.0, 3.0)
-        a_t = (1.0 - t) * noise + t * action_flat
-
-        # Predict conditionally
-        actor_output_dict = self.policy_head.forward(a_t, t.squeeze(1), curr_state, condition)
-        pred = actor_output_dict["output"]
-
-        target = action_flat
-
-        actor_loss = F.mse_loss(pred, target)
-
-        activations_dict = {
-            "actor": actor_output_dict["activation"],
-        }
-
-        # Calculate positive and negative ratios
-        positive_ratio = (condition == 1).float().mean().item()
-        negative_ratio = (condition == 0).float().mean().item()
-        uncond_ratio = (condition == 2).float().mean().item()
-
-        info_dict = {
-            "actor_loss": actor_loss.item(),
-            "dacer_loss": 0.0,
-            "log_pi": 0.0,
-            "advantage": advantage.mean().item(),
-            "positive_ratio": positive_ratio,
-            "negative_ratio": negative_ratio,
-            "uncond_ratio": uncond_ratio,
-        }
-
-        return actor_loss, activations_dict, info_dict
-
-    def _compute_actor_loss_som(self, curr_state, action_chunk):
-        """Score-based One-step MeanFlow Policy Optimization (SOM, arXiv:2605.23365).
-
-        The target velocity for MeanFlow is derived from the Q-function via an
-        iDEM-style Monte Carlo score estimator over a Boltzmann policy
-        p0(a|s) ∝ exp(α Q(s,a)) under the VP-SDE forward kernel
-        a_t = μ_t a_0 + σ_t ε. The MeanFlow identity is then enforced via a JVP.
-        Convention here matches the SOM paper: t=1 is noise, t=0 is action, r ≤ t.
-        """
-        # Defaults from the SOM paper (Appendix C ablations / Table 3).
-        som_alpha = 1.0
-        som_w = 25.0
-        som_mc_K = 100
-        som_beta_min = 0.1
-        som_beta_max = 20.0
-        if self.detach_actor:
-            curr_state = curr_state.detach()
-        B, horizon, action_dim = action_chunk.shape
-        D = horizon * action_dim
-        device = curr_state.device
-        a0 = action_chunk.view(B, D)
-
-        # Sample time pair: clamp away from boundaries for VP-SDE numerical safety.
-        t_eps = 1e-3
-        t = torch.rand(B, device=device) * (1 - 2 * t_eps) + t_eps
-        r = torch.rand(B, device=device) * t
-        # 25% FM mode (r = t) so the network also learns the boundary case.
-        fm_mask = torch.rand(B, device=device) < 0.25
-        r = torch.where(fm_mask, t, r)
-
-        # VP-SDE coefficients with linear β schedule β(t) = β_min + t(β_max - β_min).
-        int_beta = som_beta_min * t + 0.5 * (som_beta_max - som_beta_min) * t * t
-        mu_t = torch.exp(-0.5 * int_beta)
-        sigma_t = torch.sqrt(1.0 - mu_t * mu_t + 1e-8)
-        beta_t = som_beta_min + t * (som_beta_max - som_beta_min)
-
-        # Forward noising kernel sample.
-        noise = torch.randn(B, D, device=device)
-        at = mu_t.unsqueeze(1) * a0 + sigma_t.unsqueeze(1) * noise
-
-        # === Q-derived score estimator (iDEM, Eq. 5) ===
-        at_grad = at.detach().clone().requires_grad_(True)
-        proposal_std = (sigma_t / mu_t).unsqueeze(0).unsqueeze(2)  # (1, B, 1)
-        delta = torch.randn(som_mc_K, B, D, device=device) * proposal_std
-        a0_proposal = at_grad.unsqueeze(0) / mu_t.unsqueeze(0).unsqueeze(2) + delta
-        state_exp = (
-            curr_state.detach()
-            .unsqueeze(0)
-            .expand(som_mc_K, B, -1)
-            .reshape(-1, curr_state.shape[1])
-        )
-        a0_chunk_mc = a0_proposal.reshape(som_mc_K * B, horizon, action_dim)
-        q_dict = self.value_head(state_exp, a0_chunk_mc)
-        q_vals = q_dict["output"]
-        if self.num_bins > 1:
-            q_vals = self.hl_gauss_loss(q_vals)
-        q_vals = q_vals.view(som_mc_K, B)
-        # GRPO-style batch-wise normalization for scale-invariant training.
-        q_norm = (q_vals - q_vals.mean()) / (q_vals.std() + 1e-6)
-        log_sum_exp = torch.logsumexp(som_alpha * q_norm, dim=0)
-        score = torch.autograd.grad(log_sum_exp.sum(), at_grad, create_graph=False)[0]
-
-        # === PF-ODE target velocity (Eq. 8): unit-normalized score scaled by w ===
-        score_norm = score / (score.norm(dim=1, keepdim=True) + 1e-6)
-        v_t = -0.5 * beta_t.unsqueeze(1) * (at + som_w * score_norm)
-        v_t = v_t.detach()
-
-        # === MeanFlow identity via JVP: du/dt along (at, t) with tangents (v_t, 1) ===
-        def f(at_in: torch.Tensor, t_in: torch.Tensor) -> torch.Tensor:
-            return self.policy_head.forward(at_in, t_in, r, curr_state)["output"]
-
-        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-            u, du_dt = torch.func.jvp(f, (at.detach(), t), (v_t, torch.ones_like(t)))
-
-        gap = (t - r).unsqueeze(1)
-        u_target = v_t - gap * du_dt
-        # Adaptive per-sample weighting (MeanFlow paper) to stabilize (t-r)·du/dt.
-        delta_sq = (u - u_target.detach()).pow(2)
-        w_loss = 1.0 / (delta_sq.detach().mean(dim=1, keepdim=True) + 1e-3)
-        actor_loss = (w_loss * delta_sq).mean()
-
-        activations_dict = {
-            "actor": torch.zeros((B, 1), device=device),
-        }
-        info_dict = {
-            "actor_loss": actor_loss.item(),
-            "dacer_loss": 0.0,
-            "log_pi": 0.0,
-            "advantage": q_vals.mean().item(),
-            "som_score_norm": score.norm(dim=1).mean().item(),
-            "som_du_dt": du_dt.detach().abs().mean().item(),
-        }
-        return actor_loss, activations_dict, info_dict
 
     def _compute_sequence_loss(self, data, curr_state):
         if self.disable_state_predictor:

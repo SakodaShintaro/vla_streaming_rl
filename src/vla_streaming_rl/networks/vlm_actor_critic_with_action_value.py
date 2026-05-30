@@ -8,9 +8,8 @@ from hl_gauss_pytorch import HLGaussLoss
 from torch import nn
 from torch.nn import functional as F
 
-from .diffusion_utils import compute_actor_loss_with_dacer
 from .image_processor import ImageProcessor
-from .policy_head import DiffusionPolicy
+from .policy_head import BetaPolicy, CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
 from .prediction_head import StatePredictionHead
 from .reward_processor import RewardProcessor
 from .value_head import ActionValueHead, maybe_update_hl_gauss_range
@@ -68,6 +67,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         sparsity: float,
         image_mode: str,
         predictor_type: str,
+        policy_type: str,
     ) -> None:
         super().__init__()
         if image_mode not in ("mem", "sequence"):
@@ -79,7 +79,6 @@ class VLMActorCriticWithActionValue(nn.Module):
         self.action_dim = action_space_shape[0]
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
-        self.dacer_loss_weight = dacer_loss_weight
         self.text_q_margin = text_q_margin
         self.text_action_mode = text_action_mode
         self.image_mode = image_mode
@@ -138,17 +137,49 @@ class VLMActorCriticWithActionValue(nn.Module):
         # state_dim is determined purely by config.
         state_dim = num_state_queries * state_out_dim
 
-        # Diffusion policy head: action denoising conditioned on state
-        self.policy_head = DiffusionPolicy(
-            state_dim=state_dim,
-            action_dim=self.action_dim,
-            hidden_dim=actor_hidden_dim,
-            block_num=actor_block_num,
-            denoising_time=denoising_time,
-            sparsity=sparsity,
-            horizon=horizon,
-            denoising_steps=denoising_steps,
-        )
+        self.policy_type = policy_type
+        if self.policy_type == "diffusion":
+            self.policy_head = DiffusionPolicy(
+                state_dim=state_dim,
+                action_dim=self.action_dim,
+                hidden_dim=actor_hidden_dim,
+                block_num=actor_block_num,
+                denoising_time=denoising_time,
+                sparsity=sparsity,
+                horizon=horizon,
+                denoising_steps=denoising_steps,
+                dacer_loss_weight=dacer_loss_weight,
+            )
+        elif self.policy_type == "beta":
+            self.policy_head = BetaPolicy(
+                hidden_dim=state_dim,
+                action_dim=self.action_dim,
+                horizon=horizon,
+            )
+        elif self.policy_type == "cfgrl":
+            self.policy_head = CFGDiffusionPolicy(
+                state_dim=state_dim,
+                action_dim=self.action_dim,
+                hidden_dim=actor_hidden_dim,
+                block_num=actor_block_num,
+                denoising_time=denoising_time,
+                sparsity=sparsity,
+                cfgrl_beta=1.5,
+                horizon=horizon,
+                denoising_steps=denoising_steps,
+                condition_drop_prob=0.1,
+            )
+        elif self.policy_type == "som":
+            self.policy_head = MeanFlowPolicy(
+                state_dim=state_dim,
+                action_dim=self.action_dim,
+                hidden_dim=actor_hidden_dim,
+                block_num=actor_block_num,
+                horizon=horizon,
+                sparsity=sparsity,
+            )
+        else:
+            raise ValueError(f"Unknown policy_type: {self.policy_type}")
 
         # Critic: Q(state, action)
         self.value_head = ActionValueHead(
@@ -275,8 +306,14 @@ class VLMActorCriticWithActionValue(nn.Module):
             state, action_chunk, target_value
         )
 
-        # Actor loss (advantage + DACER)
-        actor_loss, actor_activations, actor_info = self._compute_actor_loss(state)
+        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+            state,
+            action_chunk,
+            value_head=self.value_head,
+            hl_gauss_loss=self.hl_gauss_loss if self.num_bins > 1 else None,
+            num_bins=self.num_bins,
+            detach_actor=self.detach_actor,
+        )
 
         # Sequence (state prediction) loss
         seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, state)
@@ -311,8 +348,14 @@ class VLMActorCriticWithActionValue(nn.Module):
             state, action_chunk, target_value
         )
 
-        # Actor loss (advantage + DACER)
-        actor_loss, actor_activations, actor_info = self._compute_actor_loss(state)
+        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+            state,
+            action_chunk,
+            value_head=self.value_head,
+            hl_gauss_loss=self.hl_gauss_loss if self.num_bins > 1 else None,
+            num_bins=self.num_bins,
+            detach_actor=self.detach_actor,
+        )
 
         # Sequence (state prediction) loss
         seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, state)
@@ -676,41 +719,6 @@ class VLMActorCriticWithActionValue(nn.Module):
         }
 
         return critic_loss, activations_dict, info_dict
-
-    def _compute_actor_loss(
-        self,
-        state: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict, dict]:
-        """Advantage-based loss + DACER loss, matching actor_critic_with_action_value."""
-        if self.detach_actor:
-            state = state.detach()
-        action, log_pi = self.policy_head.get_action(state)
-        bs = action.shape[0]
-        actor_activation = {}
-
-        def predict_fn(a_t, t):
-            a_flat = a_t.view(bs, -1)
-            result = self.policy_head.forward(a_flat, t, state)
-            actor_activation["value"] = result["activation"]
-            return result["output"].view(bs, self.horizon, self.action_dim)
-
-        total_actor_loss, advantage_dict, info_dict = compute_actor_loss_with_dacer(
-            state,
-            action,
-            self.value_head,
-            self.hl_gauss_loss if self.num_bins > 1 else None,
-            self.num_bins,
-            self.dacer_loss_weight,
-            predict_fn,
-        )
-
-        activations_dict = {
-            "actor": actor_activation["value"],
-            "critic": advantage_dict["activation"],
-        }
-        info_dict["log_pi"] = log_pi.mean().item()
-
-        return total_actor_loss, activations_dict, info_dict
 
     def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
         """Reshape and project state for StatePredictionHead context."""

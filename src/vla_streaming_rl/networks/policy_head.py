@@ -7,7 +7,7 @@ from torch.distributions import Beta, Categorical
 from torch.nn import functional as F
 
 from .blocks import SimbaBlock
-from .diffusion_utils import euler_denoise
+from .diffusion_utils import compute_actor_loss_with_dacer, euler_denoise
 from .sparse_utils import apply_one_shot_pruning
 
 
@@ -63,6 +63,7 @@ class DiffusionPolicy(nn.Module):
         sparsity: float,
         horizon: int,
         denoising_steps: int,
+        dacer_loss_weight: float,
     ) -> None:
         super().__init__()
         time_embedding_size = 256
@@ -75,6 +76,7 @@ class DiffusionPolicy(nn.Module):
         self.action_dim = action_dim
         self.denoising_steps = denoising_steps
         self.denoising_time = denoising_time
+        self.dacer_loss_weight = dacer_loss_weight
         self.t_embedder = TimestepEmbedder(time_embedding_size)
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
@@ -118,6 +120,40 @@ class DiffusionPolicy(nn.Module):
         dummy_log_p = torch.zeros((bs, 1), device=x.device)
         return action, dummy_log_p
 
+    def compute_actor_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        *,
+        value_head: nn.Module,
+        hl_gauss_loss,
+        num_bins: int,
+        detach_actor: bool,
+    ) -> tuple[torch.Tensor, dict, dict]:
+        """Advantage-maximizing actor loss combined with DACER2 score matching."""
+        del action_chunk
+        if detach_actor:
+            state = state.detach()
+        action, log_pi = self.get_action(state)
+        bs = action.shape[0]
+        actor_activation = {}
+
+        def predict_fn(a_t, t):
+            a_flat = a_t.view(bs, -1)
+            result = self.forward(a_flat, t, state)
+            actor_activation["value"] = result["activation"]
+            return result["output"].view(bs, self.horizon, self.action_dim)
+
+        total_actor_loss, advantage_dict, info_dict = compute_actor_loss_with_dacer(
+            state, action, value_head, hl_gauss_loss, num_bins, self.dacer_loss_weight, predict_fn
+        )
+        activations_dict = {
+            "actor": actor_activation["value"],
+            "critic": advantage_dict["activation"],
+        }
+        info_dict["log_pi"] = log_pi.mean().item()
+        return total_actor_loss, activations_dict, info_dict
+
 
 class CFGDiffusionPolicy(nn.Module):
     """
@@ -138,9 +174,11 @@ class CFGDiffusionPolicy(nn.Module):
         cfgrl_beta: float,
         horizon: int,
         denoising_steps: int,
+        condition_drop_prob: float,
     ) -> None:
         super().__init__()
         self.cfgrl_beta = cfgrl_beta
+        self.condition_drop_prob = condition_drop_prob
         self.horizon = horizon
         time_embedding_size = 256
         condition_embedding_size = 64
@@ -221,6 +259,58 @@ class CFGDiffusionPolicy(nn.Module):
         dummy_log_p = torch.zeros((bs, 1), device=device)
         return action, dummy_log_p
 
+    def compute_actor_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        *,
+        value_head: nn.Module,
+        hl_gauss_loss,
+        num_bins: int,
+        detach_actor: bool,
+    ) -> tuple[torch.Tensor, dict, dict]:
+        """CFGRL/pistar06: condition on advantage sign, drop with condition_drop_prob."""
+        if detach_actor:
+            state = state.detach()
+        batch_size = state.shape[0]
+        device = state.device
+        action_flat = action_chunk.view(batch_size, -1)
+
+        with torch.no_grad():
+            advantage_dict = value_head.get_advantage(state, action_chunk)
+            advantage = advantage_dict["output"]
+            if num_bins > 1:
+                advantage = hl_gauss_loss(advantage)
+            advantage = advantage.view(-1)
+            threshold = advantage.median()
+            condition = (advantage >= threshold).long()
+            drop_mask = torch.rand(batch_size, device=device) < self.condition_drop_prob
+            condition = torch.where(drop_mask, torch.full_like(condition, 2), condition)
+
+        eps = 1e-4
+        t = torch.rand((batch_size, 1), device=device) * (1 - eps) + eps
+        noise = torch.randn_like(action_flat)
+        noise = torch.clamp(noise, -3.0, 3.0)
+        a_t = (1.0 - t) * noise + t * action_flat
+        actor_output_dict = self.forward(a_t, t.squeeze(1), state, condition)
+        pred = actor_output_dict["output"]
+        actor_loss = F.mse_loss(pred, action_flat)
+
+        positive_ratio = (condition == 1).float().mean().item()
+        negative_ratio = (condition == 0).float().mean().item()
+        uncond_ratio = (condition == 2).float().mean().item()
+        activations_dict = {"actor": actor_output_dict["activation"]}
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "dacer_loss": 0.0,
+            "log_pi": 0.0,
+            "advantage": advantage.mean().item(),
+            "positive_ratio": positive_ratio,
+            "negative_ratio": negative_ratio,
+            "uncond_ratio": uncond_ratio,
+        }
+        return actor_loss, activations_dict, info_dict
+
 
 class MeanFlowPolicy(nn.Module):
     """One-step policy network u_θ(a_t, r, t, s) trained with the SOM objective.
@@ -293,6 +383,103 @@ class MeanFlowPolicy(nn.Module):
         dummy_log_p = torch.zeros((bs, 1), device=device)
         return action, dummy_log_p
 
+    def compute_actor_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        *,
+        value_head: nn.Module,
+        hl_gauss_loss,
+        num_bins: int,
+        detach_actor: bool,
+    ) -> tuple[torch.Tensor, dict, dict]:
+        """Score-based One-step MeanFlow Policy Optimization (SOM, arXiv:2605.23365).
+
+        The target velocity for MeanFlow is derived from the Q-function via an
+        iDEM-style Monte Carlo score estimator over a Boltzmann policy
+        p0(a|s) ∝ exp(α Q(s,a)) under the VP-SDE forward kernel
+        a_t = μ_t a_0 + σ_t ε. The MeanFlow identity is then enforced via a JVP.
+        Convention here matches the SOM paper: t=1 is noise, t=0 is action, r ≤ t.
+        """
+        # Defaults from the SOM paper (Appendix C ablations / Table 3).
+        som_alpha = 1.0
+        som_w = 25.0
+        som_mc_K = 100
+        som_beta_min = 0.1
+        som_beta_max = 20.0
+
+        if detach_actor:
+            state = state.detach()
+        B, horizon, action_dim = action_chunk.shape
+        D = horizon * action_dim
+        device = state.device
+        a0 = action_chunk.view(B, D)
+
+        # Sample time pair: clamp away from boundaries for VP-SDE numerical safety.
+        t_eps = 1e-3
+        t = torch.rand(B, device=device) * (1 - 2 * t_eps) + t_eps
+        r = torch.rand(B, device=device) * t
+        # 25% FM mode (r = t) so the network also learns the boundary case.
+        fm_mask = torch.rand(B, device=device) < 0.25
+        r = torch.where(fm_mask, t, r)
+
+        # VP-SDE coefficients with linear β schedule β(t) = β_min + t(β_max - β_min).
+        int_beta = som_beta_min * t + 0.5 * (som_beta_max - som_beta_min) * t * t
+        mu_t = torch.exp(-0.5 * int_beta)
+        sigma_t = torch.sqrt(1.0 - mu_t * mu_t + 1e-8)
+        beta_t = som_beta_min + t * (som_beta_max - som_beta_min)
+
+        # Forward noising kernel sample.
+        noise = torch.randn(B, D, device=device)
+        at = mu_t.unsqueeze(1) * a0 + sigma_t.unsqueeze(1) * noise
+
+        # === Q-derived score estimator (iDEM, Eq. 5) ===
+        at_grad = at.detach().clone().requires_grad_(True)
+        proposal_std = (sigma_t / mu_t).unsqueeze(0).unsqueeze(2)  # (1, B, 1)
+        delta = torch.randn(som_mc_K, B, D, device=device) * proposal_std
+        a0_proposal = at_grad.unsqueeze(0) / mu_t.unsqueeze(0).unsqueeze(2) + delta
+        state_exp = state.detach().unsqueeze(0).expand(som_mc_K, B, -1).reshape(-1, state.shape[1])
+        a0_chunk_mc = a0_proposal.reshape(som_mc_K * B, horizon, action_dim)
+        q_dict = value_head(state_exp, a0_chunk_mc)
+        q_vals = q_dict["output"]
+        if num_bins > 1:
+            q_vals = hl_gauss_loss(q_vals)
+        q_vals = q_vals.view(som_mc_K, B)
+        # GRPO-style batch-wise normalization for scale-invariant training.
+        q_norm = (q_vals - q_vals.mean()) / (q_vals.std() + 1e-6)
+        log_sum_exp = torch.logsumexp(som_alpha * q_norm, dim=0)
+        score = torch.autograd.grad(log_sum_exp.sum(), at_grad, create_graph=False)[0]
+
+        # === PF-ODE target velocity (Eq. 8): unit-normalized score scaled by w ===
+        score_norm = score / (score.norm(dim=1, keepdim=True) + 1e-6)
+        v_t = -0.5 * beta_t.unsqueeze(1) * (at + som_w * score_norm)
+        v_t = v_t.detach()
+
+        # === MeanFlow identity via JVP: du/dt along (at, t) with tangents (v_t, 1) ===
+        def f(at_in: torch.Tensor, t_in: torch.Tensor) -> torch.Tensor:
+            return self.forward(at_in, t_in, r, state)["output"]
+
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            u, du_dt = torch.func.jvp(f, (at.detach(), t), (v_t, torch.ones_like(t)))
+
+        gap = (t - r).unsqueeze(1)
+        u_target = v_t - gap * du_dt
+        # Adaptive per-sample weighting (MeanFlow paper) to stabilize (t-r)·du/dt.
+        delta_sq = (u - u_target.detach()).pow(2)
+        w_loss = 1.0 / (delta_sq.detach().mean(dim=1, keepdim=True) + 1e-3)
+        actor_loss = (w_loss * delta_sq).mean()
+
+        activations_dict = {"actor": torch.zeros((B, 1), device=device)}
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "dacer_loss": 0.0,
+            "log_pi": 0.0,
+            "advantage": q_vals.mean().item(),
+            "som_score_norm": score.norm(dim=1).mean().item(),
+            "som_du_dt": du_dt.detach().abs().mean().item(),
+        }
+        return actor_loss, activations_dict, info_dict
+
 
 class BetaPolicy(nn.Module):
     def __init__(self, hidden_dim: int, action_dim: int, horizon: int) -> None:
@@ -344,6 +531,45 @@ class BetaPolicy(nn.Module):
     def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         result = self.forward(x, None)
         return result["action"], result["a_logp"]
+
+    def compute_actor_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        *,
+        value_head: nn.Module,
+        hl_gauss_loss,
+        num_bins: int,
+        detach_actor: bool,
+    ) -> tuple[torch.Tensor, dict, dict]:
+        """REINFORCE-style policy-gradient loss used inside ActorCriticWithActionValue."""
+        del action_chunk
+        if detach_actor:
+            state = state.detach()
+        policy_output = self.forward(state, None)
+        action = policy_output["action"]
+        log_pi = policy_output["a_logp"]
+        entropy = policy_output["entropy"]
+
+        advantage_dict = value_head.get_advantage(state, action)
+        advantage = advantage_dict["output"]
+        if num_bins > 1:
+            advantage = hl_gauss_loss(advantage)
+        advantage = advantage.view(-1, 1)
+        actor_loss = -(log_pi * advantage.detach()).mean() - 0.02 * entropy.mean()
+
+        activations_dict = {
+            "actor": policy_output["activation"],
+            "critic": advantage_dict["activation"],
+        }
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "dacer_loss": 0.0,
+            "log_pi": log_pi.mean().item(),
+            "advantage": advantage.mean().item(),
+            "entropy": entropy.mean().item(),
+        }
+        return actor_loss, activations_dict, info_dict
 
 
 class CategoricalPolicy(nn.Module):

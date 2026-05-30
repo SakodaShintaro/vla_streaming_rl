@@ -110,6 +110,7 @@ def build_network(
             sparsity=args.sparsity,
             image_mode=args.image_mode,
             predictor_type=args.predictor_type,
+            policy_type=args.policy_type,
         )
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
