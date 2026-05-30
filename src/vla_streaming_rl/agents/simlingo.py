@@ -296,14 +296,14 @@ class SimLingoAgent:
         # it also frees us from having to rewrite stale absolute module
         # paths in the saved checkpoint config.
         model_kwargs = {k: v for k, v in cfg.model.items() if k != "_target_"}
-        self.model = DrivingModel(
+        self.network = DrivingModel(
             cfg_data_module=cfg.data_module,
             processor=tokenizer,
             cache_dir=cache_dir,
             **model_kwargs,
         ).to(self.device)
         torch.set_default_dtype(default_dtype)
-        self.model.load_state_dict(torch.load(config_path))
+        self.network.load_state_dict(torch.load(config_path))
 
         self.T = 1
         self.stuck_detector = 0
@@ -326,15 +326,15 @@ class SimLingoAgent:
         # LLM. The peft wrap happens AFTER the checkpoint load —
         # vanilla SimLingo cfg has ``lora=False`` at checkpoint time so
         # the loaded state_dict has no LoRA tensors.
-        for p in self.model.parameters():
+        for p in self.network.parameters():
             p.requires_grad_(False)
         if use_lora:
-            self.model.vision_model = _apply_lora(self.model.vision_model)
-            self.model.language_model.model = _apply_lora(self.model.language_model.model)
+            self.network.vision_model = _apply_lora(self.network.vision_model)
+            self.network.language_model.model = _apply_lora(self.network.language_model.model)
 
         # SimLingo runs in bfloat16; the RL heads run in float32 to keep
         # value targets numerically stable.
-        feature_dim = int(self.model.language_model.hidden_size)
+        feature_dim = int(self.network.language_model.hidden_size)
         # DACER2 flow-matching policy that produces a tanh-bounded Δ.
         # The actual action sent to PID is ``base + delta_scale * Δ``.
         self.delta_head = DiffusionPolicy(
@@ -363,7 +363,7 @@ class SimLingoAgent:
         # Filter picks up LoRA params when use_lora=True, otherwise the
         # list reduces to the diffusion policy alone.
         actor_params = list(self.delta_head.parameters()) + [
-            p for p in self.model.parameters() if p.requires_grad
+            p for p in self.network.parameters() if p.requires_grad
         ]
         self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=0.0)
         self.critic_optimizer = optim.AdamW(
@@ -411,8 +411,6 @@ class SimLingoAgent:
         self._attached_ego_id: int | None = None
         self._prev_action = torch.zeros(_ACTION_DIM, device=self.device)
 
-        # Trainer-facing surface (parameter count print + checkpoint).
-        self.network = self.model
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
         # rewards (stuck) get a small negative push and collision spikes
         # are hard-clipped to keep the critic stable. See RewardProcessor.
@@ -746,7 +744,7 @@ class SimLingoAgent:
         self._last_driving_input_kwargs = driving_input_kwargs
 
         model_input = DrivingInput(**driving_input_kwargs)
-        pred_speed_wps, pred_route, _, driving_features = self.model(model_input)
+        pred_speed_wps, pred_route, _, driving_features = self.network(model_input)
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 
@@ -831,11 +829,11 @@ class SimLingoAgent:
         bases_next = []
         for i_t, i_next in zip(seq[:, 0].tolist(), seq[:, 1].tolist()):
             di_t = _to_device(self._driving_input_buffer[i_t], self.device)
-            sp_t, rt_t, _, df_t = self.model(DrivingInput(**di_t))
+            sp_t, rt_t, _, df_t = self.network(DrivingInput(**di_t))
             states_t.append(df_t.mean(dim=1).squeeze(0).to(torch.float32))
             bases_t.append(_waypoints_to_action_vec(rt_t.float(), sp_t.float()))
             di_next = _to_device(self._driving_input_buffer[i_next], self.device)
-            sp_n, rt_n, _, df_n = self.model(DrivingInput(**di_next))
+            sp_n, rt_n, _, df_n = self.network(DrivingInput(**di_next))
             states_next.append(df_n.mean(dim=1).squeeze(0).to(torch.float32))
             bases_next.append(_waypoints_to_action_vec(rt_n.float(), sp_n.float()))
         s = torch.stack(states_t)
