@@ -45,7 +45,7 @@ import cv2
 import gymnasium as gym
 import numpy as np
 import torch
-from leaderboard.utils.route_manipulation import downsample_route
+from leaderboard.utils.route_manipulation import downsample_route  # type: ignore
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from PIL import Image
@@ -139,17 +139,11 @@ def _to_device(obj, device):
     return obj
 
 
-def _waypoints_to_action_vec(route: torch.Tensor, speed_wps: torch.Tensor) -> torch.Tensor:
+def _waypoints_to_action_vec(route_wps: torch.Tensor, speed_wps: torch.Tensor) -> torch.Tensor:
     """Flatten one sample's (1, R, 2) + (1, S, 2) waypoints to a 1-D
     action vector of length (R+S)*2 in float32.
     """
-    return torch.cat([route.reshape(-1), speed_wps.reshape(-1)], dim=0).to(torch.float32)
-
-
-def _waypoints_batch_to_action_vec(route: torch.Tensor, speed_wps: torch.Tensor) -> torch.Tensor:
-    """Batch version of the above: (B, R, 2) + (B, S, 2) → (B, (R+S)*2)."""
-    bs = route.shape[0]
-    return torch.cat([route.reshape(bs, -1), speed_wps.reshape(bs, -1)], dim=1).to(torch.float32)
+    return torch.cat([route_wps.reshape(-1), speed_wps.reshape(-1)], dim=0).to(torch.float32)
 
 
 def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -207,9 +201,6 @@ class SimLingoAgent:
     keep critic / actor losses propagating fresh gradients into LoRA.
     """
 
-    _HF_REPO_ID = "RenzKa/simlingo"
-    _HF_CKPT_NAME = "pytorch_model.pt"
-
     def __init__(
         self,
         *,
@@ -235,11 +226,13 @@ class SimLingoAgent:
         max_grad_norm: float,
     ) -> None:
         self.observation_space = observation_space
-        self.action_space = action_space
+        del action_space
         self._env_unwrapped = env.unwrapped
 
         scratch_dir = Path(scratch_dir)
         scratch_dir.mkdir(parents=True, exist_ok=True)
+        self.save_path_metric = str(scratch_dir) + "/metric"
+        Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
         self.gamma = gamma
         self.batch_size = batch_size
@@ -274,10 +267,7 @@ class SimLingoAgent:
         self.cfg = cfg
         self.cfg.model.vision_model.use_global_img = cfg.data_module.use_global_img
 
-        # ``AutoProcessor`` + ``trust_remote_code=True`` resolves to
-        # ``Qwen2Tokenizer`` for InternVL2-1B (the custom remote processor
-        # class isn't actually used downstream). Name the concrete class
-        # directly so we don't depend on HF-hosted remote code.
+        # tokenizer
         tokenizer = Qwen2Tokenizer.from_pretrained(cfg.model.vision_model.variant)
         tokenizer.add_special_tokens(
             {"additional_special_tokens": list(SIMLINGO_ADDITIONAL_SPECIAL_TOKENS)}
@@ -322,9 +312,6 @@ class SimLingoAgent:
             num_image_token=num_image_token,
             device=self.device,
         )
-
-        self.save_path_metric = str(scratch_dir) + "/metric"
-        Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
         # --- RL setup ---------------------------------------------------
 
@@ -551,12 +538,13 @@ class SimLingoAgent:
         """
         from huggingface_hub import snapshot_download
 
-        snapshot = Path(snapshot_download(cls._HF_REPO_ID))
-        candidates = [p for p in snapshot.rglob(cls._HF_CKPT_NAME) if "/blobs/" not in str(p)]
+        _HF_REPO_ID = "RenzKa/simlingo"
+        _HF_CKPT_NAME = "pytorch_model.pt"
+
+        snapshot = Path(snapshot_download(_HF_REPO_ID))
+        candidates = [p for p in snapshot.rglob(_HF_CKPT_NAME) if "/blobs/" not in str(p)]
         if not candidates:
-            raise RuntimeError(
-                f"no {cls._HF_CKPT_NAME} in HF snapshot of {cls._HF_REPO_ID} at {snapshot}"
-            )
+            raise RuntimeError(f"no {_HF_CKPT_NAME} in HF snapshot of {_HF_REPO_ID} at {snapshot}")
         return candidates[0]
 
     def _init(self) -> None:
