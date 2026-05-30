@@ -31,11 +31,6 @@ network_class: actor_critic_with_action_value
 print_interval: 1
 batch_size: 1
 learning_starts: 100
-actor_hidden_dim: 256
-critic_hidden_dim: 512
-denoising_time: 1.0
-denoising_steps: 1
-max_grad_norm: 1.0
 # Each replay slot also holds a CPU copy of that step's DrivingInput
 # (camera_images is the dominant term, ~3 MB bfloat16) so the critic
 # can re-forward the VLM at training time. 1024 ≈ 3 GB CPU RAM.
