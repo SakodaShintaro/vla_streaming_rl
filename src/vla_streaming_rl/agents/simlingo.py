@@ -92,8 +92,12 @@ _SPEED_WPS_LEN = 10
 _WP_DIM = 2
 _ACTION_DIM = (_ROUTE_LEN + _SPEED_WPS_LEN) * _WP_DIM
 
-# Standard off-policy target needs two contiguous indices (s_t, s_{t+1}).
-_SEQ_LEN = 2
+# Single-frame VLM input (seq_len=1) with a one-step bootstrap horizon, so the
+# replay buffer needs ``_SEQ_LEN + _HORIZON`` contiguous indices per sample to
+# form an off-policy transition (s_t, s_{t+1}) -- same convention as
+# ``off_policy.py`` (``seq_len=self.seq_len + self.horizon``).
+_SEQ_LEN = 1
+_HORIZON = 1
 
 
 def _apply_lora(module: nn.Module) -> nn.Module:
@@ -374,7 +378,7 @@ class SimLingoAgent:
         # type-checks.
         self.rb = ReplayBuffer(
             size=buffer_size,
-            seq_len=_SEQ_LEN,
+            seq_len=_SEQ_LEN + _HORIZON,
             obs_shape=(1,),
             obs_z_shape=(1,),
             rnn_state_shape=(1,),
@@ -810,8 +814,9 @@ class SimLingoAgent:
         # seq[:, 1] = t+1; the replay convention puts a_t at
         # actions[t+1], r_t at rewards[t+1], done_t at dones[t+1].
         curr_size = self.rb.size if self.rb.full else self.rb.idx
-        start = torch.randint(0, curr_size - _SEQ_LEN, (self.batch_size,))
-        seq = start[:, None] + torch.arange(_SEQ_LEN)[None, :]
+        span = _SEQ_LEN + _HORIZON
+        start = torch.randint(0, curr_size - span, (self.batch_size,))
+        seq = start[:, None] + torch.arange(span)[None, :]
         a = self.rb.actions[seq[:, 1]].to(self.device)
         r = self.rb.rewards[seq[:, 1], 0].to(self.device)
         r = self.reward_processor.normalize(r)
