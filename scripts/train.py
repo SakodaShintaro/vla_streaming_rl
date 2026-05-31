@@ -166,6 +166,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     # does that with seed=seed (was: double-reset wasted route 0 in the
     # bench2drive sequential cursor and confused the eval writer).
     step_limit = args.step_limit
+    episode_limit = args.episode_limit
     checkpoint_interval = max(1, step_limit // 10)
 
     compile_network = args.network_class != "vlm_actor_critic_with_action_value"
@@ -291,6 +292,10 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         # playlist this is always False.
         runtime = getattr(env.unwrapped, "runtime", None)
         if runtime is not None and getattr(runtime, "is_exhausted", False):
+            break
+
+        # Stop once we've run the configured number of episodes.
+        if episode_id >= episode_limit:
             break
 
         # initialize episode (seed only the first call so the gym RNG is
