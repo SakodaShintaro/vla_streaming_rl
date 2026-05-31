@@ -418,6 +418,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         elapsed_time_hour = elapsed_time_sec / 3600
         data_dict = {
             "global_step": global_step,
+            "episode_id": episode_id,
             "episodic_return": env_info["episode"]["r"],
             "episodic_length": env_info["episode"]["l"],
             "SPS": global_step / elapsed_time_sec,
