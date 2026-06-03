@@ -43,5 +43,5 @@ buffer_size: 8192
 # waypoint action μ(s) at rollout time (per waypoint coord, in meters).
 # Set to 0 for greedy evaluation.
 exploration_noise: 0.0
-actor_lr: 5e-7
-critic_lr: 1e-6
+actor_lr: 2e-7
+critic_lr: 5e-7
