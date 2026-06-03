@@ -193,6 +193,9 @@ class CARLALeaderboardEnv(gym.Env):
         self._early_off_route_m = early_off_route_m
         self._early_blocked_steps = early_blocked_steps
         self._blocked_step_counter = 0
+        # Running collision-infraction total at the previous step; a jump
+        # means a fresh collision (→ immediate episode termination).
+        self._prev_collision_total = 0
 
         # Observation / action contracts come from carla_obs (shared with the
         # Bench2Drive eval agent so training and eval stay bit-aligned).
@@ -480,6 +483,7 @@ class CARLALeaderboardEnv(gym.Env):
         # Initialization
         self.episode_step = 0
         self._blocked_step_counter = 0
+        self._prev_collision_total = 0
         self.lane_invasion_history = []
         self.infractions = {k: 0 for k in self.infractions}
         self.prev_driving_score = 0.0
@@ -585,6 +589,18 @@ class CARLALeaderboardEnv(gym.Env):
         # update happens inside the scenario tick above.
         reward = self._compute_reward()
 
+        # A collision (vehicle / pedestrian / static) ends the episode
+        # immediately. The collision sensor's callback bumps the infraction
+        # counters during the world.tick above, so a jump in the running
+        # total since the previous step means we hit something this step.
+        collision_total = (
+            self.infractions["collision_vehicle"]
+            + self.infractions["collision_pedestrian"]
+            + self.infractions["collision_static"]
+        )
+        collided = collision_total > self._prev_collision_total
+        self._prev_collision_total = collision_total
+
         if self.runtime is not None and self.runtime.route_scenario is not None:
             scenario_running = (
                 self.runtime.route_scenario.scenario_tree.status == py_trees.common.Status.RUNNING
@@ -596,14 +612,20 @@ class CARLALeaderboardEnv(gym.Env):
             # max_episode_steps cap below catches everything else.
             terminated = self.route_tracker.route_completion >= 1.0
 
-        # Tighter analogues of Bench2Drive's InRouteTest / AgentBlockedTest
-        # for fast-iteration training. Both mirror the upstream FAILURE
-        # semantics (terminated=True), so the agent learns to avoid them.
-        if (
+        # Collision is a hard terminal failure — stop the episode at once.
+        if collided:
+            terminated = True
+
+        # Wandering too far off-route is treated as a truncation (not a
+        # natural terminal): cut the episode and hand back a fixed -1
+        # penalty so the agent learns the boundary. Looser analogue of
+        # Bench2Drive's InRouteTest, which fails at 30 m.
+        off_route_truncated = (
             self._early_off_route_m is not None
             and self.route_tracker.min_distance_to_route > self._early_off_route_m
-        ):
-            terminated = True
+        )
+
+        # AgentBlockedTest analogue keeps terminated (FAILURE) semantics.
         if self._early_blocked_steps is not None:
             speed = float(np.linalg.norm(self.vehicle_physics.velocity))
             if speed < 0.1:
@@ -613,7 +635,9 @@ class CARLALeaderboardEnv(gym.Env):
             else:
                 self._blocked_step_counter = 0
 
-        truncated = self.episode_step >= self.max_episode_steps
+        truncated = self.episode_step >= self.max_episode_steps or off_route_truncated
+        if off_route_truncated:
+            reward = -1.0
 
         self.episode_step += 1
 
