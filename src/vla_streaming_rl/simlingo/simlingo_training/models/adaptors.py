@@ -158,8 +158,13 @@ class DrivingAdaptor(nn.Module):
         for i, input_type in enumerate(self.order):
             size = self.sizes[input_type]
 
+            head = self.heads[input_type]
             feature = features[:, current_index : current_index + size]
-            prediction = self.heads[input_type](feature).cumsum(1)
+            # The waypoint heads may be promoted to float32 (RL fine-tuning)
+            # while the VLM features stay bfloat16; cast to the head's dtype
+            # so both the frozen-backbone forward and float32 training work.
+            feature = feature.to(head[0].weight.dtype)
+            prediction = head(feature).cumsum(1)
 
             predictions[input_type] = prediction
             current_index += size

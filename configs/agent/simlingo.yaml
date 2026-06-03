@@ -1,5 +1,6 @@
 # @package _global_
-# SimLingo VLM + DACER2 RL on top of waypoint output.
+# SimLingo VLM + DDPG RL: the SimLingo waypoint heads are trained
+# directly to maximize a learned Q (deterministic policy gradient).
 #
 # Sensors come from CARLALeaderboardEnv's info["sensors"] (rgb / gps /
 # imu / speed) — SimLingoAgent does NOT spawn its own sensor stack, so
@@ -30,16 +31,17 @@ network_class: actor_critic_with_action_value
 # Overrides of base_*/default values consumed by SimLingoAgent.
 print_interval: 1
 batch_size: 1
-learning_starts: 100
-# Each replay slot holds the pooled VLM state + base waypoints + action
-# for that step (a few KB), so the buffer is cheap; the frozen VLM is
-# never re-forwarded at training time.
-buffer_size: 1024
+learning_starts: 800
+# Each replay slot holds the per-query VLM features (30 × hidden) + the
+# action for that step, so a slot is larger than before but the frozen
+# VLM is never re-forwarded at training time; only the waypoint heads are
+# re-applied to the cached features.
+buffer_size: 8192
 
 # SimLingo-specific keys (no equivalent in base_* / default).
-# Scale applied to the tanh-bounded Δ before adding to base
-# waypoints. With δ_scale=0.1 the residual is capped at ±0.1 per
-# waypoint coord, matching the magnitude that PID can absorb.
-delta_scale: 0.5
-actor_lr: 1e-6
-critic_lr: 1e-5
+# Std of the Gaussian exploration noise added to the deterministic
+# waypoint action μ(s) at rollout time (per waypoint coord, in meters).
+# Set to 0 for greedy evaluation.
+exploration_noise: 0.0
+actor_lr: 5e-7
+critic_lr: 1e-6

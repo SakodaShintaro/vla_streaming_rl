@@ -1,33 +1,38 @@
 # SPDX-License-Identifier: MIT
-"""DACER2-based RL agent built on top of SimLingo.
+"""DDPG-style RL agent built on top of SimLingo.
 
-The action trained against is SimLingo's full waypoint output:
-``pred_route`` (20×2) concatenated with ``pred_speed_wps`` (10×2),
-flattened to a 60-D continuous vector. The deterministic PID controller
-that turns waypoints into ``carla.VehicleControl`` is treated as part
-of the environment — the policy emits waypoints, PID emits 2-D control,
-env sees ``[steer, throttle - brake]``.
+The action is SimLingo's full waypoint output: ``pred_route`` (20×2)
+concatenated with ``pred_speed_wps`` (10×2), flattened to a 60-D
+continuous vector. The deterministic PID controller that turns
+waypoints into ``carla.VehicleControl`` is treated as part of the
+environment — the policy emits waypoints, PID emits 2-D control, env
+sees ``[steer, throttle - brake]``.
 
-  μ(s) = base_wps(VLM(s)) + δ_scale * Δ(features(s))
-  Δ : DiffusionPolicy (DACER2; tanh-bounded flow-matching policy)
-  Q(s, a) = ActionValueHead(features(s), a)
+  μ(s) = waypoint_heads(features(s))   ← SimLingo's own route / speed
+                                         MLP heads, trained directly
+  Q(s, a) = ActionValueHead(pool(features(s)), a)
+
+Rather than learning a residual on top of frozen waypoints, this is a
+DDPG-like setup: the SimLingo waypoint heads (``DrivingAdaptor.route_head``
+and ``speed_wps_head``) *are* the deterministic policy μ and are updated
+to ascend the critic's Q-gradient. The rest of the VLM stays frozen.
 
 Critic update (off-policy, batch from replay):
-  Δ' ~ π(·|s'), a' = base'(s') + δ_scale * Δ'
-  y = r + γ (1 − done) Q_target(s', a')
+  a' = μ(s')
+  y = r + γ (1 − done) Q(s', a')
   L_critic = MSE(Q(s, a), y)
 
 Actor update (off-policy, batch from replay):
-  Δ ~ π(·|s)
-  L_actor = advantage-based loss + DACER2 flow-matching loss
-           (via DiffusionPolicy.compute_actor_loss).
-  A small wrapper presents Q(s, base + δ_scale * Δ) to that method, so
-  the policy is trained on Δ while Q sees the full action.
+  L_actor = − Q(s, μ(s))      (deterministic policy gradient)
+  Gradients flow through the waypoint heads only; the pooled state fed
+  to Q is detached so the actor loss cannot move the frozen backbone.
 
-The VLM is fully frozen. ``run_step`` caches the pooled state and base
-waypoints it computes for each tick directly into the replay buffer, so
-training reads ``(state, base, action, reward, done)`` straight from the
-buffer with no VLM re-forward — only Δ and Q learn.
+The VLM backbone (everything except the two waypoint heads) is frozen.
+``run_step`` caches the per-query VLM features and the action it took
+for each tick directly into the replay buffer, so training reads
+``(features, action, reward, done)`` straight from the buffer and only
+re-applies the (cheap) waypoint heads — no VLM re-forward. Only the
+waypoint heads and Q learn.
 
 Because the env owns the sensor lifecycle, SimLingoAgent does **not**
 spawn its own multi-camera stack or wire a leaderboard
@@ -50,7 +55,6 @@ from PIL import Image
 from torch import nn, optim
 from transformers import Qwen2Tokenizer
 
-from vla_streaming_rl.networks.policy_head import DiffusionPolicy
 from vla_streaming_rl.networks.value_head import ActionValueHead
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -88,7 +92,10 @@ torch.backends.cudnn.allow_tf32 = True
 _ROUTE_LEN = 20
 _SPEED_WPS_LEN = 10
 _WP_DIM = 2
-_ACTION_DIM = (_ROUTE_LEN + _SPEED_WPS_LEN) * _WP_DIM
+# Number of waypoint-query positions in ``driving_features`` (route then
+# speed). The DrivingAdaptor heads consume one feature vector per query.
+_NUM_WP_QUERIES = _ROUTE_LEN + _SPEED_WPS_LEN
+_ACTION_DIM = _NUM_WP_QUERIES * _WP_DIM
 
 # Single-frame VLM input (seq_len=1) with a one-step bootstrap horizon, so the
 # replay buffer needs ``_SEQ_LEN + _HORIZON`` contiguous indices per sample to
@@ -114,51 +121,20 @@ def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     )
 
 
-class _BasedValueHead:
-    """Thin shim around ``ActionValueHead`` that adds a fixed base action
-    before evaluating Q. Lets :meth:`DiffusionPolicy.compute_actor_loss`
-    treat the policy's tanh-bounded Δ as the action (so the advantage /
-    Q-grad machinery applies cleanly) while the real critic still sees
-    the full ``base + δ_scale * Δ`` action.
-    """
-
-    def __init__(
-        self,
-        *,
-        value_head: ActionValueHead,
-        base_action: torch.Tensor,
-        delta_scale: float,
-    ) -> None:
-        self.value_head = value_head
-        self.base_action = base_action
-        self.delta_scale = delta_scale
-
-    def __call__(self, state: torch.Tensor, delta_chunk: torch.Tensor) -> dict:
-        action = self.base_action + self.delta_scale * delta_chunk
-        return self.value_head(state, action)
-
-    def get_advantage(self, state: torch.Tensor, delta_chunk: torch.Tensor) -> dict:
-        action = self.base_action + self.delta_scale * delta_chunk
-        return self.value_head.get_advantage(state, action)
-
-    def parameters(self):
-        return self.value_head.parameters()
-
-
 class SimLingoAgent:
-    """DACER2 off-policy agent built on SimLingo's waypoint output.
+    """DDPG-style off-policy agent built on SimLingo's waypoint output.
 
     ``DrivingModel.forward`` returns ``(speed_wps, route, language,
-    driving_features)``. The fourth element is pooled (mean over the 30
-    waypoint-query positions) into the critic / actor's state vector.
+    driving_features)``. The fourth element is the (1, 30, hidden) slice
+    of per-query VLM features; the waypoint heads map it to the action
+    and its mean over the 30 queries is the critic's state vector.
 
-    ``run_step`` is pure inference: VLM forward → base waypoints +
-    sampled Δ from the DACER2 diffusion policy → PID. Training is
-    off-policy: ``step`` writes (state, base, action, reward, done) into
-    the replay buffer — the pooled VLM state and base waypoints cached by
-    ``run_step`` go into the obs / obs_z slots — so ``_maybe_train`` reads
-    everything it needs straight from the buffer without re-forwarding the
-    frozen VLM.
+    ``run_step`` is pure inference: VLM forward → waypoint heads → action
+    (+ Gaussian exploration noise) → PID. Training is off-policy:
+    ``step`` writes (features, action, reward, done) into the replay
+    buffer — the per-query VLM features cached by ``run_step`` go into the
+    obs slot — so ``_maybe_train`` re-applies the waypoint heads to those
+    cached features (no VLM re-forward) and trains them to maximize Q.
     """
 
     def __init__(
@@ -174,12 +150,7 @@ class SimLingoAgent:
         learning_starts: int,
         critic_hidden_dim: int,
         critic_block_num: int,
-        actor_hidden_dim: int,
-        actor_block_num: int,
-        denoising_time: float,
-        denoising_steps: int,
-        dacer_loss_weight: float,
-        delta_scale: float,
+        exploration_noise: float,
         actor_lr: float,
         critic_lr: float,
         max_grad_norm: float,
@@ -196,7 +167,7 @@ class SimLingoAgent:
         self.gamma = gamma
         self.batch_size = batch_size
         self.learning_starts = learning_starts
-        self.delta_scale = delta_scale
+        self.exploration_noise = exploration_noise
         self.max_grad_norm = max_grad_norm
 
         torch.cuda.empty_cache()
@@ -274,29 +245,26 @@ class SimLingoAgent:
 
         # --- RL setup ---------------------------------------------------
 
-        # The VLM is fully frozen: it only serves as a fixed feature /
-        # base-waypoint extractor whose outputs are cached into the
-        # replay buffer at inference time. Only Δ (DiffusionPolicy) and
-        # Q (critic) learn.
+        # Freeze the whole VLM backbone, then re-enable just the two
+        # SimLingo waypoint heads — those *are* the deterministic policy
+        # μ and are the only part of the network that learns.
         for p in self.network.parameters():
             p.requires_grad_(False)
+        self._driving_adaptor = self.network.adaptors.driving
+        # The heads were built in bfloat16 (default dtype at construction).
+        # Promote them to float32 so the tiny actor LR isn't swallowed by
+        # bf16 rounding and so they line up with the float32 critic /
+        # cached features. ``get_predictions`` casts its feature input to
+        # the head dtype, so the rest of the (bf16) VLM forward still works.
+        self.actor_heads = nn.ModuleList(
+            [self._driving_adaptor.route_head, self._driving_adaptor.speed_wps_head]
+        ).float()
+        for p in self.actor_heads.parameters():
+            p.requires_grad_(True)
 
         # SimLingo runs in bfloat16; the RL heads run in float32 to keep
         # value targets numerically stable.
         feature_dim = int(self.network.language_model.hidden_size)
-        # DACER2 flow-matching policy that produces a tanh-bounded Δ.
-        # The actual action sent to PID is ``base + delta_scale * Δ``.
-        self.delta_head = DiffusionPolicy(
-            state_dim=feature_dim,
-            action_dim=_ACTION_DIM,
-            hidden_dim=actor_hidden_dim,
-            block_num=actor_block_num,
-            denoising_time=denoising_time,
-            sparsity=0.0,
-            horizon=1,
-            denoising_steps=denoising_steps,
-            dacer_loss_weight=dacer_loss_weight,
-        ).to(self.device)
         # Dueling Q(s, a) head from networks.value_head. ``num_bins=1``
         # collapses the distributional output to a scalar.
         self.critic = ActionValueHead(
@@ -309,26 +277,26 @@ class SimLingoAgent:
             sparsity=0.0,
         ).to(self.device)
 
-        # The frozen VLM contributes no trainable params, so the actor
-        # optimizer owns the diffusion policy alone.
+        # The actor optimizer owns the SimLingo waypoint heads alone; the
+        # rest of the VLM stays frozen.
         self.actor_optimizer = optim.AdamW(
-            self.delta_head.parameters(), lr=actor_lr, weight_decay=0.0
+            self.actor_heads.parameters(), lr=actor_lr, weight_decay=0.0
         )
         self.critic_optimizer = optim.AdamW(
             self.critic.parameters(), lr=critic_lr, weight_decay=0.0
         )
 
-        # ``run_step`` caches each tick's pooled VLM state and base
-        # waypoints; ``step`` stores them in the obs / obs_z slots so
-        # ``_maybe_train`` reads (state, base, action, reward, done)
-        # straight from the buffer. rnn_state / log_prob / value / token
-        # slots stay unused (shape-(1,) / 0 / empty) so the buffer
-        # machinery still type-checks.
+        # ``run_step`` caches each tick's per-query VLM features and the
+        # action it took; ``step`` stores them in the obs / action slots so
+        # ``_maybe_train`` reads (features, action, reward, done) straight
+        # from the buffer and only re-applies the waypoint heads. The obs_z
+        # / rnn_state / log_prob / value / token slots stay unused
+        # (shape-(1,) / 0 / empty) so the buffer machinery still type-checks.
         self.rb = ReplayBuffer(
             size=buffer_size,
             seq_len=_SEQ_LEN + _HORIZON,
-            obs_shape=(feature_dim,),
-            obs_z_shape=(_ACTION_DIM,),
+            obs_shape=(_NUM_WP_QUERIES, feature_dim),
+            obs_z_shape=(1,),
             rnn_state_shape=(1,),
             action_shape=(_ACTION_DIM,),
             output_device=self.device,
@@ -338,13 +306,15 @@ class SimLingoAgent:
             pad_token_id=0,
         )
         self._dummy_rnn_state = torch.zeros(1, device=self.device)
+        self._dummy_obs_z = torch.zeros(1, device=self.device)
 
-        # ``run_step`` writes the just-computed state / base / action into
-        # these so the next ``step`` can store them at the buffer index
-        # for the current timestep (the project's convention puts the
-        # action that produced state t at ``actions[t]``).
-        self._current_state: torch.Tensor = torch.zeros(feature_dim, device=self.device)
-        self._current_base: torch.Tensor = torch.zeros(_ACTION_DIM, device=self.device)
+        # ``run_step`` writes the just-computed features / action into these
+        # so the next ``step`` can store them at the buffer index for the
+        # current timestep (the project's convention puts the action that
+        # produced state t at ``actions[t]``).
+        self._current_state: torch.Tensor = torch.zeros(
+            _NUM_WP_QUERIES, feature_dim, device=self.device
+        )
         self._current_action_taken: torch.Tensor = torch.zeros(_ACTION_DIM, device=self.device)
 
         self._attached_ego_id: int | None = None
@@ -385,14 +355,14 @@ class SimLingoAgent:
         env_action = self._act()
         info = self._build_info(env_action)
 
-        # Store (state_t, base_t, action_{t-1}, reward, done). The pooled
-        # VLM state and base waypoints go into the obs / obs_z slots;
+        # Store (features_t, action_{t-1}, reward, done). The per-query VLM
+        # features go into the obs slot (obs_z is unused);
         # ``action_{t-1}`` mirrors off_policy.OffPolicyAgent.select_action's
         # add semantics so later sampling and indexing match the project
         # convention.
         self.rb.add(
             self._current_state,
-            self._current_base,
+            self._dummy_obs_z,
             reward,
             episode_done,
             self._dummy_rnn_state,
@@ -656,11 +626,11 @@ class SimLingoAgent:
 
     @torch.no_grad()
     def run_step(self, input_data):
-        """Pure inference: VLM forward → base waypoints → sample Δ from the
-        DACER2 diffusion policy → ``base + δ_scale * Δ`` → PID. The
-        DiffusionPolicy's tanh-bounded output ``[-1, 1]`` combined with
-        ``delta_scale`` (e.g. 0.1) caps Δ at ``[-0.1, 0.1]`` per coord —
-        exploration comes entirely from the diffusion sampler's noise.
+        """Pure inference: VLM forward → SimLingo waypoint heads → μ(s) →
+        add Gaussian exploration noise (std ``exploration_noise``) → PID.
+        The policy is deterministic; the only exploration is the additive
+        action noise, which is zero at eval time when ``exploration_noise``
+        is set to 0.
         """
         self._frame_step += 1
 
@@ -679,18 +649,19 @@ class SimLingoAgent:
         pred_speed_wps = pred_speed_wps.float() if pred_speed_wps is not None else None
         pred_route = pred_route.float() if pred_route is not None else None
 
-        pooled = driving_features.mean(dim=1).squeeze(0).to(torch.float32)
-        base_action = _waypoints_to_action_vec(pred_route, pred_speed_wps)
-        delta_chunk, _ = self.delta_head.get_action(pooled.unsqueeze(0))
-        delta = delta_chunk.squeeze(0).squeeze(0)
-        action_taken = base_action + self.delta_scale * delta
-        # Cache state + base + action for ``step`` to write into the buffer
-        # at this timestep's index (no VLM re-forward needed at train time).
-        self._current_state = pooled
-        self._current_base = base_action
+        # ``pred_route`` / ``pred_speed_wps`` are exactly the waypoint heads
+        # applied to ``driving_features`` — i.e. the deterministic μ(s).
+        features = driving_features.squeeze(0).to(torch.float32)  # (30, hidden)
+        action_mean = _waypoints_to_action_vec(pred_route, pred_speed_wps)
+        noise = torch.randn_like(action_mean) * self.exploration_noise
+        action_taken = action_mean + noise
+        # Cache features + action for ``step`` to write into the buffer at
+        # this timestep's index (no VLM re-forward needed at train time —
+        # only the waypoint heads are re-applied to ``features``).
+        self._current_state = features
         self._current_action_taken = action_taken
 
-        # Feed the modified waypoints to the deterministic PID.
+        # Feed the (noised) waypoints to the deterministic PID.
         pred_route, pred_speed_wps = _action_vec_to_waypoints(action_taken)
 
         gt_velocity = driving_input_kwargs["vehicle_speed"]
@@ -735,6 +706,23 @@ class SimLingoAgent:
 
     # --- Off-policy training step -----------------------------------------
 
+    def _policy_action(self, features: torch.Tensor) -> torch.Tensor:
+        """Apply the SimLingo waypoint heads to per-query features and
+        return the flattened action μ(s).
+
+        Args:
+            features: ``(B, 30, hidden)`` per-query VLM features.
+
+        Returns:
+            ``(B, 60)`` action: route waypoints (20×2) then speed
+            waypoints (10×2), matching ``_waypoints_to_action_vec``.
+        """
+        preds = self._driving_adaptor.get_predictions(features)
+        b = features.shape[0]
+        route = preds["route"].reshape(b, -1)  # (B, 40)
+        speed = preds["speed_wps"].reshape(b, -1)  # (B, 20)
+        return torch.cat([route, speed], dim=1)
+
     def _maybe_train(self, global_step: int) -> dict:
         # The buffer's ``sample`` requires ``curr_size > seq_len``; the
         # learning_starts warmup is set high enough that this is
@@ -743,9 +731,9 @@ class SimLingoAgent:
             return {}
 
         # seq[:, 0] = t, seq[:, 1] = t+1; the replay convention puts a_t at
-        # actions[t+1], r_t at rewards[t+1], done_t at dones[t+1]. State and
-        # base waypoints were cached at write time into the obs / obs_z
-        # slots, so a transition reads straight out of the buffer.
+        # actions[t+1], r_t at rewards[t+1], done_t at dones[t+1]. The
+        # per-query features were cached at write time into the obs slot, so
+        # a transition reads straight out of the buffer.
         curr_size = self.rb.size if self.rb.full else self.rb.idx
         span = _SEQ_LEN + _HORIZON
         start = torch.randint(0, curr_size - span, (self.batch_size,))
@@ -755,60 +743,52 @@ class SimLingoAgent:
         r = self.reward_processor.normalize(r)
         done = self.rb.dones[seq[:, 1], 0].to(self.device)
 
-        s = self.rb.observations[seq[:, 0]].to(self.device)
-        base_t = self.rb.obs_z[seq[:, 0]].to(self.device)
-        s_next = self.rb.observations[seq[:, 1]].to(self.device)
-        base_next = self.rb.obs_z[seq[:, 1]].to(self.device)
+        feat = self.rb.observations[seq[:, 0]].to(self.device)  # (B, 30, hidden)
+        feat_next = self.rb.observations[seq[:, 1]].to(self.device)
+        # The critic state is the per-query features pooled over the 30
+        # waypoint queries (mean), matching the inference-time pooling.
+        s = feat.mean(dim=1)
+        s_next = feat_next.mean(dim=1)
 
         # --- critic loss --------------------------------------------------
+        # DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a').
         with torch.no_grad():
-            delta_next, _ = self.delta_head.get_action(s_next)
-            a_next_target = base_next + self.delta_scale * delta_next.squeeze(1)
-            next_q = self.critic(s_next, a_next_target.unsqueeze(1))["output"].view(-1)
+            a_next = self._policy_action(feat_next)
+            next_q = self.critic(s_next, a_next.unsqueeze(1))["output"].view(-1)
             target_q = r + self.gamma * (1.0 - done) * next_q
         current_q = self.critic(s, a.unsqueeze(1))["output"].view(-1)
         critic_loss = nn.functional.mse_loss(current_q, target_q)
 
-        # --- actor loss (delegated to DiffusionPolicy) --------------------
-        # ``_BasedValueHead`` lets DiffusionPolicy.compute_actor_loss treat the
-        # tanh-bounded Δ as the action, while the real ``self.critic``
-        # still sees ``base + δ_scale * Δ``. ``base_t`` is detached so the
-        # advantage gradient flows to Δ only, not back through the base path.
-        based_value_head = _BasedValueHead(
-            value_head=self.critic,
-            base_action=base_t.detach().unsqueeze(1),
-            delta_scale=self.delta_scale,
-        )
-        actor_loss, _, actor_info = self.delta_head.compute_actor_loss(
-            s,
-            None,
-            value_head=based_value_head,
-            hl_gauss_loss=None,
-            num_bins=1,
-            detach_actor=False,
-        )
+        # --- actor loss (deterministic policy gradient) -------------------
+        # L_actor = − Q(s, μ(s)). Same trick as DiffusionPolicy.compute_actor_loss:
+        # freeze the critic's params during this Q forward so the −Q gradient
+        # flows only into the waypoint heads, not the critic. ``s`` is a buffer
+        # read with no grad, so the heads are the sole path to the loss.
+        a_pred = self._policy_action(feat)
+        for p in self.critic.parameters():
+            p.requires_grad_(False)
+        actor_q = self.critic(s, a_pred.unsqueeze(1))["output"].view(-1)
+        for p in self.critic.parameters():
+            p.requires_grad_(True)
+        actor_loss = -actor_q.mean()
 
-        # --- backward + optimizer step ------------------------------------
-        # Combined backward: states are detached buffer reads, so critic
-        # and actor losses build independent graphs (no shared saved
-        # tensors, no retain_graph). Each optimizer only owns its slice of
-        # parameters, so cross-bleed (the actor's q-grad path depositing on
-        # critic) only affects critic.grad and is then stepped solely by
-        # critic_optimizer — same as a critic_loss-only update at that
-        # magnitude.
+        # --- combined backward + optimizer step ---------------------------
+        # One backward over (critic_loss + actor_loss) — like the DACER2
+        # network's single ``total_loss.backward()`` — so no ``step`` lands
+        # between the two graphs (which would invalidate them in-place). The
+        # critic-freeze above keeps the two losses on disjoint param sets, so
+        # each optimizer only steps the params it owns.
         self.critic_optimizer.zero_grad(set_to_none=True)
         self.actor_optimizer.zero_grad(set_to_none=True)
         (critic_loss + actor_loss).backward()
         nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        nn.utils.clip_grad_norm_(self.actor_optimizer.param_groups[0]["params"], self.max_grad_norm)
+        nn.utils.clip_grad_norm_(self.actor_heads.parameters(), self.max_grad_norm)
         self.critic_optimizer.step()
         self.actor_optimizer.step()
 
         return {
             "losses/critic_loss": float(critic_loss.item()),
-            "losses/actor_loss": float(actor_info["actor_loss"]),
-            "losses/dacer_loss": float(actor_info["dacer_loss"]),
-            "losses/advantage": float(actor_info["advantage"]),
+            "losses/actor_loss": float(actor_loss.item()),
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
         }
