@@ -46,3 +46,10 @@ buffer_size: 8192
 exploration_noise: 0.0
 actor_lr: 2e-7
 critic_lr: 5e-7
+
+# Training mode for the waypoint-head policy / critic:
+#   off_policy : random replay batches (DDPG, the default).
+#   streaming  : online TD(λ) on the latest transition every step, critic
+#                via AdamET eligibility traces (uses ``et_lambda`` from
+#                base_streaming). Actor stays DDPG (-Q) + AdamW.
+learning_mode: off_policy

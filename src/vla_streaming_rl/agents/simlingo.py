@@ -34,6 +34,12 @@ for each tick directly into the replay buffer, so training reads
 re-applies the (cheap) waypoint heads — no VLM re-forward. Only the
 waypoint heads and Q learn.
 
+Two learning modes (``learning_mode``):
+  - ``off_policy``: random replay batches (the critic/actor updates above).
+  - ``streaming``: online TD(λ) on the latest transition every step, with the
+    critic updated by eligibility traces (``AdamET``) and the actor by the
+    same deterministic policy gradient + AdamW — mirroring ``StreamingAgent``.
+
 Because the env owns the sensor lifecycle, SimLingoAgent does **not**
 spawn its own multi-camera stack or wire a leaderboard
 ``SensorInterface``. New-episode handover (set_global_plan, hero_actor,
@@ -56,6 +62,7 @@ from torch import nn, optim
 from transformers import Qwen2Tokenizer
 
 from vla_streaming_rl.networks.value_head import ActionValueHead
+from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
@@ -154,6 +161,8 @@ class SimLingoAgent:
         actor_lr: float,
         critic_lr: float,
         max_grad_norm: float,
+        learning_mode: str,
+        et_lambda: float,
     ) -> None:
         self.observation_space = observation_space
         del action_space
@@ -277,13 +286,22 @@ class SimLingoAgent:
             sparsity=0.0,
         ).to(self.device)
 
+        # ``off_policy`` trains on random replay batches; ``streaming`` trains
+        # online on the latest transition every step with TD(λ) eligibility
+        # traces on the critic (AdamET), mirroring ``StreamingAgent``. The
+        # actor (deterministic policy gradient on the waypoint heads) uses
+        # AdamW in both modes.
+        self.learning_mode = learning_mode
+
         # The actor optimizer owns the SimLingo waypoint heads alone; the
         # rest of the VLM stays frozen.
         self.actor_optimizer = optim.AdamW(
             self.actor_heads.parameters(), lr=actor_lr, weight_decay=0.0
         )
-        self.critic_optimizer = optim.AdamW(
-            self.critic.parameters(), lr=critic_lr, weight_decay=0.0
+        self.critic_optimizer = (
+            AdamET(self.critic.parameters(), lr=critic_lr, gamma=gamma, et_lambda=et_lambda)
+            if learning_mode == "streaming"
+            else optim.AdamW(self.critic.parameters(), lr=critic_lr, weight_decay=0.0)
         )
 
         # ``run_step`` caches each tick's per-query VLM features and the
@@ -373,7 +391,7 @@ class SimLingoAgent:
             [],
         )
 
-        info.update(self._maybe_train(global_step))
+        info.update(self._train(global_step, episode_done))
 
         # Advance: the action just selected becomes the prev for the
         # next add. (off_policy carries it across episode boundaries
@@ -723,47 +741,39 @@ class SimLingoAgent:
         speed = preds["speed_wps"].reshape(b, -1)  # (B, 20)
         return torch.cat([route, speed], dim=1)
 
-    def _maybe_train(self, global_step: int) -> dict:
-        # The buffer's ``sample`` requires ``curr_size > seq_len``; the
-        # learning_starts warmup is set high enough that this is
-        # implicitly satisfied.
-        if global_step < self.learning_starts:
-            return {}
+    def _train(self, global_step: int, episode_done: bool) -> dict:
+        if self.learning_mode == "streaming":
+            return self._train_streaming(global_step, episode_done)
+        return self._maybe_train(global_step)
 
-        # seq[:, 0] = t, seq[:, 1] = t+1; the replay convention puts a_t at
-        # actions[t+1], r_t at rewards[t+1], done_t at dones[t+1]. The
-        # per-query features were cached at write time into the obs slot, so
-        # a transition reads straight out of the buffer.
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        span = _SEQ_LEN + _HORIZON
-        start = torch.randint(0, curr_size - span, (self.batch_size,))
-        seq = start[:, None] + torch.arange(span)[None, :]
+    def _read_and_compute(self, seq: torch.Tensor) -> tuple:
+        """Read one transition batch for index pairs ``seq`` (B, 2) and build
+        the DDPG losses' tensors. Returns ``(current_q, target_q, actor_loss)``.
+
+        ``seq[:, 0] = t``, ``seq[:, 1] = t+1``; the replay convention puts a_t
+        at ``actions[t+1]``, r_t at ``rewards[t+1]``, done_t at ``dones[t+1]``.
+        The per-query features were cached into the obs slot at write time; the
+        critic state is their mean over the 30 waypoint queries.
+        """
         a = self.rb.actions[seq[:, 1]].to(self.device)
-        r = self.rb.rewards[seq[:, 1], 0].to(self.device)
-        r = self.reward_processor.normalize(r)
+        r = self.reward_processor.normalize(self.rb.rewards[seq[:, 1], 0].to(self.device))
         done = self.rb.dones[seq[:, 1], 0].to(self.device)
-
         feat = self.rb.observations[seq[:, 0]].to(self.device)  # (B, 30, hidden)
         feat_next = self.rb.observations[seq[:, 1]].to(self.device)
-        # The critic state is the per-query features pooled over the 30
-        # waypoint queries (mean), matching the inference-time pooling.
         s = feat.mean(dim=1)
         s_next = feat_next.mean(dim=1)
 
-        # --- critic loss --------------------------------------------------
         # DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a').
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
             next_q = self.critic(s_next, a_next.unsqueeze(1))["output"].view(-1)
             target_q = r + self.gamma * (1.0 - done) * next_q
         current_q = self.critic(s, a.unsqueeze(1))["output"].view(-1)
-        critic_loss = nn.functional.mse_loss(current_q, target_q)
 
-        # --- actor loss (deterministic policy gradient) -------------------
-        # L_actor = − Q(s, μ(s)). Same trick as DiffusionPolicy.compute_actor_loss:
-        # freeze the critic's params during this Q forward so the −Q gradient
-        # flows only into the waypoint heads, not the critic. ``s`` is a buffer
-        # read with no grad, so the heads are the sole path to the loss.
+        # L_actor = − Q(s, μ(s)). Freeze the critic's params during this Q
+        # forward so the −Q gradient flows only into the waypoint heads, not
+        # the critic. ``s`` is a buffer read with no grad, so the heads are the
+        # sole path to the loss.
         a_pred = self._policy_action(feat)
         for p in self.critic.parameters():
             p.requires_grad_(False)
@@ -771,13 +781,28 @@ class SimLingoAgent:
         for p in self.critic.parameters():
             p.requires_grad_(True)
         actor_loss = -actor_q.mean()
+        return current_q, target_q, actor_loss
 
-        # --- combined backward + optimizer step ---------------------------
-        # One backward over (critic_loss + actor_loss) — like the DACER2
-        # network's single ``total_loss.backward()`` — so no ``step`` lands
+    # --- Off-policy training step -----------------------------------------
+
+    def _maybe_train(self, global_step: int) -> dict:
+        # The buffer's ``sample`` requires ``curr_size > seq_len``; the
+        # learning_starts warmup is set high enough that this is
+        # implicitly satisfied.
+        if global_step < self.learning_starts:
+            return {}
+
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        span = _SEQ_LEN + _HORIZON
+        start = torch.randint(0, curr_size - span, (self.batch_size,))
+        seq = start[:, None] + torch.arange(span)[None, :]
+        current_q, target_q, actor_loss = self._read_and_compute(seq)
+        critic_loss = nn.functional.mse_loss(current_q, target_q)
+
+        # One backward over (critic_loss + actor_loss) so no ``step`` lands
         # between the two graphs (which would invalidate them in-place). The
-        # critic-freeze above keeps the two losses on disjoint param sets, so
-        # each optimizer only steps the params it owns.
+        # critic-freeze in ``_read_and_compute`` keeps the two losses on
+        # disjoint param sets, so each optimizer only steps the params it owns.
         self.critic_optimizer.zero_grad(set_to_none=True)
         self.actor_optimizer.zero_grad(set_to_none=True)
         (critic_loss + actor_loss).backward()
@@ -791,4 +816,48 @@ class SimLingoAgent:
             "losses/actor_loss": float(actor_loss.item()),
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
+        }
+
+    # --- Streaming (online TD(λ)) training step ----------------------------
+
+    def _train_streaming(self, global_step: int, episode_done: bool) -> dict:
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        span = _SEQ_LEN + _HORIZON
+        if curr_size < span:
+            return {}
+
+        # Latest contiguous transition: t = idx-2, t+1 = idx-1 (the two most
+        # recent writes; modulo handles the ring wrap). Batch size is 1 —
+        # online, no replay sampling.
+        i_next = (self.rb.idx - 1) % self.rb.size
+        i_curr = (self.rb.idx - 2) % self.rb.size
+        seq = torch.tensor([[i_curr, i_next]], dtype=torch.long)
+        current_q, target_q, actor_loss = self._read_and_compute(seq)
+
+        # TD error drives the eligibility-trace critic update; a detached
+        # scalar (AdamET multiplies the per-parameter trace by it).
+        delta = float((target_q - current_q).mean().item())
+
+        # Backward BOTH losses before any optimizer step so the actor graph
+        # still sees the pre-update critic weights (``AdamET.step`` mutates
+        # critic params in place). The critic-freeze keeps actor grads off the
+        # critic, so the eligibility trace gets only the value gradient.
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        nn.utils.clip_grad_norm_(self.actor_heads.parameters(), self.max_grad_norm)
+
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        (-current_q.mean()).backward()
+        nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+
+        self.actor_optimizer.step()
+        self.critic_optimizer.step(delta=delta, reset=episode_done)
+
+        return {
+            "losses/critic_loss": float(delta * delta),
+            "losses/actor_loss": float(actor_loss.item()),
+            "losses/q_value": float(current_q.mean().item()),
+            "losses/target_q": float(target_q.mean().item()),
+            "losses/td_error": delta,
         }

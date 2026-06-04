@@ -273,6 +273,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             actor_lr=float(args.actor_lr),
             critic_lr=float(args.critic_lr),
             max_grad_norm=float(args.max_grad_norm),
+            learning_mode=str(args.learning_mode),
+            et_lambda=float(args.et_lambda),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
