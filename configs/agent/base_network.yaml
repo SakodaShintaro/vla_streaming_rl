@@ -10,3 +10,5 @@ predictor_block_num: 2
 predictor_step_num: 1
 predictor_type: flow_matching
 num_bins: 1
+som_alpha: 1.0
+som_w: 25.0

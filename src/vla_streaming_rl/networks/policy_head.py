@@ -395,11 +395,15 @@ class MeanFlowPolicy(nn.Module):
         block_num: int,
         horizon: int,
         sparsity: float,
+        som_alpha: float,
+        som_w: float,
     ) -> None:
         super().__init__()
         time_embedding_size = 256
         self.horizon = horizon
         self.action_dim = action_dim
+        self.som_alpha = som_alpha
+        self.som_w = som_w
         total_action_dim = action_dim * horizon
         self.fc_in = nn.Linear(state_dim + total_action_dim + 2 * time_embedding_size, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
@@ -468,9 +472,11 @@ class MeanFlowPolicy(nn.Module):
         a_t = μ_t a_0 + σ_t ε. The MeanFlow identity is then enforced via a JVP.
         Convention here matches the SOM paper: t=1 is noise, t=0 is action, r ≤ t.
         """
-        # Defaults from the SOM paper (Appendix C ablations / Table 3).
-        som_alpha = 1.0
-        som_w = 25.0
+        # som_alpha (Boltzmann inverse-temperature) and som_w (PF-ODE score
+        # scale) are the two "greediness" knobs, exposed via config for sweeps.
+        # Remaining defaults follow the SOM paper (Appendix C / Table 3).
+        som_alpha = self.som_alpha
+        som_w = self.som_w
         som_mc_K = 100
         som_beta_min = 0.1
         som_beta_max = 20.0

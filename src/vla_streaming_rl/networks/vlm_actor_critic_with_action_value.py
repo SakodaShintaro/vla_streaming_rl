@@ -44,6 +44,8 @@ class VLMActorCriticWithActionValue(nn.Module):
         denoising_steps: int,
         denoising_time: float,
         dacer_loss_weight: float,
+        som_alpha: float,
+        som_w: float,
         text_q_margin: float,
         text_action_mode: str,
         predictor_step_num: int,
@@ -177,6 +179,8 @@ class VLMActorCriticWithActionValue(nn.Module):
                 block_num=actor_block_num,
                 horizon=horizon,
                 sparsity=sparsity,
+                som_alpha=som_alpha,
+                som_w=som_w,
             )
         else:
             raise ValueError(f"Unknown policy_type: {self.policy_type}")

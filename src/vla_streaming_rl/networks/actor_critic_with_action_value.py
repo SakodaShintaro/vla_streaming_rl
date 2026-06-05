@@ -39,6 +39,8 @@ class ActorCriticWithActionValue(nn.Module):
         actor_block_num: int,
         denoising_time: float,
         denoising_steps: int,
+        som_alpha: float,
+        som_w: float,
         critic_hidden_dim: int,
         critic_block_num: int,
         predictor_hidden_dim: int,
@@ -128,6 +130,8 @@ class ActorCriticWithActionValue(nn.Module):
                 block_num=actor_block_num,
                 horizon=horizon,
                 sparsity=sparsity,
+                som_alpha=som_alpha,
+                som_w=som_w,
             )
         else:
             raise ValueError(f"Unknown policy_type: {self.policy_type}")
