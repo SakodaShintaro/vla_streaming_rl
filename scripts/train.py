@@ -435,7 +435,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             data_dict["scenario_index"] = env_info["scenario_index"]
             data_dict["scenarios_done"] = int(env_info["scenario_index"]) + 1
             data_dict["scenarios_total"] = env_info["scenarios_total"]
-            data_dict[f"per_scenario/route_{env_info['route_id']}/score"] = score
         # The env auto-flushes its Bench2Drive eval artifacts on the
         # terminating step and exposes the summary scores here.
         for k, v in env_info.get("eval_summary", {}).items():
