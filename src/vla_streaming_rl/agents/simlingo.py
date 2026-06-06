@@ -61,7 +61,7 @@ from PIL import Image
 from torch import nn, optim
 from transformers import Qwen2Tokenizer
 
-from vla_streaming_rl.networks.value_head import ActionValueHead
+from vla_streaming_rl.networks.value_head import ActionValueHead, HypersphericalActionValueHead
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -163,6 +163,8 @@ class SimLingoAgent:
         max_grad_norm: float,
         learning_mode: str,
         et_lambda: float,
+        critic_arch: str,
+        critic_c_shift: float,
     ) -> None:
         self.observation_space = observation_space
         del action_space
@@ -274,17 +276,35 @@ class SimLingoAgent:
         # SimLingo runs in bfloat16; the RL heads run in float32 to keep
         # value targets numerically stable.
         feature_dim = int(self.network.language_model.hidden_size)
-        # Dueling Q(s, a) head from networks.value_head. ``num_bins=1``
-        # collapses the distributional output to a scalar.
-        self.critic = ActionValueHead(
-            in_channels=feature_dim,
-            action_dim=_ACTION_DIM,
-            horizon=1,
-            hidden_dim=critic_hidden_dim,
-            block_num=critic_block_num,
-            num_bins=1,
-            sparsity=0.0,
-        ).to(self.device)
+        # Q(s, a) head from networks.value_head. ``num_bins=1`` collapses the
+        # distributional output to a scalar.
+        #   - ``simbav2``  : SimbaV2 hyperspherical critic (arXiv:2502.15280).
+        #     Weights / features are kept on the unit hypersphere so the
+        #     critic's norm cannot explode under the TD loss — the cause of the
+        #     "good early, collapses mid-training" instability.
+        #   - ``dueling``  : the original LayerNorm dueling V/A critic.
+        if critic_arch == "simbav2":
+            self.critic = HypersphericalActionValueHead(
+                in_channels=feature_dim,
+                action_dim=_ACTION_DIM,
+                horizon=1,
+                hidden_dim=critic_hidden_dim,
+                block_num=critic_block_num,
+                num_bins=1,
+                c_shift=critic_c_shift,
+            ).to(self.device)
+        elif critic_arch == "dueling":
+            self.critic = ActionValueHead(
+                in_channels=feature_dim,
+                action_dim=_ACTION_DIM,
+                horizon=1,
+                hidden_dim=critic_hidden_dim,
+                block_num=critic_block_num,
+                num_bins=1,
+                sparsity=0.0,
+            ).to(self.device)
+        else:
+            raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
 
         # ``off_policy`` trains on random replay batches; ``streaming`` trains
         # online on the latest transition every step with TD(λ) eligibility

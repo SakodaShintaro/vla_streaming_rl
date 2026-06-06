@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
+import math
+
 import torch
 from hl_gauss_pytorch import HLGaussLoss
 from torch import nn
 
-from .blocks import SimbaBlock
+from .blocks import HypersphericalEmbedding, NormedLinear, SimbaBlock, SimbaV2Block
 from .image_processor import ImageProcessor
 from .sparse_utils import apply_one_shot_pruning
 
@@ -153,6 +155,57 @@ class ActionValueHead(nn.Module):
         result_dict["output"] = adv_out
 
         return result_dict
+
+
+class HypersphericalActionValueHead(nn.Module):
+    """SimbaV2 critic (arXiv:2502.15280): Q(s, a) with hyperspherical
+    normalization of features *and* weights throughout.
+
+    The state ``x`` and flattened action ``a`` are concatenated, embedded onto
+    the unit hypersphere (RSNorm + shift + NormedLinear, Eq. 9-10), refined by
+    ``block_num`` SimbaV2 blocks (NormedLinear + learnable scaler + ℓ2-norm +
+    LERP residual, Eq. 11-12), and read out by a NormedLinear + scaler
+    (Eq. 14). Because every linear uses unit-norm effective weights and every
+    block output is ℓ2-normalized, feature / weight norms cannot grow during
+    training — directly addressing the TD-loss-driven norm explosion that makes
+    a plain MLP critic destabilize and the policy collapse mid-training.
+
+    Drop-in for ``ActionValueHead``: same ``forward(x, a) -> {"output",
+    "activation"}`` contract (scalar Q when ``num_bins == 1``).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        action_dim: int,
+        horizon: int,
+        hidden_dim: int,
+        block_num: int,
+        num_bins: int,
+        c_shift: float,
+    ) -> None:
+        super().__init__()
+        self.horizon = horizon
+        self.action_dim = action_dim
+        in_dim = in_channels + action_dim * horizon
+        self.embed = HypersphericalEmbedding(in_dim, hidden_dim, c_shift)
+        self.blocks = nn.Sequential(*[SimbaV2Block(hidden_dim) for _ in range(block_num)])
+        self.out_linear = NormedLinear(hidden_dim, num_bins)
+        s_init = math.sqrt(2.0 / hidden_dim)
+        self.out_scaler = nn.Parameter(torch.full((num_bins,), s_init))
+
+    def forward(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
+        """
+        Args:
+            x: state embedding (B, state_dim)
+            a: action chunk (B, horizon, action_dim)
+        """
+        bs = a.size(0)
+        h = torch.cat([x, a.view(bs, -1)], dim=1)
+        h = self.embed(h)
+        h = self.blocks(h)
+        out = self.out_scaler * self.out_linear(h)  # Eq. 14
+        return {"output": out, "activation": h}
 
 
 class SeparateCritic(nn.Module):

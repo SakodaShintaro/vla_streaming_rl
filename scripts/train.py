@@ -275,6 +275,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             max_grad_norm=float(args.max_grad_norm),
             learning_mode=str(args.learning_mode),
             et_lambda=float(args.et_lambda),
+            critic_arch=str(args.critic_arch),
+            critic_c_shift=float(args.critic_c_shift),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

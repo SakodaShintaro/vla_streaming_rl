@@ -53,3 +53,13 @@ critic_lr: 5e-7
 #                via AdamET eligibility traces (uses ``et_lambda`` from
 #                base_streaming). Actor stays DDPG (-Q) + AdamW.
 learning_mode: off_policy
+
+# Critic architecture:
+#   simbav2 : SimbaV2 hyperspherical critic (arXiv:2502.15280). Weights and
+#             features are constrained to the unit hypersphere, so the critic's
+#             norm cannot blow up under the TD loss — the countermeasure for the
+#             "good early, score degrades mid-training" instability.
+#   dueling : original LayerNorm dueling V/A critic.
+critic_arch: dueling
+# SimbaV2 input shift constant c_shift (Eq. 9); paper default is 3.0.
+critic_c_shift: 3.0
