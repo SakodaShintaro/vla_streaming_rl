@@ -879,5 +879,5 @@ class SimLingoAgent:
             "losses/actor_loss": float(actor_loss.item()),
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
-            "losses/td_error": delta,
+            "losses/delta": delta,
         }
