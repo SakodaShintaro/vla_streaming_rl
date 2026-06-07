@@ -63,3 +63,8 @@ learning_mode: off_policy
 critic_arch: dueling
 # SimbaV2 input shift constant c_shift (Eq. 9); paper default is 3.0.
 critic_c_shift: 3.0
+# Atoms for the distributional (categorical) critic head (SimbaV2 §4.3), trained
+# with an HL-Gauss cross-entropy loss. The support auto-expands as returns grow.
+# Reference uses 101. Set to 1 for a scalar MSE critic. Overrides base_network's
+# default of 1 (also feeds the built-but-unused RL net, harmlessly).
+num_bins: 101

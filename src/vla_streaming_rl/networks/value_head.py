@@ -5,7 +5,7 @@ import torch
 from hl_gauss_pytorch import HLGaussLoss
 from torch import nn
 
-from .blocks import HypersphericalEmbedding, NormedLinear, SimbaBlock, SimbaV2Block
+from .blocks import HyperLERPBlock, HypersphericalEmbedding, NormedLinear, Scaler, SimbaBlock
 from .sparse_utils import apply_one_shot_pruning
 
 
@@ -169,8 +169,20 @@ class HypersphericalActionValueHead(nn.Module):
     training — directly addressing the TD-loss-driven norm explosion that makes
     a plain MLP critic destabilize and the policy collapse mid-training.
 
-    Drop-in for ``ActionValueHead``: same ``forward(x, a) -> {"output",
-    "activation"}`` contract (scalar Q when ``num_bins == 1``).
+    When ``num_bins > 1`` this is SimbaV2's distributional value estimation: the
+    head emits ``num_bins`` categorical logits and holds an :class:`HLGaussLoss`
+    (the repo's Gaussian-histogram cross-entropy drop-in for the paper's
+    categorical critic). ``forward`` returns the raw logits in ``"output"``;
+    convert to a scalar Q with ``hl_gauss_loss(output)`` and train with
+    ``hl_gauss_loss(output, target)``; the support auto-expands via
+    :func:`maybe_update_hl_gauss_range`.
+
+    The value head mirrors the reference ``HyperCategoricalValue`` exactly:
+    ``NormedLinear → Scaler(init=1) → NormedLinear + bias``. The internal scaler
+    at init 1.0 (vs the embedder/block ``sqrt(2/dh)``) and the bias are
+    essential — with a tiny output scaler and no bias the categorical logits
+    stay ≈0, the softmax is pinned uniform, and the critic cannot leave its
+    initial value (the freeze observed earlier). Drop-in for ``ActionValueHead``.
     """
 
     def __init__(
@@ -186,12 +198,43 @@ class HypersphericalActionValueHead(nn.Module):
         super().__init__()
         self.horizon = horizon
         self.action_dim = action_dim
+        self.num_bins = num_bins
         in_dim = in_channels + action_dim * horizon
-        self.embed = HypersphericalEmbedding(in_dim, hidden_dim, c_shift)
-        self.blocks = nn.Sequential(*[SimbaV2Block(hidden_dim) for _ in range(block_num)])
-        self.out_linear = NormedLinear(hidden_dim, num_bins)
-        s_init = math.sqrt(2.0 / hidden_dim)
-        self.out_scaler = nn.Parameter(torch.full((num_bins,), s_init))
+
+        # Encoder scalers/alphas follow the reference critic config:
+        #   scaler_init = scaler_scale = sqrt(2/dh);  alpha_init = 1/(L+1);
+        #   alpha_scale = 1/sqrt(dh).
+        scaler = math.sqrt(2.0 / hidden_dim)
+        alpha_init = 1.0 / (block_num + 1)
+        alpha_scale = 1.0 / math.sqrt(hidden_dim)
+        self.embed = HypersphericalEmbedding(in_dim, hidden_dim, c_shift, scaler, scaler)
+        self.blocks = nn.Sequential(
+            *[
+                HyperLERPBlock(hidden_dim, scaler, scaler, alpha_init, alpha_scale)
+                for _ in range(block_num)
+            ]
+        )
+
+        # Value head == reference HyperCategoricalValue: w1 → scaler(init=1) →
+        # w2 + bias. The bias carries the (input-independent) marginal over
+        # bins; the scaler at init 1.0 gives the logits enough magnitude for the
+        # softmax to actually concentrate.
+        self.value_w1 = NormedLinear(hidden_dim, hidden_dim)
+        self.value_scaler = Scaler(hidden_dim, 1.0, 1.0)
+        self.value_w2 = NormedLinear(hidden_dim, num_bins)
+        self.value_bias = nn.Parameter(torch.zeros(num_bins))
+
+        # Distributional (categorical) critic loss state. ``value_range`` starts
+        # at 1.0 and is grown by ``maybe_update_hl_gauss_range`` as targets
+        # exceed it, matching the other actor-critic networks in this repo.
+        self.value_range = 1.0
+        if num_bins > 1:
+            self.hl_gauss_loss = HLGaussLoss(
+                min_value=-self.value_range,
+                max_value=+self.value_range,
+                num_bins=num_bins,
+                clamp_to_range=True,
+            )
 
     def forward(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
         """
@@ -203,5 +246,6 @@ class HypersphericalActionValueHead(nn.Module):
         h = torch.cat([x, a.view(bs, -1)], dim=1)
         h = self.embed(h)
         h = self.blocks(h)
-        out = self.out_scaler * self.out_linear(h)  # Eq. 14
-        return {"output": out, "activation": h}
+        v = self.value_scaler(self.value_w1(h))
+        logits = self.value_w2(v) + self.value_bias
+        return {"output": logits, "activation": h}

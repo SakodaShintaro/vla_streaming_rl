@@ -277,6 +277,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             et_lambda=float(args.et_lambda),
             critic_arch=str(args.critic_arch),
             critic_c_shift=float(args.critic_c_shift),
+            num_bins=int(args.num_bins),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

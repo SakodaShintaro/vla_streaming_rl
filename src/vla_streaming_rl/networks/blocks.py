@@ -25,6 +25,25 @@ class NormedLinear(nn.Module):
         return F.linear(x, F.normalize(self.weight, dim=1))
 
 
+class Scaler(nn.Module):
+    """Learnable per-dimension scaler with decoupled init / learning scale
+    (SimbaV2's ``Scaler``, Eq. 21 of arXiv:2502.15280).
+
+    The stored parameter is initialized to ``scale`` and multiplied by the
+    constant ``init / scale`` in forward, so the effective initial scaler is
+    ``init`` while its gradient scale is controlled independently by ``scale``.
+    Matches the reference ``Scaler`` exactly.
+    """
+
+    def __init__(self, dim: int, init: float, scale: float) -> None:
+        super().__init__()
+        self.scaler = nn.Parameter(torch.full((dim,), float(scale)))
+        self._forward_scaler = init / scale
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.scaler * self._forward_scaler * x
+
+
 class RSNorm(nn.Module):
     """Running-statistics normalization (SimbaV2, Eq. 3-4 of arXiv:2502.15280).
 
@@ -76,65 +95,86 @@ class HypersphericalEmbedding(nn.Module):
     the ``hidden_dim`` hypersphere (Eq. 10).
     """
 
-    def __init__(self, in_dim: int, hidden_dim: int, c_shift: float) -> None:
+    def __init__(
+        self, in_dim: int, hidden_dim: int, c_shift: float, scaler_init: float, scaler_scale: float
+    ) -> None:
         super().__init__()
+        # The reference normalizes observations with an external running
+        # normalizer (``normalize_observation``); we fold that in here as RSNorm
+        # since our critic input (pooled VLM features + action) is un-normalized.
         self.rsnorm = RSNorm(in_dim)
         self.register_buffer("c_shift", torch.full((1,), c_shift))
         self.linear = NormedLinear(in_dim + 1, hidden_dim)
-        s_init = math.sqrt(2.0 / hidden_dim)
-        self.scaler = nn.Parameter(torch.full((hidden_dim,), s_init))
+        self.scaler = Scaler(hidden_dim, scaler_init, scaler_scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.rsnorm(x)
         shift = self.c_shift.expand(x.shape[0], 1)
         x = F.normalize(torch.cat([x, shift], dim=-1), dim=-1)  # õ  (Eq. 9)
-        x = self.scaler * self.linear(x)  # s0 ⊙ (W0 õ)
+        x = self.scaler(self.linear(x))  # s0 ⊙ (W0 õ)
         return F.normalize(x, dim=-1)  # h0  (Eq. 10)
 
 
-class SimbaV2Block(nn.Module):
-    """https://arxiv.org/abs/2502.15280
+class HyperMLP(nn.Module):
+    """Inverted-bottleneck MLP on the hypersphere (SimbaV2 ``HyperMLP``, Eq. 11).
 
-    Inverted-bottleneck MLP with:
-      - L2 normalization instead of LayerNorm
-      - NormedLinear (weight on unit hypersphere, no bias)
-      - Learnable scaler vector
-      - LERP residual connection
-    All weight projection is handled inside forward, so no special optimizer
-    or external hook is required.
+    NormedLinear (unit-norm weight, no bias) → Scaler → ReLU (+eps to avoid a
+    zero vector) → NormedLinear → ℓ2-normalize. Matches the reference exactly.
+    """
 
-    Args:
-        channels: hidden dimension (dh)
+    _EPS = 1e-8
+
+    def __init__(
+        self, in_dim: int, inner_dim: int, out_dim: int, scaler_init: float, scaler_scale: float
+    ) -> None:
+        super().__init__()
+        self.w1 = NormedLinear(in_dim, inner_dim)
+        self.scaler = Scaler(inner_dim, scaler_init, scaler_scale)
+        self.w2 = NormedLinear(inner_dim, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.scaler(self.w1(x))
+        x = F.relu(x) + self._EPS
+        x = self.w2(x)
+        return F.normalize(x, dim=-1)
+
+
+class HyperLERPBlock(nn.Module):
+    """SimbaV2 residual block (``HyperLERPBlock``, Eq. 12 of arXiv:2502.15280).
+
+    A learnable linear interpolation (LERP) between the input and its HyperMLP
+    transform, ℓ2-normalized back onto the hypersphere:
+    ``x ← ℓ2norm(x + alpha ⊙ (mlp(x) − x))``. ``alpha`` is a Scaler with the
+    reference's decoupled init/scale (``alpha_init = 1/(L+1)``,
+    ``alpha_scale = 1/sqrt(hidden)``).
     """
 
     _EXPANSION = 4
-    _ALPHA_INIT = 0.1
 
-    def __init__(self, channels: int) -> None:
+    def __init__(
+        self,
+        hidden_dim: int,
+        scaler_init: float,
+        scaler_scale: float,
+        alpha_init: float,
+        alpha_scale: float,
+    ) -> None:
         super().__init__()
-        inner = channels * self._EXPANSION
-        self.linear1 = NormedLinear(channels, inner)
-        self.linear2 = NormedLinear(inner, channels)
-
-        s_init = math.sqrt(2.0 / channels)
-        self.scaler = nn.Parameter(torch.full((inner,), s_init))
-
-        alpha_scale = 1.0 / math.sqrt(channels)
-        self.alpha = nn.Parameter(torch.full((channels,), alpha_scale))
-        self._alpha_ratio = self._ALPHA_INIT / alpha_scale
+        inner = hidden_dim * self._EXPANSION
+        self.mlp = HyperMLP(
+            hidden_dim,
+            inner,
+            hidden_dim,
+            scaler_init / math.sqrt(self._EXPANSION),
+            scaler_scale / math.sqrt(self._EXPANSION),
+        )
+        self.alpha = Scaler(hidden_dim, alpha_init, alpha_scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # MLP + L2 Norm  (Eq.11)
-        h = self.linear1(x)
-        h = F.relu(h)
-        h = h * self.scaler
-        h = self.linear2(h)
-        h = F.normalize(h, dim=-1)
-
-        # LERP + L2 Norm  (Eq.12)
-        alpha = self.alpha * self._alpha_ratio
-        out = (1.0 - alpha) * x + alpha * h
-        return F.normalize(out, dim=-1)
+        residual = x
+        x = self.mlp(x)
+        x = residual + self.alpha(x - residual)
+        return F.normalize(x, dim=-1)
 
 
 class SimbaBlock(nn.Module):

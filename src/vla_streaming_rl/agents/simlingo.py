@@ -61,7 +61,11 @@ from PIL import Image
 from torch import nn, optim
 from transformers import Qwen2Tokenizer
 
-from vla_streaming_rl.networks.value_head import ActionValueHead, HypersphericalActionValueHead
+from vla_streaming_rl.networks.value_head import (
+    ActionValueHead,
+    HypersphericalActionValueHead,
+    maybe_update_hl_gauss_range,
+)
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -165,6 +169,7 @@ class SimLingoAgent:
         et_lambda: float,
         critic_arch: str,
         critic_c_shift: float,
+        num_bins: int,
     ) -> None:
         self.observation_space = observation_space
         del action_space
@@ -284,16 +289,18 @@ class SimLingoAgent:
         #     "good early, collapses mid-training" instability.
         #   - ``dueling``  : the original LayerNorm dueling V/A critic.
         if critic_arch == "simbav2":
+            self.num_bins = num_bins
             self.critic = HypersphericalActionValueHead(
                 in_channels=feature_dim,
                 action_dim=_ACTION_DIM,
                 horizon=1,
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
-                num_bins=1,
+                num_bins=self.num_bins,
                 c_shift=critic_c_shift,
             ).to(self.device)
         elif critic_arch == "dueling":
+            self.num_bins = 1
             self.critic = ActionValueHead(
                 in_channels=feature_dim,
                 action_dim=_ACTION_DIM,
@@ -766,9 +773,23 @@ class SimLingoAgent:
             return self._train_streaming(global_step, episode_done)
         return self._maybe_train(global_step)
 
+    def _critic_value(self, logits: torch.Tensor) -> torch.Tensor:
+        """Map the critic's raw ``"output"`` to a scalar Q (B,).
+
+        For the distributional (``num_bins > 1``) SimbaV2 critic the output is
+        ``num_bins`` categorical logits; HL-Gauss returns their expected return.
+        For a scalar critic it is just the value itself.
+        """
+        if self.num_bins > 1:
+            return self.critic.hl_gauss_loss(logits).view(-1)
+        return logits.view(-1)
+
     def _read_and_compute(self, seq: torch.Tensor) -> tuple:
         """Read one transition batch for index pairs ``seq`` (B, 2) and build
-        the DDPG losses' tensors. Returns ``(current_q, target_q, actor_loss)``.
+        the DDPG losses' tensors. Returns
+        ``(current_logits, current_q, target_q, actor_loss)`` where
+        ``current_logits`` is the raw critic output kept for the (distributional)
+        critic loss and ``current_q`` / ``target_q`` are scalar values.
 
         ``seq[:, 0] = t``, ``seq[:, 1] = t+1``; the replay convention puts a_t
         at ``actions[t+1]``, r_t at ``rewards[t+1]``, done_t at ``dones[t+1]``.
@@ -783,12 +804,15 @@ class SimLingoAgent:
         s = feat.mean(dim=1)
         s_next = feat_next.mean(dim=1)
 
-        # DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a').
+        # DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a'). With the
+        # distributional critic the next-state value is the expectation of its
+        # categorical output (via HL-Gauss).
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
-            next_q = self.critic(s_next, a_next.unsqueeze(1))["output"].view(-1)
+            next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1))["output"])
             target_q = r + self.gamma * (1.0 - done) * next_q
-        current_q = self.critic(s, a.unsqueeze(1))["output"].view(-1)
+        current_logits = self.critic(s, a.unsqueeze(1))["output"]
+        current_q = self._critic_value(current_logits)
 
         # L_actor = − Q(s, μ(s)). Freeze the critic's params during this Q
         # forward so the −Q gradient flows only into the waypoint heads, not
@@ -797,11 +821,11 @@ class SimLingoAgent:
         a_pred = self._policy_action(feat)
         for p in self.critic.parameters():
             p.requires_grad_(False)
-        actor_q = self.critic(s, a_pred.unsqueeze(1))["output"].view(-1)
+        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1))["output"])
         for p in self.critic.parameters():
             p.requires_grad_(True)
         actor_loss = -actor_q.mean()
-        return current_q, target_q, actor_loss
+        return current_logits, current_q, target_q, actor_loss
 
     # --- Off-policy training step -----------------------------------------
 
@@ -816,8 +840,15 @@ class SimLingoAgent:
         span = _SEQ_LEN + _HORIZON
         start = torch.randint(0, curr_size - span, (self.batch_size,))
         seq = start[:, None] + torch.arange(span)[None, :]
-        current_q, target_q, actor_loss = self._read_and_compute(seq)
-        critic_loss = nn.functional.mse_loss(current_q, target_q)
+        current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
+        # Distributional critic: cross-entropy of the categorical output against
+        # the (support-projected) scalar TD target via HL-Gauss; grow the support
+        # first if the target exceeds the current range. Scalar critic: MSE.
+        if self.num_bins > 1:
+            maybe_update_hl_gauss_range(self.critic, target_q)
+            critic_loss = self.critic.hl_gauss_loss(current_logits, target_q)
+        else:
+            critic_loss = nn.functional.mse_loss(current_q, target_q)
 
         # One backward over (critic_loss + actor_loss) so no ``step`` lands
         # between the two graphs (which would invalidate them in-place). The
@@ -831,12 +862,15 @@ class SimLingoAgent:
         self.critic_optimizer.step()
         self.actor_optimizer.step()
 
-        return {
+        info = {
             "losses/critic_loss": float(critic_loss.item()),
             "losses/actor_loss": float(actor_loss.item()),
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
         }
+        if self.num_bins > 1:
+            info["losses/value_range"] = float(self.critic.value_range)
+        return info
 
     # --- Streaming (online TD(λ)) training step ----------------------------
 
@@ -852,7 +886,10 @@ class SimLingoAgent:
         i_next = (self.rb.idx - 1) % self.rb.size
         i_curr = (self.rb.idx - 2) % self.rb.size
         seq = torch.tensor([[i_curr, i_next]], dtype=torch.long)
-        current_q, target_q, actor_loss = self._read_and_compute(seq)
+        # AdamET's eligibility trace is inherently scalar-TD, so streaming uses
+        # the expected value (``current_q``) of the distributional critic rather
+        # than the full categorical cross-entropy (which only off_policy uses).
+        _current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
 
         # TD error drives the eligibility-trace critic update; a detached
         # scalar (AdamET multiplies the per-parameter trace by it).
@@ -874,10 +911,13 @@ class SimLingoAgent:
         self.actor_optimizer.step()
         self.critic_optimizer.step(delta=delta, reset=episode_done)
 
-        return {
+        info = {
             "losses/critic_loss": float(delta * delta),
             "losses/actor_loss": float(actor_loss.item()),
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
             "losses/delta": delta,
         }
+        if self.num_bins > 1:
+            info["losses/value_range"] = float(self.critic.value_range)
+        return info
