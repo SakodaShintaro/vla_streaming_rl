@@ -14,7 +14,11 @@ from vla_streaming_rl.networks.policy_head import (
 )
 from vla_streaming_rl.networks.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.reward_processor import RewardProcessor
-from vla_streaming_rl.networks.value_head import ActionValueHead, maybe_update_hl_gauss_range
+from vla_streaming_rl.networks.value_head import (
+    ActionValueHead,
+    HypersphericalActionValueHead,
+    maybe_update_hl_gauss_range,
+)
 
 
 class ActorCriticWithActionValue(nn.Module):
@@ -41,8 +45,10 @@ class ActorCriticWithActionValue(nn.Module):
         denoising_steps: int,
         som_alpha: float,
         som_w: float,
+        critic_arch: str,
         critic_hidden_dim: int,
         critic_block_num: int,
+        critic_c_shift: float,
         predictor_hidden_dim: int,
         predictor_block_num: int,
         detach_actor: bool,
@@ -135,15 +141,34 @@ class ActorCriticWithActionValue(nn.Module):
             )
         else:
             raise ValueError(f"Unknown policy_type: {self.policy_type}")
-        self.value_head = ActionValueHead(
-            in_channels=self.encoder.output_dim,
-            action_dim=self.action_dim,
-            horizon=horizon,
-            hidden_dim=critic_hidden_dim,
-            block_num=critic_block_num,
-            num_bins=self.num_bins,
-            sparsity=sparsity,
-        )
+        # Critic architecture (the network owns hl_gauss, so ``num_bins`` from
+        # config is used as-is for both):
+        #   - ``simbav2`` : SimbaV2 hyperspherical critic (arXiv:2502.15280).
+        #     Weights / features stay on the unit hypersphere so the critic's
+        #     norm cannot blow up under the TD loss.
+        #   - ``dueling`` : the original LayerNorm dueling V/A critic.
+        if critic_arch == "simbav2":
+            self.value_head = HypersphericalActionValueHead(
+                in_channels=self.encoder.output_dim,
+                action_dim=self.action_dim,
+                horizon=horizon,
+                hidden_dim=critic_hidden_dim,
+                block_num=critic_block_num,
+                num_bins=self.num_bins,
+                c_shift=critic_c_shift,
+            )
+        elif critic_arch == "dueling":
+            self.value_head = ActionValueHead(
+                in_channels=self.encoder.output_dim,
+                action_dim=self.action_dim,
+                horizon=horizon,
+                hidden_dim=critic_hidden_dim,
+                block_num=critic_block_num,
+                num_bins=self.num_bins,
+                sparsity=sparsity,
+            )
+        else:
+            raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
         self.prediction_head = StatePredictionHead(
             image_processor=self.image_processor,
             reward_processor=self.reward_processor,
