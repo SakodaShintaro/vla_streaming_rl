@@ -61,5 +61,3 @@ learning_mode: off_policy
 #             "good early, score degrades mid-training" instability.
 #   dueling : original LayerNorm dueling V/A critic.
 critic_arch: dueling
-# SimbaV2 input shift constant c_shift (Eq. 9); paper default is 3.0.
-critic_c_shift: 3.0

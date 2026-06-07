@@ -69,7 +69,6 @@ class VLMActorCriticWithActionValue(nn.Module):
         critic_arch: str,
         critic_hidden_dim: int,
         critic_block_num: int,
-        critic_c_shift: float,
         predictor_hidden_dim: int,
         predictor_block_num: int,
         sparsity: float,
@@ -206,7 +205,6 @@ class VLMActorCriticWithActionValue(nn.Module):
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=num_bins,
-                c_shift=critic_c_shift,
             )
         elif critic_arch == "dueling":
             self.value_head = ActionValueHead(

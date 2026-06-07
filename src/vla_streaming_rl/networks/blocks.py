@@ -96,14 +96,14 @@ class HypersphericalEmbedding(nn.Module):
     """
 
     def __init__(
-        self, in_dim: int, hidden_dim: int, c_shift: float, scaler_init: float, scaler_scale: float
+        self, in_dim: int, hidden_dim: int, scaler_init: float, scaler_scale: float
     ) -> None:
         super().__init__()
         # The reference normalizes observations with an external running
         # normalizer (``normalize_observation``); we fold that in here as RSNorm
         # since our critic input (pooled VLM features + action) is un-normalized.
         self.rsnorm = RSNorm(in_dim)
-        self.register_buffer("c_shift", torch.full((1,), c_shift))
+        self.register_buffer("c_shift", torch.full((1,), 3.0))
         self.linear = NormedLinear(in_dim + 1, hidden_dim)
         self.scaler = Scaler(hidden_dim, scaler_init, scaler_scale)
 

@@ -10,9 +10,6 @@ critic_block_num: 1
 #             up the critic norm.
 #   dueling : original LayerNorm dueling V/A critic.
 critic_arch: dueling
-# SimbaV2 input shift constant c_shift (Eq. 9); paper default is 3.0. Ignored
-# by the dueling critic.
-critic_c_shift: 3.0
 predictor_hidden_dim: 512
 predictor_block_num: 2
 predictor_step_num: 1

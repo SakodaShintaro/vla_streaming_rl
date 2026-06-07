@@ -193,7 +193,6 @@ class HypersphericalActionValueHead(nn.Module):
         hidden_dim: int,
         block_num: int,
         num_bins: int,
-        c_shift: float,
     ) -> None:
         super().__init__()
         self.horizon = horizon
@@ -207,7 +206,7 @@ class HypersphericalActionValueHead(nn.Module):
         scaler = math.sqrt(2.0 / hidden_dim)
         alpha_init = 1.0 / (block_num + 1)
         alpha_scale = 1.0 / math.sqrt(hidden_dim)
-        self.embed = HypersphericalEmbedding(in_dim, hidden_dim, c_shift, scaler, scaler)
+        self.embed = HypersphericalEmbedding(in_dim, hidden_dim, scaler, scaler)
         self.blocks = nn.Sequential(
             *[
                 HyperLERPBlock(hidden_dim, scaler, scaler, alpha_init, alpha_scale)

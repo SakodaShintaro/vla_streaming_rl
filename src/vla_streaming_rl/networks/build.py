@@ -70,7 +70,6 @@ def build_network(
             critic_arch=args.critic_arch,
             critic_hidden_dim=args.critic_hidden_dim,
             critic_block_num=args.critic_block_num,
-            critic_c_shift=args.critic_c_shift,
             predictor_hidden_dim=args.predictor_hidden_dim,
             predictor_block_num=args.predictor_block_num,
             detach_actor=args.detach_actor,
@@ -117,7 +116,6 @@ def build_network(
             critic_arch=args.critic_arch,
             critic_hidden_dim=args.critic_hidden_dim,
             critic_block_num=args.critic_block_num,
-            critic_c_shift=args.critic_c_shift,
             predictor_hidden_dim=args.predictor_hidden_dim,
             predictor_block_num=args.predictor_block_num,
             sparsity=args.sparsity,
@@ -132,7 +130,6 @@ def build_network(
             critic_arch=args.critic_arch,
             critic_hidden_dim=args.critic_hidden_dim,
             critic_block_num=args.critic_block_num,
-            critic_c_shift=args.critic_c_shift,
             num_bins=args.num_bins,
             device=device,
         )

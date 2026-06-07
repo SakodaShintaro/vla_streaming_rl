@@ -59,7 +59,6 @@ class SimLingoNetwork(nn.Module):
         critic_arch: str,
         critic_hidden_dim: int,
         critic_block_num: int,
-        critic_c_shift: float,
         num_bins: int,
         device: torch.device,
     ) -> None:
@@ -134,7 +133,6 @@ class SimLingoNetwork(nn.Module):
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=self.num_bins,
-                c_shift=critic_c_shift,
             ).to(device)
         elif critic_arch == "dueling":
             self.num_bins = 1
