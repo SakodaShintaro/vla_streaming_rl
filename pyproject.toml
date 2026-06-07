@@ -104,7 +104,7 @@ line-length = 100
 src = ["src"]
 
 [tool.ruff.lint]
-select = ["I"]
+select = ["I", "F"]
 extend-ignore = ["ANN", "D"]
 ignore = [
     "ARG002",

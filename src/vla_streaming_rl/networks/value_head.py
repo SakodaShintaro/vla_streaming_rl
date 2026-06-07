@@ -6,7 +6,6 @@ from hl_gauss_pytorch import HLGaussLoss
 from torch import nn
 
 from .blocks import HypersphericalEmbedding, NormedLinear, SimbaBlock, SimbaV2Block
-from .image_processor import ImageProcessor
 from .sparse_utils import apply_one_shot_pruning
 
 
