@@ -6,12 +6,6 @@ import torch
 from omegaconf import DictConfig
 from torch import nn
 
-from vla_streaming_rl.networks.actor_critic_with_action_value import ActorCriticWithActionValue
-from vla_streaming_rl.networks.actor_critic_with_state_value import ActorCriticWithStateValue
-from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
-    VLMActorCriticWithActionValue,
-)
-
 
 def build_network(
     args: DictConfig,
@@ -22,6 +16,10 @@ def build_network(
     compile: bool,
 ) -> nn.Module:
     if args.network_class == "actor_critic_with_state_value":
+        from vla_streaming_rl.networks.actor_critic_with_state_value import (
+            ActorCriticWithStateValue,
+        )
+
         network = ActorCriticWithStateValue(
             observation_space_shape=observation_space_shape,
             action_space_shape=action_space_shape,
@@ -44,6 +42,10 @@ def build_network(
             predictor_type=args.predictor_type,
         )
     elif args.network_class == "actor_critic_with_action_value":
+        from vla_streaming_rl.networks.actor_critic_with_action_value import (
+            ActorCriticWithActionValue,
+        )
+
         network = ActorCriticWithActionValue(
             observation_space_shape=observation_space_shape,
             action_space_shape=action_space_shape,
@@ -76,6 +78,10 @@ def build_network(
             predictor_type=args.predictor_type,
         )
     elif args.network_class == "vlm_actor_critic_with_action_value":
+        from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
+            VLMActorCriticWithActionValue,
+        )
+
         network = VLMActorCriticWithActionValue(
             observation_space_shape=observation_space_shape,
             action_space_shape=action_space_shape,
@@ -116,7 +122,6 @@ def build_network(
             policy_type=args.policy_type,
         )
     elif args.network_class == "simlingo":
-        # Lazy import: pulls the heavy SimLingo VLM stack only for simlingo runs.
         from vla_streaming_rl.networks.simlingo_network import SimLingoNetwork
 
         network = SimLingoNetwork(
