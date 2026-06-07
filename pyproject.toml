@@ -105,7 +105,6 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["I", "F"]
-extend-ignore = ["ANN", "D"]
 ignore = [
     "ARG002",
     "COM812",
