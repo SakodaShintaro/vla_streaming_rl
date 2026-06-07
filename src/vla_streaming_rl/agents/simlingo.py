@@ -56,26 +56,22 @@ import gymnasium as gym
 import numpy as np
 import torch
 from leaderboard.utils.route_manipulation import downsample_route  # type: ignore
-from omegaconf import OmegaConf
 from PIL import Image
 from torch import nn, optim
-from transformers import Qwen2Tokenizer
 
-from vla_streaming_rl.networks.value_head import (
-    ActionValueHead,
-    HypersphericalActionValueHead,
-    maybe_update_hl_gauss_range,
+from vla_streaming_rl.networks.simlingo_network import (
+    _ACTION_DIM,
+    _NUM_WP_QUERIES,
+    _ROUTE_LEN,
+    _SPEED_WPS_LEN,
+    _WP_DIM,
 )
+from vla_streaming_rl.networks.value_head import maybe_update_hl_gauss_range
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
-from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (
-    InternVLChatConfig,
-)
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import DrivingInput
 from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
-    SIMLINGO_ADDITIONAL_SPECIAL_TOKENS,
     build_transform,
     dynamic_preprocess,
 )
@@ -97,16 +93,9 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.allow_tf32 = True
 
-# SimLingo's driving adaptor emits 20 route waypoints + 10 speed
-# waypoints, each 2-D — see DrivingAdaptor in
-# simlingo_training/models/adaptors.py.
-_ROUTE_LEN = 20
-_SPEED_WPS_LEN = 10
-_WP_DIM = 2
-# Number of waypoint-query positions in ``driving_features`` (route then
-# speed). The DrivingAdaptor heads consume one feature vector per query.
-_NUM_WP_QUERIES = _ROUTE_LEN + _SPEED_WPS_LEN
-_ACTION_DIM = _NUM_WP_QUERIES * _WP_DIM
+# Waypoint shape constants (_ROUTE_LEN, _SPEED_WPS_LEN, _WP_DIM, _NUM_WP_QUERIES,
+# _ACTION_DIM) are imported from ``networks.simlingo_network`` — they describe
+# the SimLingo waypoint output that the network produces.
 
 # Single-frame VLM input (seq_len=1) with a one-step bootstrap horizon, so the
 # replay buffer needs ``_SEQ_LEN + _HORIZON`` contiguous indices per sample to
@@ -154,22 +143,18 @@ class SimLingoAgent:
         observation_space: gym.spaces.Box,
         action_space: gym.spaces.Box,
         env: gym.Env,
+        network: nn.Module,
         scratch_dir: Path,
         gamma: float,
         buffer_size: int,
         batch_size: int,
         learning_starts: int,
-        critic_hidden_dim: int,
-        critic_block_num: int,
         exploration_noise: float,
         actor_lr: float,
         critic_lr: float,
         max_grad_norm: float,
         learning_mode: str,
         et_lambda: float,
-        critic_arch: str,
-        critic_c_shift: float,
-        num_bins: int,
     ) -> None:
         self.observation_space = observation_space
         del action_space
@@ -187,8 +172,6 @@ class SimLingoAgent:
         self.max_grad_norm = max_grad_norm
 
         torch.cuda.empty_cache()
-        config_path = str(self._resolve_checkpoint())
-        print(f"Config path: {config_path}")
         self._frame_step = -1
         self.initialized = False
         self.device = torch.device("cuda")
@@ -206,46 +189,16 @@ class SimLingoAgent:
         self.route_planner_max_distance = 50.0
         self.route_planner_min_distance = 7.5
 
-        # load config from .hydra folder
-        config_load_path = Path(config_path).parent.parent.parent / ".hydra" / "config.yaml"
-        with open(config_load_path, "r") as file:
-            cfg = OmegaConf.load(file)
-        self.cfg = cfg
-        self.cfg.model.vision_model.use_global_img = cfg.data_module.use_global_img
-
-        # tokenizer
-        tokenizer = Qwen2Tokenizer.from_pretrained(cfg.model.vision_model.variant)
-        tokenizer.add_special_tokens(
-            {"additional_special_tokens": list(SIMLINGO_ADDITIONAL_SPECIAL_TOKENS)}
-        )
-        tokenizer.padding_side = "left"
-
-        # ``AutoConfig`` + ``trust_remote_code=True`` resolves to
-        # ``InternVLChatConfig``. Use the vendored class directly so the
-        # HF-hosted ``configuration_internvl_chat.py`` is no longer
-        # downloaded / executed at runtime.
-        tmp_config = InternVLChatConfig.from_pretrained(cfg.model.vision_model.variant)
-        image_size = tmp_config.force_image_size or tmp_config.vision_config.image_size
-        patch_size = tmp_config.vision_config.patch_size
-        num_image_token = int((image_size // patch_size) ** 2 * (tmp_config.downsample_ratio**2))
-        cache_dir = f"pretrained/{(cfg.model.vision_model.variant.split('/')[1])}"
-        default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        # Construct ``DrivingModel`` directly instead of going through
-        # ``hydra.utils.instantiate(cfg.model, ...)`` — the dispatch via
-        # ``_target_`` was only useful for simlingo's experiment-yaml
-        # model-class swap workflow, which we never exercise. Removing
-        # it also frees us from having to rewrite stale absolute module
-        # paths in the saved checkpoint config.
-        model_kwargs = {k: v for k, v in cfg.model.items() if k != "_target_"}
-        self.network = DrivingModel(
-            cfg_data_module=cfg.data_module,
-            processor=tokenizer,
-            cache_dir=cache_dir,
-            **model_kwargs,
-        ).to(self.device)
-        torch.set_default_dtype(default_dtype)
-        self.network.load_state_dict(torch.load(config_path))
+        # The learnable network (SimLingo VLM + waypoint-head policy μ + Q
+        # critic) is built outside and passed in. ``cfg`` / tokenizer /
+        # num_image_token are byproducts of its construction that the inference
+        # pipeline below needs.
+        self.network = network
+        self.cfg = network.cfg
+        self._driving_adaptor = network.driving_adaptor
+        self.actor_heads = network.actor_heads
+        self.critic = network.critic
+        self.num_bins = network.num_bins
 
         self.T = 1
         self.stuck_detector = 0
@@ -254,64 +207,14 @@ class SimLingoAgent:
         self.ego_state_filter = EgoStateFilter(dt=1.0 / 20.0, state_log_maxlen=5)
         self.prompt_builder = PromptBuilder(
             config=self.config,
-            tokenizer=tokenizer,
-            num_image_token=num_image_token,
+            tokenizer=network.tokenizer,
+            num_image_token=network.num_image_token,
             device=self.device,
         )
 
         # --- RL setup ---------------------------------------------------
 
-        # Freeze the whole VLM backbone, then re-enable just the two
-        # SimLingo waypoint heads — those *are* the deterministic policy
-        # μ and are the only part of the network that learns.
-        for p in self.network.parameters():
-            p.requires_grad_(False)
-        self._driving_adaptor = self.network.adaptors.driving
-        # The heads were built in bfloat16 (default dtype at construction).
-        # Promote them to float32 so the tiny actor LR isn't swallowed by
-        # bf16 rounding and so they line up with the float32 critic /
-        # cached features. ``get_predictions`` casts its feature input to
-        # the head dtype, so the rest of the (bf16) VLM forward still works.
-        self.actor_heads = nn.ModuleList(
-            [self._driving_adaptor.route_head, self._driving_adaptor.speed_wps_head]
-        ).float()
-        for p in self.actor_heads.parameters():
-            p.requires_grad_(True)
-
-        # SimLingo runs in bfloat16; the RL heads run in float32 to keep
-        # value targets numerically stable.
-        feature_dim = int(self.network.language_model.hidden_size)
-        # Q(s, a) head from networks.value_head. ``num_bins=1`` collapses the
-        # distributional output to a scalar.
-        #   - ``simbav2``  : SimbaV2 hyperspherical critic (arXiv:2502.15280).
-        #     Weights / features are kept on the unit hypersphere so the
-        #     critic's norm cannot explode under the TD loss — the cause of the
-        #     "good early, collapses mid-training" instability.
-        #   - ``dueling``  : the original LayerNorm dueling V/A critic.
-        if critic_arch == "simbav2":
-            self.num_bins = num_bins
-            self.critic = HypersphericalActionValueHead(
-                in_channels=feature_dim,
-                action_dim=_ACTION_DIM,
-                horizon=1,
-                hidden_dim=critic_hidden_dim,
-                block_num=critic_block_num,
-                num_bins=self.num_bins,
-                c_shift=critic_c_shift,
-            ).to(self.device)
-        elif critic_arch == "dueling":
-            self.num_bins = 1
-            self.critic = ActionValueHead(
-                in_channels=feature_dim,
-                action_dim=_ACTION_DIM,
-                horizon=1,
-                hidden_dim=critic_hidden_dim,
-                block_num=critic_block_num,
-                num_bins=1,
-                sparsity=0.0,
-            ).to(self.device)
-        else:
-            raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
+        feature_dim = network.feature_dim
 
         # ``off_policy`` trains on random replay batches; ``streaming`` trains
         # online on the latest transition every step with TD(λ) eligibility
@@ -477,27 +380,6 @@ class SimLingoAgent:
         self._global_plan = [global_plan_gps[x] for x in ds_ids]
 
     # --- Setup helpers -----------------------------------------------------
-
-    @classmethod
-    def _resolve_checkpoint(cls):
-        """Pull the SimLingo checkpoint from HF and return its local path.
-
-        ``snapshot_download`` populates the HF cache; we pick the single
-        ``pytorch_model.pt`` inside (excluding the blob-store hardlinks,
-        which point to the same file but live under a content-addressed
-        path that breaks SimLingo's
-        ``Path(...).parent.parent.parent / .hydra/config.yaml`` lookup).
-        """
-        from huggingface_hub import snapshot_download
-
-        _HF_REPO_ID = "RenzKa/simlingo"
-        _HF_CKPT_NAME = "pytorch_model.pt"
-
-        snapshot = Path(snapshot_download(_HF_REPO_ID))
-        candidates = [p for p in snapshot.rglob(_HF_CKPT_NAME) if "/blobs/" not in str(p)]
-        if not candidates:
-            raise RuntimeError(f"no {_HF_CKPT_NAME} in HF snapshot of {_HF_REPO_ID} at {snapshot}")
-        return candidates[0]
 
     def _init(self) -> None:
         """First-tick lazy init: build the RoutePlanner once the global

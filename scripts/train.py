@@ -169,7 +169,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     episode_limit = args.episode_limit
     checkpoint_interval = max(1, step_limit // 10)
 
-    compile_network = args.network_class != "vlm_actor_critic_with_action_value"
+    compile_network = args.network_class not in ("vlm_actor_critic_with_action_value", "simlingo")
     network = build_network(
         args,
         observation_space_shape=env.observation_space.shape,
@@ -260,6 +260,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             observation_space=env.observation_space,
             action_space=env.action_space,
             env=env,
+            network=network,
             scratch_dir=(result_dir / "simlingo_scratch")
             if result_dir is not None
             else Path("/tmp/simlingo_scratch"),
@@ -267,17 +268,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             buffer_size=int(args.buffer_size),
             batch_size=int(args.batch_size),
             learning_starts=int(args.learning_starts),
-            critic_hidden_dim=int(args.critic_hidden_dim),
-            critic_block_num=int(args.critic_block_num),
             exploration_noise=float(args.exploration_noise),
             actor_lr=float(args.actor_lr),
             critic_lr=float(args.critic_lr),
             max_grad_norm=float(args.max_grad_norm),
             learning_mode=str(args.learning_mode),
             et_lambda=float(args.et_lambda),
-            critic_arch=str(args.critic_arch),
-            critic_c_shift=float(args.critic_c_shift),
-            num_bins=int(args.num_bins),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

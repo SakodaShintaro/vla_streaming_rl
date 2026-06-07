@@ -115,6 +115,18 @@ def build_network(
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,
         )
+    elif args.network_class == "simlingo":
+        # Lazy import: pulls the heavy SimLingo VLM stack only for simlingo runs.
+        from vla_streaming_rl.networks.simlingo_network import SimLingoNetwork
+
+        network = SimLingoNetwork(
+            critic_arch=args.critic_arch,
+            critic_hidden_dim=args.critic_hidden_dim,
+            critic_block_num=args.critic_block_num,
+            critic_c_shift=args.critic_c_shift,
+            num_bins=args.num_bins,
+            device=device,
+        )
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
 

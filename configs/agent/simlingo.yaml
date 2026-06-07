@@ -24,9 +24,9 @@ defaults:
   - _self_
 
 agent_type: simlingo
-# Built-but-unused RL net (the trainer still builds one against the
-# env's observation_space). Mirrors cnn_streaming.yaml's choice.
-network_class: actor_critic_with_action_value
+# The SimLingo VLM + waypoint heads (policy μ) + Q critic, built by
+# ``build_network`` (networks/simlingo_network.py) and passed to SimLingoAgent.
+network_class: simlingo
 
 # Overrides of base_*/default values consumed by SimLingoAgent.
 image_save_interval: 50
@@ -63,8 +63,3 @@ learning_mode: off_policy
 critic_arch: dueling
 # SimbaV2 input shift constant c_shift (Eq. 9); paper default is 3.0.
 critic_c_shift: 3.0
-# Atoms for the distributional (categorical) critic head (SimbaV2 §4.3), trained
-# with an HL-Gauss cross-entropy loss. The support auto-expands as returns grow.
-# Reference uses 101. Set to 1 for a scalar MSE critic. Overrides base_network's
-# default of 1 (also feeds the built-but-unused RL net, harmlessly).
-num_bins: 101
