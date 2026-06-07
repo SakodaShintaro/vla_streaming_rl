@@ -31,7 +31,6 @@ def build_network(
             num_bins=args.num_bins,
             predictor_step_num=args.predictor_step_num,
             critic_loss_weight=args.critic_loss_weight,
-            separate_critic=args.separate_critic,
             encoder=args.encoder,
             seq_len=args.seq_len,
             encoder_block_num=args.encoder_block_num,

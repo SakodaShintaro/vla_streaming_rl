@@ -10,7 +10,6 @@ from vla_streaming_rl.networks.policy_head import BetaPolicy, CategoricalPolicy
 from vla_streaming_rl.networks.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.value_head import (
-    SeparateCritic,
     StateValueHead,
     maybe_update_hl_gauss_range,
 )
@@ -28,7 +27,6 @@ class ActorCriticWithStateValue(nn.Module):
         num_bins: int,
         predictor_step_num: int,
         critic_loss_weight: float,
-        separate_critic: bool,
         encoder: str,
         seq_len: int,
         encoder_block_num: int,
@@ -50,7 +48,6 @@ class ActorCriticWithStateValue(nn.Module):
         self.observation_space_shape = observation_space_shape
         self.predictor_step_num = predictor_step_num
         self.critic_loss_weight = critic_loss_weight
-        self.separate_critic = separate_critic
 
         self.image_processor = ImageProcessor(observation_space_shape)
         hidden_image_dim = self.image_processor.output_shape[0]
@@ -82,21 +79,12 @@ class ActorCriticWithStateValue(nn.Module):
         hidden_dim = self.encoder.output_dim
         self.horizon = horizon
 
-        self.value_head = (
-            SeparateCritic(
-                observation_space_shape,
-                hidden_dim,
-                critic_block_num,
-                num_bins,
-            )
-            if self.separate_critic
-            else StateValueHead(
-                in_channels=hidden_dim,
-                hidden_dim=hidden_dim,
-                block_num=1,
-                num_bins=num_bins,
-                sparsity=0.0,
-            )
+        self.value_head = StateValueHead(
+            in_channels=hidden_dim,
+            hidden_dim=hidden_dim,
+            block_num=1,
+            num_bins=num_bins,
+            sparsity=0.0,
         )
 
         if policy_type == "beta":
@@ -165,7 +153,7 @@ class ActorCriticWithStateValue(nn.Module):
     ) -> dict:
         x, rnn_state = self.encoder(s_seq, obs_z_seq, a_seq, r_seq, rnn_state)  # (B, hidden_dim)
 
-        value_dict = self.value_head(s_seq[:, -1]) if self.separate_critic else self.value_head(x)
+        value_dict = self.value_head(x)
 
         policy_dict = self.policy_head(x, None)
 
@@ -210,11 +198,7 @@ class ActorCriticWithStateValue(nn.Module):
         policy_activation = policy_dict["activation"]
 
         # Get value output (state value at chunk start, i.e., last frame of input sequence)
-        value_dict = (
-            self.value_head(curr_obs[:, -1])
-            if self.separate_critic
-            else self.value_head(curr_state)
-        )
+        value_dict = self.value_head(curr_state)
         value = value_dict["output"]
         value_activation = value_dict["activation"]
 
@@ -272,11 +256,7 @@ class ActorCriticWithStateValue(nn.Module):
                 next_obs, next_obs_z, next_actions, next_rewards, next_rnn_state
             )
 
-            next_value_dict = (
-                self.value_head(next_obs[:, -1])
-                if self.separate_critic
-                else self.value_head(next_state)
-            )
+            next_value_dict = self.value_head(next_state)
             next_value = next_value_dict["output"]
             next_value = (
                 self.hl_gauss_loss(next_value).view(-1)
@@ -321,11 +301,7 @@ class ActorCriticWithStateValue(nn.Module):
         policy_activation = policy_dict["activation"]
 
         # Value evaluation
-        value_dict = (
-            self.value_head(curr_obs[:, -1])
-            if self.separate_critic
-            else self.value_head(curr_state)
-        )
+        value_dict = self.value_head(curr_state)
         value = value_dict["output"]
         value_activation = value_dict["activation"]
 
@@ -352,11 +328,7 @@ class ActorCriticWithStateValue(nn.Module):
         actor_entropy_loss = action_loss - 0.02 * entropy.mean()
 
         # -V(s) for eligibility trace backward (detached from encoder)
-        value_for_et_dict = (
-            self.value_head(curr_obs[:, -1].detach())
-            if self.separate_critic
-            else self.value_head(curr_state.detach())
-        )
+        value_for_et_dict = self.value_head(curr_state.detach())
         value_for_et = value_for_et_dict["output"]
         if self.num_bins > 1:
             neg_value_detached = -self.hl_gauss_loss(value_for_et).mean()
