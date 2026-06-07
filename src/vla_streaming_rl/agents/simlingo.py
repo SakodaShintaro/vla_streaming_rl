@@ -66,7 +66,6 @@ from vla_streaming_rl.networks.simlingo_network import (
     _SPEED_WPS_LEN,
     _WP_DIM,
 )
-from vla_streaming_rl.networks.value_head import maybe_update_hl_gauss_range
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -662,9 +661,7 @@ class SimLingoAgent:
         ``num_bins`` categorical logits; HL-Gauss returns their expected return.
         For a scalar critic it is just the value itself.
         """
-        if self.num_bins > 1:
-            return self.critic.hl_gauss_loss(logits).view(-1)
-        return logits.view(-1)
+        return self.critic.to_value(logits).view(-1)
 
     def _read_and_compute(self, seq: torch.Tensor) -> tuple:
         """Read one transition batch for index pairs ``seq`` (B, 2) and build
@@ -726,11 +723,8 @@ class SimLingoAgent:
         # Distributional critic: cross-entropy of the categorical output against
         # the (support-projected) scalar TD target via HL-Gauss; grow the support
         # first if the target exceeds the current range. Scalar critic: MSE.
-        if self.num_bins > 1:
-            maybe_update_hl_gauss_range(self.critic, target_q)
-            critic_loss = self.critic.hl_gauss_loss(current_logits, target_q)
-        else:
-            critic_loss = nn.functional.mse_loss(current_q, target_q)
+        self.critic.update_value_range(target_q)
+        critic_loss = self.critic.value_loss(current_logits, target_q)
 
         # One backward over (critic_loss + actor_loss) so no ``step`` lands
         # between the two graphs (which would invalidate them in-place). The

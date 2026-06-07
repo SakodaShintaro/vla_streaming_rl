@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
 import torch
-from hl_gauss_pytorch import HLGaussLoss
 from torch import nn
 from torch.nn import functional as F
 
@@ -9,10 +8,7 @@ from vla_streaming_rl.networks.image_processor import ImageProcessor
 from vla_streaming_rl.networks.policy_head import BetaPolicy, CategoricalPolicy
 from vla_streaming_rl.networks.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.reward_processor import RewardProcessor
-from vla_streaming_rl.networks.value_head import (
-    StateValueHead,
-    maybe_update_hl_gauss_range,
-)
+from vla_streaming_rl.networks.value_head import StateValueHead
 
 
 class ActorCriticWithStateValue(nn.Module):
@@ -106,15 +102,6 @@ class ActorCriticWithStateValue(nn.Module):
         self.disable_state_predictor = disable_state_predictor
 
         self.apply(self._init_weights)
-
-        self.value_range = 1.0
-        if self.num_bins > 1:
-            self.hl_gauss_loss = HLGaussLoss(
-                min_value=-self.value_range,
-                max_value=+self.value_range,
-                num_bins=self.num_bins,
-                clamp_to_range=True,
-            )
 
     def _init_weights(self, module: nn.Module) -> None:
         """Initialize weights with orthogonal initialization.
@@ -213,8 +200,8 @@ class ActorCriticWithStateValue(nn.Module):
 
         # Compute value loss
         if self.num_bins > 1:
-            maybe_update_hl_gauss_range(self, curr_target_v.squeeze(1))
-            value_loss = self.hl_gauss_loss(value, curr_target_v.squeeze(1))
+            self.value_head.update_value_range(curr_target_v.squeeze(1))
+            value_loss = self.value_head.value_loss(value, curr_target_v.squeeze(1))
         else:
             value_clipped = torch.clamp(
                 value,
@@ -257,12 +244,7 @@ class ActorCriticWithStateValue(nn.Module):
             )
 
             next_value_dict = self.value_head(next_state)
-            next_value = next_value_dict["output"]
-            next_value = (
-                self.hl_gauss_loss(next_value).view(-1)
-                if self.num_bins > 1
-                else next_value.view(-1)
-            )
+            next_value = self.value_head.to_value(next_value_dict["output"]).view(-1)
 
             # Generate inference action from next state
             policy_dict_next = self.policy_head(next_state, None)
@@ -307,20 +289,15 @@ class ActorCriticWithStateValue(nn.Module):
 
         # Advantage (no normalization for streaming B=1)
         with torch.no_grad():
-            curr_v = self.hl_gauss_loss(value).view(-1) if self.num_bins > 1 else value.view(-1)
+            curr_v = self.value_head.to_value(value).view(-1)
             advantage = target_value - curr_v
 
         # Policy loss (REINFORCE-style, online so no PPO clipping needed)
         action_loss = -(a_logp * advantage.unsqueeze(1)).mean()
 
         # Value loss
-        if self.num_bins > 1:
-            maybe_update_hl_gauss_range(self, target_value)
-        value_loss = (
-            self.hl_gauss_loss(value, target_value)
-            if self.num_bins > 1
-            else F.mse_loss(value.view(-1), target_value)
-        )
+        self.value_head.update_value_range(target_value)
+        value_loss = self.value_head.value_loss(value, target_value)
 
         total_loss = action_loss + self.critic_loss_weight * value_loss - 0.02 * entropy.mean()
 
@@ -329,11 +306,7 @@ class ActorCriticWithStateValue(nn.Module):
 
         # -V(s) for eligibility trace backward (detached from encoder)
         value_for_et_dict = self.value_head(curr_state.detach())
-        value_for_et = value_for_et_dict["output"]
-        if self.num_bins > 1:
-            neg_value_detached = -self.hl_gauss_loss(value_for_et).mean()
-        else:
-            neg_value_detached = -value_for_et.mean()
+        neg_value_detached = -self.value_head.to_value(value_for_et_dict["output"]).mean()
 
         # Prediction for inference visualization
         next_image, next_reward = self.prediction_head.predict_next_state(

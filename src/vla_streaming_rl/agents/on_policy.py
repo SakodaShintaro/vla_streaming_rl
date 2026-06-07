@@ -216,10 +216,7 @@ class OnPolicyAgent:
         info_dict["a_logp"] = a_logp
 
         # value
-        value = result_dict["value"]
-        if self.num_bins > 1:
-            value = self.network.hl_gauss_loss(value)
-        value = value.item()
+        value = self.network.value_head.to_value(result_dict["value"]).item()
         self.prev_value = value
         info_dict["value"] = value
 

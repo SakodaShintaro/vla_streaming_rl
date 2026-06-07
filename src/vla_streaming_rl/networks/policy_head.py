@@ -153,8 +153,6 @@ class DiffusionPolicy(nn.Module):
         action_chunk: torch.Tensor,
         *,
         value_head,
-        hl_gauss_loss,
-        num_bins: int,
         detach_actor: bool,
     ) -> tuple[torch.Tensor, dict, dict]:
         """Advantage-maximizing actor loss + DACER2 score matching
@@ -171,10 +169,7 @@ class DiffusionPolicy(nn.Module):
         for param in value_head.parameters():
             param.requires_grad_(False)
         advantage_dict = value_head.get_advantage(state, action)
-        advantage = advantage_dict["output"]
-        if num_bins > 1:
-            advantage = hl_gauss_loss(advantage)
-        advantage = advantage.view(-1, 1)
+        advantage = value_head.to_value(advantage_dict["output"]).view(-1, 1)
         actor_loss = -advantage.mean()
         for param in value_head.parameters():
             param.requires_grad_(True)
@@ -188,11 +183,7 @@ class DiffusionPolicy(nn.Module):
         actions = action.view(B, -1).clone().detach().requires_grad_(True)
         actions_chunk = actions.view(B, horizon, action_dim)
         q_output_dict = value_head(state, actions_chunk)
-        q_values = q_output_dict["output"]
-        if num_bins > 1:
-            q_values = hl_gauss_loss(q_values).unsqueeze(-1)
-        else:
-            q_values = q_values.unsqueeze(-1)
+        q_values = value_head.to_value(q_output_dict["output"]).unsqueeze(-1)
         q_grad = torch.autograd.grad(q_values.sum(), actions, create_graph=True)[0]
 
         noise = torch.randn_like(actions).clamp(-3.0, 3.0)
@@ -332,8 +323,6 @@ class CFGDiffusionPolicy(nn.Module):
         action_chunk: torch.Tensor,
         *,
         value_head: nn.Module,
-        hl_gauss_loss,
-        num_bins: int,
         detach_actor: bool,
     ) -> tuple[torch.Tensor, dict, dict]:
         """CFGRL/pistar06: condition on advantage sign, drop with condition_drop_prob."""
@@ -345,10 +334,7 @@ class CFGDiffusionPolicy(nn.Module):
 
         with torch.no_grad():
             advantage_dict = value_head.get_advantage(state, action_chunk)
-            advantage = advantage_dict["output"]
-            if num_bins > 1:
-                advantage = hl_gauss_loss(advantage)
-            advantage = advantage.view(-1)
+            advantage = value_head.to_value(advantage_dict["output"]).view(-1)
             threshold = advantage.median()
             condition = (advantage >= threshold).long()
             drop_mask = torch.rand(batch_size, device=device) < self.condition_drop_prob
@@ -460,8 +446,6 @@ class MeanFlowPolicy(nn.Module):
         action_chunk: torch.Tensor,
         *,
         value_head: nn.Module,
-        hl_gauss_loss,
-        num_bins: int,
         detach_actor: bool,
     ) -> tuple[torch.Tensor, dict, dict]:
         """Score-based One-step MeanFlow Policy Optimization (SOM, arXiv:2605.23365).
@@ -514,10 +498,7 @@ class MeanFlowPolicy(nn.Module):
         state_exp = state.detach().unsqueeze(0).expand(som_mc_K, B, -1).reshape(-1, state.shape[1])
         a0_chunk_mc = a0_proposal.reshape(som_mc_K * B, horizon, action_dim)
         q_dict = value_head(state_exp, a0_chunk_mc)
-        q_vals = q_dict["output"]
-        if num_bins > 1:
-            q_vals = hl_gauss_loss(q_vals)
-        q_vals = q_vals.view(som_mc_K, B)
+        q_vals = value_head.to_value(q_dict["output"]).view(som_mc_K, B)
         # GRPO-style batch-wise normalization for scale-invariant training.
         q_norm = (q_vals - q_vals.mean()) / (q_vals.std() + 1e-6)
         log_sum_exp = torch.logsumexp(som_alpha * q_norm, dim=0)
@@ -611,8 +592,6 @@ class BetaPolicy(nn.Module):
         action_chunk: torch.Tensor,
         *,
         value_head: nn.Module,
-        hl_gauss_loss,
-        num_bins: int,
         detach_actor: bool,
     ) -> tuple[torch.Tensor, dict, dict]:
         """REINFORCE-style policy-gradient loss used inside ActorCriticWithActionValue."""
@@ -625,10 +604,7 @@ class BetaPolicy(nn.Module):
         entropy = policy_output["entropy"]
 
         advantage_dict = value_head.get_advantage(state, action)
-        advantage = advantage_dict["output"]
-        if num_bins > 1:
-            advantage = hl_gauss_loss(advantage)
-        advantage = advantage.view(-1, 1)
+        advantage = value_head.to_value(advantage_dict["output"]).view(-1, 1)
         actor_loss = -(log_pi * advantage.detach()).mean() - 0.02 * entropy.mean()
 
         activations_dict = {

@@ -4,7 +4,6 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
-from hl_gauss_pytorch import HLGaussLoss
 from torch import nn
 from torch.nn import functional as F
 
@@ -12,11 +11,7 @@ from .image_processor import ImageProcessor
 from .policy_head import BetaPolicy, CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
 from .prediction_head import StatePredictionHead
 from .reward_processor import RewardProcessor
-from .value_head import (
-    ActionValueHead,
-    HypersphericalActionValueHead,
-    maybe_update_hl_gauss_range,
-)
+from .value_head import ActionValueHead, HypersphericalActionValueHead
 from .video_encoder import VideoEncoder
 from .vlm_backbone import is_qwen35, load_model
 from .vlm_input_cache import VLMInputCache
@@ -230,15 +225,6 @@ class VLMActorCriticWithActionValue(nn.Module):
         # Project state output to match FluxDiT context_in_dim
         self.state_to_predictor_proj = nn.Linear(state_out_dim, hidden_image_dim)
 
-        self.value_range = 1.0
-        if self.num_bins > 1:
-            self.hl_gauss_loss = HLGaussLoss(
-                min_value=-self.value_range,
-                max_value=+self.value_range,
-                num_bins=num_bins,
-                clamp_to_range=True,
-            )
-
         self._dummy_state = torch.zeros(1, 1, 1)
 
         # prepare_vlm_inputs allocates thousands of small Python objects per
@@ -337,8 +323,6 @@ class VLMActorCriticWithActionValue(nn.Module):
             state,
             action_chunk,
             value_head=self.value_head,
-            hl_gauss_loss=self.hl_gauss_loss if self.num_bins > 1 else None,
-            num_bins=self.num_bins,
             detach_actor=self.detach_actor,
         )
 
@@ -379,8 +363,6 @@ class VLMActorCriticWithActionValue(nn.Module):
             state,
             action_chunk,
             value_head=self.value_head,
-            hl_gauss_loss=self.hl_gauss_loss if self.num_bins > 1 else None,
-            num_bins=self.num_bins,
             detach_actor=self.detach_actor,
         )
 
@@ -394,10 +376,7 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         et_critic_dict = self.value_head(state.detach(), action_chunk.detach())
-        if self.num_bins > 1:
-            neg_value_detached = -self.hl_gauss_loss(et_critic_dict["output"]).mean()
-        else:
-            neg_value_detached = -et_critic_dict["output"].mean()
+        neg_value_detached = -self.value_head.to_value(et_critic_dict["output"]).mean()
 
         next_image, next_reward = self.prediction_head.predict_next_state(
             self._state_for_predictor(state),
@@ -652,8 +631,7 @@ class VLMActorCriticWithActionValue(nn.Module):
     def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Compute scalar Q-value for a (state, action) pair."""
         q_dict = self.value_head(state, action)
-        q = q_dict["output"]
-        return self.hl_gauss_loss(q).view(-1) if self.num_bins > 1 else q.view(-1)
+        return self.value_head.to_value(q_dict["output"]).view(-1)
 
     @torch.inference_mode()
     def _infer(
@@ -724,14 +702,11 @@ class VLMActorCriticWithActionValue(nn.Module):
         if self.detach_critic:
             state = state.detach()
         curr_critic_output_dict = self.value_head(state, action_chunk)
+        logits = curr_critic_output_dict["output"]
 
-        if self.num_bins > 1:
-            maybe_update_hl_gauss_range(self, target_value)
-            curr_critic_value = self.hl_gauss_loss(curr_critic_output_dict["output"]).view(-1)
-            critic_loss = self.hl_gauss_loss(curr_critic_output_dict["output"], target_value)
-        else:
-            curr_critic_value = curr_critic_output_dict["output"].view(-1)
-            critic_loss = F.mse_loss(curr_critic_value, target_value)
+        self.value_head.update_value_range(target_value)
+        curr_critic_value = self.value_head.to_value(logits).view(-1)
+        critic_loss = self.value_head.value_loss(logits, target_value)
 
         delta = target_value - curr_critic_value
 
@@ -742,7 +717,7 @@ class VLMActorCriticWithActionValue(nn.Module):
             "critic_loss": critic_loss.item(),
             "curr_critic_value": curr_critic_value.mean().item(),
             "target_value": target_value.mean().item(),
-            "value_range": self.value_range,
+            "value_range": self.value_head.value_range,
         }
 
         return critic_loss, activations_dict, info_dict

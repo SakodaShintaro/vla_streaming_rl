@@ -4,26 +4,77 @@ import math
 import torch
 from hl_gauss_pytorch import HLGaussLoss
 from torch import nn
+from torch.nn import functional as F
 
 from .blocks import HyperLERPBlock, HypersphericalEmbedding, NormedLinear, Scaler, SimbaBlock
 from .sparse_utils import apply_one_shot_pruning
 
 
-def maybe_update_hl_gauss_range(
-    module: nn.Module,
-    target_value: torch.Tensor,
-) -> None:
-    observed_max = target_value.abs().max().item()
-    if observed_max <= module.value_range:
-        return
-    module.value_range = observed_max
-    device = module.hl_gauss_loss.support.device
-    module.hl_gauss_loss = HLGaussLoss(
-        min_value=-module.value_range,
-        max_value=+module.value_range,
-        num_bins=module.num_bins,
-        clamp_to_range=True,
-    ).to(device)
+class DistributionalValueHead(nn.Module):
+    """Base for value heads: owns the HL-Gauss categorical-critic machinery so
+    the value head — not the surrounding network — manages the distributional
+    ⇄ scalar mapping.
+
+    With ``num_bins > 1`` the head emits ``num_bins`` categorical logits and
+    holds an :class:`HLGaussLoss` (Gaussian-histogram cross-entropy, the repo's
+    drop-in for a categorical critic) whose support grows to track the targets.
+    ``num_bins == 1`` is the plain scalar critic with no HL-Gauss; the methods
+    degrade to identity / MSE so callers never branch on ``num_bins``.
+
+    Subclasses call :meth:`_init_value_dist` once they know ``num_bins`` and
+    return raw logits in ``forward``'s ``"output"``.
+    """
+
+    def _init_value_dist(self, num_bins: int) -> None:
+        self.num_bins = num_bins
+        # ``value_range`` starts at 1.0 and is grown by ``update_value_range``
+        # as targets exceed it.
+        self.value_range = 1.0
+        if num_bins > 1:
+            self.hl_gauss_loss = HLGaussLoss(
+                min_value=-self.value_range,
+                max_value=+self.value_range,
+                num_bins=num_bins,
+                clamp_to_range=True,
+            )
+
+    def to_value(self, logits: torch.Tensor) -> torch.Tensor:
+        """Critic ``output`` → expected scalar value, with the bin dim reduced.
+
+        ``num_bins > 1``: HL-Gauss expectation over the categorical logits.
+        ``num_bins == 1``: the single output channel, squeezed.
+        """
+        if self.num_bins > 1:
+            return self.hl_gauss_loss(logits)
+        return logits.squeeze(-1)
+
+    def update_value_range(self, target_value: torch.Tensor) -> None:
+        """Grow the HL-Gauss support to cover ``target_value`` (no-op if scalar)."""
+        if self.num_bins == 1:
+            return
+        observed_max = target_value.abs().max().item()
+        if observed_max <= self.value_range:
+            return
+        self.value_range = observed_max
+        device = self.hl_gauss_loss.support.device
+        self.hl_gauss_loss = HLGaussLoss(
+            min_value=-self.value_range,
+            max_value=+self.value_range,
+            num_bins=self.num_bins,
+            clamp_to_range=True,
+        ).to(device)
+
+    def value_loss(self, logits: torch.Tensor, target_value: torch.Tensor) -> torch.Tensor:
+        """Regression/TD loss for the critic output.
+
+        ``num_bins > 1``: HL-Gauss categorical cross-entropy against the
+        support-projected target. ``num_bins == 1``: plain MSE on the scalar.
+        Call :meth:`update_value_range` first when the target may exceed the
+        current support.
+        """
+        if self.num_bins > 1:
+            return self.hl_gauss_loss(logits, target_value)
+        return F.mse_loss(self.to_value(logits), target_value)
 
 
 def weights_init_(m: nn.Module) -> None:
@@ -33,7 +84,7 @@ def weights_init_(m: nn.Module) -> None:
         nn.init.constant_(m.bias, 0)
 
 
-class StateValueHead(nn.Module):
+class StateValueHead(DistributionalValueHead):
     def __init__(
         self,
         in_channels: int,
@@ -52,6 +103,7 @@ class StateValueHead(nn.Module):
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
+        self._init_value_dist(num_bins)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         result_dict = {}
@@ -67,7 +119,7 @@ class StateValueHead(nn.Module):
         return result_dict
 
 
-class ActionValueHead(nn.Module):
+class ActionValueHead(DistributionalValueHead):
     """Dueling Architecture: Q(s,a) = V(s) + A(s,a)"""
 
     def __init__(
@@ -103,6 +155,7 @@ class ActionValueHead(nn.Module):
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
+        self._init_value_dist(num_bins)
 
     def forward(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
         """
@@ -156,7 +209,7 @@ class ActionValueHead(nn.Module):
         return result_dict
 
 
-class HypersphericalActionValueHead(nn.Module):
+class HypersphericalActionValueHead(DistributionalValueHead):
     """SimbaV2 critic (arXiv:2502.15280): Q(s, a) with hyperspherical
     normalization of features *and* weights throughout.
 
@@ -173,9 +226,8 @@ class HypersphericalActionValueHead(nn.Module):
     head emits ``num_bins`` categorical logits and holds an :class:`HLGaussLoss`
     (the repo's Gaussian-histogram cross-entropy drop-in for the paper's
     categorical critic). ``forward`` returns the raw logits in ``"output"``;
-    convert to a scalar Q with ``hl_gauss_loss(output)`` and train with
-    ``hl_gauss_loss(output, target)``; the support auto-expands via
-    :func:`maybe_update_hl_gauss_range`.
+    convert to a scalar Q with :meth:`to_value` and train with
+    :meth:`value_loss`; the support auto-expands via :meth:`update_value_range`.
 
     The value head mirrors the reference ``HyperCategoricalValue`` exactly:
     ``NormedLinear → Scaler(init=1) → NormedLinear + bias``. The internal scaler
@@ -197,7 +249,6 @@ class HypersphericalActionValueHead(nn.Module):
         super().__init__()
         self.horizon = horizon
         self.action_dim = action_dim
-        self.num_bins = num_bins
         in_dim = in_channels + action_dim * horizon
 
         # Encoder scalers/alphas follow the reference critic config:
@@ -223,17 +274,7 @@ class HypersphericalActionValueHead(nn.Module):
         self.value_w2 = NormedLinear(hidden_dim, num_bins)
         self.value_bias = nn.Parameter(torch.zeros(num_bins))
 
-        # Distributional (categorical) critic loss state. ``value_range`` starts
-        # at 1.0 and is grown by ``maybe_update_hl_gauss_range`` as targets
-        # exceed it, matching the other actor-critic networks in this repo.
-        self.value_range = 1.0
-        if num_bins > 1:
-            self.hl_gauss_loss = HLGaussLoss(
-                min_value=-self.value_range,
-                max_value=+self.value_range,
-                num_bins=num_bins,
-                clamp_to_range=True,
-            )
+        self._init_value_dist(num_bins)
 
     def forward(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
         """

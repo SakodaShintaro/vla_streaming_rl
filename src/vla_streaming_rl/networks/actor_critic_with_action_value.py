@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: MIT
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from hl_gauss_pytorch import HLGaussLoss
 
 from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder, TemporalOnlyEncoder
 from vla_streaming_rl.networks.image_processor import ImageProcessor
@@ -14,11 +12,7 @@ from vla_streaming_rl.networks.policy_head import (
 )
 from vla_streaming_rl.networks.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.reward_processor import RewardProcessor
-from vla_streaming_rl.networks.value_head import (
-    ActionValueHead,
-    HypersphericalActionValueHead,
-    maybe_update_hl_gauss_range,
-)
+from vla_streaming_rl.networks.value_head import ActionValueHead, HypersphericalActionValueHead
 
 
 class ActorCriticWithActionValue(nn.Module):
@@ -181,15 +175,6 @@ class ActorCriticWithActionValue(nn.Module):
         self.detach_predictor = detach_predictor
         self.disable_state_predictor = disable_state_predictor
 
-        self.value_range = 1.0
-        if self.num_bins > 1:
-            self.hl_gauss_loss = HLGaussLoss(
-                min_value=-self.value_range,
-                max_value=+self.value_range,
-                num_bins=self.num_bins,
-                clamp_to_range=True,
-            )
-
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
@@ -218,8 +203,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         # Get action-value from value_head
         q_dict = self.value_head(x, action)
-        q_value = q_dict["output"]  # (B, 1) or (B, num_bins)
-        q_value = q_value.item() if self.num_bins == 1 else self.hl_gauss_loss(q_value).item()
+        q_value = self.value_head.to_value(q_dict["output"]).item()
 
         # Get predicted next state
         next_image, next_reward = self.prediction_head.predict_next_state(
@@ -275,8 +259,6 @@ class ActorCriticWithActionValue(nn.Module):
             curr_state,
             action_chunk,
             value_head=self.value_head,
-            hl_gauss_loss=self.hl_gauss_loss if self.num_bins > 1 else None,
-            num_bins=self.num_bins,
             detach_actor=self.detach_actor,
         )
         seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, curr_state)
@@ -330,8 +312,6 @@ class ActorCriticWithActionValue(nn.Module):
             prev_state,
             action_chunk,
             value_head=self.value_head,
-            hl_gauss_loss=self.hl_gauss_loss if self.num_bins > 1 else None,
-            num_bins=self.num_bins,
             detach_actor=self.detach_actor,
         )
         seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, prev_state)
@@ -343,10 +323,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         et_critic_dict = self.value_head(prev_state.detach(), action_chunk.detach())
-        if self.num_bins > 1:
-            neg_value_detached = -self.hl_gauss_loss(et_critic_dict["output"]).mean()
-        else:
-            neg_value_detached = -et_critic_dict["output"].mean()
+        neg_value_detached = -self.value_head.to_value(et_critic_dict["output"]).mean()
 
         next_image, next_reward = self.prediction_head.predict_next_state(
             next_state,
@@ -401,8 +378,7 @@ class ActorCriticWithActionValue(nn.Module):
         state, rnn_state_out = self.encoder.forward(obs, obs_z, actions, rewards, rnn_state)
         action, _ = self.policy_head.get_action(state)
         q_dict = self.value_head(state, action)
-        q = q_dict["output"]
-        q = self.hl_gauss_loss(q).view(-1) if self.num_bins > 1 else q.view(-1)
+        q = self.value_head.to_value(q_dict["output"]).view(-1)
         return state, action, q, rnn_state_out
 
     @torch.no_grad()
@@ -434,14 +410,11 @@ class ActorCriticWithActionValue(nn.Module):
             curr_state = curr_state.detach()
 
         curr_critic_output_dict = self.value_head(curr_state, action_chunk)
+        logits = curr_critic_output_dict["output"]
 
-        if self.num_bins > 1:
-            maybe_update_hl_gauss_range(self, target_value)
-            curr_critic_value = self.hl_gauss_loss(curr_critic_output_dict["output"]).view(-1)
-            critic_loss = self.hl_gauss_loss(curr_critic_output_dict["output"], target_value)
-        else:
-            curr_critic_value = curr_critic_output_dict["output"].view(-1)
-            critic_loss = F.mse_loss(curr_critic_value, target_value)
+        self.value_head.update_value_range(target_value)
+        curr_critic_value = self.value_head.to_value(logits).view(-1)
+        critic_loss = self.value_head.value_loss(logits, target_value)
 
         delta = target_value - curr_critic_value
 
@@ -452,7 +425,7 @@ class ActorCriticWithActionValue(nn.Module):
             "critic_loss": critic_loss.item(),
             "curr_critic_value": curr_critic_value.mean().item(),
             "target_value": target_value.mean().item(),
-            "value_range": self.value_range,
+            "value_range": self.value_head.value_range,
         }
 
         return critic_loss, activations_dict, info_dict
