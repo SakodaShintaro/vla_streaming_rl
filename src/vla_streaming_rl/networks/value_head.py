@@ -289,3 +289,8 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         v = self.value_scaler(self.value_w1(h))
         logits = self.value_w2(v) + self.value_bias
         return {"output": logits, "activation": h}
+
+    def get_advantage(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
+        """SimbaV2 has no separate advantage stream (pure Q(s, a)), so the
+        advantage equals the Q output; maximizing it maximizes E[Q(s, π(s))]."""
+        return self.forward(x, a)
