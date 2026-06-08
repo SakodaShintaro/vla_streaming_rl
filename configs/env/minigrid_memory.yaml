@@ -1,5 +1,4 @@
 # @package _global_
 env_id: MiniGrid-MemoryS9-v0
 step_limit: 800_000
-encoder: temporal_only
 denoising_time: 0.8

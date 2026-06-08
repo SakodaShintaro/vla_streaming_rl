@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 
-from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder, TemporalOnlyEncoder
+from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.image_processor import ImageProcessor
 from vla_streaming_rl.networks.policy_head import (
     BetaPolicy,
@@ -28,7 +28,6 @@ class ActorCriticWithActionValue(nn.Module):
         dacer_loss_weight: float,
         critic_loss_weight: float,
         predictor_step_num: int,
-        encoder: str,
         encoder_block_num: int,
         temporal_model_type: str,
         horizon: int,
@@ -65,28 +64,15 @@ class ActorCriticWithActionValue(nn.Module):
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
-        if encoder == "spatial_temporal":
-            self.encoder = SpatialTemporalEncoder(
-                image_processor=self.image_processor,
-                reward_processor=self.reward_processor,
-                seq_len=self.seq_len,
-                n_layer=encoder_block_num,
-                action_dim=self.action_dim,
-                temporal_model_type=temporal_model_type,
-                use_image_only=True,
-            )
-        elif encoder == "temporal_only":
-            self.encoder = TemporalOnlyEncoder(
-                image_processor=self.image_processor,
-                reward_processor=self.reward_processor,
-                seq_len=self.seq_len,
-                n_layer=encoder_block_num,
-                action_dim=self.action_dim,
-                temporal_model_type=temporal_model_type,
-                use_image_only=False,
-            )
-        else:
-            raise ValueError(f"Unknown encoder: {encoder=}")
+        self.encoder = SpatialTemporalEncoder(
+            image_processor=self.image_processor,
+            reward_processor=self.reward_processor,
+            seq_len=self.seq_len,
+            n_layer=encoder_block_num,
+            action_dim=self.action_dim,
+            temporal_model_type=temporal_model_type,
+            use_image_only=True,
+        )
 
         self.horizon = horizon
         self.policy_type = policy_type

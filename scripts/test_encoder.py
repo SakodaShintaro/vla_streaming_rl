@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torchvision import transforms
 
-from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder, TemporalOnlyEncoder
+from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.image_processor import ImageProcessor
 from vla_streaming_rl.networks.reward_processor import RewardProcessor
 from vla_streaming_rl.wrappers import _car_racing_parse_action
@@ -19,11 +19,6 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "encoder",
-        type=str,
-        choices=["spatial_temporal", "temporal_only"],
-    )
     parser.add_argument("--images_dir", type=Path, default="./local/image/ep_00000001")
     parser.add_argument("--num_images", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -87,29 +82,16 @@ if __name__ == "__main__":
     reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
     reward_processor = reward_processor.to(device)
 
-    if args.encoder == "spatial_temporal":
-        encoder = SpatialTemporalEncoder(
-            image_processor=image_processor,
-            reward_processor=reward_processor,
-            seq_len=seq_len,
-            n_layer=1,
-            action_dim=3,
-            temporal_model_type="transformer",
-            use_image_only=False,
-        )
-        encoder = encoder.to(device)
-
-    elif args.encoder == "temporal_only":
-        encoder = TemporalOnlyEncoder(
-            image_processor=image_processor,
-            reward_processor=reward_processor,
-            seq_len=seq_len,
-            n_layer=1,
-            action_dim=3,
-            temporal_model_type="gru",
-            use_image_only=True,
-        )
-        encoder = encoder.to(device)
+    encoder = SpatialTemporalEncoder(
+        image_processor=image_processor,
+        reward_processor=reward_processor,
+        seq_len=seq_len,
+        n_layer=1,
+        action_dim=3,
+        temporal_model_type="transformer",
+        use_image_only=False,
+    )
+    encoder = encoder.to(device)
 
     print(f"\n{encoder.__class__.__name__}")
 

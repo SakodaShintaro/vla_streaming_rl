@@ -21,9 +21,7 @@ class ReplayBufferData:
     obs_z: torch.Tensor  # (B, T, obs_z_shape) - encoded observations
     rewards: torch.Tensor  # (B, T)
     dones: torch.Tensor  # (B, T)
-    # rnn_state shape depends on encoder:
-    #   SpatialTemporalEncoder: (B, T, space_len, state_size, n_layer)
-    #   TemporalOnlyEncoder   : (B, T, state_size, n_layer)
+    # rnn_state shape (SpatialTemporalEncoder): (B, T, space_len, state_size, n_layer)
     rnn_state: torch.Tensor
     actions: torch.Tensor  # (B, T, action_shape)
     log_probs: torch.Tensor  # (B, T)

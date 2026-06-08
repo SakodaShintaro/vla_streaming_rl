@@ -30,7 +30,6 @@ def build_network(
             dacer_loss_weight=args.dacer_loss_weight,
             critic_loss_weight=args.critic_loss_weight,
             predictor_step_num=args.predictor_step_num,
-            encoder=args.encoder,
             encoder_block_num=args.encoder_block_num,
             temporal_model_type=args.temporal_model_type,
             horizon=args.horizon,

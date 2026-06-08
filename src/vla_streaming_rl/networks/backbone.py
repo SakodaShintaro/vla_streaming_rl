@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: MIT
-import numpy as np
 import torch
 from torch import nn
 
@@ -7,7 +6,6 @@ from .image_processor import ImageProcessor
 from .reward_processor import RewardProcessor
 from .self_attention import get_fourier_embeds_from_coordinates
 from .spatial_temporal_transformer import SpatialTemporalTransformer
-from .temporal_block import CausalTransformerBlock, GdnBlock, GRUBlock, IdentityBlock, MambaBlock
 
 
 def init_weights(m: nn.Module) -> None:
@@ -149,137 +147,3 @@ class SpatialTemporalEncoder(nn.Module):
         output = last_frame_emb.flatten(start_dim=1)  # [B, token_num * C']
 
         return output, rnn_state
-
-
-class TemporalOnlyEncoder(nn.Module):
-    """
-    Unified temporal encoder
-    Integrates RecurrentEncoder and SimpleTransformerEncoder for flexible configuration
-
-    Args:
-        image_processor: Image processor instance
-        reward_processor: Reward processor instance
-        seq_len: Sequence length
-        n_layer: Number of layers (num_layers for GRU, block count for transformer)
-        action_dim: Action dimension (unused)
-        temporal_model_type: Temporal model type ("gru", "transformer", "gdn", "mamba", "identity")
-        use_image_only: Whether to use only images (if False, include action and reward)
-    """
-
-    def __init__(
-        self,
-        image_processor: ImageProcessor,
-        reward_processor: RewardProcessor,
-        seq_len: int,
-        n_layer: int,
-        action_dim: int,
-        temporal_model_type: str,
-        use_image_only: bool,
-    ) -> None:
-        super().__init__()
-
-        self.n_layer = n_layer
-        self.temporal_model_type = temporal_model_type
-        self.use_image_only = use_image_only
-
-        # Image processor
-        self.image_processor = image_processor
-        self.reward_processor = reward_processor
-
-        # Calculate image feature dimension
-        image_feature_dim = np.prod(self.image_processor.output_shape)
-
-        # Common hidden layer size
-        self.output_dim = 64
-
-        # Common linear layer after image_processor
-        self.lin_hidden_in = nn.Linear(image_feature_dim, self.output_dim)
-
-        # Create list of temporal blocks
-        max_seq_len = seq_len if use_image_only else seq_len * 3
-        hidden_dim = self.output_dim
-        n_head = 8
-
-        if temporal_model_type == "gru":
-            self.blocks = nn.ModuleList([GRUBlock(hidden_dim) for _ in range(n_layer)])
-        elif temporal_model_type == "transformer":
-            self.blocks = nn.ModuleList(
-                [CausalTransformerBlock(hidden_dim, n_head, max_seq_len) for _ in range(n_layer)]
-            )
-        elif temporal_model_type == "gdn":
-            self.blocks = nn.ModuleList([GdnBlock(hidden_dim) for _ in range(n_layer)])
-        elif temporal_model_type == "mamba":
-            self.blocks = nn.ModuleList([MambaBlock(hidden_dim) for _ in range(n_layer)])
-        elif temporal_model_type == "identity":
-            self.blocks = nn.ModuleList([IdentityBlock(hidden_dim) for _ in range(n_layer)])
-        else:
-            raise ValueError(f"Unknown temporal_model_type: {temporal_model_type}")
-
-    def init_state(self) -> torch.Tensor:
-        # Get state_size using block's get_rnn_state_size()
-        state_size = self.blocks[0].get_rnn_state_size()
-        # Return [1, state_size, n_layer] (batch size 1)
-        return torch.zeros(1, state_size, self.n_layer)
-
-    def forward(
-        self,
-        images: torch.Tensor,  # (B, T, 3, H, W)
-        obs_z: torch.Tensor,  # (B, T, C', H', W') - pre-encoded observations
-        actions: torch.Tensor,  # (B, T, action_dim)
-        rewards: torch.Tensor,  # (B, T, 1)
-        rnn_state: torch.Tensor,  # (B, state_size, n_layer)
-    ) -> tuple[torch.Tensor, torch.Tensor, str]:
-        """
-        Returns:
-            encoded features: (B, output_dim)
-            rnn_state: (B, state_size, n_layer)
-            action_text: str (always empty string for non-VLM encoders)
-        """
-        B, T = images.shape[:2]
-
-        # Process images
-        all_frames = images.reshape(B * T, *images.shape[2:])  # (B*T, C, H, W)
-        image_features = self.image_processor.encode(all_frames)
-
-        # Flatten and linear projection
-        h = image_features.flatten(start_dim=1)  # (B*T, feature_dim)
-        h = self.lin_hidden_in(h)  # (B*T, hidden_size)
-        h = h.reshape(B, T, -1)  # (B, T, hidden_size)
-
-        if self.use_image_only:
-            # Image only
-            sequence = h  # (B, T, d_model)
-        else:
-            # Embed action and reward
-            action_emb = get_fourier_embeds_from_coordinates(
-                self.output_dim, actions
-            )  # (B, T, action_dim, d_model)
-            action_emb = action_emb.sum(dim=2)  # (B, T, d_model)
-
-            reward_emb = get_fourier_embeds_from_coordinates(
-                self.output_dim, rewards
-            )  # (B, T, 1, d_model)
-            reward_emb = reward_emb.sum(dim=2)  # (B, T, d_model)
-
-            # Interleave: [a_0, r_0, s_0, a_1, r_1, s_1, ...]
-            sequence = torch.stack([action_emb, reward_emb, h], dim=2)  # (B, T, 3, d_model)
-            sequence = sequence.view(B, T * 3, self.output_dim)  # (B, T*3, d_model)
-
-        # Split each layer's state: [B, state_size, n_layer] -> n_layer of [B, state_size]
-        layer_states = [rnn_state[:, :, i] for i in range(self.n_layer)]
-
-        new_layer_states = []
-        for i, block in enumerate(self.blocks):
-            # External format [B, state_size] -> Internal format [1, B, state_size]
-            layer_state_internal = layer_states[i].unsqueeze(0)
-            sequence, layer_state_internal = block(sequence, layer_state_internal)
-            # Internal format [1, B, state_size] -> External format [B, state_size]
-            new_layer_states.append(layer_state_internal.squeeze(0))
-
-        # Combine each layer's state: n_layer of [B, state_size] -> [B, state_size, n_layer]
-        rnn_state = torch.stack(new_layer_states, dim=-1)
-
-        # Representation of last token
-        final_repr = sequence[:, -1, :]  # (B, d_model)
-
-        return final_repr, rnn_state
