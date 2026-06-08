@@ -25,7 +25,6 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.off_policy import OffPolicyAgent
-from vla_streaming_rl.agents.on_policy import OnPolicyAgent
 from vla_streaming_rl.agents.streaming import StreamingAgent
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
@@ -206,30 +205,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             max_new_tokens=args.max_new_tokens,
             max_prompt_tokens=args.max_prompt_tokens,
             pad_token_id=args.pad_token_id,
-            goal_predictor=goal_predictor,
-        )
-    elif args.agent_type == "on_policy":
-        agent = OnPolicyAgent(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
-            network=network,
-            network_class=args.network_class,
-            on_policy_epoch=args.on_policy_epoch,
-            gamma=args.gamma,
-            buffer_capacity=args.buffer_capacity,
-            seq_len=args.seq_len,
-            horizon=args.horizon,
-            batch_size=args.batch_size,
-            accumulation_steps=args.accumulation_steps,
-            num_bins=args.num_bins,
-            max_grad_norm=args.max_grad_norm,
-            use_done=args.use_done,
-            normalizing_by_return=args.normalizing_by_return,
-            max_new_tokens=args.max_new_tokens,
-            max_prompt_tokens=args.max_prompt_tokens,
-            pad_token_id=args.pad_token_id,
-            buffer_device=args.buffer_device,
-            learning_rate=args.learning_rate,
             goal_predictor=goal_predictor,
         )
     elif args.agent_type == "streaming":
@@ -538,7 +513,6 @@ def hydra_main(cfg: DictConfig) -> None:
     if cfg.debug:
         cfg.off_wandb = True
         cfg.learning_starts = max(10, cfg.seq_len + cfg.horizon + 5)
-        cfg.buffer_capacity = 50
         cfg.render = 0
         cfg.step_limit = 100
         cfg.buffer_size = int(2e4)

@@ -17,7 +17,6 @@
 defaults:
   - base_network
   - base_off_policy
-  - base_on_policy
   - base_streaming
   - base_cnn
   - base_vlm

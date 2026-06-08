@@ -15,33 +15,7 @@ def build_network(
     device: torch.device,
     compile: bool,
 ) -> nn.Module:
-    if args.network_class == "actor_critic_with_state_value":
-        from vla_streaming_rl.networks.actor_critic_with_state_value import (
-            ActorCriticWithStateValue,
-        )
-
-        network = ActorCriticWithStateValue(
-            observation_space_shape=observation_space_shape,
-            action_space_shape=action_space_shape,
-            gamma=args.gamma,
-            clip_param_policy=args.clip_param_policy,
-            clip_param_value=args.clip_param_value,
-            num_bins=args.num_bins,
-            predictor_step_num=args.predictor_step_num,
-            critic_loss_weight=args.critic_loss_weight,
-            encoder=args.encoder,
-            seq_len=args.seq_len,
-            encoder_block_num=args.encoder_block_num,
-            temporal_model_type=args.temporal_model_type,
-            horizon=args.horizon,
-            critic_block_num=args.critic_block_num,
-            policy_type=args.policy_type,
-            predictor_hidden_dim=args.predictor_hidden_dim,
-            predictor_block_num=args.predictor_block_num,
-            disable_state_predictor=args.disable_state_predictor,
-            predictor_type=args.predictor_type,
-        )
-    elif args.network_class == "actor_critic_with_action_value":
+    if args.network_class == "actor_critic_with_action_value":
         from vla_streaming_rl.networks.actor_critic_with_action_value import (
             ActorCriticWithActionValue,
         )
