@@ -1,7 +1,7 @@
 # @package _global_
 agent_type: off_policy
 encoder: spatial_temporal
-temporal_model_type: transformer
+temporal_model_type: gru
 policy_type: diffusion
 buffer_size: 20000
 learning_starts: 2000

@@ -5,6 +5,7 @@ suffix=${1:-""}
 cd $(dirname $0)
 
 # AGENT=cnn_off_policy_bs16
+# AGENT=cnn_streaming
 # AGENT=base_on_policy
 # AGENT=vlm_off_policy_bs16
 AGENT=vlm_streaming
