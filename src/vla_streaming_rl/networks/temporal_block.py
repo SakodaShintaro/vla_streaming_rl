@@ -102,8 +102,10 @@ class MambaLayer(nn.Module):
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
-        d_ssm = 2 * hidden_dim
-        self.mamba = Mamba2(d_model=hidden_dim, headdim=d_ssm)
+        # headdim is the per-head SSM dimension and must divide d_inner
+        # (= 2 * hidden_dim with Mamba2's default expand=2). 64 is Mamba2's
+        # standard head size, giving nheads = 2 * hidden_dim / 64.
+        self.mamba = Mamba2(d_model=hidden_dim, headdim=64)
 
     def get_rnn_state_size(self) -> int:
         """Return hidden_dim since state is not used"""
