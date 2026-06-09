@@ -557,7 +557,7 @@ class VLMActorCriticWithActionValue(nn.Module):
             cur_pos = kv_len - 1  # re-feed last cached token
 
         # rope_deltas from the initial VLM forward (accounts for image token positions)
-        rope_deltas = self.vlm_model.model.rope_deltas  # (B, 1)
+        rope_deltas = self._get_vlm_model_inner().rope_deltas  # (B, 1)
 
         self.vlm_model.eval()
 
