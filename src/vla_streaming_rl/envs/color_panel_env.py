@@ -6,8 +6,6 @@ Color Panel Game - Gymnasium Environment
 Click the correct color -> reward +1, wrong -> reward -0.01
 """
 
-import random
-
 import numpy as np
 
 from vla_streaming_rl.envs.base_gui_env import BaseGUIEnv
@@ -41,8 +39,8 @@ class ColorPanelEnv(BaseGUIEnv):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        random.shuffle(self.color_assignment)
-        self.correct_color_idx = random.randint(0, 3)
+        self.color_assignment = self.np_random.permutation(4).tolist()
+        self.correct_color_idx = int(self.np_random.integers(0, 4))
         self._update_task_prompt()
         self.step_count = 0
         self.cursor_x = 0.5
@@ -74,8 +72,8 @@ class ColorPanelEnv(BaseGUIEnv):
                 else:
                     reward = -0.01
 
-            random.shuffle(self.color_assignment)
-            self.correct_color_idx = random.randint(0, 3)
+            self.color_assignment = self.np_random.permutation(4).tolist()
+            self.correct_color_idx = int(self.np_random.integers(0, 4))
             self._update_task_prompt()
 
         observation = self._render_frame()
