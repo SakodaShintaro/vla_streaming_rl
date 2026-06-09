@@ -531,11 +531,12 @@ class WanVAE_(nn.Module):
             assert (t - 1) % 4 == 0, f"first encode requires 1+4*N frames, got {t}"
             iter_ = 1 + (t - 1) // 4
             # 对encode输入的x，按时间拆分为1、4、4、4....
+            chunks = []
             for i in range(iter_):
                 conv_idx = [0]
                 slice_ = x[:, :, :1, :, :] if i == 0 else x[:, :, 1 + 4 * (i - 1) : 1 + 4 * i, :, :]
-                chunk = self.encoder(slice_, feat_cache=cache, feat_idx=conv_idx)
-                out = chunk if i == 0 else torch.cat([out, chunk], 2)
+                chunks.append(self.encoder(slice_, feat_cache=cache, feat_idx=conv_idx))
+            out = torch.cat(chunks, 2)
         else:
             assert t % 4 == 0, f"streaming continuation requires 4*N frames, got {t}"
             n_chunks = t // 4

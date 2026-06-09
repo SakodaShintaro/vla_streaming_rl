@@ -223,8 +223,6 @@ class LanguageAdaptor(nn.Module):
         except AttributeError:
             driving_input = example
 
-        b = driving_input.camera_images.size(0)
-
         if inference:
             label = driving_input.prompt_inference
         else:
