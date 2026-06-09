@@ -58,7 +58,7 @@ class STL10PanelEnv(BaseGUIEnv):
         self.quadrant_images = []
         for label in self.selected_labels:
             path = random.choice(self.image_paths[label])
-            img = np.array(Image.open(path))
+            img = np.array(Image.open(path).convert("RGB"))
             half_w = self.width // 2
             half_h = self.height // 2
             img = np.array(Image.fromarray(img).resize((half_w, half_h), Image.BILINEAR))
