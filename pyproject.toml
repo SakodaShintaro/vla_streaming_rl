@@ -65,6 +65,7 @@ dependencies = [
     "filterpy",
     "rdp",
     "pytorch-lightning",
+    "pre-commit>=4.6.0",
 ]
 
 [build-system]
