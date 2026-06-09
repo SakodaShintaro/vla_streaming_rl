@@ -9,7 +9,7 @@ from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers import StoppingCriteria, StoppingCriteriaList
 
-from vla_streaming_rl.networks.vlm_backbone import is_qwen35, load_model
+from vla_streaming_rl.networks.vlm_backbone import load_model
 
 PERCEPTION_OPEN = "<perception>\n"
 REASONING_CLOSE = "</reasoning>"
@@ -80,7 +80,6 @@ class ZeroShotVLMAgent:
         self.device = "cuda"
         self.model, self.processor = load_model(model_id, use_lora=False, device=self.device)
         self.model.eval()
-        self.is_qwen35 = is_qwen35(model_id)
 
         self.parse_action_text = parse_action_text
         self.action_dim = action_dim
@@ -130,10 +129,7 @@ class ZeroShotVLMAgent:
             messages, tokenize=False, add_generation_prompt=True
         )
         text = text + PERCEPTION_OPEN
-        if self.is_qwen35:
-            images, _ = process_vision_info(messages)
-        else:
-            images, _ = process_vision_info(messages, image_patch_size=16)
+        images, _ = process_vision_info(messages)
 
         inputs = self.processor(text=text, images=images, return_tensors="pt", padding=True)
         inputs.pop("token_type_ids", None)

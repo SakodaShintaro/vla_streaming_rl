@@ -12,14 +12,10 @@ from transformers import (
 )
 
 
-def is_qwen35(model_id: str) -> bool:
-    return "Qwen3.5" in model_id
-
-
 def load_model(
     model_id: str, use_lora: bool, device: torch.device
 ) -> tuple[nn.Module, AutoProcessor]:
-    """Load Qwen-VL or Qwen3.5 model and processor."""
+    """Load Qwen3.5 model and processor."""
 
     # quantization has a negative effect on performance, so we disable it by default for now
     # True:4.30 steps/sec, False 5.40 steps/sec
@@ -34,12 +30,11 @@ def load_model(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
-    attn_impl = "sdpa" if is_qwen35(model_id) else "flash_attention_2"
     model = AutoModelForImageTextToText.from_pretrained(
         model_id,
         quantization_config=bnb_config,
         dtype=torch.bfloat16,
-        attn_implementation=attn_impl,
+        attn_implementation="sdpa",
         device_map=device,
     )
     if use_lora:
@@ -86,7 +81,6 @@ def prepare_vlm_inputs(
     processor: AutoProcessor,
     images: torch.Tensor,
     task_prompts: list[str],
-    is_qwen35: bool,
     image_mode: str,
 ) -> dict[str, torch.Tensor]:
     """Build VLM messages and prepare model inputs.
@@ -102,7 +96,6 @@ def prepare_vlm_inputs(
         processor: AutoProcessor instance
         images: (B, T, C, H, W) tensor
         task_prompts: List of task prompt strings, one per batch element
-        is_qwen35: Whether the model is Qwen3.5
         image_mode: "mem" or "sequence"
 
     Returns:
@@ -135,10 +128,7 @@ def prepare_vlm_inputs(
 
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-    if is_qwen35:
-        prompt_proc_images, _ = process_vision_info(messages)
-    else:
-        prompt_proc_images, _ = process_vision_info(messages, image_patch_size=16)
+    prompt_proc_images, _ = process_vision_info(messages)
 
     inputs = processor(text=text, images=prompt_proc_images, return_tensors="pt", padding=True)
     inputs.pop("token_type_ids", None)
@@ -148,10 +138,7 @@ def prepare_vlm_inputs(
     all_messages = [
         [{"role": "user", "content": [{"type": "image", "image": img}]}] for img in all_pil
     ]
-    if is_qwen35:
-        all_proc_images, _ = process_vision_info(all_messages)
-    else:
-        all_proc_images, _ = process_vision_info(all_messages, image_patch_size=16)
+    all_proc_images, _ = process_vision_info(all_messages)
 
     all_inputs = processor(
         text=["x"] * len(all_pil), images=all_proc_images, return_tensors="pt", padding=True

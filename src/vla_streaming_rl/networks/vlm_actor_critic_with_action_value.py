@@ -13,7 +13,7 @@ from .prediction_head import StatePredictionHead
 from .reward_processor import RewardProcessor
 from .value_head import ActionValueHead, HypersphericalActionValueHead
 from .video_encoder import VideoEncoder
-from .vlm_backbone import is_qwen35, load_model
+from .vlm_backbone import load_model
 from .vlm_input_cache import VLMInputCache
 
 
@@ -107,7 +107,6 @@ class VLMActorCriticWithActionValue(nn.Module):
         self.device = device
 
         # VLM config
-        self.is_qwen35 = is_qwen35(vlm_model_id)
         vlm_cfg = self.vlm_model.config.text_config
         vlm_hidden_size = vlm_cfg.hidden_size
         num_layers = vlm_cfg.num_hidden_layers
@@ -123,13 +122,10 @@ class VLMActorCriticWithActionValue(nn.Module):
         self.pad_token_id = pad_token_id
 
         # Index attention layers for ``_extract_kv`` (text generation).
-        if self.is_qwen35:
-            layer_types = vlm_cfg.layer_types
-            self.attn_layer_indices = [
-                i for i, lt in enumerate(layer_types) if lt == "full_attention"
-            ]
-        else:
-            self.attn_layer_indices = list(range(num_layers))
+        layer_types = vlm_cfg.layer_types
+        self.attn_layer_indices = [
+            i for i, lt in enumerate(layer_types) if lt == "full_attention"
+        ]
 
         self.num_state_queries = num_state_queries
         self.video_encoder = VideoEncoder()
@@ -539,15 +535,9 @@ class VLMActorCriticWithActionValue(nn.Module):
             vlm_seq_len: sequence length of the VLM KV cache
         """
         kv_list = []
-        if self.is_qwen35:
-            for idx in self.attn_layer_indices:
-                kv_list.append((vlm_past_kv.key_cache[idx], vlm_past_kv.value_cache[idx]))
-            seq_len = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[2]
-        else:
-            for j in range(self.num_layers):
-                layer = vlm_past_kv.layers[j]
-                kv_list.append((layer.keys, layer.values))
-            seq_len = vlm_past_kv.layers[0].keys.shape[2]
+        for idx in self.attn_layer_indices:
+            kv_list.append((vlm_past_kv.key_cache[idx], vlm_past_kv.value_cache[idx]))
+        seq_len = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[2]
         return kv_list, seq_len
 
     def _generate_text_and_extend_kv(self, prompt: str, vlm_past_kv, max_new_tokens: int):
@@ -563,10 +553,7 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         if prompt:
             prompt_ids = tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-            if self.is_qwen35:
-                B = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[0]
-            else:
-                B = vlm_past_kv.layers[0].keys.shape[0]
+            B = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[0]
             next_ids = prompt_ids.expand(B, -1)  # (B, prompt_len)
             cur_pos = kv_len
         else:
