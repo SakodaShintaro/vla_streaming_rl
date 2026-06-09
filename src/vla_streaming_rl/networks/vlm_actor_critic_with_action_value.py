@@ -123,9 +123,7 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         # Index attention layers for ``_extract_kv`` (text generation).
         layer_types = vlm_cfg.layer_types
-        self.attn_layer_indices = [
-            i for i, lt in enumerate(layer_types) if lt == "full_attention"
-        ]
+        self.attn_layer_indices = [i for i, lt in enumerate(layer_types) if lt == "full_attention"]
 
         self.num_state_queries = num_state_queries
         self.video_encoder = VideoEncoder()
@@ -223,10 +221,7 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         self._dummy_state = torch.zeros(1, 1, 1)
 
-        # prepare_vlm_inputs allocates thousands of small Python objects per
-        # call; in long Bench2Drive routes the heap state churned by scenario
-        # runtime amplifies that allocation cost, so the call slows by ~8x
-        # over a single run. VLMInputCache caches everything that depends
+        # VLMInputCache caches everything that depends
         # only on image dimensions (image_grid_thw, chat template format) but
         # tokenizes the prompt fresh every step so envs that vary their
         # task prompt (TrackingSquare, future CoT, ...) keep working.
