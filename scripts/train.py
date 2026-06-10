@@ -144,12 +144,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     log_episode_writer = None
 
     # env setup
-    if args.env_id == "CARLA-Leaderboard-v0":
-        from vla_streaming_rl.carla_bootstrap import ensure_carla_server, setup_carla_paths
-
-        setup_carla_paths()
-        ensure_carla_server()
-
     env = make_env(args.env_id, args.env_factory, result_dir=result_dir)
     env.unwrapped.max_step_count = args.max_step_count
     env.action_space.seed(seed)

@@ -95,6 +95,16 @@ def make_carla_env(
     config) and points at the Hydra run dir / "eval". weather.xml is
     auto-located next to ``route_xml``.
     """
+    # Wire up the CARLA / Bench2Drive sys.path (normally train_carla.sh's
+    # PYTHONPATH) and launch a CARLA server in-process, so a run needs no bash
+    # wrapper and no pre-running server. ``setup_carla_paths`` must run before
+    # importing ``carla_leaderboard_env`` (it imports leaderboard / srunner at
+    # module load); a server already up on port 2000 is reused, not relaunched.
+    from vla_streaming_rl.carla_bootstrap import ensure_carla_server, setup_carla_paths
+
+    setup_carla_paths()
+    ensure_carla_server()
+
     from vla_streaming_rl.envs.carla_leaderboard_env import CARLALeaderboardEnv
 
     return CARLALeaderboardEnv(
