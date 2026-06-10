@@ -51,7 +51,22 @@ critic_lr: 5e-7
 #   streaming  : online TD(λ) on the latest transition every step, critic
 #                via AdamET eligibility traces (uses ``et_lambda`` from
 #                base_streaming). Actor stays DDPG (-Q) + AdamW.
+#   awr        : random-replay critic (TD), but the actor is exp-weighted
+#                supervised regression — sample ``awr_num_samples`` actions
+#                per state, score each with Q, normalize the scores per state
+#                and softmax-weight them (``awr_temperature``), then regress
+#                the waypoint heads toward the higher-Q samples.
 learning_mode: off_policy
+
+# Advantage-weighted-regression actor knobs (``learning_mode: awr`` only).
+# awr_num_samples : candidate actions sampled per state (sample 0 is μ(s)).
+# awr_temperature : softmax temperature on the per-state z-scored Q advantages;
+#                   lower → weights concentrate harder on the best samples.
+# awr_sample_noise: Gaussian std of the candidate actions around μ(s)
+#                   (per waypoint coord, meters).
+awr_num_samples: 16
+awr_temperature: 0.1
+awr_sample_noise: 0.1
 
 # Critic architecture:
 #   simbav2 : SimbaV2 hyperspherical critic (arXiv:2502.15280). Weights and
