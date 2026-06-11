@@ -367,10 +367,14 @@ class SimLingoAgent:
         The waypoint policy predicts neither a goal nor a next frame. It does
         not predict the reward either, so the reward panel shows the actual
         reward only (``pred=None``). ``action_norm`` is a scalar telemetry hook.
+        ``processed_reward`` is the exact reward the critic trains on — the
+        "carla" transform is stateless, so logging it here matches the value
+        used at train time (see ``_read_transition``).
         """
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
             "q_value": self._viz_q_value,
+            "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
         }
         panels = {
             "reward": create_reward_image(None, reward),
