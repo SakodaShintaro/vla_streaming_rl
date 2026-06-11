@@ -159,8 +159,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
     eval_range = env.unwrapped.eval_range
 
-    parse_action_text = getattr(env.unwrapped, "parse_action_text", None)
-
     start_time = time.time()
 
     # start the game
@@ -180,7 +178,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         args,
         observation_space_shape=env.observation_space.shape,
         action_space_shape=env.action_space.shape,
-        parse_action_text=parse_action_text,
+        parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
         device=torch.device("cuda"),
     )
 
