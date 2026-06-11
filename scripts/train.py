@@ -71,6 +71,15 @@ def save_episode_data(
             "an agent's panel set / shapes must stay constant across the run."
         )
 
+    # libx264 (yuv420p) requires even width/height; the concatenated panel strip
+    # can be an odd size. Pad one black row/column when needed.
+    h, w = bgr_image_list[0].shape[:2]
+    if h % 2 or w % 2:
+        bgr_image_list = [
+            np.pad(img, ((0, h % 2), (0, w % 2), (0, 0)), mode="constant")
+            for img in bgr_image_list
+        ]
+
     video_path = video_dir / f"{name}.mp4"
     rgb_images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in bgr_image_list]
     imageio.mimsave(str(video_path), rgb_images, fps=10, macro_block_size=1)

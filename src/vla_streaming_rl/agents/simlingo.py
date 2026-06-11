@@ -93,6 +93,7 @@ from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     preprocess_compass,
 )
 from vla_streaming_rl.simlingo.team_code.trajectory_to_control import TrajectoryToControl
+from vla_streaming_rl.utils import create_reward_image
 
 # Configure pytorch for maximum performance
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -311,7 +312,7 @@ class SimLingoAgent:
     ) -> StepResult:
         self._maybe_handover_episode()
         env_action = self._act()
-        metrics, panels = self._build_info(env_action)
+        metrics, panels = self._build_info(env_action, reward)
         return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def step(
@@ -326,7 +327,7 @@ class SimLingoAgent:
         self._maybe_handover_episode()
         episode_done = terminated or truncated
         env_action = self._act()
-        metrics, panels = self._build_info(env_action)
+        metrics, panels = self._build_info(env_action, reward)
 
         # Store (features_t, action_{t-1}, reward, done). The per-query VLM
         # features go into the obs slot (obs_z is unused);
@@ -360,18 +361,21 @@ class SimLingoAgent:
         self._attached_ego_id = None
         return {}
 
-    def _build_info(self, env_action: np.ndarray) -> tuple[dict, dict]:
+    def _build_info(self, env_action: np.ndarray, reward: float) -> tuple[dict, dict]:
         """Return ``(metrics, panels)`` for this tick.
 
-        The waypoint policy predicts neither a goal nor a next frame, so it
-        contributes no image panels here (the bird's-eye trajectory panel is
-        added separately). ``action_norm`` is a scalar telemetry hook.
+        The waypoint policy predicts neither a goal nor a next frame. It does
+        not predict the reward either, so the reward panel shows the actual
+        reward only (``pred=None``). ``action_norm`` is a scalar telemetry hook.
         """
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
             "q_value": self._viz_q_value,
         }
-        panels = {"bev_value": self._render_bev_panel()}
+        panels = {
+            "reward": create_reward_image(None, reward),
+            "bev_value": self._render_bev_panel(),
+        }
         return metrics, panels
 
     def _render_bev_panel(self) -> np.ndarray:
