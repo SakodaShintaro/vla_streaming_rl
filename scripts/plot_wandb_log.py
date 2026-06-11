@@ -74,6 +74,45 @@ def load_history(wandb_file: Path) -> dict[str, np.ndarray]:
     return columns
 
 
+def episode_boundaries(
+    history: dict[str, np.ndarray], x_key: str, marker_key: str
+) -> np.ndarray:
+    """x positions where an episode ended.
+
+    The trainer logs per-episode summaries (e.g. ``episodic_return``) in a
+    separate ``wandb.log`` call at each episode boundary, so the rows where
+    ``marker_key`` is non-NaN give the global_step of each episode switch.
+    """
+    if marker_key not in history or x_key not in history:
+        return np.empty(0)
+    marker = history[marker_key]
+    x = history[x_key]
+    rows = ~np.isnan(marker) & ~np.isnan(x)
+    return x[rows]
+
+
+def split_by_episode(
+    gs: np.ndarray, y: np.ndarray, boundaries: np.ndarray
+) -> list[np.ndarray]:
+    """Split the per-step series ``y`` (logged at global steps ``gs``) into one
+    array per episode, using the episode-end global steps ``boundaries``.
+
+    Episode k holds the steps with ``boundary[k-1] < gs <= boundary[k]``; any
+    steps past the last boundary form a trailing (in-progress) episode.
+    """
+    segments: list[np.ndarray] = []
+    lo = -np.inf
+    for b in boundaries:
+        mask = (gs > lo) & (gs <= b)
+        if mask.any():
+            segments.append(y[mask])
+        lo = b
+    tail = gs > lo
+    if tail.any():
+        segments.append(y[tail])
+    return segments
+
+
 def smooth(y: np.ndarray, window: int) -> np.ndarray:
     if window <= 1:
         return y
@@ -107,10 +146,81 @@ def parse_args() -> argparse.Namespace:
         "--smooth", type=int, default=1, help="Rolling mean window (default: 1, no smoothing)"
     )
     parser.add_argument(
+        "--episode-key",
+        default="episodic_return",
+        help="Per-episode marker key whose log rows mark episode boundaries "
+        "(drawn as vertical dashed lines; default: episodic_return)",
+    )
+    parser.add_argument(
+        "--no-episode-lines",
+        action="store_true",
+        help="Disable the episode-boundary vertical dashed lines",
+    )
+    parser.add_argument(
+        "--per-episode",
+        action="store_true",
+        help="Overlay one line per episode, x = step within the episode, each "
+        "line colored by episode id (gradient). Requires exactly one key.",
+    )
+    parser.add_argument(
+        "--cumulative",
+        action="store_true",
+        help="In --per-episode mode, plot the within-episode cumulative sum of "
+        "the key (e.g. -k reward --cumulative gives cumulative reward / return).",
+    )
+    parser.add_argument(
         "-o", "--output", type=Path, help="Output image path (default: <run_dir>/plot.png)"
     )
     parser.add_argument("--show", action="store_true", help="Show the figure interactively")
     return parser.parse_args()
+
+
+def plot_per_episode(
+    args: argparse.Namespace, history: dict[str, np.ndarray], x: np.ndarray, x_key: str
+) -> None:
+    """One line per episode, x = step within the episode, colored by episode id."""
+    if len(args.keys) != 1:
+        raise SystemExit("--per-episode requires exactly one key")
+    key = args.keys[0]
+
+    valid = ~(np.isnan(x) | np.isnan(history[key]))
+    gs = x[valid]
+    y = history[key][valid]
+    boundaries = episode_boundaries(history, x_key, args.episode_key)
+    segments = split_by_episode(gs, y, boundaries)
+    if not segments:
+        raise SystemExit(f"No data to plot for key '{key}'")
+
+    n = len(segments)
+    cmap = plt.cm.viridis
+    norm = plt.Normalize(vmin=0, vmax=max(1, n - 1))
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for i, seg in enumerate(segments):
+        if args.cumulative:
+            seg = np.cumsum(seg)
+        ys = smooth(seg, args.smooth)
+        ax.plot(np.arange(len(ys)), ys, color=cmap(norm(i)), linewidth=1.0, alpha=0.8)
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, label="episode id")
+
+    ax.set_xlabel("step within episode")
+    ax.set_ylabel(f"cumulative {key}" if args.cumulative else key)
+    ax.grid(alpha=0.3)
+    label = f"cumulative {key}" if args.cumulative else key
+    title = f"{args.run_dir.name} — {label} per episode ({n})"
+    if args.smooth > 1:
+        title += f" (smooth={args.smooth})"
+    ax.set_title(title)
+    fig.tight_layout()
+
+    output = args.output if args.output is not None else args.run_dir / "plot.png"
+    fig.savefig(output, dpi=120)
+    print(f"Saved {output}")
+    if args.show:
+        plt.show()
 
 
 def main() -> None:
@@ -141,6 +251,10 @@ def main() -> None:
         raise SystemExit(f"x-axis key '{args.x_key}' not found and no '_step' fallback")
     x = history[x_key]
 
+    if args.per_episode:
+        plot_per_episode(args, history, x, x_key)
+        return
+
     fig, ax = plt.subplots(figsize=(10, 6))
     for key in args.keys:
         y = history[key]
@@ -148,6 +262,20 @@ def main() -> None:
         xs = x[valid]
         ys = smooth(y[valid], args.smooth)
         ax.plot(xs, ys, label=key, linewidth=1.2)
+
+    if not args.no_episode_lines:
+        boundaries = episode_boundaries(history, x_key, args.episode_key)
+        for i, xb in enumerate(boundaries):
+            ax.axvline(
+                xb,
+                color="gray",
+                linestyle="--",
+                linewidth=0.8,
+                alpha=0.5,
+                label="episode boundary" if i == 0 else None,
+            )
+        if len(boundaries) == 0:
+            print(f"No episode boundaries found (marker key '{args.episode_key}' absent)")
 
     ax.set_xlabel(x_key)
     ax.set_ylabel("value")
