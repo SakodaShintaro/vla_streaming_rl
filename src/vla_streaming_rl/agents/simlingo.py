@@ -286,6 +286,12 @@ class SimLingoAgent:
         self._attached_ego_id: int | None = None
         self._prev_action = torch.zeros(_ACTION_DIM, device=self.device)
 
+        # Latest executed trajectory + its critic value, cached by ``run_step``
+        # for the bird's-eye visualization panel built in ``_build_info``.
+        self._viz_route = np.zeros((_ROUTE_LEN, _WP_DIM), dtype=np.float32)
+        self._viz_speed = np.zeros((_SPEED_WPS_LEN, _WP_DIM), dtype=np.float32)
+        self._viz_q_value = 0.0
+
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
         # rewards (stuck) get a small negative push and collision spikes
         # are hard-clipped to keep the critic stable. See RewardProcessor.
@@ -373,9 +379,50 @@ class SimLingoAgent:
         contributes no image panels here (the bird's-eye trajectory panel is
         added separately). ``action_norm`` is a scalar telemetry hook.
         """
-        metrics = {"action_norm": float(np.linalg.norm(env_action))}
-        panels: dict = {}
+        metrics = {
+            "action_norm": float(np.linalg.norm(env_action)),
+            "q_value": self._viz_q_value,
+        }
+        panels = {"bev_value": self._render_bev_panel()}
         return metrics, panels
+
+    def _render_bev_panel(self) -> np.ndarray:
+        """Top-down (ego-frame) view of the executed trajectory, annotated
+        with the critic's value estimate Q(s, a).
+
+        Ego is the green marker near the bottom; route index 0 (``+x``) is
+        forward → up, ``+y`` → right (the PID's heading convention). Returns
+        an RGB uint8 image for the render strip.
+        """
+        size = 256
+        scale = 6.0  # pixels per meter
+        img = np.full((size, size, 3), 30, dtype=np.uint8)
+        ego_px = (size // 2, int(size * 0.8))
+
+        def to_px(forward: float, lateral: float) -> tuple[int, int]:
+            return (int(ego_px[0] + lateral * scale), int(ego_px[1] - forward * scale))
+
+        # range rings every 10 m for scale reference
+        for r_m in (10, 20, 30):
+            cv2.circle(img, ego_px, int(r_m * scale), (60, 60, 60), 1)
+
+        # executed route: polyline + waypoint dots
+        pts = [to_px(float(wp[0]), float(wp[1])) for wp in self._viz_route]
+        for i in range(len(pts) - 1):
+            cv2.line(img, pts[i], pts[i + 1], (0, 200, 255), 2)
+        for p in pts:
+            cv2.circle(img, p, 2, (255, 255, 0), -1)
+
+        # ego marker pointing forward (up)
+        cv2.drawMarker(
+            img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2
+        )
+
+        # value annotation (green if non-negative, red otherwise)
+        q = self._viz_q_value
+        q_color = (0, 255, 0) if q >= 0.0 else (255, 80, 80)
+        cv2.putText(img, f"Q: {q:.3f}", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, q_color, 2)
+        return img
 
     # --- Episode handover --------------------------------------------------
 
@@ -621,6 +668,15 @@ class SimLingoAgent:
 
         # Feed the (noised) waypoints to the deterministic PID.
         pred_route, pred_speed_wps = _action_vec_to_waypoints(action_taken)
+
+        # Cache the executed trajectory + its critic value Q(s, a) for the
+        # bird's-eye visualization panel. ``s`` is the mean over the 30
+        # waypoint queries, matching the critic's state convention in training.
+        s_vec = features.mean(dim=0, keepdim=True)
+        q = self._critic_value(self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1))["output"])
+        self._viz_q_value = float(q.item())
+        self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
+        self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
 
         gt_velocity = driving_input_kwargs["vehicle_speed"]
 
