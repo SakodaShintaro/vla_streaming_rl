@@ -108,36 +108,18 @@ def add_text_label_on_top(image: np.ndarray, text: str) -> np.ndarray:
     return result
 
 
-def concat_labeled_images(
-    environment: np.ndarray,
-    observation: np.ndarray,
-    prediction: np.ndarray,
-    reward: np.ndarray,
-    goal: np.ndarray,
-) -> np.ndarray:
-    """
-    Create a combined image from multiple images (returns in RGB format).
-    Convert all images to uint8 and add labels. An all-zero `goal` is treated
-    as "no goal" and the panel (and its label) is omitted; the prediction
-    panel is then rendered alone instead of being vstacked with goal.
-    """
-    has_goal = bool(np.any(goal))
-    images = [environment, observation, prediction, reward]
-    labels = ["environment", "observation", "prediction", "reward"]
-    if has_goal:
-        images.append(goal)
-        labels.append("goal")
+def concat_labeled_images(panels: dict[str, np.ndarray]) -> np.ndarray:
+    """Lay out named image panels side by side as a single RGB strip.
 
+    ``panels`` maps a label to an RGB image (uint8 or float32). Panels are
+    drawn left-to-right in insertion order, each captioned with its label,
+    converted to uint8, and padded to a common height. Agents and envs can
+    contribute arbitrary extra panels (e.g. a bird's-eye trajectory view)
+    without this function knowing the panel set in advance.
+    """
     labeled_images = [
-        add_text_label_on_top(convert_to_uint8(img), label) for img, label in zip(images, labels)
+        add_text_label_on_top(convert_to_uint8(img), label) for label, img in panels.items()
     ]
-
-    if has_goal:
-        # vstack prediction with goal so they share a column
-        pred_goal_concat = cv2.vconcat([labeled_images[2], labeled_images[4]])
-        labeled_images[2] = pred_goal_concat
-        del labeled_images[4]
-
     final_image_bgr = concat_images(labeled_images)
     final_image_rgb = cv2.cvtColor(final_image_bgr, cv2.COLOR_BGR2RGB)
     return final_image_rgb

@@ -66,6 +66,7 @@ from leaderboard.utils.route_manipulation import downsample_route  # type: ignor
 from PIL import Image
 from torch import nn, optim
 
+from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.simlingo_network import (
     _ACTION_DIM,
     _NUM_WP_QUERIES,
@@ -301,10 +302,17 @@ class SimLingoAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
+    ) -> StepResult:
         self._maybe_handover_episode()
         env_action = self._act()
-        return env_action, self._build_info(env_action)
+        metrics, panels = self._build_info(env_action)
+        return StepResult(
+            action=env_action,
+            metrics=metrics,
+            panels=panels,
+            next_image=None,
+            next_reward=None,
+        )
 
     def step(
         self,
@@ -314,11 +322,11 @@ class SimLingoAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
+    ) -> StepResult:
         self._maybe_handover_episode()
         episode_done = terminated or truncated
         env_action = self._act()
-        info = self._build_info(env_action)
+        metrics, panels = self._build_info(env_action)
 
         # Store (features_t, action_{t-1}, reward, done). The per-query VLM
         # features go into the obs slot (obs_z is unused);
@@ -338,30 +346,36 @@ class SimLingoAgent:
             [],
         )
 
-        info.update(self._train(global_step, episode_done))
+        metrics.update(self._train(global_step, episode_done))
 
         # Advance: the action just selected becomes the prev for the
         # next add. (off_policy carries it across episode boundaries
         # too — the buffer's done flag handles bootstrap correctness.)
         self._prev_action = self._current_action_taken
 
-        return env_action, info
+        return StepResult(
+            action=env_action,
+            metrics=metrics,
+            panels=panels,
+            next_image=None,
+            next_reward=None,
+        )
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         # Force re-init on the next select_action.
         self._attached_ego_id = None
         return {}
 
-    def _build_info(self, env_action: np.ndarray) -> dict:
-        """Trainer reads ``agent_info["goal_image"]`` for its rendering
-        pipeline. The waypoint policy doesn't predict a goal, so hand
-        back a zeroed frame shaped like the obs the env returns.
-        ``action_norm`` is included as a scalar telemetry hook."""
-        h, w = self.observation_space.shape[1], self.observation_space.shape[2]
-        return {
-            "goal_image": np.zeros((h, w, 3), dtype=np.float32),
-            "action_norm": float(np.linalg.norm(env_action)),
-        }
+    def _build_info(self, env_action: np.ndarray) -> tuple[dict, dict]:
+        """Return ``(metrics, panels)`` for this tick.
+
+        The waypoint policy predicts neither a goal nor a next frame, so it
+        contributes no image panels here (the bird's-eye trajectory panel is
+        added separately). ``action_norm`` is a scalar telemetry hook.
+        """
+        metrics = {"action_norm": float(np.linalg.norm(env_action))}
+        panels: dict = {}
+        return metrics, panels
 
     # --- Episode handover --------------------------------------------------
 

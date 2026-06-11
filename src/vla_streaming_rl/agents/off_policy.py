@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch import nn, optim
 
+from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
@@ -95,8 +96,9 @@ class OffPolicyAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
-        info_dict = {}
+    ) -> StepResult:
+        metrics = {}
+        panels = {}
 
         # Reset chunk on episode boundary
         if terminated or truncated:
@@ -107,8 +109,8 @@ class OffPolicyAgent:
         action_norm = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
-        info_dict["action_norm"] = action_norm
-        info_dict["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+        metrics["action_norm"] = action_norm
+        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
 
         # add to replay buffer
         obs_tensor = torch.from_numpy(obs).to(self.device)
@@ -129,7 +131,9 @@ class OffPolicyAgent:
             task_prompt_token_ids,
         )
 
-        info_dict["goal_image"] = self.goal_predictor.step(obs)
+        goal_image = self.goal_predictor.step(obs)
+        if np.any(goal_image):
+            panels["goal"] = goal_image
         if terminated or truncated:
             self.goal_predictor.reset()
 
@@ -144,8 +148,14 @@ class OffPolicyAgent:
             action = np.clip(action, self.action_low, self.action_high)
             self.prev_action = action
             self.chunk_step += 1
-            info_dict["chunk_step"] = self.chunk_step
-            return action, info_dict
+            metrics["chunk_step"] = self.chunk_step
+            return StepResult(
+                action=action,
+                metrics=metrics,
+                panels=panels,
+                next_image=None,
+                next_reward=None,
+            )
 
         # inference - predict new action chunk
         latest_data = self.rb.get_latest(self.seq_len)
@@ -158,9 +168,9 @@ class OffPolicyAgent:
             task_prompts=[task_prompt],
         )
         self.rnn_state = infer_dict["rnn_state"]
-        info_dict["value"] = infer_dict["value"]
-        info_dict["next_image"] = infer_dict["next_image"]
-        info_dict["next_reward"] = infer_dict["next_reward"]
+        metrics["value"] = infer_dict["value"]
+        next_image = infer_dict["next_image"]
+        next_reward = infer_dict["next_reward"]
 
         # action
         if global_step < self.learning_starts:
@@ -179,8 +189,14 @@ class OffPolicyAgent:
             action = np.clip(action, self.action_low, self.action_high)
         self.prev_action = action
 
-        info_dict["chunk_step"] = self.chunk_step
-        return action, info_dict
+        metrics["chunk_step"] = self.chunk_step
+        return StepResult(
+            action=action,
+            metrics=metrics,
+            panels=panels,
+            next_image=next_image,
+            next_reward=next_reward,
+        )
 
     def step(
         self,
@@ -190,20 +206,15 @@ class OffPolicyAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
-        info_dict = {}
-
-        # train
-        train_info = self._train(global_step)
-        info_dict.update(train_info)
-
-        # make decision
-        action, action_info = self.select_action(
+    ) -> StepResult:
+        # train, then make decision; the training metrics merge into the
+        # action's StepResult.
+        train_metrics = self._train(global_step)
+        result = self.select_action(
             global_step, obs, reward, terminated, truncated, task_prompt
         )
-        info_dict.update(action_info)
-
-        return action, info_dict
+        result.metrics.update(train_metrics)
+        return result
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         return {}

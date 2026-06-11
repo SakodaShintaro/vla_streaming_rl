@@ -278,19 +278,22 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         task_prompt = reset_info["task_prompt"] if args.use_prompt else ""
 
         # initial action
-        action, agent_info = agent.select_action(global_step, obs, 0.0, False, False, task_prompt)
+        result = agent.select_action(global_step, obs, 0.0, False, False, task_prompt)
+        action = result.action
 
         # initial render
         obs_for_render = obs.copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
-        reward_image = create_reward_image(0.0, 0.0)
-        initial_rgb_image = concat_labeled_images(
-            env.render(),
-            obs_viz,
-            np.zeros_like(obs_viz),
-            reward_image,
-            np.zeros_like(obs_viz),
-        )
+        # Trainer-owned panels first, then whatever extra panels the agent
+        # contributed (goal frame, bird's-eye trajectory view, ...).
+        panels = {
+            "environment": env.render(),
+            "observation": obs_viz,
+            "prediction": np.zeros_like(obs_viz),
+            "reward": create_reward_image(0.0, 0.0),
+            **result.panels,
+        }
+        initial_rgb_image = concat_labeled_images(panels)
         bgr_image_list = [cv2.cvtColor(initial_rgb_image, cv2.COLOR_RGB2BGR)]
 
         # action and reward history for this episode
@@ -299,8 +302,10 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         obs_list = [obs.copy()]
 
         # initial prediction for next step
-        pred_image = agent_info.get("next_image", np.zeros_like(obs_for_render))
-        pred_reward = agent_info.get("next_reward", 0.0)
+        pred_image = (
+            result.next_image if result.next_image is not None else np.zeros_like(obs_for_render)
+        )
+        pred_reward = result.next_reward if result.next_reward is not None else 0.0
 
         while True:
             global_step += 1
@@ -317,19 +322,16 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             obs_list.append(obs.copy())
 
             agent_step_start = time.time()
-            action, agent_info = agent.step(
-                global_step, obs, reward, terminated, truncated, task_prompt
-            )
+            result = agent.step(global_step, obs, reward, terminated, truncated, task_prompt)
+            action = result.action
             agent_step_time_msec = (time.time() - agent_step_start) * 1000
 
             # render
             obs_for_render = obs.copy().transpose(1, 2, 0)
 
-            # log
+            # log: metrics are already scalar telemetry (images live in panels)
             elapsed_time_sec = time.time() - start_time
             elapsed_time_min = elapsed_time_sec / 60
-            # Exclude ndarray before logging to wandb
-            log_agent_info = {k: v for k, v in agent_info.items() if not isinstance(v, np.ndarray)}
             data_dict = {
                 "global_step": global_step,
                 "elapsed_time_min": elapsed_time_min,
@@ -337,7 +339,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 "reward": reward,
                 "env_step_msec": env_step_time_msec,
                 "agent_step_msec": agent_step_time_msec,
-                **log_agent_info,
+                **result.metrics,
             }
             data_dict["losses/pred_image_loss"] = np.mean(np.abs(pred_image - obs_for_render))
             data_dict["losses/pred_reward_loss"] = np.abs(pred_reward - reward)
@@ -346,14 +348,14 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             reward_image = create_reward_image(pred_reward, reward)
             obs_viz = _viz_resize(obs_for_render, args.render_scale)
             pred_viz = _viz_resize(pred_image, args.render_scale)
-            goal_for_render = cv2.resize(
-                agent_info["goal_image"],
-                (obs_viz.shape[1], obs_viz.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            rgb_image = concat_labeled_images(
-                env.render(), obs_viz, pred_viz, reward_image, goal_for_render
-            )
+            panels = {
+                "environment": env.render(),
+                "observation": obs_viz,
+                "prediction": pred_viz,
+                "reward": reward_image,
+                **result.panels,
+            }
+            rgb_image = concat_labeled_images(panels)
             bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
             bgr_image_list.append(bgr_image)
             if args.render:
@@ -376,8 +378,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 break
 
             # update prediction for next step
-            pred_image = agent_info.get("next_image", np.zeros_like(obs_for_render))
-            pred_reward = agent_info.get("next_reward", 0.0)
+            pred_image = (
+                result.next_image
+                if result.next_image is not None
+                else np.zeros_like(obs_for_render)
+            )
+            pred_reward = result.next_reward if result.next_reward is not None else 0.0
 
         if global_step >= step_limit:
             break
