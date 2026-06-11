@@ -9,6 +9,7 @@ from torch.nn import functional as F
 
 from .image_processor import ImageProcessor
 from .infer_result import InferResult
+from .loss_result import EligibilityTraceInfo, InferLossResult, LossResult
 from .policy_head import BetaPolicy, CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
 from .prediction_head import StatePredictionHead
 from .reward_processor import RewardProcessor
@@ -288,7 +289,7 @@ class VLMActorCriticWithActionValue(nn.Module):
             action_token_ids=[],
         )
 
-    def compute_loss(self, data) -> tuple[torch.Tensor, dict, dict]:
+    def compute_loss(self, data) -> LossResult:
         # Decode task prompts from buffer: use last timestep's prompt for next-state
         next_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         # Use prompt at the boundary between seq and horizon for current state
@@ -328,9 +329,9 @@ class VLMActorCriticWithActionValue(nn.Module):
         }
         info_dict = {**critic_info, **actor_info, **seq_info}
 
-        return total_loss, activations_dict, info_dict
+        return LossResult(loss=total_loss, activations=activations_dict, info=info_dict)
 
-    def infer_and_compute_loss(self, data) -> tuple[dict, torch.Tensor, dict, dict]:
+    def infer_and_compute_loss(self, data) -> InferLossResult:
         next_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
 
@@ -392,13 +393,19 @@ class VLMActorCriticWithActionValue(nn.Module):
         }
         info_dict = {**critic_info, **actor_info, **seq_info}
 
-        et_info = {
-            "actor_entropy_loss": actor_entropy_loss,
-            "neg_value": neg_value_detached,
-            "delta": critic_info["delta"],
-        }
+        et_info = EligibilityTraceInfo(
+            actor_entropy_loss=actor_entropy_loss,
+            neg_value=neg_value_detached,
+            delta=critic_info["delta"],
+        )
 
-        return infer_result, total_loss, activations_dict, info_dict, et_info
+        return InferLossResult(
+            infer_result=infer_result,
+            loss=total_loss,
+            activations=activations_dict,
+            info=info_dict,
+            et_info=et_info,
+        )
 
     ####################
     # Internal methods #

@@ -288,24 +288,22 @@ class StreamingAgent:
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_processor.normalize(data.rewards)
 
-        infer_result, loss, activation_dict, loss_info, et_info = (
-            self.network.infer_and_compute_loss(data)
-        )
-        action, next_image, next_reward = self._start_new_chunk(infer_result, metrics)
+        result = self.network.infer_and_compute_loss(data)
+        action, next_image, next_reward = self._start_new_chunk(result.infer_result, metrics)
         self._store_prediction(next_image, next_reward, terminated or truncated)
 
-        metrics.update({f"losses/{key}": value for key, value in loss_info.items()})
+        metrics.update({f"losses/{key}": value for key, value in result.info.items()})
 
         if self.use_eligibility_trace:
             # Actor: backward actor-only loss → encoder + actor grads
-            actor_loss = et_info["actor_entropy_loss"] / self.accumulation_steps
+            actor_loss = result.et_info.actor_entropy_loss / self.accumulation_steps
             actor_loss.backward(retain_graph=True)
 
             # Critic: backward -V(s) → value_head grads only (detached from encoder)
-            neg_value = et_info["neg_value"] / self.accumulation_steps
+            neg_value = result.et_info.neg_value / self.accumulation_steps
             neg_value.backward()
         else:
-            scaled_loss = loss / self.accumulation_steps
+            scaled_loss = result.loss / self.accumulation_steps
             scaled_loss.backward()
 
         self._accumulation_count += 1
@@ -313,7 +311,7 @@ class StreamingAgent:
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
             self.optimizer.step()
             if self.use_eligibility_trace:
-                self.critic_optimizer.step(delta=et_info["delta"], reset=self._episode_reset)
+                self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
                 self._episode_reset = False
                 self.critic_optimizer.zero_grad()
             self.optimizer.zero_grad()

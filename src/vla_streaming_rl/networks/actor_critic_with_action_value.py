@@ -5,6 +5,11 @@ import torch.nn as nn
 from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.image_processor import ImageProcessor
 from vla_streaming_rl.networks.infer_result import InferResult
+from vla_streaming_rl.networks.loss_result import (
+    EligibilityTraceInfo,
+    InferLossResult,
+    LossResult,
+)
 from vla_streaming_rl.networks.policy_head import (
     BetaPolicy,
     CFGDiffusionPolicy,
@@ -210,7 +215,7 @@ class ActorCriticWithActionValue(nn.Module):
             action_token_ids=[],
         )
 
-    def compute_loss(self, data) -> tuple[torch.Tensor, dict, dict]:
+    def compute_loss(self, data) -> LossResult:
         _, _, next_q, _ = self._infer(
             data.observations[:, self.horizon :],
             data.obs_z[:, self.horizon :],
@@ -262,9 +267,9 @@ class ActorCriticWithActionValue(nn.Module):
             **seq_info,
         }
 
-        return total_loss, activations_dict, info_dict
+        return LossResult(loss=total_loss, activations=activations_dict, info=info_dict)
 
-    def infer_and_compute_loss(self, data) -> tuple[dict, torch.Tensor, dict, dict]:
+    def infer_and_compute_loss(self, data) -> InferLossResult:
         """Combined inference and loss computation."""
         next_state, next_action, next_q, next_rnn_state = self._infer(
             data.observations[:, self.horizon :],
@@ -339,13 +344,19 @@ class ActorCriticWithActionValue(nn.Module):
             **seq_info,
         }
 
-        et_info = {
-            "actor_entropy_loss": actor_entropy_loss,
-            "neg_value": neg_value_detached,
-            "delta": critic_info["delta"],
-        }
+        et_info = EligibilityTraceInfo(
+            actor_entropy_loss=actor_entropy_loss,
+            neg_value=neg_value_detached,
+            delta=critic_info["delta"],
+        )
 
-        return infer_result, total_loss, activations_dict, info_dict, et_info
+        return InferLossResult(
+            infer_result=infer_result,
+            loss=total_loss,
+            activations=activations_dict,
+            info=info_dict,
+            et_info=et_info,
+        )
 
     ####################
     # Internal methods #

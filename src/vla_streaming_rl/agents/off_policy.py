@@ -274,13 +274,13 @@ class OffPolicyAgent:
         data.rewards = self.reward_processor.normalize(data.rewards)
 
         # compute loss
-        loss, activation_dict, info_dict = self.network.compute_loss(data)
+        loss_result = self.network.compute_loss(data)
 
         # add prefixes to info_dict keys
-        info_dict = {f"losses/{key}": value for key, value in info_dict.items()}
+        info_dict = {f"losses/{key}": value for key, value in loss_result.info.items()}
 
         # optimize the model with gradient accumulation
-        scaled_loss = loss / self.accumulation_steps
+        scaled_loss = loss_result.loss / self.accumulation_steps
         scaled_loss.backward()
 
         self._accumulation_count += 1
