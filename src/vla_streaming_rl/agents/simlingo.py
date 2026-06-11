@@ -66,6 +66,7 @@ from leaderboard.utils.route_manipulation import downsample_route  # type: ignor
 from PIL import Image
 from torch import nn, optim
 
+from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.simlingo_network import (
     _ACTION_DIM,
     _NUM_WP_QUERIES,
@@ -92,6 +93,7 @@ from vla_streaming_rl.simlingo.team_code.simlingo_utils import (
     preprocess_compass,
 )
 from vla_streaming_rl.simlingo.team_code.trajectory_to_control import TrajectoryToControl
+from vla_streaming_rl.utils import create_reward_image
 
 # Configure pytorch for maximum performance
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -285,6 +287,12 @@ class SimLingoAgent:
         self._attached_ego_id: int | None = None
         self._prev_action = torch.zeros(_ACTION_DIM, device=self.device)
 
+        # Latest executed trajectory + its critic value, cached by ``run_step``
+        # for the bird's-eye visualization panel built in ``_build_info``.
+        self._viz_route = np.zeros((_ROUTE_LEN, _WP_DIM), dtype=np.float32)
+        self._viz_speed = np.zeros((_SPEED_WPS_LEN, _WP_DIM), dtype=np.float32)
+        self._viz_q_value = 0.0
+
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
         # rewards (stuck) get a small negative push and collision spikes
         # are hard-clipped to keep the critic stable. See RewardProcessor.
@@ -301,10 +309,11 @@ class SimLingoAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
+    ) -> StepResult:
         self._maybe_handover_episode()
         env_action = self._act()
-        return env_action, self._build_info(env_action)
+        metrics, panels = self._build_info(env_action, reward)
+        return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def step(
         self,
@@ -314,11 +323,11 @@ class SimLingoAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
+    ) -> StepResult:
         self._maybe_handover_episode()
         episode_done = terminated or truncated
         env_action = self._act()
-        info = self._build_info(env_action)
+        metrics, panels = self._build_info(env_action, reward)
 
         # Store (features_t, action_{t-1}, reward, done). The per-query VLM
         # features go into the obs slot (obs_z is unused);
@@ -338,30 +347,90 @@ class SimLingoAgent:
             [],
         )
 
-        info.update(self._train(global_step, episode_done))
+        metrics.update(self._train(global_step, episode_done))
 
         # Advance: the action just selected becomes the prev for the
         # next add. (off_policy carries it across episode boundaries
         # too — the buffer's done flag handles bootstrap correctness.)
         self._prev_action = self._current_action_taken
 
-        return env_action, info
+        return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         # Force re-init on the next select_action.
         self._attached_ego_id = None
         return {}
 
-    def _build_info(self, env_action: np.ndarray) -> dict:
-        """Trainer reads ``agent_info["goal_image"]`` for its rendering
-        pipeline. The waypoint policy doesn't predict a goal, so hand
-        back a zeroed frame shaped like the obs the env returns.
-        ``action_norm`` is included as a scalar telemetry hook."""
-        h, w = self.observation_space.shape[1], self.observation_space.shape[2]
-        return {
-            "goal_image": np.zeros((h, w, 3), dtype=np.float32),
+    def _build_info(self, env_action: np.ndarray, reward: float) -> tuple[dict, dict]:
+        """Return ``(metrics, panels)`` for this tick.
+
+        The waypoint policy predicts neither a goal nor a next frame. It does
+        not predict the reward either, so the reward panel shows the actual
+        reward only (``pred=None``). ``action_norm`` is a scalar telemetry hook.
+        ``processed_reward`` is the exact reward the critic trains on — the
+        "carla" transform is stateless, so logging it here matches the value
+        used at train time (see ``_read_transition``).
+        """
+        metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
+            # Named "value" to match off_policy / streaming telemetry (their
+            # critic logs V(s) under the same key); here it is the Q(s, a) of
+            # the executed action. Keeps --calibration etc. agent-agnostic.
+            "value": self._viz_q_value,
+            "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
         }
+        panels = {
+            "reward": create_reward_image(None, reward),
+            "bev_value": self._render_bev_panel(),
+        }
+        return metrics, panels
+
+    def _render_bev_panel(self) -> np.ndarray:
+        """Top-down (ego-frame) view of SimLingo's two predicted trajectories,
+        annotated with the critic's value estimate Q(s, a).
+
+        SimLingo outputs two waypoint sets, both drawn here: the ``route``
+        (geometric path, cyan) and the ``speed`` waypoints (future positions
+        used for speed control, orange). Ego is the green marker near the
+        bottom; waypoint index 0 (``+x``) is forward → up, ``+y`` → right (the
+        PID's heading convention). Returns an RGB uint8 image for the strip.
+        """
+        size = 256
+        scale = 6.0  # pixels per meter
+        img = np.full((size, size, 3), 30, dtype=np.uint8)
+        ego_px = (size // 2, int(size * 0.8))
+
+        def to_px(forward: float, lateral: float) -> tuple[int, int]:
+            return (int(ego_px[0] + lateral * scale), int(ego_px[1] - forward * scale))
+
+        def draw_trajectory(waypoints: np.ndarray, color: tuple[int, int, int]) -> None:
+            pts = [to_px(float(wp[0]), float(wp[1])) for wp in waypoints]
+            for i in range(len(pts) - 1):
+                cv2.line(img, pts[i], pts[i + 1], color, 2)
+            for p in pts:
+                cv2.circle(img, p, 2, color, -1)
+
+        # range rings every 10 m for scale reference
+        for r_m in (10, 20, 30):
+            cv2.circle(img, ego_px, int(r_m * scale), (60, 60, 60), 1)
+
+        # the two SimLingo outputs
+        route_color = (0, 200, 255)
+        speed_color = (255, 165, 0)
+        draw_trajectory(self._viz_route, route_color)
+        draw_trajectory(self._viz_speed, speed_color)
+
+        # ego marker pointing forward (up)
+        cv2.drawMarker(img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2)
+
+        # value annotation (green if non-negative, red otherwise) + legend
+        q = self._viz_q_value
+        q_color = (0, 255, 0) if q >= 0.0 else (255, 80, 80)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(img, f"Q: {q:.3f}", (8, 22), font, 0.6, q_color, 2)
+        cv2.putText(img, "route", (8, size - 24), font, 0.45, route_color, 1)
+        cv2.putText(img, "speed", (8, size - 8), font, 0.45, speed_color, 1)
+        return img
 
     # --- Episode handover --------------------------------------------------
 
@@ -608,6 +677,15 @@ class SimLingoAgent:
         # Feed the (noised) waypoints to the deterministic PID.
         pred_route, pred_speed_wps = _action_vec_to_waypoints(action_taken)
 
+        # Cache the executed trajectory + its critic value Q(s, a) for the
+        # bird's-eye visualization panel. ``s`` is the mean over the 30
+        # waypoint queries, matching the critic's state convention in training.
+        s_vec = features.mean(dim=0, keepdim=True)
+        q = self._critic_value(self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1)).output)
+        self._viz_q_value = float(q.item())
+        self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
+        self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
+
         gt_velocity = driving_input_kwargs["vehicle_speed"]
 
         steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed_wps)
@@ -719,9 +797,9 @@ class SimLingoAgent:
         """
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
-            next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1))["output"])
+            next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1)).output)
             target_q = r + self.gamma * (1.0 - done) * next_q
-        current_logits = self.critic(s, a.unsqueeze(1))["output"]
+        current_logits = self.critic(s, a.unsqueeze(1)).output
         current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q
 
@@ -735,7 +813,7 @@ class SimLingoAgent:
         a_pred = self._policy_action(feat)
         for p in self.critic.parameters():
             p.requires_grad_(False)
-        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1))["output"])
+        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1)).output)
         for p in self.critic.parameters():
             p.requires_grad_(True)
         return -actor_q.mean()
@@ -775,7 +853,7 @@ class SimLingoAgent:
             # whole (B*N) batch in one critic forward.
             s_rep = s.unsqueeze(1).expand(b, n, s.shape[-1]).reshape(b * n, -1)
             a_rep = cand.reshape(b * n, action_dim).unsqueeze(1)  # (B*N, 1, A)
-            q = self._critic_value(self.critic(s_rep, a_rep)["output"]).view(b, n)
+            q = self._critic_value(self.critic(s_rep, a_rep).output).view(b, n)
 
             # Per-state exp weights via softmax (handles the exp and the
             # normalize-to-sum-1). softmax is shift-invariant, so centering the
@@ -866,9 +944,7 @@ class SimLingoAgent:
         seq = start[:, None] + torch.arange(span)[None, :]
 
         a, r, done, feat, feat_next, s, s_next = self._read_transition(seq)
-        current_logits, current_q, target_q = self._critic_targets(
-            a, r, done, s, s_next, feat_next
-        )
+        current_logits, current_q, target_q = self._critic_targets(a, r, done, s, s_next, feat_next)
         self.critic.update_value_range(target_q)
         critic_loss = self.critic.value_loss(current_logits, target_q)
         actor_loss, weight_entropy = self._awr_actor_loss(feat, s)

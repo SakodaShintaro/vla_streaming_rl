@@ -87,6 +87,13 @@ class WorldModelGoalPredictor:
             self._pipeline = self._build_pipeline(config, checkpoint_path)
             self._vae_enc_cache = self._pipeline.vae.model.make_encoder_cache()
 
+    @property
+    def enabled(self) -> bool:
+        """Whether the world model is loaded. Callers gate the goal panel on
+        this (a static, per-run value) so the panel set stays stable across the
+        run rather than appearing once the latent buffer fills."""
+        return self._enabled
+
     def reset(self) -> None:
         """Drop the rolling state (e.g. on episode end)."""
         self._step_counter = 0

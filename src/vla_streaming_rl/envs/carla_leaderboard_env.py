@@ -628,6 +628,11 @@ class CARLALeaderboardEnv(gym.Env):
             and self.route_tracker.min_distance_to_route > self._early_off_route_m
         )
 
+        # Refresh physics (velocity etc.) from the post-tick vehicle state
+        # before any consumer reads it; the blocked check below needs the
+        # current-step speed, not the previous step's stale value.
+        self.vehicle_physics.update(self.vehicle, throttle, brake, steer)
+
         # AgentBlockedTest analogue keeps terminated (FAILURE) semantics.
         if self._early_blocked_steps is not None:
             speed = float(np.linalg.norm(self.vehicle_physics.velocity))
@@ -651,9 +656,6 @@ class CARLALeaderboardEnv(gym.Env):
         vehicle_yaw_rad = np.radians(self.vehicle.get_transform().rotation.yaw)
         overlay = self.route_tracker.render_overlay(self.vehicle.get_location(), vehicle_yaw_rad)
         obs = compose_obs(camera_hwc_uint8, overlay, self.obs_cfg)
-
-        # Update various physics quantities
-        self.vehicle_physics.update(self.vehicle, throttle, brake, steer)
 
         # Record history
         self.physics_history.append(copy.deepcopy(self.vehicle_physics))

@@ -28,7 +28,7 @@ from vla_streaming_rl.agents.off_policy import OffPolicyAgent
 from vla_streaming_rl.agents.streaming import StreamingAgent
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
-from vla_streaming_rl.utils import concat_labeled_images, create_reward_image
+from vla_streaming_rl.utils import concat_labeled_images
 from vla_streaming_rl.wrappers import make_env
 
 torch.set_float32_matmul_precision("high")
@@ -36,11 +36,10 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def _viz_resize(image: np.ndarray, scale: float) -> np.ndarray:
-    """Downscale (or upscale) the obs / prediction render panels.
+    """Downscale (or upscale) the observation render panel.
 
-    Loss computation (``pred_image - obs_for_render``) must run on the
-    native shape, so this is applied only to the copies that go into
-    ``concat_labeled_images`` / ``cv2.imshow``.
+    This is applied only to the copy that goes into ``concat_labeled_images``
+    / ``cv2.imshow``, never to data used for any computation.
     """
     if scale == 1.0:
         return image
@@ -61,6 +60,25 @@ def save_episode_data(
     """Save episode video, images, actions and rewards"""
     if not bgr_image_list:
         return
+
+    # Stable-panel contract: an agent emits the same set of equally-shaped
+    # panels every step, so every render frame has the same size. Fail loudly
+    # if that is violated rather than letting the video encoder error out.
+    frame_sizes = {img.shape for img in bgr_image_list}
+    if len(frame_sizes) != 1:
+        raise ValueError(
+            f"Episode '{name}' produced frames of differing sizes {frame_sizes}; "
+            "an agent's panel set / shapes must stay constant across the run."
+        )
+
+    # libx264 (yuv420p) requires even width/height; the concatenated panel strip
+    # can be an odd size. Pad one black row/column when needed.
+    h, w = bgr_image_list[0].shape[:2]
+    if h % 2 or w % 2:
+        bgr_image_list = [
+            np.pad(img, ((0, h % 2), (0, w % 2), (0, 0)), mode="constant")
+            for img in bgr_image_list
+        ]
 
     video_path = video_dir / f"{name}.mp4"
     rgb_images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in bgr_image_list]
@@ -150,8 +168,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
     eval_range = env.unwrapped.eval_range
 
-    parse_action_text = getattr(env.unwrapped, "parse_action_text", None)
-
     start_time = time.time()
 
     # start the game
@@ -160,7 +176,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     score_sum_all = 0.0
     episode_count = 0
     best_score = -float("inf")
-    best_recent_average_score = -float("inf")
     # Don't reset the env here — the first iteration of the episode loop
     # does that with seed=seed (was: double-reset wasted route 0 in the
     # bench2drive sequential cursor and confused the eval writer).
@@ -168,14 +183,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     episode_limit = args.episode_limit
     checkpoint_interval = max(1, step_limit // 10)
 
-    compile_network = args.network_class not in ("vlm_actor_critic_with_action_value", "simlingo")
     network = build_network(
         args,
         observation_space_shape=env.observation_space.shape,
         action_space_shape=env.action_space.shape,
-        parse_action_text=parse_action_text,
+        parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
         device=torch.device("cuda"),
-        compile=compile_network,
     )
 
     goal_predictor = WorldModelGoalPredictor(
@@ -278,29 +291,25 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         task_prompt = reset_info["task_prompt"] if args.use_prompt else ""
 
         # initial action
-        action, agent_info = agent.select_action(global_step, obs, 0.0, False, False, task_prompt)
+        result = agent.select_action(global_step, obs, 0.0, False, False, task_prompt)
+        action = result.action
 
-        # initial render
+        # initial render. The trainer only owns the environment / observation
+        # panels; prediction, reward, goal, bev, ... arrive via result.panels.
         obs_for_render = obs.copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
-        reward_image = create_reward_image(0.0, 0.0)
-        initial_rgb_image = concat_labeled_images(
-            env.render(),
-            obs_viz,
-            np.zeros_like(obs_viz),
-            reward_image,
-            np.zeros_like(obs_viz),
-        )
+        panels = {
+            "environment": env.render(),
+            "observation": obs_viz,
+            **result.panels,
+        }
+        initial_rgb_image = concat_labeled_images(panels)
         bgr_image_list = [cv2.cvtColor(initial_rgb_image, cv2.COLOR_RGB2BGR)]
 
         # action and reward history for this episode
         action_list = []
         reward_list = []
         obs_list = [obs.copy()]
-
-        # initial prediction for next step
-        pred_image = agent_info.get("next_image", np.zeros_like(obs_for_render))
-        pred_reward = agent_info.get("next_reward", 0.0)
 
         while True:
             global_step += 1
@@ -317,19 +326,16 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             obs_list.append(obs.copy())
 
             agent_step_start = time.time()
-            action, agent_info = agent.step(
-                global_step, obs, reward, terminated, truncated, task_prompt
-            )
+            result = agent.step(global_step, obs, reward, terminated, truncated, task_prompt)
+            action = result.action
             agent_step_time_msec = (time.time() - agent_step_start) * 1000
 
             # render
             obs_for_render = obs.copy().transpose(1, 2, 0)
 
-            # log
+            # log: metrics are already scalar telemetry (images live in panels)
             elapsed_time_sec = time.time() - start_time
             elapsed_time_min = elapsed_time_sec / 60
-            # Exclude ndarray before logging to wandb
-            log_agent_info = {k: v for k, v in agent_info.items() if not isinstance(v, np.ndarray)}
             data_dict = {
                 "global_step": global_step,
                 "elapsed_time_min": elapsed_time_min,
@@ -337,23 +343,17 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 "reward": reward,
                 "env_step_msec": env_step_time_msec,
                 "agent_step_msec": agent_step_time_msec,
-                **log_agent_info,
+                **result.metrics,
             }
-            data_dict["losses/pred_image_loss"] = np.mean(np.abs(pred_image - obs_for_render))
-            data_dict["losses/pred_reward_loss"] = np.abs(pred_reward - reward)
             wandb.log(data_dict)
 
-            reward_image = create_reward_image(pred_reward, reward)
             obs_viz = _viz_resize(obs_for_render, args.render_scale)
-            pred_viz = _viz_resize(pred_image, args.render_scale)
-            goal_for_render = cv2.resize(
-                agent_info["goal_image"],
-                (obs_viz.shape[1], obs_viz.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            rgb_image = concat_labeled_images(
-                env.render(), obs_viz, pred_viz, reward_image, goal_for_render
-            )
+            panels = {
+                "environment": env.render(),
+                "observation": obs_viz,
+                **result.panels,
+            }
+            rgb_image = concat_labeled_images(panels)
             bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
             bgr_image_list.append(bgr_image)
             if args.render:
@@ -374,10 +374,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
             if global_step >= step_limit:
                 break
-
-            # update prediction for next step
-            pred_image = agent_info.get("next_image", np.zeros_like(obs_for_render))
-            pred_reward = agent_info.get("next_reward", 0.0)
 
         if global_step >= step_limit:
             break
@@ -430,17 +426,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 data_dict["advanced"] = float(env_info.get("advanced", False))
         if len(score_list) >= eval_range:
             data_dict["recent_average_score"] = recent_average_score
-            best_recent_average_score = max(best_recent_average_score, recent_average_score)
-            data_dict["best_recent_average_score"] = best_recent_average_score
         wandb.log(data_dict)
 
         if result_dir is not None:
             if log_episode_writer is None:
                 log_episode_file = open(log_episode_path, "w", newline="")
-                fieldnames = list(data_dict.keys()) + [
-                    "recent_average_score",
-                    "best_recent_average_score",
-                ]
+                fieldnames = list(data_dict.keys()) + ["recent_average_score"]
                 log_episode_writer = csv.DictWriter(
                     log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
                 )

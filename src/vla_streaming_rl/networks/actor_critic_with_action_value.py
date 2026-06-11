@@ -4,8 +4,13 @@ import torch.nn as nn
 
 from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.image_processor import ImageProcessor
+from vla_streaming_rl.networks.infer_result import ActivationFeatures, InferResult
+from vla_streaming_rl.networks.loss_result import (
+    EligibilityTraceInfo,
+    InferLossResult,
+    LossResult,
+)
 from vla_streaming_rl.networks.policy_head import (
-    BetaPolicy,
     CFGDiffusionPolicy,
     DiffusionPolicy,
     MeanFlowPolicy,
@@ -87,12 +92,6 @@ class ActorCriticWithActionValue(nn.Module):
                 horizon=horizon,
                 denoising_steps=denoising_steps,
                 dacer_loss_weight=dacer_loss_weight,
-            )
-        elif self.policy_type == "beta":
-            self.policy_head = BetaPolicy(
-                hidden_dim=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                horizon=horizon,
             )
         elif self.policy_type == "cfgrl":
             self.policy_head = CFGDiffusionPolicy(
@@ -178,21 +177,21 @@ class ActorCriticWithActionValue(nn.Module):
         a_seq: torch.Tensor,  # (B, T, action_dim)
         r_seq: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,
-        task_prompts: list[str] | None = None,
-    ) -> dict:
+        task_prompts: list[str],
+    ) -> InferResult:
         assert s_seq.shape[0] == 1, "Batch size must be 1 for inference"
 
         x, rnn_state = self.encoder(s_seq, obs_z_seq, a_seq, r_seq, rnn_state)  # (B, hidden_dim)
 
         # Get action chunk from policy_head
-        action, a_logp = self.policy_head.get_action(x)  # (B, horizon, action_dim)
+        action, actor_activation = self.policy_head.get_action(x)  # (B, horizon, action_dim)
 
         # Get action-value from value_head
         q_dict = self.value_head(x, action)
-        q_value = self.value_head.to_value(q_dict["output"]).item()
+        q_value = self.value_head.to_value(q_dict.output).item()
 
         # Get predicted next state
-        next_image, next_reward = self.prediction_head.predict_next_state(
+        next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             x,
             action[:, 0],  # use first action in chunk for prediction
             self.observation_space_shape,
@@ -200,20 +199,25 @@ class ActorCriticWithActionValue(nn.Module):
             self.disable_state_predictor,
         )
 
-        return {
-            "action": action,  # (B, horizon, action_dim)
-            "a_logp": a_logp,  # (B, 1)
-            "value": q_value,  # float
-            "x": x,  # (B, hidden_dim)
-            "rnn_state": rnn_state,  # (B, ...)
-            "next_image": next_image,  # predicted next image
-            "next_reward": next_reward,  # predicted next reward
-            "action_token_ids": [],  # empty for non-VLM networks
-            "parse_success": True,  # always True for non-VLM networks
-        }
+        activations = ActivationFeatures(
+            state=x,
+            actor=actor_activation,
+            critic=q_dict.activation,
+            state_predictor=predictor_activation,
+        )
 
-    def compute_loss(self, data) -> tuple[torch.Tensor, dict, dict]:
-        _, _, next_q, _ = self._infer(
+        return InferResult(
+            action=action,
+            value=q_value,
+            rnn_state=rnn_state,
+            next_image=next_image,
+            next_reward=next_reward,
+            action_token_ids=[],
+            activations=activations,
+        )
+
+    def compute_loss(self, data) -> LossResult:
+        _, _, next_q, _, _, _ = self._infer(
             data.observations[:, self.horizon :],
             data.obs_z[:, self.horizon :],
             data.actions[:, self.horizon :],
@@ -238,25 +242,16 @@ class ActorCriticWithActionValue(nn.Module):
         # Action chunk: (B, horizon, action_dim)
         action_chunk = data.actions[:, -self.horizon :]
 
-        critic_loss, critic_activations, critic_info = self._compute_critic_loss(
-            curr_state, action_chunk, target_value
-        )
-        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+        critic_loss, critic_info = self._compute_critic_loss(curr_state, action_chunk, target_value)
+        actor_loss, actor_info = self.policy_head.compute_actor_loss(
             curr_state,
             action_chunk,
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, curr_state)
+        seq_loss, seq_info = self._compute_sequence_loss(data, curr_state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
-
-        activations_dict = {
-            "state": curr_state,
-            **critic_activations,
-            **actor_activations,
-            **seq_activations,
-        }
 
         info_dict = {
             **critic_info,
@@ -264,16 +259,18 @@ class ActorCriticWithActionValue(nn.Module):
             **seq_info,
         }
 
-        return total_loss, activations_dict, info_dict
+        return LossResult(loss=total_loss, info=info_dict)
 
-    def infer_and_compute_loss(self, data) -> tuple[dict, torch.Tensor, dict, dict]:
+    def infer_and_compute_loss(self, data) -> InferLossResult:
         """Combined inference and loss computation."""
-        next_state, next_action, next_q, next_rnn_state = self._infer(
-            data.observations[:, self.horizon :],
-            data.obs_z[:, self.horizon :],
-            data.actions[:, self.horizon :],
-            data.rewards[:, self.horizon :],
-            data.rnn_state[:, self.horizon],
+        next_state, next_action, next_q, next_rnn_state, actor_activation, critic_activation = (
+            self._infer(
+                data.observations[:, self.horizon :],
+                data.obs_z[:, self.horizon :],
+                data.actions[:, self.horizon :],
+                data.rewards[:, self.horizon :],
+                data.rnn_state[:, self.horizon],
+            )
         )
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
@@ -291,16 +288,14 @@ class ActorCriticWithActionValue(nn.Module):
 
         action_chunk = data.actions[:, -self.horizon :]
 
-        critic_loss, critic_activations, critic_info = self._compute_critic_loss(
-            prev_state, action_chunk, target_value
-        )
-        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+        critic_loss, critic_info = self._compute_critic_loss(prev_state, action_chunk, target_value)
+        actor_loss, actor_info = self.policy_head.compute_actor_loss(
             prev_state,
             action_chunk,
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, prev_state)
+        seq_loss, seq_info = self._compute_sequence_loss(data, prev_state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -309,9 +304,9 @@ class ActorCriticWithActionValue(nn.Module):
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         et_critic_dict = self.value_head(prev_state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_dict["output"]).mean()
+        neg_value_detached = -self.value_head.to_value(et_critic_dict.output).mean()
 
-        next_image, next_reward = self.prediction_head.predict_next_state(
+        next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             next_state,
             next_action[:, 0],
             self.observation_space_shape,
@@ -319,20 +314,22 @@ class ActorCriticWithActionValue(nn.Module):
             self.disable_state_predictor,
         )
 
-        infer_dict = {
-            "action": next_action,
-            "value": next_q.item(),
-            "rnn_state": next_rnn_state,
-            "next_image": next_image,
-            "next_reward": next_reward,
-        }
+        activations = ActivationFeatures(
+            state=next_state,
+            actor=actor_activation,
+            critic=critic_activation,
+            state_predictor=predictor_activation,
+        )
 
-        activations_dict = {
-            "state": next_state,
-            **critic_activations,
-            **actor_activations,
-            **seq_activations,
-        }
+        infer_result = InferResult(
+            action=next_action,
+            value=next_q.item(),
+            rnn_state=next_rnn_state,
+            next_image=next_image,
+            next_reward=next_reward,
+            action_token_ids=[],
+            activations=activations,
+        )
 
         info_dict = {
             **critic_info,
@@ -340,13 +337,17 @@ class ActorCriticWithActionValue(nn.Module):
             **seq_info,
         }
 
-        et_info = {
-            "actor_entropy_loss": actor_entropy_loss,
-            "neg_value": neg_value_detached,
-            "delta": critic_info["delta"],
-        }
+        et_info = EligibilityTraceInfo(
+            actor_entropy_loss=actor_entropy_loss,
+            neg_value=neg_value_detached,
+            delta=critic_info["delta"],
+        )
 
-        return infer_dict, total_loss, activations_dict, info_dict, et_info
+        return InferLossResult(
+            infer_result=infer_result,
+            loss_result=LossResult(loss=total_loss, info=info_dict),
+            et_info=et_info,
+        )
 
     ####################
     # Internal methods #
@@ -360,12 +361,12 @@ class ActorCriticWithActionValue(nn.Module):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         rnn_state: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         state, rnn_state_out = self.encoder.forward(obs, obs_z, actions, rewards, rnn_state)
-        action, _ = self.policy_head.get_action(state)
+        action, actor_activation = self.policy_head.get_action(state)
         q_dict = self.value_head(state, action)
-        q = self.value_head.to_value(q_dict["output"]).view(-1)
-        return state, action, q, rnn_state_out
+        q = self.value_head.to_value(q_dict.output).view(-1)
+        return state, action, q, rnn_state_out, actor_activation, q_dict.activation
 
     @torch.no_grad()
     def _compute_target_value(
@@ -396,15 +397,13 @@ class ActorCriticWithActionValue(nn.Module):
             curr_state = curr_state.detach()
 
         curr_critic_output_dict = self.value_head(curr_state, action_chunk)
-        logits = curr_critic_output_dict["output"]
+        logits = curr_critic_output_dict.output
 
         self.value_head.update_value_range(target_value)
         curr_critic_value = self.value_head.to_value(logits).view(-1)
         critic_loss = self.value_head.value_loss(logits, target_value)
 
         delta = target_value - curr_critic_value
-
-        activations_dict = {}
 
         info_dict = {
             "delta": delta.mean().item(),
@@ -414,16 +413,14 @@ class ActorCriticWithActionValue(nn.Module):
             "value_range": self.value_head.value_range,
         }
 
-        return critic_loss, activations_dict, info_dict
+        return critic_loss, info_dict
 
     def _compute_sequence_loss(self, data, curr_state):
         if self.disable_state_predictor:
             # Return dummy loss when state_predictor is disabled
             dummy_loss = torch.tensor(0.0, device=curr_state.device, requires_grad=True)
-            # Return dummy activation with same shape as state_curr
-            activations_dict = {"state_predictor": curr_state}
             info_dict = {"seq_loss": 0.0}
-            return dummy_loss, activations_dict, info_dict
+            return dummy_loss, info_dict
 
         if self.detach_predictor:
             curr_state = curr_state.detach()
@@ -446,10 +443,6 @@ class ActorCriticWithActionValue(nn.Module):
         )  # (B, H'*W'+1, C')
 
         curr_state = curr_state.view(B, -1, C)
-        pred_loss, activation, info_dict = self.prediction_head.compute_loss(
-            curr_state, curr_action, x1
-        )
+        pred_loss, _, info_dict = self.prediction_head.compute_loss(curr_state, curr_action, x1)
 
-        activations_dict = {"state_predictor": activation}
-
-        return pred_loss, activations_dict, info_dict
+        return pred_loss, info_dict

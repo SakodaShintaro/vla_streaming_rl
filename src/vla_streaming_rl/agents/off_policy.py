@@ -4,9 +4,11 @@ import numpy as np
 import torch
 from torch import nn, optim
 
+from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
+from vla_streaming_rl.utils import create_reward_image
 
 
 class OffPolicyAgent:
@@ -84,6 +86,23 @@ class OffPolicyAgent:
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
 
+        # Next-frame prediction visualization state. ``_last_pred_image`` is the
+        # latest predicted frame, kept so the "prediction" panel persists across
+        # cached-chunk steps; ``_fresh_pred_image`` is the prediction that is
+        # exactly one step old, so its loss is logged only once (when it can be
+        # compared against the observation it predicted). The placeholder keeps
+        # the panel a fixed shape before the first prediction exists, honoring
+        # the stable-panel contract.
+        obs_c, obs_h, obs_w = observation_space.shape
+        self._pred_placeholder = np.zeros((obs_h, obs_w, obs_c), dtype=np.float32)
+        self._last_pred_image: np.ndarray | None = None
+        self._fresh_pred_image: np.ndarray | None = None
+        # Same persist (panel) / fresh (loss-once) split for the reward
+        # prediction. ``create_reward_image`` is a fixed size regardless of its
+        # inputs, so the reward panel is always emittable with no placeholder.
+        self._last_pred_reward: float | None = None
+        self._fresh_pred_reward: float | None = None
+
         self.goal_predictor = goal_predictor
 
     @torch.inference_mode()
@@ -95,8 +114,9 @@ class OffPolicyAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
-        info_dict = {}
+    ) -> StepResult:
+        metrics = {}
+        panels = {}
 
         # Reset chunk on episode boundary
         if terminated or truncated:
@@ -107,8 +127,27 @@ class OffPolicyAgent:
         action_norm = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
-        info_dict["action_norm"] = action_norm
-        info_dict["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+        metrics["action_norm"] = action_norm
+        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+
+        # Validate the previous inference's next-frame prediction against this
+        # observation. The loss is logged only while the prediction is fresh
+        # (one step old); the panel persists the latest prediction so it stays
+        # visible across cached-chunk steps.
+        obs_hwc = obs.transpose(1, 2, 0)
+        if self._fresh_pred_image is not None:
+            metrics["losses/pred_image_loss"] = float(
+                np.mean(np.abs(self._fresh_pred_image - obs_hwc))
+            )
+            self._fresh_pred_image = None
+        panels["prediction"] = (
+            self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
+        )
+        if self._fresh_pred_reward is not None:
+            metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
+            self._fresh_pred_reward = None
+        pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
+        panels["reward"] = create_reward_image(pred_reward, reward)
 
         # add to replay buffer
         obs_tensor = torch.from_numpy(obs).to(self.device)
@@ -129,7 +168,9 @@ class OffPolicyAgent:
             task_prompt_token_ids,
         )
 
-        info_dict["goal_image"] = self.goal_predictor.step(obs)
+        goal_image = self.goal_predictor.step(obs)
+        if self.goal_predictor.enabled:
+            panels["goal"] = goal_image
         if terminated or truncated:
             self.goal_predictor.reset()
 
@@ -144,12 +185,12 @@ class OffPolicyAgent:
             action = np.clip(action, self.action_low, self.action_high)
             self.prev_action = action
             self.chunk_step += 1
-            info_dict["chunk_step"] = self.chunk_step
-            return action, info_dict
+            metrics["chunk_step"] = self.chunk_step
+            return StepResult(action=action, metrics=metrics, panels=panels)
 
         # inference - predict new action chunk
         latest_data = self.rb.get_latest(self.seq_len)
-        infer_dict = self.network.infer(
+        infer_result = self.network.infer(
             latest_data.observations,
             latest_data.obs_z,
             latest_data.actions,
@@ -157,10 +198,23 @@ class OffPolicyAgent:
             self.rnn_state,
             task_prompts=[task_prompt],
         )
-        self.rnn_state = infer_dict["rnn_state"]
-        info_dict["value"] = infer_dict["value"]
-        info_dict["next_image"] = infer_dict["next_image"]
-        info_dict["next_reward"] = infer_dict["next_reward"]
+        self.rnn_state = infer_result.rnn_state
+        metrics["value"] = infer_result.value
+        next_image = infer_result.next_image
+        next_reward = infer_result.next_reward
+        # Stash the fresh prediction for next-step validation / display. Drop it
+        # at an episode boundary so it is never compared against the next
+        # episode's first frame.
+        if terminated or truncated:
+            self._last_pred_image = None
+            self._fresh_pred_image = None
+            self._last_pred_reward = None
+            self._fresh_pred_reward = None
+        else:
+            self._last_pred_image = next_image
+            self._fresh_pred_image = next_image
+            self._last_pred_reward = next_reward
+            self._fresh_pred_reward = next_reward
 
         # action
         if global_step < self.learning_starts:
@@ -169,7 +223,7 @@ class OffPolicyAgent:
             self.chunk_step = 0
         else:
             # action chunk: (B, horizon, action_dim) -> (horizon, action_dim)
-            action_chunk = infer_dict["action"][0].cpu().numpy()
+            action_chunk = infer_result.action[0].cpu().numpy()
             self.action_chunk = action_chunk
             self.chunk_step = 1
 
@@ -179,8 +233,8 @@ class OffPolicyAgent:
             action = np.clip(action, self.action_low, self.action_high)
         self.prev_action = action
 
-        info_dict["chunk_step"] = self.chunk_step
-        return action, info_dict
+        metrics["chunk_step"] = self.chunk_step
+        return StepResult(action=action, metrics=metrics, panels=panels)
 
     def step(
         self,
@@ -190,20 +244,13 @@ class OffPolicyAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
-        info_dict = {}
-
-        # train
-        train_info = self._train(global_step)
-        info_dict.update(train_info)
-
-        # make decision
-        action, action_info = self.select_action(
-            global_step, obs, reward, terminated, truncated, task_prompt
-        )
-        info_dict.update(action_info)
-
-        return action, info_dict
+    ) -> StepResult:
+        # train, then make decision; the training metrics merge into the
+        # action's StepResult.
+        train_metrics = self._train(global_step)
+        result = self.select_action(global_step, obs, reward, terminated, truncated, task_prompt)
+        result.metrics.update(train_metrics)
+        return result
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         return {}
@@ -227,13 +274,13 @@ class OffPolicyAgent:
         data.rewards = self.reward_processor.normalize(data.rewards)
 
         # compute loss
-        loss, activation_dict, info_dict = self.network.compute_loss(data)
+        loss_result = self.network.compute_loss(data)
 
         # add prefixes to info_dict keys
-        info_dict = {f"losses/{key}": value for key, value in info_dict.items()}
+        info_dict = {f"losses/{key}": value for key, value in loss_result.info.items()}
 
         # optimize the model with gradient accumulation
-        scaled_loss = loss / self.accumulation_steps
+        scaled_loss = loss_result.loss / self.accumulation_steps
         scaled_loss.backward()
 
         self._accumulation_count += 1

@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .blocks import HyperLERPBlock, HypersphericalEmbedding, NormedLinear, Scaler, SimbaBlock
+from .head_output import HeadOutput
 from .sparse_utils import apply_one_shot_pruning
 
 
@@ -105,18 +106,15 @@ class StateValueHead(DistributionalValueHead):
         )
         self._init_value_dist(num_bins)
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        result_dict = {}
-
+    def forward(self, x: torch.Tensor) -> HeadOutput:
         x = self.fc_in(x)
         x = self.fc_mid(x)
         x = self.norm(x)
-        result_dict["activation"] = x
+        activation = x
 
         output = self.fc_out(x)
-        result_dict["output"] = output
 
-        return result_dict
+        return HeadOutput(output=output, activation=activation)
 
 
 class ActionValueHead(DistributionalValueHead):
@@ -157,13 +155,12 @@ class ActionValueHead(DistributionalValueHead):
         )
         self._init_value_dist(num_bins)
 
-    def forward(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
         """
         Args:
             x: state embedding (B, state_dim)
             a: action chunk (B, horizon, action_dim)
         """
-        result_dict = {}
         bs = a.size(0)
         a_flat = a.view(bs, -1)  # (B, horizon * action_dim)
 
@@ -180,21 +177,17 @@ class ActionValueHead(DistributionalValueHead):
         adv = self.a_norm(adv)
         adv_out = self.a_fc_out(adv)  # (B, num_bins)
 
-        result_dict["activation"] = torch.cat([v, adv], dim=1)
-
         # Q(s,a) = V(s) + A(s,a) in logit space
         output = v_out + adv_out
-        result_dict["output"] = output
 
-        return result_dict
+        return HeadOutput(output=output, activation=torch.cat([v, adv], dim=1))
 
-    def get_advantage(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
+    def get_advantage(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
         """
         Args:
             x: state embedding (B, state_dim)
             a: action chunk (B, horizon, action_dim)
         """
-        result_dict = {}
         bs = a.size(0)
         a_flat = a.view(bs, -1)  # (B, horizon * action_dim)
 
@@ -202,11 +195,9 @@ class ActionValueHead(DistributionalValueHead):
         adv = self.a_fc_in(xa)
         adv = self.a_fc_mid(adv)
         adv = self.a_norm(adv)
-        result_dict["activation"] = adv
         adv_out = self.a_fc_out(adv)  # (B, num_bins)
-        result_dict["output"] = adv_out
 
-        return result_dict
+        return HeadOutput(output=adv_out, activation=adv)
 
 
 class HypersphericalActionValueHead(DistributionalValueHead):
@@ -276,7 +267,7 @@ class HypersphericalActionValueHead(DistributionalValueHead):
 
         self._init_value_dist(num_bins)
 
-    def forward(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
         """
         Args:
             x: state embedding (B, state_dim)
@@ -288,9 +279,9 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         h = self.blocks(h)
         v = self.value_scaler(self.value_w1(h))
         logits = self.value_w2(v) + self.value_bias
-        return {"output": logits, "activation": h}
+        return HeadOutput(output=logits, activation=h)
 
-    def get_advantage(self, x: torch.Tensor, a: torch.Tensor) -> dict[str, torch.Tensor]:
+    def get_advantage(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
         """SimbaV2 has no separate advantage stream (pure Q(s, a)), so the
         advantage equals the Q output; maximizing it maximizes E[Q(s, π(s))]."""
         return self.forward(x, a)

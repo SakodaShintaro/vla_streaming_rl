@@ -4,10 +4,13 @@ import numpy as np
 import torch
 from torch import nn, optim
 
+from vla_streaming_rl.agents.step_result import StepResult
+from vla_streaming_rl.networks.infer_result import InferResult
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
+from vla_streaming_rl.utils import create_reward_image
 
 
 class StreamingAgent:
@@ -100,6 +103,23 @@ class StreamingAgent:
         self.prev_action_token_ids = []
         self._episode_reset = False
 
+        # Next-frame prediction visualization state. ``_last_pred_image`` is the
+        # latest predicted frame, kept so the "prediction" panel persists across
+        # cached-chunk steps; ``_fresh_pred_image`` is the prediction that is
+        # exactly one step old, so its loss is logged only once (when it can be
+        # compared against the observation it predicted). The placeholder keeps
+        # the panel a fixed shape before the first prediction exists, honoring
+        # the stable-panel contract.
+        obs_c, obs_h, obs_w = observation_space.shape
+        self._pred_placeholder = np.zeros((obs_h, obs_w, obs_c), dtype=np.float32)
+        self._last_pred_image: np.ndarray | None = None
+        self._fresh_pred_image: np.ndarray | None = None
+        # Same persist (panel) / fresh (loss-once) split for the reward
+        # prediction. ``create_reward_image`` is a fixed size regardless of its
+        # inputs, so the reward panel needs no placeholder.
+        self._last_pred_reward: float | None = None
+        self._fresh_pred_reward: float | None = None
+
         self.goal_predictor = goal_predictor
 
     def _prepare_step(
@@ -108,7 +128,8 @@ class StreamingAgent:
         reward: float,
         terminated: bool,
         truncated: bool,
-        info_dict: dict,
+        metrics: dict,
+        panels: dict,
         task_prompt: str,
     ) -> None:
         episode_done = terminated or truncated
@@ -121,8 +142,27 @@ class StreamingAgent:
         action_norm = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
-        info_dict["action_norm"] = action_norm
-        info_dict["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+        metrics["action_norm"] = action_norm
+        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+
+        # Validate the previous inference's next-frame prediction against this
+        # observation. The loss is logged only while the prediction is fresh
+        # (one step old); the panel persists the latest prediction so it stays
+        # visible across cached-chunk steps.
+        obs_hwc = obs.transpose(1, 2, 0)
+        if self._fresh_pred_image is not None:
+            metrics["losses/pred_image_loss"] = float(
+                np.mean(np.abs(self._fresh_pred_image - obs_hwc))
+            )
+            self._fresh_pred_image = None
+        panels["prediction"] = (
+            self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
+        )
+        if self._fresh_pred_reward is not None:
+            metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
+            self._fresh_pred_reward = None
+        pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
+        panels["reward"] = create_reward_image(pred_reward, reward)
 
         obs_tensor = torch.from_numpy(obs).to(self.device)
         with torch.inference_mode():
@@ -143,27 +183,31 @@ class StreamingAgent:
             task_prompt_token_ids,
         )
 
-        info_dict["goal_image"] = self.goal_predictor.step(obs)
+        goal_image = self.goal_predictor.step(obs)
+        if self.goal_predictor.enabled:
+            panels["goal"] = goal_image
         if episode_done:
             self.goal_predictor.reset()
 
-    def _use_action_chunk(self, info_dict: dict) -> np.ndarray:
+    def _use_action_chunk(self, metrics: dict) -> np.ndarray:
         action = self.action_chunk[self.chunk_step]
         action = action * self.action_scale + self.action_bias
         action = np.clip(action, self.action_low, self.action_high)
         self.prev_action = action
         self.chunk_step += 1
-        info_dict["chunk_step"] = self.chunk_step
+        metrics["chunk_step"] = self.chunk_step
         return action
 
-    def _start_new_chunk(self, infer_dict: dict, info_dict: dict) -> np.ndarray:
-        self.rnn_state = infer_dict["rnn_state"]
-        self.prev_action_token_ids = infer_dict.get("action_token_ids", [])
-        info_dict["value"] = infer_dict["value"]
-        info_dict["next_image"] = infer_dict["next_image"]
-        info_dict["next_reward"] = infer_dict["next_reward"]
+    def _start_new_chunk(
+        self, infer_result: InferResult, metrics: dict
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        self.rnn_state = infer_result.rnn_state
+        self.prev_action_token_ids = infer_result.action_token_ids
+        metrics["value"] = infer_result.value
+        next_image = infer_result.next_image
+        next_reward = infer_result.next_reward
 
-        action_chunk = infer_dict["action"][0].cpu().numpy()
+        action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
         self.chunk_step = 1
 
@@ -171,8 +215,8 @@ class StreamingAgent:
         action = action * self.action_scale + self.action_bias
         action = np.clip(action, self.action_low, self.action_high)
         self.prev_action = action
-        info_dict["chunk_step"] = self.chunk_step
-        return action
+        metrics["chunk_step"] = self.chunk_step
+        return action, next_image, next_reward
 
     @torch.inference_mode()
     def select_action(
@@ -183,15 +227,17 @@ class StreamingAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
-        info_dict = {}
-        self._prepare_step(obs, reward, terminated, truncated, info_dict, task_prompt)
+    ) -> StepResult:
+        metrics = {}
+        panels = {}
+        self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)
 
         if self.action_chunk is not None and self.chunk_step < self.horizon:
-            return self._use_action_chunk(info_dict), info_dict
+            action = self._use_action_chunk(metrics)
+            return StepResult(action=action, metrics=metrics, panels=panels)
 
         latest_data = self.rb.get_latest(self.seq_len)
-        infer_dict = self.network.infer(
+        infer_result = self.network.infer(
             latest_data.observations,
             latest_data.obs_z,
             latest_data.actions,
@@ -199,7 +245,26 @@ class StreamingAgent:
             self.rnn_state,
             task_prompts=[task_prompt],
         )
-        return self._start_new_chunk(infer_dict, info_dict), info_dict
+        action, next_image, next_reward = self._start_new_chunk(infer_result, metrics)
+        self._store_prediction(next_image, next_reward, terminated or truncated)
+        return StepResult(action=action, metrics=metrics, panels=panels)
+
+    def _store_prediction(
+        self, next_image: np.ndarray, next_reward: float, episode_done: bool
+    ) -> None:
+        """Stash the fresh next-frame / next-reward predictions for next-step
+        validation and display. Drop them at an episode boundary so they are
+        never compared against the next episode's first step."""
+        if episode_done:
+            self._last_pred_image = None
+            self._fresh_pred_image = None
+            self._last_pred_reward = None
+            self._fresh_pred_reward = None
+        else:
+            self._last_pred_image = next_image
+            self._fresh_pred_image = next_image
+            self._last_pred_reward = next_reward
+            self._fresh_pred_reward = next_reward
 
     def step(
         self,
@@ -209,35 +274,36 @@ class StreamingAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
-    ) -> tuple[np.ndarray, dict]:
-        info_dict = {}
-        self._prepare_step(obs, reward, terminated, truncated, info_dict, task_prompt)
+    ) -> StepResult:
+        metrics = {}
+        panels = {}
+        self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)
 
         # cached action: no inference, no training
         if self.action_chunk is not None and self.chunk_step < self.horizon:
-            return self._use_action_chunk(info_dict), info_dict
+            action = self._use_action_chunk(metrics)
+            return StepResult(action=action, metrics=metrics, panels=panels)
 
         # combined inference + training
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_processor.normalize(data.rewards)
 
-        infer_dict, loss, activation_dict, loss_info, et_info = self.network.infer_and_compute_loss(
-            data
-        )
-        action = self._start_new_chunk(infer_dict, info_dict)
+        result = self.network.infer_and_compute_loss(data)
+        action, next_image, next_reward = self._start_new_chunk(result.infer_result, metrics)
+        self._store_prediction(next_image, next_reward, terminated or truncated)
 
-        info_dict.update({f"losses/{key}": value for key, value in loss_info.items()})
+        metrics.update({f"losses/{key}": value for key, value in result.loss_result.info.items()})
 
         if self.use_eligibility_trace:
             # Actor: backward actor-only loss → encoder + actor grads
-            actor_loss = et_info["actor_entropy_loss"] / self.accumulation_steps
+            actor_loss = result.et_info.actor_entropy_loss / self.accumulation_steps
             actor_loss.backward(retain_graph=True)
 
             # Critic: backward -V(s) → value_head grads only (detached from encoder)
-            neg_value = et_info["neg_value"] / self.accumulation_steps
+            neg_value = result.et_info.neg_value / self.accumulation_steps
             neg_value.backward()
         else:
-            scaled_loss = loss / self.accumulation_steps
+            scaled_loss = result.loss_result.loss / self.accumulation_steps
             scaled_loss.backward()
 
         self._accumulation_count += 1
@@ -245,12 +311,12 @@ class StreamingAgent:
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
             self.optimizer.step()
             if self.use_eligibility_trace:
-                self.critic_optimizer.step(delta=et_info["delta"], reset=self._episode_reset)
+                self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
                 self._episode_reset = False
                 self.critic_optimizer.zero_grad()
             self.optimizer.zero_grad()
 
-        return action, info_dict
+        return StepResult(action=action, metrics=metrics, panels=panels)
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         return {}

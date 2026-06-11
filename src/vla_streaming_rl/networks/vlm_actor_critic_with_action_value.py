@@ -8,7 +8,9 @@ from torch import nn
 from torch.nn import functional as F
 
 from .image_processor import ImageProcessor
-from .policy_head import BetaPolicy, CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
+from .infer_result import ActivationFeatures, InferResult
+from .loss_result import EligibilityTraceInfo, InferLossResult, LossResult
+from .policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
 from .prediction_head import StatePredictionHead
 from .reward_processor import RewardProcessor
 from .value_head import ActionValueHead, HypersphericalActionValueHead
@@ -146,12 +148,6 @@ class VLMActorCriticWithActionValue(nn.Module):
                 denoising_steps=denoising_steps,
                 dacer_loss_weight=dacer_loss_weight,
             )
-        elif self.policy_type == "beta":
-            self.policy_head = BetaPolicy(
-                hidden_dim=state_dim,
-                action_dim=self.action_dim,
-                horizon=horizon,
-            )
         elif self.policy_type == "cfgrl":
             self.policy_head = CFGDiffusionPolicy(
                 state_dim=state_dim,
@@ -267,10 +263,12 @@ class VLMActorCriticWithActionValue(nn.Module):
         r_seq: torch.Tensor,
         rnn_state: torch.Tensor,
         task_prompts: list[str],
-    ) -> dict:
-        state, action, q_value = self._infer(s_seq, task_prompts)
+    ) -> InferResult:
+        state, action, q_value, actor_activation, critic_activation = self._infer(
+            s_seq, task_prompts
+        )
 
-        next_image, next_reward = self.prediction_head.predict_next_state(
+        next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             self._state_for_predictor(state),
             action[:, 0],
             self.observation_space_shape,
@@ -278,25 +276,30 @@ class VLMActorCriticWithActionValue(nn.Module):
             self.disable_state_predictor,
         )
 
-        return {
-            "action": action,
-            "a_logp": torch.zeros(s_seq.shape[0], 1, device=self.device),
-            "value": q_value.item(),
-            "x": state,
-            "rnn_state": rnn_state,
-            "next_image": next_image,
-            "next_reward": next_reward,
-            "action_token_ids": [],
-            "parse_success": True,
-        }
+        activations = ActivationFeatures(
+            state=state,
+            actor=actor_activation,
+            critic=critic_activation,
+            state_predictor=predictor_activation,
+        )
 
-    def compute_loss(self, data) -> tuple[torch.Tensor, dict, dict]:
+        return InferResult(
+            action=action,
+            value=q_value.item(),
+            rnn_state=rnn_state,
+            next_image=next_image,
+            next_reward=next_reward,
+            action_token_ids=[],
+            activations=activations,
+        )
+
+    def compute_loss(self, data) -> LossResult:
         # Decode task prompts from buffer: use last timestep's prompt for next-state
         next_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         # Use prompt at the boundary between seq and horizon for current state
         curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
 
-        _, _, next_q = self._infer(data.observations[:, self.horizon :], next_prompts)
+        _, _, next_q, _, _ = self._infer(data.observations[:, self.horizon :], next_prompts)
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self._compute_target_value(next_q, chunk_rewards, chunk_dones)
@@ -306,11 +309,9 @@ class VLMActorCriticWithActionValue(nn.Module):
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
 
         # Critic loss
-        critic_loss, critic_activations, critic_info = self._compute_critic_loss(
-            state, action_chunk, target_value
-        )
+        critic_loss, critic_info = self._compute_critic_loss(state, action_chunk, target_value)
 
-        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+        actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state,
             action_chunk,
             value_head=self.value_head,
@@ -318,25 +319,21 @@ class VLMActorCriticWithActionValue(nn.Module):
         )
 
         # Sequence (state prediction) loss
-        seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, state)
+        seq_loss, seq_info = self._compute_sequence_loss(data, state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
-        activations_dict = {
-            "state": state,
-            **critic_activations,
-            **actor_activations,
-            **seq_activations,
-        }
         info_dict = {**critic_info, **actor_info, **seq_info}
 
-        return total_loss, activations_dict, info_dict
+        return LossResult(loss=total_loss, info=info_dict)
 
-    def infer_and_compute_loss(self, data) -> tuple[dict, torch.Tensor, dict, dict]:
+    def infer_and_compute_loss(self, data) -> InferLossResult:
         next_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
 
-        _, next_action, next_q = self._infer(data.observations[:, self.horizon :], next_prompts)
+        next_state, next_action, next_q, actor_activation, critic_activation = self._infer(
+            data.observations[:, self.horizon :], next_prompts
+        )
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self._compute_target_value(next_q, chunk_rewards, chunk_dones)
@@ -346,11 +343,9 @@ class VLMActorCriticWithActionValue(nn.Module):
         action_chunk = data.actions[:, -self.horizon :]
 
         # Critic loss
-        critic_loss, critic_activations, critic_info = self._compute_critic_loss(
-            state, action_chunk, target_value
-        )
+        critic_loss, critic_info = self._compute_critic_loss(state, action_chunk, target_value)
 
-        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+        actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state,
             action_chunk,
             value_head=self.value_head,
@@ -358,7 +353,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         )
 
         # Sequence (state prediction) loss
-        seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, state)
+        seq_loss, seq_info = self._compute_sequence_loss(data, state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -367,9 +362,9 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         et_critic_dict = self.value_head(state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_dict["output"]).mean()
+        neg_value_detached = -self.value_head.to_value(et_critic_dict.output).mean()
 
-        next_image, next_reward = self.prediction_head.predict_next_state(
+        next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             self._state_for_predictor(state),
             next_action[:, 0],
             self.observation_space_shape,
@@ -377,29 +372,35 @@ class VLMActorCriticWithActionValue(nn.Module):
             self.disable_state_predictor,
         )
 
-        infer_dict = {
-            "action": next_action,
-            "value": next_q.item(),
-            "rnn_state": self._dummy_state.clone(),
-            "next_image": next_image,
-            "next_reward": next_reward,
-        }
+        activations = ActivationFeatures(
+            state=next_state,
+            actor=actor_activation,
+            critic=critic_activation,
+            state_predictor=predictor_activation,
+        )
 
-        activations_dict = {
-            "state": state,
-            **critic_activations,
-            **actor_activations,
-            **seq_activations,
-        }
+        infer_result = InferResult(
+            action=next_action,
+            value=next_q.item(),
+            rnn_state=self._dummy_state.clone(),
+            next_image=next_image,
+            next_reward=next_reward,
+            action_token_ids=[],
+            activations=activations,
+        )
         info_dict = {**critic_info, **actor_info, **seq_info}
 
-        et_info = {
-            "actor_entropy_loss": actor_entropy_loss,
-            "neg_value": neg_value_detached,
-            "delta": critic_info["delta"],
-        }
+        et_info = EligibilityTraceInfo(
+            actor_entropy_loss=actor_entropy_loss,
+            neg_value=neg_value_detached,
+            delta=critic_info["delta"],
+        )
 
-        return infer_dict, total_loss, activations_dict, info_dict, et_info
+        return InferLossResult(
+            infer_result=infer_result,
+            loss_result=LossResult(loss=total_loss, info=info_dict),
+            et_info=et_info,
+        )
 
     ####################
     # Internal methods #
@@ -613,12 +614,12 @@ class VLMActorCriticWithActionValue(nn.Module):
     def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Compute scalar Q-value for a (state, action) pair."""
         q_dict = self.value_head(state, action)
-        return self.value_head.to_value(q_dict["output"]).view(-1)
+        return self.value_head.to_value(q_dict.output).view(-1)
 
     @torch.inference_mode()
     def _infer(
         self, obs: torch.Tensor, task_prompts: list[str]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         state, vlm_past_kv = self._forward_state(obs, task_prompts)
         mode = self.text_action_mode
 
@@ -637,7 +638,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         elif mode != "none":
             raise ValueError(f"Unknown text_action_mode: {mode}")
 
-        diff_action, _ = self.policy_head.get_action(state)
+        diff_action, actor_activation = self.policy_head.get_action(state)
         diff_q = self._compute_q(state, diff_action)
 
         if mode == "text_action":
@@ -656,7 +657,8 @@ class VLMActorCriticWithActionValue(nn.Module):
             action = diff_action
             q = diff_q
 
-        return state, action, q
+        critic_activation = self.value_head(state, action).activation
+        return state, action, q, actor_activation, critic_activation
 
     @torch.no_grad()
     def _compute_target_value(
@@ -680,19 +682,17 @@ class VLMActorCriticWithActionValue(nn.Module):
         state: torch.Tensor,
         action_chunk: torch.Tensor,
         target_value: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict, dict]:
+    ) -> tuple[torch.Tensor, dict]:
         if self.detach_critic:
             state = state.detach()
         curr_critic_output_dict = self.value_head(state, action_chunk)
-        logits = curr_critic_output_dict["output"]
+        logits = curr_critic_output_dict.output
 
         self.value_head.update_value_range(target_value)
         curr_critic_value = self.value_head.to_value(logits).view(-1)
         critic_loss = self.value_head.value_loss(logits, target_value)
 
         delta = target_value - curr_critic_value
-
-        activations_dict = {}
 
         info_dict = {
             "delta": delta.mean().item(),
@@ -702,7 +702,7 @@ class VLMActorCriticWithActionValue(nn.Module):
             "value_range": self.value_head.value_range,
         }
 
-        return critic_loss, activations_dict, info_dict
+        return critic_loss, info_dict
 
     def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
         """Reshape and project state for StatePredictionHead context."""
@@ -713,9 +713,8 @@ class VLMActorCriticWithActionValue(nn.Module):
     def _compute_sequence_loss(self, data, curr_state):
         if self.disable_state_predictor:
             dummy_loss = torch.tensor(0.0, device=curr_state.device, requires_grad=True)
-            activations_dict = {"state_predictor": curr_state}
             info_dict = {"seq_loss": 0.0}
-            return dummy_loss, activations_dict, info_dict
+            return dummy_loss, info_dict
 
         predictor_state = self._state_for_predictor(curr_state)
         if self.detach_predictor:
@@ -736,9 +735,8 @@ class VLMActorCriticWithActionValue(nn.Module):
             [target_state_next, target_reward_next.unsqueeze(1)], dim=1
         )  # (B, H'*W'+1, C')
 
-        pred_loss, activation, info_dict = self.prediction_head.compute_loss(
+        pred_loss, _, info_dict = self.prediction_head.compute_loss(
             predictor_state, curr_action, x1
         )
 
-        activations_dict = {"state_predictor": activation}
-        return pred_loss, activations_dict, info_dict
+        return pred_loss, info_dict

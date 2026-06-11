@@ -118,7 +118,7 @@ def make_carla_env(
     )
 
 
-def make_env(env_id: str, env_factory, result_dir=None) -> gym.Env:
+def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
     """Build the training env.
 
     ``result_dir`` (when set) is the Hydra run dir; for the CARLA env it
