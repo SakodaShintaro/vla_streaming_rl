@@ -169,7 +169,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     score_sum_all = 0.0
     episode_count = 0
     best_score = -float("inf")
-    best_recent_average_score = -float("inf")
     # Don't reset the env here — the first iteration of the episode loop
     # does that with seed=seed (was: double-reset wasted route 0 in the
     # bench2drive sequential cursor and confused the eval writer).
@@ -422,17 +421,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 data_dict["advanced"] = float(env_info.get("advanced", False))
         if len(score_list) >= eval_range:
             data_dict["recent_average_score"] = recent_average_score
-            best_recent_average_score = max(best_recent_average_score, recent_average_score)
-            data_dict["best_recent_average_score"] = best_recent_average_score
         wandb.log(data_dict)
 
         if result_dir is not None:
             if log_episode_writer is None:
                 log_episode_file = open(log_episode_path, "w", newline="")
-                fieldnames = list(data_dict.keys()) + [
-                    "recent_average_score",
-                    "best_recent_average_score",
-                ]
+                fieldnames = list(data_dict.keys()) + ["recent_average_score"]
                 log_episode_writer = csv.DictWriter(
                     log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
                 )
