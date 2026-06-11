@@ -373,7 +373,10 @@ class SimLingoAgent:
         """
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
-            "q_value": self._viz_q_value,
+            # Named "value" to match off_policy / streaming telemetry (their
+            # critic logs V(s) under the same key); here it is the Q(s, a) of
+            # the executed action. Keeps --calibration etc. agent-agnostic.
+            "value": self._viz_q_value,
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
         }
         panels = {

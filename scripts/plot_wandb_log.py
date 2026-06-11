@@ -16,7 +16,7 @@ Examples:
     uv run python scripts/plot_wandb_log.py results/<run_dir> \\
         -k reward losses/critic_loss --smooth 100 -o /tmp/plots
 
-    # Q-overestimation diagnostic (saved as calibration_q_value.png)
+    # Q-overestimation diagnostic (saved as calibration_value.png)
     uv run python scripts/plot_wandb_log.py results/<run_dir> --calibration
 """
 
@@ -174,7 +174,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calibration",
         action="store_true",
-        help="Q-overestimation diagnostic: scatter Q (key, default q_value) vs "
+        help="Q-overestimation diagnostic: scatter the critic value (key, default value) vs "
         "the realized discounted return-to-go, colored by episode id, plus the "
         "per-episode mean gap (Q - return). Reveals critic divergence.",
     )
@@ -215,7 +215,7 @@ def resolve_output(args: argparse.Namespace) -> Path:
     derived from the plot mode and keys (``/`` in keys becomes ``_``)."""
     out_dir = args.out_dir if args.out_dir is not None else args.run_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    keys = "_".join(k.replace("/", "_") for k in (args.keys or ["q_value"]))
+    keys = "_".join(k.replace("/", "_") for k in (args.keys or ["value"]))
     if args.calibration:
         name = f"calibration_{keys}"
     elif args.per_episode:
@@ -257,7 +257,7 @@ def plot_q_calibration(
     """Scatter Q vs realized discounted return-to-go (colored by episode id),
     plus the per-episode mean gap (Q - return). A growing positive gap for late
     episodes is the classic critic-overestimation collapse."""
-    q_key = args.keys[0] if args.keys else "q_value"
+    q_key = args.keys[0] if args.keys else "value"
     if q_key not in history:
         raise SystemExit(f"Q key '{q_key}' not found in run")
     r_key = args.reward_key
@@ -400,9 +400,9 @@ def main() -> None:
     print(f"Reading {wandb_file}")
     history = load_history(wandb_file)
 
-    # --calibration defaults its Q key to q_value so -k is optional.
+    # --calibration defaults its key to the critic value so -k is optional.
     if args.calibration and not args.keys:
-        args.keys = ["q_value"]
+        args.keys = ["value"]
 
     if args.list or not args.keys:
         print(f"Available keys ({len(history)}):")
