@@ -96,14 +96,13 @@ def make_carla_env(
     auto-located next to ``route_xml``.
     """
     # Wire up the CARLA / Bench2Drive sys.path (normally train_carla.sh's
-    # PYTHONPATH) and launch a CARLA server in-process, so a run needs no bash
-    # wrapper and no pre-running server. ``setup_carla_paths`` must run before
-    # importing ``carla_leaderboard_env`` (it imports leaderboard / srunner at
-    # module load); a server already up on port 2000 is reused, not relaunched.
-    from vla_streaming_rl.carla_bootstrap import ensure_carla_server, setup_carla_paths
+    # PYTHONPATH), so a run needs no bash wrapper. This must run before importing
+    # ``carla_leaderboard_env`` (it imports leaderboard / srunner at module
+    # load); the CARLA server itself is launched lazily by the env's shared
+    # ``get_client`` (carla_bootstrap.py), reused across all trials.
+    from vla_streaming_rl.envs.carla_bootstrap import setup_carla_paths
 
     setup_carla_paths()
-    ensure_carla_server()
 
     from vla_streaming_rl.envs.carla_leaderboard_env import CARLALeaderboardEnv
 

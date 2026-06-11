@@ -12,6 +12,7 @@ from leaderboard.utils.statistics_manager import PENALTY_PERC_DICT, PENALTY_VALU
 from srunner.scenariomanager.traffic_events import TrafficEventType
 
 from vla_streaming_rl.envs.bench2drive_scenario_runtime import Bench2DriveRuntime
+from vla_streaming_rl.envs.carla_bootstrap import get_client
 from vla_streaming_rl.envs.carla_obs import (
     CARLAObsConfig,
     RouteTracker,
@@ -211,10 +212,12 @@ class CARLALeaderboardEnv(gym.Env):
         self.observation_space = make_obs_space(self.obs_cfg)
         self.action_space = make_action_space()
 
-        self.client = carla.Client("localhost", 2000)
-        # Eval uses 300 s; large-map (Town12/13/15) actor spawns can blow
-        # past 120 s while tiles stream in.
-        self.client.set_timeout(300.0)
+        # Process-wide singleton client (created once, reused by every env
+        # instance). A 2nd carla.Client in one process keeps the first's
+        # streaming threads alive and corrupts the session, so constructing one
+        # per env would break ``trial_num>1``; get_client() shares one client
+        # (and one server) across all trials. See envs/carla_bootstrap.py.
+        self.client = get_client()
 
         # Build the runtime first (parses the XML eagerly) so we can read the
         # initial town off the upcoming config before deciding which world
