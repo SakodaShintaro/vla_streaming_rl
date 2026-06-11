@@ -292,7 +292,7 @@ class StreamingAgent:
         action, next_image, next_reward = self._start_new_chunk(result.infer_result, metrics)
         self._store_prediction(next_image, next_reward, terminated or truncated)
 
-        metrics.update({f"losses/{key}": value for key, value in result.info.items()})
+        metrics.update({f"losses/{key}": value for key, value in result.loss_result.info.items()})
 
         if self.use_eligibility_trace:
             # Actor: backward actor-only loss → encoder + actor grads
@@ -303,7 +303,7 @@ class StreamingAgent:
             neg_value = result.et_info.neg_value / self.accumulation_steps
             neg_value.backward()
         else:
-            scaled_loss = result.loss / self.accumulation_steps
+            scaled_loss = result.loss_result.loss / self.accumulation_steps
             scaled_loss.backward()
 
         self._accumulation_count += 1

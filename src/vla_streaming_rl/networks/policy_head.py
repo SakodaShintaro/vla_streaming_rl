@@ -200,17 +200,13 @@ class DiffusionPolicy(nn.Module):
         dacer_loss = F.mse_loss(pred, target)
         total_loss = actor_loss + dacer_loss * self.dacer_loss_weight
 
-        activations_dict = {
-            "actor": pred_dict["activation"],
-            "critic": advantage_dict["activation"],
-        }
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": dacer_loss.item(),
             "advantage": advantage.mean().item(),
             "log_pi": log_pi.mean().item(),
         }
-        return total_loss, activations_dict, info_dict
+        return total_loss, pred_dict["activation"], info_dict
 
 
 class CFGDiffusionPolicy(nn.Module):
@@ -352,7 +348,6 @@ class CFGDiffusionPolicy(nn.Module):
         positive_ratio = (condition == 1).float().mean().item()
         negative_ratio = (condition == 0).float().mean().item()
         uncond_ratio = (condition == 2).float().mean().item()
-        activations_dict = {"actor": actor_output_dict["activation"]}
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": 0.0,
@@ -362,7 +357,7 @@ class CFGDiffusionPolicy(nn.Module):
             "negative_ratio": negative_ratio,
             "uncond_ratio": uncond_ratio,
         }
-        return actor_loss, activations_dict, info_dict
+        return actor_loss, actor_output_dict["activation"], info_dict
 
 
 class MeanFlowPolicy(nn.Module):
@@ -523,7 +518,6 @@ class MeanFlowPolicy(nn.Module):
         w_loss = 1.0 / (delta_sq.detach().mean(dim=1, keepdim=True) + 1e-3)
         actor_loss = (w_loss * delta_sq).mean()
 
-        activations_dict = {"actor": torch.zeros((B, 1), device=device)}
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": 0.0,
@@ -532,7 +526,7 @@ class MeanFlowPolicy(nn.Module):
             "som_score_norm": score.norm(dim=1).mean().item(),
             "som_du_dt": du_dt.detach().abs().mean().item(),
         }
-        return actor_loss, activations_dict, info_dict
+        return actor_loss, torch.zeros((B, 1), device=device), info_dict
 
 
 class BetaPolicy(nn.Module):
@@ -607,10 +601,6 @@ class BetaPolicy(nn.Module):
         advantage = value_head.to_value(advantage_dict["output"]).view(-1, 1)
         actor_loss = -(log_pi * advantage.detach()).mean() - 0.02 * entropy.mean()
 
-        activations_dict = {
-            "actor": policy_output["activation"],
-            "critic": advantage_dict["activation"],
-        }
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": 0.0,
@@ -618,7 +608,7 @@ class BetaPolicy(nn.Module):
             "advantage": advantage.mean().item(),
             "entropy": entropy.mean().item(),
         }
-        return actor_loss, activations_dict, info_dict
+        return actor_loss, policy_output["activation"], info_dict
 
 
 class CategoricalPolicy(nn.Module):

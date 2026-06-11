@@ -16,16 +16,27 @@ class EligibilityTraceInfo:
 
 
 @dataclass
+class ActivationFeatures:
+    """2D feature tensors of the four monitored submodules, fed to the
+    statistical-metrics computer (stable rank / dormant ratio / ...)."""
+
+    state: torch.Tensor  # encoder output
+    actor: torch.Tensor  # policy head
+    critic: torch.Tensor  # value head
+    state_predictor: torch.Tensor  # sequence prediction head
+
+
+@dataclass
 class LossResult:
     """Structured return value of a network's ``compute_loss``.
 
-    ``activations`` and ``info`` stay plain dicts on purpose: they are dynamic
-    ``name -> value`` maps (submodule features for statistical metrics, and
-    scalar telemetry) whose keys vary per network configuration.
+    ``info`` stays a plain dict on purpose: it is a dynamic ``name -> float``
+    telemetry map whose keys vary per policy-head / predictor configuration and
+    is flattened verbatim into wandb metrics.
     """
 
     loss: torch.Tensor
-    activations: dict  # submodule name -> 2D feature tensor
+    activations: ActivationFeatures
     info: dict  # scalar name -> float
 
 
@@ -34,7 +45,5 @@ class InferLossResult:
     """Structured return value of a network's ``infer_and_compute_loss``."""
 
     infer_result: InferResult
-    loss: torch.Tensor
-    activations: dict
-    info: dict
+    loss_result: LossResult
     et_info: EligibilityTraceInfo

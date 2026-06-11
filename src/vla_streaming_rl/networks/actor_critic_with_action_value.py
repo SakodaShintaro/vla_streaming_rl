@@ -6,6 +6,7 @@ from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.image_processor import ImageProcessor
 from vla_streaming_rl.networks.infer_result import InferResult
 from vla_streaming_rl.networks.loss_result import (
+    ActivationFeatures,
     EligibilityTraceInfo,
     InferLossResult,
     LossResult,
@@ -241,25 +242,25 @@ class ActorCriticWithActionValue(nn.Module):
         # Action chunk: (B, horizon, action_dim)
         action_chunk = data.actions[:, -self.horizon :]
 
-        critic_loss, critic_activations, critic_info = self._compute_critic_loss(
+        critic_loss, critic_activation, critic_info = self._compute_critic_loss(
             curr_state, action_chunk, target_value
         )
-        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+        actor_loss, actor_activation, actor_info = self.policy_head.compute_actor_loss(
             curr_state,
             action_chunk,
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, curr_state)
+        seq_loss, seq_activation, seq_info = self._compute_sequence_loss(data, curr_state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
-        activations_dict = {
-            "state": curr_state,
-            **critic_activations,
-            **actor_activations,
-            **seq_activations,
-        }
+        activations = ActivationFeatures(
+            state=curr_state,
+            actor=actor_activation,
+            critic=critic_activation,
+            state_predictor=seq_activation,
+        )
 
         info_dict = {
             **critic_info,
@@ -267,7 +268,7 @@ class ActorCriticWithActionValue(nn.Module):
             **seq_info,
         }
 
-        return LossResult(loss=total_loss, activations=activations_dict, info=info_dict)
+        return LossResult(loss=total_loss, activations=activations, info=info_dict)
 
     def infer_and_compute_loss(self, data) -> InferLossResult:
         """Combined inference and loss computation."""
@@ -294,16 +295,16 @@ class ActorCriticWithActionValue(nn.Module):
 
         action_chunk = data.actions[:, -self.horizon :]
 
-        critic_loss, critic_activations, critic_info = self._compute_critic_loss(
+        critic_loss, critic_activation, critic_info = self._compute_critic_loss(
             prev_state, action_chunk, target_value
         )
-        actor_loss, actor_activations, actor_info = self.policy_head.compute_actor_loss(
+        actor_loss, actor_activation, actor_info = self.policy_head.compute_actor_loss(
             prev_state,
             action_chunk,
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        seq_loss, seq_activations, seq_info = self._compute_sequence_loss(data, prev_state)
+        seq_loss, seq_activation, seq_info = self._compute_sequence_loss(data, prev_state)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -331,12 +332,12 @@ class ActorCriticWithActionValue(nn.Module):
             action_token_ids=[],
         )
 
-        activations_dict = {
-            "state": next_state,
-            **critic_activations,
-            **actor_activations,
-            **seq_activations,
-        }
+        activations = ActivationFeatures(
+            state=next_state,
+            actor=actor_activation,
+            critic=critic_activation,
+            state_predictor=seq_activation,
+        )
 
         info_dict = {
             **critic_info,
@@ -352,9 +353,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         return InferLossResult(
             infer_result=infer_result,
-            loss=total_loss,
-            activations=activations_dict,
-            info=info_dict,
+            loss_result=LossResult(loss=total_loss, activations=activations, info=info_dict),
             et_info=et_info,
         )
 
@@ -414,8 +413,6 @@ class ActorCriticWithActionValue(nn.Module):
 
         delta = target_value - curr_critic_value
 
-        activations_dict = {}
-
         info_dict = {
             "delta": delta.mean().item(),
             "critic_loss": critic_loss.item(),
@@ -424,16 +421,15 @@ class ActorCriticWithActionValue(nn.Module):
             "value_range": self.value_head.value_range,
         }
 
-        return critic_loss, activations_dict, info_dict
+        return critic_loss, curr_critic_output_dict["activation"], info_dict
 
     def _compute_sequence_loss(self, data, curr_state):
         if self.disable_state_predictor:
             # Return dummy loss when state_predictor is disabled
             dummy_loss = torch.tensor(0.0, device=curr_state.device, requires_grad=True)
             # Return dummy activation with same shape as state_curr
-            activations_dict = {"state_predictor": curr_state}
             info_dict = {"seq_loss": 0.0}
-            return dummy_loss, activations_dict, info_dict
+            return dummy_loss, curr_state, info_dict
 
         if self.detach_predictor:
             curr_state = curr_state.detach()
@@ -460,6 +456,4 @@ class ActorCriticWithActionValue(nn.Module):
             curr_state, curr_action, x1
         )
 
-        activations_dict = {"state_predictor": activation}
-
-        return pred_loss, activations_dict, info_dict
+        return pred_loss, activation, info_dict
