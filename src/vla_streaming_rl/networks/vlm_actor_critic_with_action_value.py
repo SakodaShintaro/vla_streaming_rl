@@ -8,6 +8,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .image_processor import ImageProcessor
+from .infer_result import InferResult
 from .policy_head import BetaPolicy, CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
 from .prediction_head import StatePredictionHead
 from .reward_processor import RewardProcessor
@@ -267,7 +268,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         r_seq: torch.Tensor,
         rnn_state: torch.Tensor,
         task_prompts: list[str],
-    ) -> dict:
+    ) -> InferResult:
         state, action, q_value = self._infer(s_seq, task_prompts)
 
         next_image, next_reward = self.prediction_head.predict_next_state(
@@ -278,17 +279,14 @@ class VLMActorCriticWithActionValue(nn.Module):
             self.disable_state_predictor,
         )
 
-        return {
-            "action": action,
-            "a_logp": torch.zeros(s_seq.shape[0], 1, device=self.device),
-            "value": q_value.item(),
-            "x": state,
-            "rnn_state": rnn_state,
-            "next_image": next_image,
-            "next_reward": next_reward,
-            "action_token_ids": [],
-            "parse_success": True,
-        }
+        return InferResult(
+            action=action,
+            value=q_value.item(),
+            rnn_state=rnn_state,
+            next_image=next_image,
+            next_reward=next_reward,
+            action_token_ids=[],
+        )
 
     def compute_loss(self, data) -> tuple[torch.Tensor, dict, dict]:
         # Decode task prompts from buffer: use last timestep's prompt for next-state
@@ -377,13 +375,14 @@ class VLMActorCriticWithActionValue(nn.Module):
             self.disable_state_predictor,
         )
 
-        infer_dict = {
-            "action": next_action,
-            "value": next_q.item(),
-            "rnn_state": self._dummy_state.clone(),
-            "next_image": next_image,
-            "next_reward": next_reward,
-        }
+        infer_result = InferResult(
+            action=next_action,
+            value=next_q.item(),
+            rnn_state=self._dummy_state.clone(),
+            next_image=next_image,
+            next_reward=next_reward,
+            action_token_ids=[],
+        )
 
         activations_dict = {
             "state": state,
@@ -399,7 +398,7 @@ class VLMActorCriticWithActionValue(nn.Module):
             "delta": critic_info["delta"],
         }
 
-        return infer_dict, total_loss, activations_dict, info_dict, et_info
+        return infer_result, total_loss, activations_dict, info_dict, et_info
 
     ####################
     # Internal methods #

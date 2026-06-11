@@ -5,6 +5,7 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
+from vla_streaming_rl.networks.infer_result import InferResult
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -198,15 +199,15 @@ class StreamingAgent:
         return action
 
     def _start_new_chunk(
-        self, infer_dict: dict, metrics: dict
+        self, infer_result: InferResult, metrics: dict
     ) -> tuple[np.ndarray, np.ndarray, float]:
-        self.rnn_state = infer_dict["rnn_state"]
-        self.prev_action_token_ids = infer_dict.get("action_token_ids", [])
-        metrics["value"] = infer_dict["value"]
-        next_image = infer_dict["next_image"]
-        next_reward = infer_dict["next_reward"]
+        self.rnn_state = infer_result.rnn_state
+        self.prev_action_token_ids = infer_result.action_token_ids
+        metrics["value"] = infer_result.value
+        next_image = infer_result.next_image
+        next_reward = infer_result.next_reward
 
-        action_chunk = infer_dict["action"][0].cpu().numpy()
+        action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
         self.chunk_step = 1
 
@@ -236,7 +237,7 @@ class StreamingAgent:
             return StepResult(action=action, metrics=metrics, panels=panels)
 
         latest_data = self.rb.get_latest(self.seq_len)
-        infer_dict = self.network.infer(
+        infer_result = self.network.infer(
             latest_data.observations,
             latest_data.obs_z,
             latest_data.actions,
@@ -244,7 +245,7 @@ class StreamingAgent:
             self.rnn_state,
             task_prompts=[task_prompt],
         )
-        action, next_image, next_reward = self._start_new_chunk(infer_dict, metrics)
+        action, next_image, next_reward = self._start_new_chunk(infer_result, metrics)
         self._store_prediction(next_image, next_reward, terminated or truncated)
         return StepResult(action=action, metrics=metrics, panels=panels)
 
@@ -287,10 +288,10 @@ class StreamingAgent:
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_processor.normalize(data.rewards)
 
-        infer_dict, loss, activation_dict, loss_info, et_info = self.network.infer_and_compute_loss(
-            data
+        infer_result, loss, activation_dict, loss_info, et_info = (
+            self.network.infer_and_compute_loss(data)
         )
-        action, next_image, next_reward = self._start_new_chunk(infer_dict, metrics)
+        action, next_image, next_reward = self._start_new_chunk(infer_result, metrics)
         self._store_prediction(next_image, next_reward, terminated or truncated)
 
         metrics.update({f"losses/{key}": value for key, value in loss_info.items()})

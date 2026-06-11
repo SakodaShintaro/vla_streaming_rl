@@ -190,7 +190,7 @@ class OffPolicyAgent:
 
         # inference - predict new action chunk
         latest_data = self.rb.get_latest(self.seq_len)
-        infer_dict = self.network.infer(
+        infer_result = self.network.infer(
             latest_data.observations,
             latest_data.obs_z,
             latest_data.actions,
@@ -198,10 +198,10 @@ class OffPolicyAgent:
             self.rnn_state,
             task_prompts=[task_prompt],
         )
-        self.rnn_state = infer_dict["rnn_state"]
-        metrics["value"] = infer_dict["value"]
-        next_image = infer_dict["next_image"]
-        next_reward = infer_dict["next_reward"]
+        self.rnn_state = infer_result.rnn_state
+        metrics["value"] = infer_result.value
+        next_image = infer_result.next_image
+        next_reward = infer_result.next_reward
         # Stash the fresh prediction for next-step validation / display. Drop it
         # at an episode boundary so it is never compared against the next
         # episode's first frame.
@@ -223,7 +223,7 @@ class OffPolicyAgent:
             self.chunk_step = 0
         else:
             # action chunk: (B, horizon, action_dim) -> (horizon, action_dim)
-            action_chunk = infer_dict["action"][0].cpu().numpy()
+            action_chunk = infer_result.action[0].cpu().numpy()
             self.action_chunk = action_chunk
             self.chunk_step = 1
 
@@ -248,9 +248,7 @@ class OffPolicyAgent:
         # train, then make decision; the training metrics merge into the
         # action's StepResult.
         train_metrics = self._train(global_step)
-        result = self.select_action(
-            global_step, obs, reward, terminated, truncated, task_prompt
-        )
+        result = self.select_action(global_step, obs, reward, terminated, truncated, task_prompt)
         result.metrics.update(train_metrics)
         return result
 

@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.image_processor import ImageProcessor
+from vla_streaming_rl.networks.infer_result import InferResult
 from vla_streaming_rl.networks.policy_head import (
     BetaPolicy,
     CFGDiffusionPolicy,
@@ -178,14 +179,14 @@ class ActorCriticWithActionValue(nn.Module):
         a_seq: torch.Tensor,  # (B, T, action_dim)
         r_seq: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,
-        task_prompts: list[str] | None = None,
-    ) -> dict:
+        task_prompts: list[str],
+    ) -> InferResult:
         assert s_seq.shape[0] == 1, "Batch size must be 1 for inference"
 
         x, rnn_state = self.encoder(s_seq, obs_z_seq, a_seq, r_seq, rnn_state)  # (B, hidden_dim)
 
         # Get action chunk from policy_head
-        action, a_logp = self.policy_head.get_action(x)  # (B, horizon, action_dim)
+        action, _ = self.policy_head.get_action(x)  # (B, horizon, action_dim)
 
         # Get action-value from value_head
         q_dict = self.value_head(x, action)
@@ -200,17 +201,14 @@ class ActorCriticWithActionValue(nn.Module):
             self.disable_state_predictor,
         )
 
-        return {
-            "action": action,  # (B, horizon, action_dim)
-            "a_logp": a_logp,  # (B, 1)
-            "value": q_value,  # float
-            "x": x,  # (B, hidden_dim)
-            "rnn_state": rnn_state,  # (B, ...)
-            "next_image": next_image,  # predicted next image
-            "next_reward": next_reward,  # predicted next reward
-            "action_token_ids": [],  # empty for non-VLM networks
-            "parse_success": True,  # always True for non-VLM networks
-        }
+        return InferResult(
+            action=action,
+            value=q_value,
+            rnn_state=rnn_state,
+            next_image=next_image,
+            next_reward=next_reward,
+            action_token_ids=[],
+        )
 
     def compute_loss(self, data) -> tuple[torch.Tensor, dict, dict]:
         _, _, next_q, _ = self._infer(
@@ -319,13 +317,14 @@ class ActorCriticWithActionValue(nn.Module):
             self.disable_state_predictor,
         )
 
-        infer_dict = {
-            "action": next_action,
-            "value": next_q.item(),
-            "rnn_state": next_rnn_state,
-            "next_image": next_image,
-            "next_reward": next_reward,
-        }
+        infer_result = InferResult(
+            action=next_action,
+            value=next_q.item(),
+            rnn_state=next_rnn_state,
+            next_image=next_image,
+            next_reward=next_reward,
+            action_token_ids=[],
+        )
 
         activations_dict = {
             "state": next_state,
@@ -346,7 +345,7 @@ class ActorCriticWithActionValue(nn.Module):
             "delta": critic_info["delta"],
         }
 
-        return infer_dict, total_loss, activations_dict, info_dict, et_info
+        return infer_result, total_loss, activations_dict, info_dict, et_info
 
     ####################
     # Internal methods #
