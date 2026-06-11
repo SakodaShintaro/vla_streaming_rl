@@ -8,13 +8,16 @@ Examples:
     # List available keys in a run
     uv run python scripts/plot_wandb_log.py results/<run_dir> --list
 
-    # Plot specific keys (auto-saves to <run_dir>/plot.png)
+    # Plot specific keys (auto-named, saved into the run dir)
     uv run python scripts/plot_wandb_log.py results/<run_dir> \\
         -k agent_step_msec env_step_msec
 
-    # Multiple keys + smoothing window + custom output
+    # Multiple keys + smoothing window + custom output directory
     uv run python scripts/plot_wandb_log.py results/<run_dir> \\
-        -k reward losses/critic_loss --smooth 100 -o /tmp/out.png
+        -k reward losses/critic_loss --smooth 100 -o /tmp/plots
+
+    # Q-overestimation diagnostic (saved as calibration_q_value.png)
+    uv run python scripts/plot_wandb_log.py results/<run_dir> --calibration
 """
 
 import argparse
@@ -196,10 +199,30 @@ def parse_args() -> argparse.Namespace:
         "--calibration gap panel (default: 5).",
     )
     parser.add_argument(
-        "-o", "--output", type=Path, help="Output image path (default: <run_dir>/plot.png)"
+        "-o",
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Directory to save the plot in (default: run_dir). The filename is "
+        "auto-derived from the mode and keys.",
     )
     parser.add_argument("--show", action="store_true", help="Show the figure interactively")
     return parser.parse_args()
+
+
+def resolve_output(args: argparse.Namespace) -> Path:
+    """Output path: the chosen directory (default run_dir) plus an auto filename
+    derived from the plot mode and keys (``/`` in keys becomes ``_``)."""
+    out_dir = args.out_dir if args.out_dir is not None else args.run_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    keys = "_".join(k.replace("/", "_") for k in (args.keys or ["q_value"]))
+    if args.calibration:
+        name = f"calibration_{keys}"
+    elif args.per_episode:
+        name = f"{keys}_per_episode" + ("_cumulative" if args.cumulative else "")
+    else:
+        name = keys
+    return out_dir / f"{name}.png"
 
 
 def _resolve_gamma(run_dir: Path, cli_gamma: float | None) -> float:
@@ -315,7 +338,7 @@ def plot_q_calibration(
 
     fig.suptitle(f"{args.run_dir.name} — Q calibration ({n} episodes)")
     fig.tight_layout()
-    output = args.output if args.output is not None else args.run_dir / "plot.png"
+    output = resolve_output(args)
     fig.savefig(output, dpi=120)
     print(f"Saved {output}")
     if args.show:
@@ -363,7 +386,7 @@ def plot_per_episode(
     ax.set_title(title)
     fig.tight_layout()
 
-    output = args.output if args.output is not None else args.run_dir / "plot.png"
+    output = resolve_output(args)
     fig.savefig(output, dpi=120)
     print(f"Saved {output}")
     if args.show:
@@ -442,7 +465,7 @@ def main() -> None:
     ax.set_title(title)
     fig.tight_layout()
 
-    output = args.output if args.output is not None else args.run_dir / "plot.png"
+    output = resolve_output(args)
     fig.savefig(output, dpi=120)
     print(f"Saved {output}")
 
