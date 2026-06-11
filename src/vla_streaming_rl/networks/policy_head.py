@@ -133,14 +133,19 @@ class DiffusionPolicy(nn.Module):
         bs = x.size(0)
         noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
 
+        # Capture the penultimate feature of the final denoising step as the
+        # actor representation.
+        activations = []
+
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            return self.forward(x_flat, t, x).output.view(bs, self.horizon, self.action_dim)
+            head_out = self.forward(x_flat, t, x)
+            activations.append(head_out.activation)
+            return head_out.output.view(bs, self.horizon, self.action_dim)
 
         action = _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
-        dummy_log_p = torch.zeros((bs, 1), device=x.device)
-        return action, dummy_log_p
+        return action, activations[-1]
 
     def compute_actor_loss(
         self,
@@ -149,14 +154,14 @@ class DiffusionPolicy(nn.Module):
         *,
         value_head,
         detach_actor: bool,
-    ) -> tuple[torch.Tensor, dict, dict]:
+    ) -> tuple[torch.Tensor, dict]:
         """Advantage-maximizing actor loss + DACER2 score matching
         (https://arxiv.org/abs/2505.23426).
         """
         del action_chunk
         if detach_actor:
             state = state.detach()
-        action, log_pi = self.get_action(state)
+        action, _ = self.get_action(state)
         B, horizon, action_dim = action.shape
         device = action.device
 
@@ -199,9 +204,8 @@ class DiffusionPolicy(nn.Module):
             "actor_loss": actor_loss.item(),
             "dacer_loss": dacer_loss.item(),
             "advantage": advantage.mean().item(),
-            "log_pi": log_pi.mean().item(),
         }
-        return total_loss, pred_dict.activation, info_dict
+        return total_loss, info_dict
 
 
 class CFGDiffusionPolicy(nn.Module):
@@ -293,17 +297,21 @@ class CFGDiffusionPolicy(nn.Module):
         cond_positive = torch.ones((bs,), dtype=torch.long, device=device)
         cond_uncond = torch.full((bs,), 2, dtype=torch.long, device=device)
 
+        # Capture the positive-conditioned feature of the final denoising step
+        # as the actor representation.
+        activations = []
+
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            out_pos = self.forward(x_flat, t, x, cond_positive).output
+            pos = self.forward(x_flat, t, x, cond_positive)
             out_unc = self.forward(x_flat, t, x, cond_uncond).output
-            out = (1 - self.cfgrl_beta) * out_unc + self.cfgrl_beta * out_pos
+            activations.append(pos.activation)
+            out = (1 - self.cfgrl_beta) * out_unc + self.cfgrl_beta * pos.output
             return out.view(bs, self.horizon, self.action_dim)
 
         action = _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
-        dummy_log_p = torch.zeros((bs, 1), device=device)
-        return action, dummy_log_p
+        return action, activations[-1]
 
     def compute_actor_loss(
         self,
@@ -312,7 +320,7 @@ class CFGDiffusionPolicy(nn.Module):
         *,
         value_head: nn.Module,
         detach_actor: bool,
-    ) -> tuple[torch.Tensor, dict, dict]:
+    ) -> tuple[torch.Tensor, dict]:
         """CFGRL/pistar06: condition on advantage sign, drop with condition_drop_prob."""
         if detach_actor:
             state = state.detach()
@@ -343,13 +351,12 @@ class CFGDiffusionPolicy(nn.Module):
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": 0.0,
-            "log_pi": 0.0,
             "advantage": advantage.mean().item(),
             "positive_ratio": positive_ratio,
             "negative_ratio": negative_ratio,
             "uncond_ratio": uncond_ratio,
         }
-        return actor_loss, actor_output_dict.activation, info_dict
+        return actor_loss, info_dict
 
 
 class MeanFlowPolicy(nn.Module):
@@ -419,11 +426,11 @@ class MeanFlowPolicy(nn.Module):
         eps_flat = eps.view(bs, -1)
         t = torch.ones(bs, device=device)
         r = torch.zeros(bs, device=device)
-        u = self.forward(eps_flat, t, r, x).output
+        head_out = self.forward(eps_flat, t, r, x)
+        u = head_out.output
         action_flat = eps_flat - u
         action = torch.tanh(action_flat).view(bs, self.horizon, self.action_dim)
-        dummy_log_p = torch.zeros((bs, 1), device=device)
-        return action, dummy_log_p
+        return action, head_out.activation
 
     def compute_actor_loss(
         self,
@@ -432,7 +439,7 @@ class MeanFlowPolicy(nn.Module):
         *,
         value_head: nn.Module,
         detach_actor: bool,
-    ) -> tuple[torch.Tensor, dict, dict]:
+    ) -> tuple[torch.Tensor, dict]:
         """Score-based One-step MeanFlow Policy Optimization (SOM, arXiv:2605.23365).
 
         The target velocity for MeanFlow is derived from the Q-function via an
@@ -511,9 +518,8 @@ class MeanFlowPolicy(nn.Module):
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": 0.0,
-            "log_pi": 0.0,
             "advantage": q_vals.mean().item(),
             "som_score_norm": score.norm(dim=1).mean().item(),
             "som_du_dt": du_dt.detach().abs().mean().item(),
         }
-        return actor_loss, torch.zeros((B, 1), device=device), info_dict
+        return actor_loss, info_dict

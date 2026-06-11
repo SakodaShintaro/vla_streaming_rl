@@ -16,17 +16,6 @@ class EligibilityTraceInfo:
 
 
 @dataclass
-class ActivationFeatures:
-    """2D feature tensors of the four monitored submodules, fed to the
-    statistical-metrics computer (stable rank / dormant ratio / ...)."""
-
-    state: torch.Tensor  # encoder output
-    actor: torch.Tensor  # policy head
-    critic: torch.Tensor  # value head
-    state_predictor: torch.Tensor  # sequence prediction head
-
-
-@dataclass
 class LossResult:
     """Structured return value of a network's ``compute_loss``.
 
@@ -36,13 +25,16 @@ class LossResult:
     """
 
     loss: torch.Tensor
-    activations: ActivationFeatures
     info: dict  # scalar name -> float
 
 
 @dataclass
 class InferLossResult:
-    """Structured return value of a network's ``infer_and_compute_loss``."""
+    """Structured return value of a network's ``infer_and_compute_loss``.
+
+    Activations now live on ``infer_result`` (captured during the inference
+    forward), so they are reached via ``infer_result.activations``.
+    """
 
     infer_result: InferResult
     loss_result: LossResult

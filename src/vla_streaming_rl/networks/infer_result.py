@@ -6,6 +6,18 @@ import torch
 
 
 @dataclass
+class ActivationFeatures:
+    """2D feature tensors of the four monitored submodules, captured during the
+    inference forward pass and fed to the statistical-metrics computer (stable
+    rank / dormant ratio / ...)."""
+
+    state: torch.Tensor  # encoder output
+    actor: torch.Tensor  # policy head
+    critic: torch.Tensor  # value head
+    state_predictor: torch.Tensor  # sequence prediction head
+
+
+@dataclass
 class InferResult:
     """Structured return value of a network's ``infer`` / ``infer_and_compute_loss``.
 
@@ -21,3 +33,4 @@ class InferResult:
     next_image: np.ndarray  # predicted next image (H, W, 3)
     next_reward: float  # predicted next reward
     action_token_ids: list  # token ids for VLM action chunk; empty for non-VLM
+    activations: ActivationFeatures  # forward-pass features for statistical metrics

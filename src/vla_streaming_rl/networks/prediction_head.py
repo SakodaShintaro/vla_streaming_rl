@@ -51,11 +51,13 @@ class StatePredictionHead(nn.Module):
         device = z.device
         dt = 1.0 / predictor_step_num
         curr_time = torch.zeros((B,), device=device)
+        activation = None
         for _ in range(predictor_step_num):
-            vt = self.state_predictor.forward(z, curr_time, state_curr, action_curr, None).output
-            z = z + dt * vt
+            head_out = self.state_predictor.forward(z, curr_time, state_curr, action_curr, None)
+            activation = head_out.activation
+            z = z + dt * head_out.output
             curr_time = curr_time + dt
-        return z
+        return z, activation
 
     def _sample_mean_flow(
         self,
@@ -70,12 +72,14 @@ class StatePredictionHead(nn.Module):
         # At each segment [t, r] (t<r) the network predicts the average velocity u,
         # and we step z_r = z_t + (r - t) * u(z_t, t, r).
         time_steps = torch.linspace(0.0, 1.0, predictor_step_num + 1, device=device)
+        activation = None
         for i in range(predictor_step_num):
             t = torch.full((B,), time_steps[i].item(), device=device)
             r = torch.full((B,), time_steps[i + 1].item(), device=device)
-            u = self.state_predictor.forward(z, t, state_curr, action_curr, r).output
-            z = z + (time_steps[i + 1].item() - time_steps[i].item()) * u
-        return z
+            head_out = self.state_predictor.forward(z, t, state_curr, action_curr, r)
+            activation = head_out.activation
+            z = z + (time_steps[i + 1].item() - time_steps[i].item()) * head_out.output
+        return z, activation
 
     @torch.inference_mode()
     def predict_next_state(
@@ -85,13 +89,14 @@ class StatePredictionHead(nn.Module):
         observation_space_shape: tuple[int, ...],
         predictor_step_num: int,
         disable_state_predictor: bool,
-    ) -> tuple[np.ndarray, float]:
+    ) -> tuple[np.ndarray, float, torch.Tensor]:
         if disable_state_predictor:
             H = observation_space_shape[1]
             W = observation_space_shape[2]
             next_image = np.zeros((H, W, 3), dtype=np.float32)
             next_reward = 0.0
-            return next_image, next_reward
+            dummy_activation = torch.zeros((state_curr.size(0), 1), device=state_curr.device)
+            return next_image, next_reward, dummy_activation
 
         device = state_curr.device
         B = state_curr.size(0)
@@ -108,11 +113,11 @@ class StatePredictionHead(nn.Module):
         next_hidden_state = torch.clamp(next_hidden_state, -3.0, 3.0)
 
         if self.predictor_type == "flow_matching":
-            next_hidden_state = self._sample_flow_matching(
+            next_hidden_state, activation = self._sample_flow_matching(
                 next_hidden_state, state_curr, action_curr, predictor_step_num
             )
         elif self.predictor_type == "mean_flow":
-            next_hidden_state = self._sample_mean_flow(
+            next_hidden_state, activation = self._sample_mean_flow(
                 next_hidden_state, state_curr, action_curr, predictor_step_num
             )
         else:
@@ -128,7 +133,7 @@ class StatePredictionHead(nn.Module):
         reward_part = next_hidden_state[:, -1, :]
         next_reward = self.reward_processor.decode(reward_part)
 
-        return next_image, next_reward.item()
+        return next_image, next_reward.item(), activation
 
     def _loss_flow_matching(
         self,
