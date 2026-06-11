@@ -13,7 +13,6 @@ def build_network(
     action_space_shape: tuple[int, ...],
     parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
     device: torch.device,
-    compile: bool,
 ) -> nn.Module:
     if args.network_class == "actor_critic_with_action_value":
         from vla_streaming_rl.networks.actor_critic_with_action_value import (
@@ -50,7 +49,8 @@ def build_network(
             detach_predictor=args.detach_predictor,
             disable_state_predictor=args.disable_state_predictor,
             predictor_type=args.predictor_type,
-        )
+        ).to(device)
+        network = torch.compile(network)
     elif args.network_class == "vlm_actor_critic_with_action_value":
         from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
             VLMActorCriticWithActionValue,
@@ -95,7 +95,7 @@ def build_network(
             image_mode=args.image_mode,
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,
-        )
+        ).to(device)
     elif args.network_class == "simlingo":
         from vla_streaming_rl.networks.simlingo_network import SimLingoNetwork
 
@@ -105,11 +105,8 @@ def build_network(
             critic_block_num=args.critic_block_num,
             num_bins=args.num_bins,
             device=device,
-        )
+        ).to(device)
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
 
-    network = network.to(device)
-    if compile:
-        network = torch.compile(network)
     return network

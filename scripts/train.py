@@ -176,14 +176,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     episode_limit = args.episode_limit
     checkpoint_interval = max(1, step_limit // 10)
 
-    compile_network = args.network_class not in ("vlm_actor_critic_with_action_value", "simlingo")
     network = build_network(
         args,
         observation_space_shape=env.observation_space.shape,
         action_space_shape=env.action_space.shape,
         parse_action_text=parse_action_text,
         device=torch.device("cuda"),
-        compile=compile_network,
     )
 
     goal_predictor = WorldModelGoalPredictor(
