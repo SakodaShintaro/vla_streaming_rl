@@ -406,9 +406,7 @@ class SimLingoAgent:
             cv2.circle(img, p, 2, (255, 255, 0), -1)
 
         # ego marker pointing forward (up)
-        cv2.drawMarker(
-            img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2
-        )
+        cv2.drawMarker(img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2)
 
         # value annotation (green if non-negative, red otherwise)
         q = self._viz_q_value
@@ -665,7 +663,7 @@ class SimLingoAgent:
         # bird's-eye visualization panel. ``s`` is the mean over the 30
         # waypoint queries, matching the critic's state convention in training.
         s_vec = features.mean(dim=0, keepdim=True)
-        q = self._critic_value(self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1))["output"])
+        q = self._critic_value(self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1)).output)
         self._viz_q_value = float(q.item())
         self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
         self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
@@ -781,9 +779,9 @@ class SimLingoAgent:
         """
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
-            next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1))["output"])
+            next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1)).output)
             target_q = r + self.gamma * (1.0 - done) * next_q
-        current_logits = self.critic(s, a.unsqueeze(1))["output"]
+        current_logits = self.critic(s, a.unsqueeze(1)).output
         current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q
 
@@ -797,7 +795,7 @@ class SimLingoAgent:
         a_pred = self._policy_action(feat)
         for p in self.critic.parameters():
             p.requires_grad_(False)
-        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1))["output"])
+        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1)).output)
         for p in self.critic.parameters():
             p.requires_grad_(True)
         return -actor_q.mean()
@@ -837,7 +835,7 @@ class SimLingoAgent:
             # whole (B*N) batch in one critic forward.
             s_rep = s.unsqueeze(1).expand(b, n, s.shape[-1]).reshape(b * n, -1)
             a_rep = cand.reshape(b * n, action_dim).unsqueeze(1)  # (B*N, 1, A)
-            q = self._critic_value(self.critic(s_rep, a_rep)["output"]).view(b, n)
+            q = self._critic_value(self.critic(s_rep, a_rep).output).view(b, n)
 
             # Per-state exp weights via softmax (handles the exp and the
             # normalize-to-sum-1). softmax is shift-invariant, so centering the
@@ -928,9 +926,7 @@ class SimLingoAgent:
         seq = start[:, None] + torch.arange(span)[None, :]
 
         a, r, done, feat, feat_next, s, s_next = self._read_transition(seq)
-        current_logits, current_q, target_q = self._critic_targets(
-            a, r, done, s, s_next, feat_next
-        )
+        current_logits, current_q, target_q = self._critic_targets(a, r, done, s, s_next, feat_next)
         self.critic.update_value_range(target_q)
         critic_loss = self.critic.value_loss(current_logits, target_q)
         actor_loss, weight_entropy = self._awr_actor_loss(feat, s)

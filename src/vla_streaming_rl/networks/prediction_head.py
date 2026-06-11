@@ -52,7 +52,7 @@ class StatePredictionHead(nn.Module):
         dt = 1.0 / predictor_step_num
         curr_time = torch.zeros((B,), device=device)
         for _ in range(predictor_step_num):
-            vt = self.state_predictor.forward(z, curr_time, state_curr, action_curr, None)["output"]
+            vt = self.state_predictor.forward(z, curr_time, state_curr, action_curr, None).output
             z = z + dt * vt
             curr_time = curr_time + dt
         return z
@@ -73,7 +73,7 @@ class StatePredictionHead(nn.Module):
         for i in range(predictor_step_num):
             t = torch.full((B,), time_steps[i].item(), device=device)
             r = torch.full((B,), time_steps[i + 1].item(), device=device)
-            u = self.state_predictor.forward(z, t, state_curr, action_curr, r)["output"]
+            u = self.state_predictor.forward(z, t, state_curr, action_curr, r).output
             z = z + (time_steps[i + 1].item() - time_steps[i].item()) * u
         return z
 
@@ -141,10 +141,10 @@ class StatePredictionHead(nn.Module):
         t = torch.rand(shape_t, device=x1.device)
         xt = (1.0 - t) * x0 + t * x1
         pred_dict = self.state_predictor.forward(xt, t, predictor_state, action, None)
-        pred_vt = pred_dict["output"]
+        pred_vt = pred_dict.output
         vt = x1 - x0
         loss = F.mse_loss(pred_vt, vt)
-        return loss, pred_dict["activation"], {"seq_loss": loss.item()}
+        return loss, pred_dict.activation, {"seq_loss": loss.item()}
 
     def _loss_mean_flow(
         self,
@@ -171,7 +171,7 @@ class StatePredictionHead(nn.Module):
         xt = (1.0 - t_b) * x0 + t_b * x1
 
         def f(x: torch.Tensor, t_: torch.Tensor) -> torch.Tensor:
-            return self.state_predictor.forward(x, t_, predictor_state, action, r)["output"]
+            return self.state_predictor.forward(x, t_, predictor_state, action, r).output
 
         # JVP computes total derivative along the trajectory: du/dt = ∂u/∂x · v + ∂u/∂t.
         # SDPA MATH backend because Flash Attention lacks double-backward / forward-mode AD.

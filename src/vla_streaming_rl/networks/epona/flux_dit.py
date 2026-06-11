@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor, nn
 
+from ..head_output import HeadOutput
 from .layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -80,7 +81,7 @@ class FluxDiT(nn.Module):
         cond: Tensor,
         y: Tensor,
         r_timesteps: Tensor | None,
-    ) -> dict[str, Tensor]:
+    ) -> HeadOutput:
         B, noise_seq_len, C = noise.shape
         _, cond_seq_len, _ = cond.shape
 
@@ -117,4 +118,4 @@ class FluxDiT(nn.Module):
         # dummy
         activation = torch.zeros((B, 1))
 
-        return {"output": output, "activation": activation}
+        return HeadOutput(output=output, activation=activation)

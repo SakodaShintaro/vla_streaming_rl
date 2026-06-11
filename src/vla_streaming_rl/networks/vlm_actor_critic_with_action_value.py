@@ -15,7 +15,7 @@ from .loss_result import (
     InferLossResult,
     LossResult,
 )
-from .policy_head import BetaPolicy, CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
+from .policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
 from .prediction_head import StatePredictionHead
 from .reward_processor import RewardProcessor
 from .value_head import ActionValueHead, HypersphericalActionValueHead
@@ -152,12 +152,6 @@ class VLMActorCriticWithActionValue(nn.Module):
                 horizon=horizon,
                 denoising_steps=denoising_steps,
                 dacer_loss_weight=dacer_loss_weight,
-            )
-        elif self.policy_type == "beta":
-            self.policy_head = BetaPolicy(
-                hidden_dim=state_dim,
-                action_dim=self.action_dim,
-                horizon=horizon,
             )
         elif self.policy_type == "cfgrl":
             self.policy_head = CFGDiffusionPolicy(
@@ -371,7 +365,7 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         et_critic_dict = self.value_head(state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_dict["output"]).mean()
+        neg_value_detached = -self.value_head.to_value(et_critic_dict.output).mean()
 
         next_image, next_reward = self.prediction_head.predict_next_state(
             self._state_for_predictor(state),
@@ -622,7 +616,7 @@ class VLMActorCriticWithActionValue(nn.Module):
     def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Compute scalar Q-value for a (state, action) pair."""
         q_dict = self.value_head(state, action)
-        return self.value_head.to_value(q_dict["output"]).view(-1)
+        return self.value_head.to_value(q_dict.output).view(-1)
 
     @torch.inference_mode()
     def _infer(
@@ -693,7 +687,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         if self.detach_critic:
             state = state.detach()
         curr_critic_output_dict = self.value_head(state, action_chunk)
-        logits = curr_critic_output_dict["output"]
+        logits = curr_critic_output_dict.output
 
         self.value_head.update_value_range(target_value)
         curr_critic_value = self.value_head.to_value(logits).view(-1)
@@ -709,7 +703,7 @@ class VLMActorCriticWithActionValue(nn.Module):
             "value_range": self.value_head.value_range,
         }
 
-        return critic_loss, curr_critic_output_dict["activation"], info_dict
+        return critic_loss, curr_critic_output_dict.activation, info_dict
 
     def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
         """Reshape and project state for StatePredictionHead context."""

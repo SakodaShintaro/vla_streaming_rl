@@ -12,7 +12,6 @@ from vla_streaming_rl.networks.loss_result import (
     LossResult,
 )
 from vla_streaming_rl.networks.policy_head import (
-    BetaPolicy,
     CFGDiffusionPolicy,
     DiffusionPolicy,
     MeanFlowPolicy,
@@ -94,12 +93,6 @@ class ActorCriticWithActionValue(nn.Module):
                 horizon=horizon,
                 denoising_steps=denoising_steps,
                 dacer_loss_weight=dacer_loss_weight,
-            )
-        elif self.policy_type == "beta":
-            self.policy_head = BetaPolicy(
-                hidden_dim=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                horizon=horizon,
             )
         elif self.policy_type == "cfgrl":
             self.policy_head = CFGDiffusionPolicy(
@@ -196,7 +189,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         # Get action-value from value_head
         q_dict = self.value_head(x, action)
-        q_value = self.value_head.to_value(q_dict["output"]).item()
+        q_value = self.value_head.to_value(q_dict.output).item()
 
         # Get predicted next state
         next_image, next_reward = self.prediction_head.predict_next_state(
@@ -313,7 +306,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         et_critic_dict = self.value_head(prev_state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_dict["output"]).mean()
+        neg_value_detached = -self.value_head.to_value(et_critic_dict.output).mean()
 
         next_image, next_reward = self.prediction_head.predict_next_state(
             next_state,
@@ -373,7 +366,7 @@ class ActorCriticWithActionValue(nn.Module):
         state, rnn_state_out = self.encoder.forward(obs, obs_z, actions, rewards, rnn_state)
         action, _ = self.policy_head.get_action(state)
         q_dict = self.value_head(state, action)
-        q = self.value_head.to_value(q_dict["output"]).view(-1)
+        q = self.value_head.to_value(q_dict.output).view(-1)
         return state, action, q, rnn_state_out
 
     @torch.no_grad()
@@ -405,7 +398,7 @@ class ActorCriticWithActionValue(nn.Module):
             curr_state = curr_state.detach()
 
         curr_critic_output_dict = self.value_head(curr_state, action_chunk)
-        logits = curr_critic_output_dict["output"]
+        logits = curr_critic_output_dict.output
 
         self.value_head.update_value_range(target_value)
         curr_critic_value = self.value_head.to_value(logits).view(-1)
@@ -421,7 +414,7 @@ class ActorCriticWithActionValue(nn.Module):
             "value_range": self.value_head.value_range,
         }
 
-        return critic_loss, curr_critic_output_dict["activation"], info_dict
+        return critic_loss, curr_critic_output_dict.activation, info_dict
 
     def _compute_sequence_loss(self, data, curr_state):
         if self.disable_state_predictor:
