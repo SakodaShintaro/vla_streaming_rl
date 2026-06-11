@@ -28,7 +28,7 @@ from vla_streaming_rl.agents.off_policy import OffPolicyAgent
 from vla_streaming_rl.agents.streaming import StreamingAgent
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
-from vla_streaming_rl.utils import concat_labeled_images, create_reward_image
+from vla_streaming_rl.utils import concat_labeled_images
 from vla_streaming_rl.wrappers import make_env
 
 torch.set_float32_matmul_precision("high")
@@ -290,15 +290,13 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         result = agent.select_action(global_step, obs, 0.0, False, False, task_prompt)
         action = result.action
 
-        # initial render
+        # initial render. The trainer only owns the environment / observation
+        # panels; prediction, reward, goal, bev, ... arrive via result.panels.
         obs_for_render = obs.copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
-        # Trainer-owned panels first, then whatever extra panels the agent
-        # contributed (goal frame, bird's-eye trajectory view, ...).
         panels = {
             "environment": env.render(),
             "observation": obs_viz,
-            "reward": create_reward_image(0.0, 0.0),
             **result.panels,
         }
         initial_rgb_image = concat_labeled_images(panels)
@@ -308,10 +306,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         action_list = []
         reward_list = []
         obs_list = [obs.copy()]
-
-        # initial reward prediction for next step (the prediction frame panel is
-        # now owned by the agent and arrives via result.panels)
-        pred_reward = result.next_reward if result.next_reward is not None else 0.0
 
         while True:
             global_step += 1
@@ -347,15 +341,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 "agent_step_msec": agent_step_time_msec,
                 **result.metrics,
             }
-            data_dict["losses/pred_reward_loss"] = np.abs(pred_reward - reward)
             wandb.log(data_dict)
 
-            reward_image = create_reward_image(pred_reward, reward)
             obs_viz = _viz_resize(obs_for_render, args.render_scale)
             panels = {
                 "environment": env.render(),
                 "observation": obs_viz,
-                "reward": reward_image,
                 **result.panels,
             }
             rgb_image = concat_labeled_images(panels)
@@ -379,9 +370,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
             if global_step >= step_limit:
                 break
-
-            # update reward prediction for next step
-            pred_reward = result.next_reward if result.next_reward is not None else 0.0
 
         if global_step >= step_limit:
             break

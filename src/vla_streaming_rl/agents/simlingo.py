@@ -312,12 +312,7 @@ class SimLingoAgent:
         self._maybe_handover_episode()
         env_action = self._act()
         metrics, panels = self._build_info(env_action)
-        return StepResult(
-            action=env_action,
-            metrics=metrics,
-            panels=panels,
-            next_reward=None,
-        )
+        return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def step(
         self,
@@ -358,12 +353,7 @@ class SimLingoAgent:
         # too — the buffer's done flag handles bootstrap correctness.)
         self._prev_action = self._current_action_taken
 
-        return StepResult(
-            action=env_action,
-            metrics=metrics,
-            panels=panels,
-            next_reward=None,
-        )
+        return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         # Force re-init on the next select_action.

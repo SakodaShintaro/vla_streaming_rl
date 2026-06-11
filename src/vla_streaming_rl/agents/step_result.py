@@ -22,12 +22,8 @@ class StepResult:
       the SAME shapes on every step of a run (use a blank placeholder when the
       content does not exist yet, e.g. before the first prediction). The render
       frames are encoded into a single video, which requires a constant size.
-    - ``next_reward``: the agent's one-step reward prediction, kept typed (and
-      ``None`` when the agent makes no prediction this tick) because the
-      trainer compares it against the next reward for the reward panel.
     """
 
     action: np.ndarray
     metrics: dict[str, float]
     panels: dict[str, np.ndarray]
-    next_reward: float | None

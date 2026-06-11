@@ -8,6 +8,7 @@ from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
+from vla_streaming_rl.utils import create_reward_image
 
 
 class OffPolicyAgent:
@@ -96,6 +97,11 @@ class OffPolicyAgent:
         self._pred_placeholder = np.zeros((obs_h, obs_w, obs_c), dtype=np.float32)
         self._last_pred_image: np.ndarray | None = None
         self._fresh_pred_image: np.ndarray | None = None
+        # Same persist (panel) / fresh (loss-once) split for the reward
+        # prediction. ``create_reward_image`` is a fixed size regardless of its
+        # inputs, so the reward panel is always emittable with no placeholder.
+        self._last_pred_reward: float | None = None
+        self._fresh_pred_reward: float | None = None
 
         self.goal_predictor = goal_predictor
 
@@ -137,6 +143,11 @@ class OffPolicyAgent:
         panels["prediction"] = (
             self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
         )
+        if self._fresh_pred_reward is not None:
+            metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
+            self._fresh_pred_reward = None
+        pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
+        panels["reward"] = create_reward_image(pred_reward, reward)
 
         # add to replay buffer
         obs_tensor = torch.from_numpy(obs).to(self.device)
@@ -175,12 +186,7 @@ class OffPolicyAgent:
             self.prev_action = action
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
-            return StepResult(
-                action=action,
-                metrics=metrics,
-                panels=panels,
-                next_reward=None,
-            )
+            return StepResult(action=action, metrics=metrics, panels=panels)
 
         # inference - predict new action chunk
         latest_data = self.rb.get_latest(self.seq_len)
@@ -202,9 +208,13 @@ class OffPolicyAgent:
         if terminated or truncated:
             self._last_pred_image = None
             self._fresh_pred_image = None
+            self._last_pred_reward = None
+            self._fresh_pred_reward = None
         else:
             self._last_pred_image = next_image
             self._fresh_pred_image = next_image
+            self._last_pred_reward = next_reward
+            self._fresh_pred_reward = next_reward
 
         # action
         if global_step < self.learning_starts:
@@ -224,12 +234,7 @@ class OffPolicyAgent:
         self.prev_action = action
 
         metrics["chunk_step"] = self.chunk_step
-        return StepResult(
-            action=action,
-            metrics=metrics,
-            panels=panels,
-            next_reward=next_reward,
-        )
+        return StepResult(action=action, metrics=metrics, panels=panels)
 
     def step(
         self,
