@@ -379,12 +379,14 @@ class SimLingoAgent:
         return metrics, panels
 
     def _render_bev_panel(self) -> np.ndarray:
-        """Top-down (ego-frame) view of the executed trajectory, annotated
-        with the critic's value estimate Q(s, a).
+        """Top-down (ego-frame) view of SimLingo's two predicted trajectories,
+        annotated with the critic's value estimate Q(s, a).
 
-        Ego is the green marker near the bottom; route index 0 (``+x``) is
-        forward → up, ``+y`` → right (the PID's heading convention). Returns
-        an RGB uint8 image for the render strip.
+        SimLingo outputs two waypoint sets, both drawn here: the ``route``
+        (geometric path, cyan) and the ``speed`` waypoints (future positions
+        used for speed control, orange). Ego is the green marker near the
+        bottom; waypoint index 0 (``+x``) is forward → up, ``+y`` → right (the
+        PID's heading convention). Returns an RGB uint8 image for the strip.
         """
         size = 256
         scale = 6.0  # pixels per meter
@@ -394,24 +396,33 @@ class SimLingoAgent:
         def to_px(forward: float, lateral: float) -> tuple[int, int]:
             return (int(ego_px[0] + lateral * scale), int(ego_px[1] - forward * scale))
 
+        def draw_trajectory(waypoints: np.ndarray, color: tuple[int, int, int]) -> None:
+            pts = [to_px(float(wp[0]), float(wp[1])) for wp in waypoints]
+            for i in range(len(pts) - 1):
+                cv2.line(img, pts[i], pts[i + 1], color, 2)
+            for p in pts:
+                cv2.circle(img, p, 2, color, -1)
+
         # range rings every 10 m for scale reference
         for r_m in (10, 20, 30):
             cv2.circle(img, ego_px, int(r_m * scale), (60, 60, 60), 1)
 
-        # executed route: polyline + waypoint dots
-        pts = [to_px(float(wp[0]), float(wp[1])) for wp in self._viz_route]
-        for i in range(len(pts) - 1):
-            cv2.line(img, pts[i], pts[i + 1], (0, 200, 255), 2)
-        for p in pts:
-            cv2.circle(img, p, 2, (255, 255, 0), -1)
+        # the two SimLingo outputs
+        route_color = (0, 200, 255)
+        speed_color = (255, 165, 0)
+        draw_trajectory(self._viz_route, route_color)
+        draw_trajectory(self._viz_speed, speed_color)
 
         # ego marker pointing forward (up)
         cv2.drawMarker(img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2)
 
-        # value annotation (green if non-negative, red otherwise)
+        # value annotation (green if non-negative, red otherwise) + legend
         q = self._viz_q_value
         q_color = (0, 255, 0) if q >= 0.0 else (255, 80, 80)
-        cv2.putText(img, f"Q: {q:.3f}", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, q_color, 2)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(img, f"Q: {q:.3f}", (8, 22), font, 0.6, q_color, 2)
+        cv2.putText(img, "route", (8, size - 24), font, 0.45, route_color, 1)
+        cv2.putText(img, "speed", (8, size - 8), font, 0.45, speed_color, 1)
         return img
 
     # --- Episode handover --------------------------------------------------
