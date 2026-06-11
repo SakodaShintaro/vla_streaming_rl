@@ -1,0 +1,6 @@
+{
+  "python.analysis.extraPaths": [
+    "external/Bench2Drive/leaderboard",
+    "external/Bench2Drive/scenario_runner"
+  ]
+}
