@@ -36,11 +36,10 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def _viz_resize(image: np.ndarray, scale: float) -> np.ndarray:
-    """Downscale (or upscale) the obs / prediction render panels.
+    """Downscale (or upscale) the observation render panel.
 
-    Loss computation (``pred_image - obs_for_render``) must run on the
-    native shape, so this is applied only to the copies that go into
-    ``concat_labeled_images`` / ``cv2.imshow``.
+    This is applied only to the copy that goes into ``concat_labeled_images``
+    / ``cv2.imshow``, never to data used for any computation.
     """
     if scale == 1.0:
         return image
@@ -61,6 +60,16 @@ def save_episode_data(
     """Save episode video, images, actions and rewards"""
     if not bgr_image_list:
         return
+
+    # Stable-panel contract: an agent emits the same set of equally-shaped
+    # panels every step, so every render frame has the same size. Fail loudly
+    # if that is violated rather than letting the video encoder error out.
+    frame_sizes = {img.shape for img in bgr_image_list}
+    if len(frame_sizes) != 1:
+        raise ValueError(
+            f"Episode '{name}' produced frames of differing sizes {frame_sizes}; "
+            "an agent's panel set / shapes must stay constant across the run."
+        )
 
     video_path = video_dir / f"{name}.mp4"
     rgb_images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in bgr_image_list]
@@ -289,7 +298,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         panels = {
             "environment": env.render(),
             "observation": obs_viz,
-            "prediction": np.zeros_like(obs_viz),
             "reward": create_reward_image(0.0, 0.0),
             **result.panels,
         }
@@ -301,10 +309,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         reward_list = []
         obs_list = [obs.copy()]
 
-        # initial prediction for next step
-        pred_image = (
-            result.next_image if result.next_image is not None else np.zeros_like(obs_for_render)
-        )
+        # initial reward prediction for next step (the prediction frame panel is
+        # now owned by the agent and arrives via result.panels)
         pred_reward = result.next_reward if result.next_reward is not None else 0.0
 
         while True:
@@ -341,17 +347,14 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 "agent_step_msec": agent_step_time_msec,
                 **result.metrics,
             }
-            data_dict["losses/pred_image_loss"] = np.mean(np.abs(pred_image - obs_for_render))
             data_dict["losses/pred_reward_loss"] = np.abs(pred_reward - reward)
             wandb.log(data_dict)
 
             reward_image = create_reward_image(pred_reward, reward)
             obs_viz = _viz_resize(obs_for_render, args.render_scale)
-            pred_viz = _viz_resize(pred_image, args.render_scale)
             panels = {
                 "environment": env.render(),
                 "observation": obs_viz,
-                "prediction": pred_viz,
                 "reward": reward_image,
                 **result.panels,
             }
@@ -377,12 +380,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             if global_step >= step_limit:
                 break
 
-            # update prediction for next step
-            pred_image = (
-                result.next_image
-                if result.next_image is not None
-                else np.zeros_like(obs_for_render)
-            )
+            # update reward prediction for next step
             pred_reward = result.next_reward if result.next_reward is not None else 0.0
 
         if global_step >= step_limit:

@@ -85,6 +85,18 @@ class OffPolicyAgent:
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
 
+        # Next-frame prediction visualization state. ``_last_pred_image`` is the
+        # latest predicted frame, kept so the "prediction" panel persists across
+        # cached-chunk steps; ``_fresh_pred_image`` is the prediction that is
+        # exactly one step old, so its loss is logged only once (when it can be
+        # compared against the observation it predicted). The placeholder keeps
+        # the panel a fixed shape before the first prediction exists, honoring
+        # the stable-panel contract.
+        obs_c, obs_h, obs_w = observation_space.shape
+        self._pred_placeholder = np.zeros((obs_h, obs_w, obs_c), dtype=np.float32)
+        self._last_pred_image: np.ndarray | None = None
+        self._fresh_pred_image: np.ndarray | None = None
+
         self.goal_predictor = goal_predictor
 
     @torch.inference_mode()
@@ -112,6 +124,20 @@ class OffPolicyAgent:
         metrics["action_norm"] = action_norm
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
 
+        # Validate the previous inference's next-frame prediction against this
+        # observation. The loss is logged only while the prediction is fresh
+        # (one step old); the panel persists the latest prediction so it stays
+        # visible across cached-chunk steps.
+        obs_hwc = obs.transpose(1, 2, 0)
+        if self._fresh_pred_image is not None:
+            metrics["losses/pred_image_loss"] = float(
+                np.mean(np.abs(self._fresh_pred_image - obs_hwc))
+            )
+            self._fresh_pred_image = None
+        panels["prediction"] = (
+            self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
+        )
+
         # add to replay buffer
         obs_tensor = torch.from_numpy(obs).to(self.device)
         obs_z = self.network.image_processor.encode(obs_tensor.unsqueeze(0))
@@ -132,7 +158,7 @@ class OffPolicyAgent:
         )
 
         goal_image = self.goal_predictor.step(obs)
-        if np.any(goal_image):
+        if self.goal_predictor.enabled:
             panels["goal"] = goal_image
         if terminated or truncated:
             self.goal_predictor.reset()
@@ -153,7 +179,6 @@ class OffPolicyAgent:
                 action=action,
                 metrics=metrics,
                 panels=panels,
-                next_image=None,
                 next_reward=None,
             )
 
@@ -171,6 +196,15 @@ class OffPolicyAgent:
         metrics["value"] = infer_dict["value"]
         next_image = infer_dict["next_image"]
         next_reward = infer_dict["next_reward"]
+        # Stash the fresh prediction for next-step validation / display. Drop it
+        # at an episode boundary so it is never compared against the next
+        # episode's first frame.
+        if terminated or truncated:
+            self._last_pred_image = None
+            self._fresh_pred_image = None
+        else:
+            self._last_pred_image = next_image
+            self._fresh_pred_image = next_image
 
         # action
         if global_step < self.learning_starts:
@@ -194,7 +228,6 @@ class OffPolicyAgent:
             action=action,
             metrics=metrics,
             panels=panels,
-            next_image=next_image,
             next_reward=next_reward,
         )
 

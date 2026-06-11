@@ -16,16 +16,18 @@ class StepResult:
     - ``metrics``: flat scalar telemetry, logged verbatim to wandb.
     - ``panels``: named RGB image panels (HxWx3) for the render strip. The
       trainer concatenates whatever panels are present, in insertion order,
-      so an agent can contribute extra panels (e.g. a bird's-eye trajectory
-      view with the value estimate) without the trainer knowing about them.
-    - ``next_image`` / ``next_reward``: the agent's one-step prediction, kept
-      typed (and ``None`` when the agent makes no prediction this tick)
-      because the trainer compares them against the next observation /
-      reward to compute the prediction loss.
+      so an agent can contribute extra panels (e.g. the next-frame prediction
+      or a bird's-eye trajectory view) without the trainer knowing about them.
+      Stable-panel contract: an agent must emit the SAME set of panel keys with
+      the SAME shapes on every step of a run (use a blank placeholder when the
+      content does not exist yet, e.g. before the first prediction). The render
+      frames are encoded into a single video, which requires a constant size.
+    - ``next_reward``: the agent's one-step reward prediction, kept typed (and
+      ``None`` when the agent makes no prediction this tick) because the
+      trainer compares it against the next reward for the reward panel.
     """
 
     action: np.ndarray
     metrics: dict[str, float]
     panels: dict[str, np.ndarray]
-    next_image: np.ndarray | None
     next_reward: float | None

@@ -316,7 +316,6 @@ class SimLingoAgent:
             action=env_action,
             metrics=metrics,
             panels=panels,
-            next_image=None,
             next_reward=None,
         )
 
@@ -363,7 +362,6 @@ class SimLingoAgent:
             action=env_action,
             metrics=metrics,
             panels=panels,
-            next_image=None,
             next_reward=None,
         )
 
