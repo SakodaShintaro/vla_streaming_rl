@@ -115,6 +115,8 @@ def save_episode_data(
 
 
 def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
+    result_dir.mkdir(parents=True, exist_ok=True)
+
     wandb.init(
         project=f"vla_streaming_rl_{args.env_id}",
         config=OmegaConf.to_container(args, resolve=True),
@@ -523,7 +525,8 @@ def hydra_main(cfg: DictConfig) -> None:
 
     for i in range(cfg.trial_num):
         suffix = f"_{i:02d}" if cfg.trial_num > 1 else ""
-        main(cfg, exp_name + suffix, seed + i, hydra_output_dir)
+        trial_dir = hydra_output_dir / f"trial{suffix}" if cfg.trial_num > 1 else hydra_output_dir
+        main(cfg, exp_name + suffix, seed + i, trial_dir)
 
 
 if __name__ == "__main__":
