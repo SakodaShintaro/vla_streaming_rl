@@ -7,7 +7,6 @@ render_scale: 0.33
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_carla_env
 
-  route_xml: null
   route_id: 26950
   sequence_mode: random
   start_index: 0

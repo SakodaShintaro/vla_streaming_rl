@@ -5,9 +5,6 @@ render_scale: 0.33
 
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_carla_env
-  # Route source for the training env.
-  # - route_xml: if set, routes are loaded from this Bench2Drive-format XML.
-  #   null falls back to sampling a random 200 m route in Town01 each episode.
   # - route_id: optional, restrict to one specific route id from the XML.
   #   Only valid with sequence_mode='random'. null means "pick a random
   #   route from the XML each episode".
@@ -31,11 +28,6 @@ env_factory:
   #   AgentBlockedTest (60 s = 1200 steps @ 20 FPS under 0.1 m/s).
   #   Terminates after this many consecutive sub-0.1 m/s steps. null
   #   disables it.
-  #
-  # The Bench2Drive eval artifacts (eval_res/, eval_viz/) are written
-  # automatically under the Hydra run dir whenever route_xml is set —
-  # nothing to configure here. weather.xml is picked up next to route_xml.
-  route_xml: null
   route_id: null
   sequence_mode: sequential
   start_index: 0

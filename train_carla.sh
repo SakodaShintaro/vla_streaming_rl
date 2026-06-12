@@ -21,10 +21,6 @@ setsid ${CARLA_ROOT}/CarlaUE4.sh -RenderOffScreen &
 CARLA_PGID=$!
 trap 'kill -TERM -- -$CARLA_PGID 2>/dev/null; kill 0' EXIT
 
-# route_xml=null
-# route_xml=${B2D_ROOT}/leaderboard/data/routes_training.xml
-route_xml=${B2D_ROOT}/leaderboard/data/bench2drive220.xml
-
 # Bench2Drive 220-scenario driver: walk every route in
 # leaderboard/data/bench2drive220.xml (positions 0..219, equivalent to
 # simlingo's bench2drive_split/bench2drive_{00..219}.xml ordering) in XML
@@ -39,6 +35,5 @@ uv run python scripts/train.py \
   agent=cnn_streaming \
   env=carla \
   exp_name=carla$suffix \
-  env_factory.route_xml=${route_xml} \
   env_factory.sequence_mode=${sequence_mode} \
   env_factory.start_index=${start_index} \

@@ -18,6 +18,13 @@ from vla_streaming_rl.envs.tracking_square_env import TrackingSquareEnv
 
 REPEAT = 4
 
+# bench2drive220 is the fixed route set for the CARLA env; random-route mode is
+# no longer used, so the route XML is wired in here instead of via config/CLI.
+# Absolute path resolved against the repo root (three levels up from this file).
+CARLA_ROUTE_XML = str(
+    Path(__file__).parents[2] / "external/Bench2Drive/leaderboard/data/bench2drive220.xml"
+)
+
 
 CAR_RACING_PROMPT = (
     "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible. "
@@ -80,7 +87,6 @@ def make_animalai_env() -> gym.Env:
 
 
 def make_carla_env(
-    route_xml: str | None,
     route_id: str | None,
     sequence_mode: str,
     start_index: int,
@@ -91,9 +97,10 @@ def make_carla_env(
 ) -> gym.Env:
     """Hydra `_target_` factory for the raw CARLA env (no wrappers).
 
+    The route XML is fixed to ``CARLA_ROUTE_XML`` (bench2drive220) in code.
     ``eval_output_dir`` is injected by ``make_env`` (not the user-facing
     config) and points at the Hydra run dir / "eval". weather.xml is
-    auto-located next to ``route_xml``.
+    auto-located next to the route XML.
     """
     # Wire up the CARLA / Bench2Drive sys.path (normally train_carla.sh's
     # PYTHONPATH), so a run needs no bash wrapper. This must run before importing
@@ -107,7 +114,7 @@ def make_carla_env(
     from vla_streaming_rl.envs.carla_leaderboard_env import CARLALeaderboardEnv
 
     return CARLALeaderboardEnv(
-        route_xml=route_xml,
+        route_xml=CARLA_ROUTE_XML,
         route_id=route_id,
         sequence_mode=sequence_mode,
         start_index=start_index,
@@ -170,8 +177,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
     elif env_id == "CARLA-Leaderboard-v0":
         # eval_output_dir is injected here (not via the user-facing
         # env_factory config) so the user does not have to remember a
-        # path that is always result_dir/eval. Random-route mode passes
-        # None through unchanged → no eval writer.
+        # path that is always result_dir/eval.
         eval_output_dir = str(result_dir / "eval") if result_dir is not None else None
         env = hydra.utils.instantiate(env_factory, eval_output_dir=eval_output_dir)
         env = gym.wrappers.RecordEpisodeStatistics(env)
