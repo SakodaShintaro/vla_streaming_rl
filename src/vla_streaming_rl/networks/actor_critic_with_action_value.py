@@ -27,6 +27,7 @@ class ActorCriticWithActionValue(nn.Module):
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
         gamma: float,
+        multi_gammas: list[float],
         num_bins: int,
         sparsity: float,
         seq_len: int,
@@ -55,7 +56,16 @@ class ActorCriticWithActionValue(nn.Module):
         predictor_type: str,
     ) -> None:
         super().__init__()
+        # Multi-gamma (AMAGO): predict the action value for several discounts at
+        # once. ``gamma`` (config) is the primary/rollout discount and is kept
+        # last; the auxiliary ``multi_gammas`` come first. The actor maximizes
+        # the mean over all gammas (see ``value_head.to_value``); each gamma's
+        # critic is trained on its own TD target.
         self.gamma = gamma
+        self.gammas = list(multi_gammas) + [gamma]
+        self.num_gammas = len(self.gammas)
+        self.primary_gamma_index = self.num_gammas - 1
+        self.register_buffer("gammas_tensor", torch.tensor(self.gammas, dtype=torch.float32))
         self.num_bins = num_bins
         self.sparsity = sparsity
         self.seq_len = seq_len
@@ -133,6 +143,8 @@ class ActorCriticWithActionValue(nn.Module):
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=self.num_bins,
+                num_gammas=self.num_gammas,
+                primary_gamma_index=self.primary_gamma_index,
             )
         elif critic_arch == "dueling":
             self.value_head = ActionValueHead(
@@ -142,6 +154,8 @@ class ActorCriticWithActionValue(nn.Module):
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=self.num_bins,
+                num_gammas=self.num_gammas,
+                primary_gamma_index=self.primary_gamma_index,
                 sparsity=sparsity,
             )
         else:
@@ -323,7 +337,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         infer_result = InferResult(
             action=next_action,
-            value=next_q.item(),
+            value=next_q.mean().item(),
             rnn_state=next_rnn_state,
             next_image=next_image,
             next_reward=next_reward,
@@ -365,7 +379,8 @@ class ActorCriticWithActionValue(nn.Module):
         state, rnn_state_out = self.encoder.forward(obs, obs_z, actions, rewards, rnn_state)
         action, actor_activation = self.policy_head.get_action(state)
         q_dict = self.value_head(state, action)
-        q = self.value_head.to_value(q_dict.output).view(-1)
+        # Per-gamma bootstrap values (B, num_gammas) for the multi-gamma TD target.
+        q = self.value_head.to_values(q_dict.output)
         return state, action, q, rnn_state_out, actor_activation, q_dict.activation
 
     @torch.no_grad()
@@ -375,16 +390,26 @@ class ActorCriticWithActionValue(nn.Module):
         chunk_rewards: torch.Tensor,
         chunk_dones: torch.Tensor,
     ) -> torch.Tensor:
+        """n-step TD target for every gamma at once.
+
+        Args:
+            next_q: (B, num_gammas) bootstrap value of the next state per gamma.
+            chunk_rewards/chunk_dones: (B, horizon, 1).
+        Returns:
+            (B, num_gammas) target values.
+        """
         batch_size = chunk_rewards.size(0)
         device = chunk_rewards.device
-        discounted_reward = torch.zeros(batch_size, device=device)
-        gamma_power = 1.0
-        continuing = torch.ones(batch_size, device=device)
+        gammas = self.gammas_tensor.to(device)  # (G,)
+        discounted_reward = torch.zeros(batch_size, self.num_gammas, device=device)
+        gamma_power = torch.ones(self.num_gammas, device=device)  # (G,)
+        continuing = torch.ones(batch_size, 1, device=device)  # (B, 1)
         for i in range(self.horizon):
-            discounted_reward += continuing * gamma_power * chunk_rewards[:, i].flatten()
-            gamma_power *= self.gamma
-            continuing *= 1 - chunk_dones[:, i].flatten()
-        return discounted_reward + continuing * gamma_power * next_q
+            reward_i = chunk_rewards[:, i].view(batch_size, 1)
+            discounted_reward += continuing * gamma_power.unsqueeze(0) * reward_i
+            gamma_power = gamma_power * gammas
+            continuing = continuing * (1 - chunk_dones[:, i].view(batch_size, 1))
+        return discounted_reward + continuing * gamma_power.unsqueeze(0) * next_q
 
     def _compute_critic_loss(self, curr_state, action_chunk, target_value):
         """
@@ -400,10 +425,11 @@ class ActorCriticWithActionValue(nn.Module):
         logits = curr_critic_output_dict.output
 
         self.value_head.update_value_range(target_value)
+        # Per-gamma loss; scalars below are gamma-averaged for logging / the ET delta.
         curr_critic_value = self.value_head.to_value(logits).view(-1)
         critic_loss = self.value_head.value_loss(logits, target_value)
 
-        delta = target_value - curr_critic_value
+        delta = target_value.mean(dim=1) - curr_critic_value
 
         info_dict = {
             "delta": delta.mean().item(),

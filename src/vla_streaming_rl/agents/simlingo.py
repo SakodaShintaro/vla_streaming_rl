@@ -154,6 +154,7 @@ class SimLingoAgent:
         network: nn.Module,
         scratch_dir: Path,
         gamma: float,
+        multi_gammas: list[float],
         buffer_size: int,
         batch_size: int,
         learning_starts: int,
@@ -194,6 +195,20 @@ class SimLingoAgent:
         self._frame_step = -1
         self.initialized = False
         self.device = torch.device("cuda")
+
+        # Multi-gamma (AMAGO): the critic predicts the action value for several
+        # discounts at once (auxiliary representation-learning task). ``gamma`` is
+        # the primary/rollout discount, kept last; ``multi_gammas`` come first.
+        # The actor maximizes the *mean* Q over all gammas (``_critic_value``
+        # averages); each gamma's critic learns its own TD target
+        # (``_critic_values``). Empty ``multi_gammas`` == original single-gamma.
+        # Must match ``SimLingoNetwork.num_gammas`` (= len(multi_gammas) + 1).
+        self.gammas = list(multi_gammas) + [gamma]
+        self.num_gammas = len(self.gammas)
+        self.primary_gamma_index = self.num_gammas - 1
+        self.gammas_tensor = torch.tensor(
+            self.gammas, dtype=torch.float32, device=self.device
+        )
         self.config = GlobalConfig()
         self.bias = {
             "speed_scale": 1.0,
@@ -753,13 +768,20 @@ class SimLingoAgent:
         return self._maybe_train(global_step)
 
     def _critic_value(self, logits: torch.Tensor) -> torch.Tensor:
-        """Map the critic's raw ``"output"`` to a scalar Q (B,).
+        """Map the critic's raw ``"output"`` to a scalar Q (B,), **averaged over
+        all gammas** — the actor / rollout objective.
 
         For the distributional (``num_bins > 1``) SimbaV2 critic the output is
         ``num_bins`` categorical logits; HL-Gauss returns their expected return.
-        For a scalar critic it is just the value itself.
+        For a scalar critic it is just the value itself. With a single gamma this
+        is exactly the original per-gamma value.
         """
         return self.critic.to_value(logits).view(-1)
+
+    def _critic_values(self, logits: torch.Tensor) -> torch.Tensor:
+        """Per-gamma action values (B, num_gammas) — the per-gamma TD-target
+        read-out (each gamma's critic is trained on its own target)."""
+        return self.critic.to_values(logits)
 
     def _read_transition(self, seq: torch.Tensor) -> tuple:
         """Read one transition batch for index pairs ``seq`` (B, 2).
@@ -790,15 +812,22 @@ class SimLingoAgent:
     ) -> tuple:
         """TD target + current critic output for one transition batch.
 
-        DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a'). With the
-        distributional critic the next-state value is the expectation of its
+        DDPG target, computed per gamma: a' = μ(s'),
+        ``y_g = r + γ_g (1-done) Q_g(s', a')`` for every gamma g at once. With
+        the distributional critic the next-state value is the expectation of its
         categorical output (via HL-Gauss). Returns
-        ``(current_logits, current_q, target_q)``.
+        ``(current_logits, current_q, target_q)`` where ``target_q`` is
+        ``(B, num_gammas)`` and ``current_q`` is the gamma-mean scalar (B,) kept
+        for logging / the streaming TD delta.
         """
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
-            next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1)).output)
-            target_q = r + self.gamma * (1.0 - done) * next_q
+            next_q = self._critic_values(self.critic(s_next, a_next.unsqueeze(1)).output)
+            # (B,1) + (G,) * (B,1) * (B,G) -> (B, num_gammas)
+            target_q = (
+                r.unsqueeze(-1)
+                + self.gammas_tensor.unsqueeze(0) * (1.0 - done).unsqueeze(-1) * next_q
+            )
         current_logits = self.critic(s, a.unsqueeze(1)).output
         current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q
@@ -992,8 +1021,10 @@ class SimLingoAgent:
         _current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
 
         # TD error drives the eligibility-trace critic update; a detached
-        # scalar (AdamET multiplies the per-parameter trace by it).
-        delta = float((target_q - current_q).mean().item())
+        # scalar (AdamET multiplies the per-parameter trace by it). AdamET's
+        # trace is scalar-TD, so streaming collapses the per-gamma target to its
+        # gamma-mean (matching ``current_q``, the gamma-mean value).
+        delta = float((target_q.mean(dim=1) - current_q).mean().item())
 
         # Backward BOTH losses before any optimizer step so the actor graph
         # still sees the pre-update critic weights (``AdamET.step`` mutates

@@ -23,6 +23,7 @@ def build_network(
             observation_space_shape=observation_space_shape,
             action_space_shape=action_space_shape,
             gamma=args.gamma,
+            multi_gammas=list(args.multi_gammas),
             num_bins=args.num_bins,
             sparsity=args.sparsity,
             seq_len=args.seq_len,
@@ -61,6 +62,7 @@ def build_network(
             action_space_shape=action_space_shape,
             parse_action_text=parse_action_text,
             gamma=args.gamma,
+            multi_gammas=list(args.multi_gammas),
             num_bins=args.num_bins,
             seq_len=args.seq_len,
             horizon=args.horizon,
@@ -104,6 +106,7 @@ def build_network(
             critic_hidden_dim=args.critic_hidden_dim,
             critic_block_num=args.critic_block_num,
             num_bins=args.num_bins,
+            multi_gammas=list(args.multi_gammas),
             device=device,
         ).to(device)
     else:

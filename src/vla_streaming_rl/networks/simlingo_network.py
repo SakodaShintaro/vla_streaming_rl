@@ -60,6 +60,7 @@ class SimLingoNetwork(nn.Module):
         critic_hidden_dim: int,
         critic_block_num: int,
         num_bins: int,
+        multi_gammas: list[float],
         device: torch.device,
     ) -> None:
         super().__init__()
@@ -119,6 +120,12 @@ class SimLingoNetwork(nn.Module):
             p.requires_grad_(True)
 
         self.feature_dim = int(self.vlm.language_model.hidden_size)
+        # Multi-gamma (AMAGO): the critic predicts the action value for
+        # ``num_gammas = len(multi_gammas) + 1`` discounts at once (primary kept
+        # last). ``SimLingoAgent`` builds the matching gamma values and per-gamma
+        # TD targets; empty ``multi_gammas`` == single-gamma (original).
+        self.num_gammas = len(multi_gammas) + 1
+        self.primary_gamma_index = self.num_gammas - 1
         # ``num_bins=1`` collapses the distributional output to a scalar.
         #   - ``simbav2`` : SimbaV2 hyperspherical critic (arXiv:2502.15280).
         #     Weights / features stay on the unit hypersphere so the critic's
@@ -133,6 +140,8 @@ class SimLingoNetwork(nn.Module):
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=self.num_bins,
+                num_gammas=self.num_gammas,
+                primary_gamma_index=self.primary_gamma_index,
             ).to(device)
         elif critic_arch == "dueling":
             self.num_bins = 1
@@ -143,6 +152,8 @@ class SimLingoNetwork(nn.Module):
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=1,
+                num_gammas=self.num_gammas,
+                primary_gamma_index=self.primary_gamma_index,
                 sparsity=0.0,
             ).to(device)
         else:

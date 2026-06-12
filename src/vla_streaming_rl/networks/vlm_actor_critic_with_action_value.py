@@ -38,6 +38,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         action_space_shape: tuple[int],
         parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
         gamma: float,
+        multi_gammas: list[float],
         num_bins: int,
         seq_len: int,
         horizon: int,
@@ -76,7 +77,16 @@ class VLMActorCriticWithActionValue(nn.Module):
         super().__init__()
         if image_mode not in ("mem", "sequence"):
             raise ValueError(f"Unknown image_mode: {image_mode}")
+        # Multi-gamma (AMAGO): predict the action value for several discounts at
+        # once from a shared critic trunk. ``gamma`` (config) is the primary /
+        # rollout discount and is kept last; auxiliary ``multi_gammas`` come
+        # first. The actor maximizes the mean over all gammas (see
+        # ``value_head.to_value``); each gamma's critic learns its own TD target.
         self.gamma = gamma
+        self.gammas = list(multi_gammas) + [gamma]
+        self.num_gammas = len(self.gammas)
+        self.primary_gamma_index = self.num_gammas - 1
+        self.register_buffer("gammas_tensor", torch.tensor(self.gammas, dtype=torch.float32))
         self.num_bins = num_bins
         self.seq_len = seq_len
         self.horizon = horizon
@@ -190,6 +200,8 @@ class VLMActorCriticWithActionValue(nn.Module):
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=num_bins,
+                num_gammas=self.num_gammas,
+                primary_gamma_index=self.primary_gamma_index,
             )
         elif critic_arch == "dueling":
             self.value_head = ActionValueHead(
@@ -199,6 +211,8 @@ class VLMActorCriticWithActionValue(nn.Module):
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=num_bins,
+                num_gammas=self.num_gammas,
+                primary_gamma_index=self.primary_gamma_index,
                 sparsity=sparsity,
             )
         else:
@@ -264,7 +278,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         rnn_state: torch.Tensor,
         task_prompts: list[str],
     ) -> InferResult:
-        state, action, q_value, actor_activation, critic_activation = self._infer(
+        state, action, q_values, actor_activation, critic_activation = self._infer(
             s_seq, task_prompts
         )
 
@@ -285,7 +299,7 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         return InferResult(
             action=action,
-            value=q_value.item(),
+            value=q_values.mean().item(),
             rnn_state=rnn_state,
             next_image=next_image,
             next_reward=next_reward,
@@ -381,7 +395,7 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         infer_result = InferResult(
             action=next_action,
-            value=next_q.item(),
+            value=next_q.mean().item(),
             rnn_state=self._dummy_state.clone(),
             next_image=next_image,
             next_reward=next_reward,
@@ -612,9 +626,9 @@ class VLMActorCriticWithActionValue(nn.Module):
         return first_text, vlm_past_kv
 
     def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        """Compute scalar Q-value for a (state, action) pair."""
+        """Per-gamma action values (B, num_gammas) for a (state, action) pair."""
         q_dict = self.value_head(state, action)
-        return self.value_head.to_value(q_dict.output).view(-1)
+        return self.value_head.to_values(q_dict.output)
 
     @torch.inference_mode()
     def _infer(
@@ -639,15 +653,18 @@ class VLMActorCriticWithActionValue(nn.Module):
             raise ValueError(f"Unknown text_action_mode: {mode}")
 
         diff_action, actor_activation = self.policy_head.get_action(state)
-        diff_q = self._compute_q(state, diff_action)
+        diff_values = self._compute_q(state, diff_action)  # (B, num_gammas)
+        # The policy is trained on the gamma-averaged Q, so select / report on it.
+        diff_q = diff_values.mean(dim=1)  # (B,)
 
         if mode == "text_action":
             action_array, parse_success = self.parse_action_text(generated_text)
             text_action = torch.from_numpy(action_array).unsqueeze(0).to(obs.device)
-            text_q = self._compute_q(state, text_action)
+            text_values = self._compute_q(state, text_action)  # (B, num_gammas)
+            text_q = text_values.mean(dim=1)  # (B,)
             use_text = text_q > diff_q + self.text_q_margin
             action = torch.where(use_text.unsqueeze(-1).unsqueeze(-1), text_action, diff_action)
-            q = torch.where(use_text, text_q, diff_q)
+            values = torch.where(use_text.unsqueeze(-1), text_values, diff_values)  # (B, G)
             print(
                 f"[ActionSelect] diff_q={diff_q.item():.3f}, text_q={text_q.item():.3f}, "
                 f"use_text={use_text.item()}, parse_success={parse_success}, "
@@ -655,10 +672,10 @@ class VLMActorCriticWithActionValue(nn.Module):
             )
         else:
             action = diff_action
-            q = diff_q
+            values = diff_values
 
         critic_activation = self.value_head(state, action).activation
-        return state, action, q, actor_activation, critic_activation
+        return state, action, values, actor_activation, critic_activation
 
     @torch.no_grad()
     def _compute_target_value(
@@ -667,15 +684,25 @@ class VLMActorCriticWithActionValue(nn.Module):
         chunk_rewards: torch.Tensor,
         chunk_dones: torch.Tensor,
     ) -> torch.Tensor:
+        """n-step TD target for every gamma at once.
+
+        Args:
+            next_q: (B, num_gammas) bootstrap value of the next state per gamma.
+            chunk_rewards/chunk_dones: (B, horizon, 1).
+        Returns:
+            (B, num_gammas) target values.
+        """
         batch_size = chunk_rewards.size(0)
-        discounted_reward = torch.zeros(batch_size, device=self.device)
-        gamma_power = 1.0
-        continuing = torch.ones(batch_size, device=self.device)
+        gammas = self.gammas_tensor.to(self.device)  # (G,)
+        discounted_reward = torch.zeros(batch_size, self.num_gammas, device=self.device)
+        gamma_power = torch.ones(self.num_gammas, device=self.device)  # (G,)
+        continuing = torch.ones(batch_size, 1, device=self.device)  # (B, 1)
         for i in range(self.horizon):
-            discounted_reward += continuing * gamma_power * chunk_rewards[:, i].flatten()
-            gamma_power *= self.gamma
-            continuing *= 1 - chunk_dones[:, i].flatten()
-        return discounted_reward + continuing * gamma_power * next_q
+            reward_i = chunk_rewards[:, i].view(batch_size, 1)
+            discounted_reward += continuing * gamma_power.unsqueeze(0) * reward_i
+            gamma_power = gamma_power * gammas
+            continuing = continuing * (1 - chunk_dones[:, i].view(batch_size, 1))
+        return discounted_reward + continuing * gamma_power.unsqueeze(0) * next_q
 
     def _compute_critic_loss(
         self,
@@ -689,10 +716,11 @@ class VLMActorCriticWithActionValue(nn.Module):
         logits = curr_critic_output_dict.output
 
         self.value_head.update_value_range(target_value)
+        # Per-gamma loss; scalars below are gamma-averaged for logging / the ET delta.
         curr_critic_value = self.value_head.to_value(logits).view(-1)
         critic_loss = self.value_head.value_loss(logits, target_value)
 
-        delta = target_value - curr_critic_value
+        delta = target_value.mean(dim=1) - curr_critic_value
 
         info_dict = {
             "delta": delta.mean().item(),

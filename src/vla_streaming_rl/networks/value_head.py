@@ -14,68 +14,108 @@ from .sparse_utils import apply_one_shot_pruning
 class DistributionalValueHead(nn.Module):
     """Base for value heads: owns the HL-Gauss categorical-critic machinery so
     the value head — not the surrounding network — manages the distributional
-    ⇄ scalar mapping.
+    ⇄ scalar mapping, and the **multi-gamma** read-out.
 
-    With ``num_bins > 1`` the head emits ``num_bins`` categorical logits and
-    holds an :class:`HLGaussLoss` (Gaussian-histogram cross-entropy, the repo's
-    drop-in for a categorical critic) whose support grows to track the targets.
-    ``num_bins == 1`` is the plain scalar critic with no HL-Gauss; the methods
-    degrade to identity / MSE so callers never branch on ``num_bins``.
+    Multi-gamma (AMAGO, arXiv:2310.09971 §"multi-gamma"): the head predicts the
+    action value for ``num_gammas`` discount factors at once from a *shared
+    trunk* — the final layer emits ``num_gammas * num_bins`` logits, reshaped to
+    ``(B, num_gammas, num_bins)``. The extra gammas are an auxiliary prediction
+    task that enriches the representation; the actor / rollout maximize the mean
+    over gammas (so :meth:`to_value` averages), while the critic is trained on a
+    *per-gamma* TD target (:meth:`to_values`, :meth:`value_loss`). With
+    ``num_gammas == 1`` everything collapses to the original single-gamma head:
+    logits stay ``(B, num_bins)`` and every scalar caller is unchanged.
 
-    Subclasses call :meth:`_init_value_dist` once they know ``num_bins`` and
-    return raw logits in ``forward``'s ``"output"``.
+    With ``num_bins > 1`` the head emits categorical logits and holds an
+    :class:`HLGaussLoss` (Gaussian-histogram cross-entropy, the repo's drop-in
+    for a categorical critic) on a fixed ``[-1, 1]`` support. Because gammas
+    closer to 1 have far larger returns, each gamma carries its own PopArt-like
+    ``value_ranges[g]`` half-width: targets are divided by it before the
+    categorical projection and predictions multiplied back, so every gamma uses
+    the full bin support. ``num_bins == 1`` is the plain scalar critic (MSE, no
+    HL-Gauss); ``value_ranges`` stay 1.0.
+
+    Subclasses size their final layer to ``num_gammas * num_bins``, run logits
+    through :meth:`_shape_logits` in ``forward``, and call :meth:`_init_value_dist`.
     """
 
-    def _init_value_dist(self, num_bins: int) -> None:
+    def _init_value_dist(self, num_bins: int, num_gammas: int, primary_gamma_index: int) -> None:
         self.num_bins = num_bins
-        # ``value_range`` starts at 1.0 and is grown by ``update_value_range``
-        # as targets exceed it.
-        self.value_range = 1.0
+        self.num_gammas = num_gammas
+        self.primary_gamma_index = primary_gamma_index
+        # Per-gamma support half-width (PopArt-like). Grown by
+        # ``update_value_range`` as each gamma's targets exceed it; stays 1.0 for
+        # the scalar (``num_bins == 1``) critic.
+        self.register_buffer("value_ranges", torch.ones(num_gammas))
         if num_bins > 1:
+            # Fixed canonical support; per-gamma scale handled by value_ranges.
             self.hl_gauss_loss = HLGaussLoss(
-                min_value=-self.value_range,
-                max_value=+self.value_range,
+                min_value=-1.0,
+                max_value=+1.0,
                 num_bins=num_bins,
                 clamp_to_range=True,
             )
 
-    def to_value(self, logits: torch.Tensor) -> torch.Tensor:
-        """Critic ``output`` → expected scalar value, with the bin dim reduced.
+    @property
+    def value_range(self) -> float:
+        """Primary-gamma support half-width (scalar, for logging — unchanged API)."""
+        return float(self.value_ranges[self.primary_gamma_index])
 
-        ``num_bins > 1``: HL-Gauss expectation over the categorical logits.
-        ``num_bins == 1``: the single output channel, squeezed.
+    def _shape_logits(self, flat: torch.Tensor) -> torch.Tensor:
+        """``(B, num_gammas * num_bins)`` → ``(B, num_bins)`` for a single gamma
+        (legacy shape) else ``(B, num_gammas, num_bins)``."""
+        if self.num_gammas == 1:
+            return flat
+        return flat.view(flat.shape[0], self.num_gammas, self.num_bins)
+
+    def _normalized_value(self, logits: torch.Tensor) -> torch.Tensor:
+        """Logits → value in the normalized ``[-1, 1]`` space, bin dim reduced.
+
+        Shape ``(B,)`` for single-gamma logits, ``(B, num_gammas)`` otherwise.
         """
         if self.num_bins > 1:
-            return self.hl_gauss_loss(logits)
+            flat = logits.reshape(-1, self.num_bins)
+            return self.hl_gauss_loss(flat).view(logits.shape[:-1])
         return logits.squeeze(-1)
 
+    def to_values(self, logits: torch.Tensor) -> torch.Tensor:
+        """Per-gamma denormalized values, shape ``(B, num_gammas)`` — the
+        per-gamma TD-target read-out."""
+        norm = self._normalized_value(logits)
+        if self.num_gammas == 1:
+            norm = norm.unsqueeze(-1)
+        return norm * self.value_ranges
+
+    def to_value(self, logits: torch.Tensor) -> torch.Tensor:
+        """Scalar value per sample, **averaged over all gammas** — the actor /
+        eligibility-trace / rollout objective. Shape ``(B,)``. For a single
+        gamma this is just that gamma's value, so existing callers are unchanged.
+        """
+        return self.to_values(logits).mean(dim=1)
+
     def update_value_range(self, target_value: torch.Tensor) -> None:
-        """Grow the HL-Gauss support to cover ``target_value`` (no-op if scalar)."""
+        """Grow each gamma's HL-Gauss support to cover its targets (no-op if scalar)."""
         if self.num_bins == 1:
             return
-        observed_max = target_value.abs().max().item()
-        if observed_max <= self.value_range:
-            return
-        self.value_range = observed_max
-        device = self.hl_gauss_loss.support.device
-        self.hl_gauss_loss = HLGaussLoss(
-            min_value=-self.value_range,
-            max_value=+self.value_range,
-            num_bins=self.num_bins,
-            clamp_to_range=True,
-        ).to(device)
+        target = target_value.view(target_value.shape[0], self.num_gammas)
+        observed = target.abs().amax(dim=0)
+        with torch.no_grad():
+            self.value_ranges.copy_(
+                torch.maximum(self.value_ranges, observed.to(self.value_ranges))
+            )
 
     def value_loss(self, logits: torch.Tensor, target_value: torch.Tensor) -> torch.Tensor:
-        """Regression/TD loss for the critic output.
+        """Per-gamma regression/TD loss, averaged over gammas (and batch).
 
         ``num_bins > 1``: HL-Gauss categorical cross-entropy against the
-        support-projected target. ``num_bins == 1``: plain MSE on the scalar.
-        Call :meth:`update_value_range` first when the target may exceed the
-        current support.
+        per-gamma-normalized target. ``num_bins == 1``: plain MSE on the scalar.
+        Call :meth:`update_value_range` first when targets may exceed the support.
         """
+        target = target_value.view(target_value.shape[0], self.num_gammas)
         if self.num_bins > 1:
-            return self.hl_gauss_loss(logits, target_value)
-        return F.mse_loss(self.to_value(logits), target_value)
+            target_norm = (target / self.value_ranges).clamp(-1.0, 1.0)
+            return self.hl_gauss_loss(logits.reshape(-1, self.num_bins), target_norm.reshape(-1))
+        return F.mse_loss(self.to_values(logits), target)
 
 
 def weights_init_(m: nn.Module) -> None:
@@ -92,19 +132,21 @@ class StateValueHead(DistributionalValueHead):
         hidden_dim: int,
         block_num: int,
         num_bins: int,
+        num_gammas: int,
+        primary_gamma_index: int,
         sparsity: float,
     ) -> None:
         super().__init__()
         self.fc_in = nn.Linear(in_channels, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.fc_out = nn.Linear(hidden_dim, num_bins)
+        self.fc_out = nn.Linear(hidden_dim, num_gammas * num_bins)
         self.apply(weights_init_)
 
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
-        self._init_value_dist(num_bins)
+        self._init_value_dist(num_bins, num_gammas, primary_gamma_index)
 
     def forward(self, x: torch.Tensor) -> HeadOutput:
         x = self.fc_in(x)
@@ -112,7 +154,7 @@ class StateValueHead(DistributionalValueHead):
         x = self.norm(x)
         activation = x
 
-        output = self.fc_out(x)
+        output = self._shape_logits(self.fc_out(x))
 
         return HeadOutput(output=output, activation=activation)
 
@@ -128,6 +170,8 @@ class ActionValueHead(DistributionalValueHead):
         hidden_dim: int,
         block_num: int,
         num_bins: int,
+        num_gammas: int,
+        primary_gamma_index: int,
         sparsity: float,
     ) -> None:
         super().__init__()
@@ -135,25 +179,26 @@ class ActionValueHead(DistributionalValueHead):
         self.action_dim = action_dim
         total_action_dim = action_dim * horizon
         mid_dim = in_channels + total_action_dim
+        out_dim = num_gammas * num_bins
 
         # Value stream: V(s) - depends only on state
         self.v_fc_in = nn.Linear(in_channels, hidden_dim)
         self.v_fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.v_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.v_fc_out = nn.Linear(hidden_dim, num_bins)
+        self.v_fc_out = nn.Linear(hidden_dim, out_dim)
 
         # Advantage stream: A(s,a) - depends on state and action
         self.a_fc_in = nn.Linear(mid_dim, hidden_dim)
         self.a_fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.a_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.a_fc_out = nn.Linear(hidden_dim, num_bins)
+        self.a_fc_out = nn.Linear(hidden_dim, out_dim)
 
         self.apply(weights_init_)
 
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
-        self._init_value_dist(num_bins)
+        self._init_value_dist(num_bins, num_gammas, primary_gamma_index)
 
     def forward(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
         """
@@ -168,17 +213,17 @@ class ActionValueHead(DistributionalValueHead):
         v = self.v_fc_in(x)
         v = self.v_fc_mid(v)
         v = self.v_norm(v)
-        v_out = self.v_fc_out(v)  # (B, num_bins)
+        v_out = self.v_fc_out(v)  # (B, num_gammas * num_bins)
 
         # Advantage stream: A(s,a)
         xa = torch.cat([x, a_flat], dim=1)
         adv = self.a_fc_in(xa)
         adv = self.a_fc_mid(adv)
         adv = self.a_norm(adv)
-        adv_out = self.a_fc_out(adv)  # (B, num_bins)
+        adv_out = self.a_fc_out(adv)  # (B, num_gammas * num_bins)
 
         # Q(s,a) = V(s) + A(s,a) in logit space
-        output = v_out + adv_out
+        output = self._shape_logits(v_out + adv_out)
 
         return HeadOutput(output=output, activation=torch.cat([v, adv], dim=1))
 
@@ -195,7 +240,7 @@ class ActionValueHead(DistributionalValueHead):
         adv = self.a_fc_in(xa)
         adv = self.a_fc_mid(adv)
         adv = self.a_norm(adv)
-        adv_out = self.a_fc_out(adv)  # (B, num_bins)
+        adv_out = self._shape_logits(self.a_fc_out(adv))  # (B, [G,] num_bins)
 
         return HeadOutput(output=adv_out, activation=adv)
 
@@ -236,6 +281,8 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         hidden_dim: int,
         block_num: int,
         num_bins: int,
+        num_gammas: int,
+        primary_gamma_index: int,
     ) -> None:
         super().__init__()
         self.horizon = horizon
@@ -262,10 +309,10 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         # softmax to actually concentrate.
         self.value_w1 = NormedLinear(hidden_dim, hidden_dim)
         self.value_scaler = Scaler(hidden_dim, 1.0, 1.0)
-        self.value_w2 = NormedLinear(hidden_dim, num_bins)
-        self.value_bias = nn.Parameter(torch.zeros(num_bins))
+        self.value_w2 = NormedLinear(hidden_dim, num_gammas * num_bins)
+        self.value_bias = nn.Parameter(torch.zeros(num_gammas * num_bins))
 
-        self._init_value_dist(num_bins)
+        self._init_value_dist(num_bins, num_gammas, primary_gamma_index)
 
     def forward(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
         """
@@ -278,7 +325,7 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         h = self.embed(h)
         h = self.blocks(h)
         v = self.value_scaler(self.value_w1(h))
-        logits = self.value_w2(v) + self.value_bias
+        logits = self._shape_logits(self.value_w2(v) + self.value_bias)
         return HeadOutput(output=logits, activation=h)
 
     def get_advantage(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:

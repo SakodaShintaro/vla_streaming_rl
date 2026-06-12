@@ -255,6 +255,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             if result_dir is not None
             else Path("/tmp/simlingo_scratch"),
             gamma=float(args.gamma),
+            multi_gammas=list(args.multi_gammas),
             buffer_size=int(args.buffer_size),
             batch_size=int(args.batch_size),
             learning_starts=int(args.learning_starts),
