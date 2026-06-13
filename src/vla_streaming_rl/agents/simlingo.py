@@ -307,6 +307,7 @@ class SimLingoAgent:
         self._viz_route = np.zeros((_ROUTE_LEN, _WP_DIM), dtype=np.float32)
         self._viz_speed = np.zeros((_SPEED_WPS_LEN, _WP_DIM), dtype=np.float32)
         self._viz_q_value = 0.0
+        self._viz_q_values_per_gamma = [0.0] * self.num_gammas
 
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
         # rewards (stuck) get a small negative push and collision spikes
@@ -394,6 +395,10 @@ class SimLingoAgent:
             "value": self._viz_q_value,
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
         }
+        # Per-gamma executed-action values for per-gamma --calibration.
+        if self.num_gammas > 1:
+            for g, v in zip(self.gammas, self._viz_q_values_per_gamma):
+                metrics[f"value_g{g:.3f}"] = float(v)
         panels = {
             "reward": create_reward_image(None, reward),
             "bev_value": self._render_bev_panel(),
@@ -696,8 +701,13 @@ class SimLingoAgent:
         # bird's-eye visualization panel. ``s`` is the mean over the 30
         # waypoint queries, matching the critic's state convention in training.
         s_vec = features.mean(dim=0, keepdim=True)
-        q = self._critic_value(self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1)).output)
+        critic_out = self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1)).output
+        q = self._critic_value(critic_out)
         self._viz_q_value = float(q.item())
+        # Per-gamma rollout values Q_g(s, a) for per-gamma calibration (Q_g vs
+        # realized γ_g return-to-go). Logged per env-step in ``step`` under
+        # ``value_g{γ}``; single-gamma runs skip these.
+        self._viz_q_values_per_gamma = self._critic_values(critic_out).view(-1).tolist()
         self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
         self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
 
