@@ -258,7 +258,14 @@ class ActorCriticWithActionValue(nn.Module):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        seq_loss, seq_info = self._compute_sequence_loss(data, curr_state)
+        seq_loss, seq_info = self.prediction_head.compute_loss(
+            curr_state,
+            data.actions[:, -1],
+            data.observations[:, -1],
+            data.rewards[:, -1],
+            self.detach_predictor,
+            self.disable_state_predictor,
+        )
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -311,7 +318,14 @@ class ActorCriticWithActionValue(nn.Module):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        seq_loss, seq_info = self._compute_sequence_loss(data, prev_state)
+        seq_loss, seq_info = self.prediction_head.compute_loss(
+            prev_state,
+            data.actions[:, -1],
+            data.observations[:, -1],
+            data.rewards[:, -1],
+            self.detach_predictor,
+            self.disable_state_predictor,
+        )
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -364,39 +378,3 @@ class ActorCriticWithActionValue(nn.Module):
             loss_result=LossResult(loss=total_loss, info=info_dict),
             et_info=et_info,
         )
-
-    ####################
-    # Internal methods #
-    ####################
-
-    def _compute_sequence_loss(self, data, curr_state):
-        if self.disable_state_predictor:
-            # Return dummy loss when state_predictor is disabled
-            dummy_loss = torch.tensor(0.0, device=curr_state.device, requires_grad=True)
-            info_dict = {"seq_loss": 0.0}
-            return dummy_loss, info_dict
-
-        if self.detach_predictor:
-            curr_state = curr_state.detach()
-
-        # Get last action (actions[:, -1] corresponds to current_state)
-        curr_action = data.actions[:, -1]  # (B, action_dim)
-
-        # Encode next state
-        with torch.no_grad():
-            last_obs = data.observations[:, -1]  # (B, C, H, W)
-            target_state_next = self.image_processor.encode(last_obs)  # (B, C', H', W')
-            B, C, H, W = target_state_next.shape
-            target_state_next = target_state_next.flatten(2).permute(0, 2, 1)  # (B, H'*W', C')
-
-        reward_next = data.rewards[:, -1]  # (B, 1)
-        target_reward_next = self.reward_processor.encode(reward_next)  # (B, 1, C')
-        target_reward_next = target_reward_next.squeeze(1)  # (B, C')
-        x1 = torch.cat(
-            [target_state_next, target_reward_next.unsqueeze(1)], dim=1
-        )  # (B, H'*W'+1, C')
-
-        curr_state = curr_state.view(B, -1, C)
-        pred_loss, _, info_dict = self.prediction_head.compute_loss(curr_state, curr_action, x1)
-
-        return pred_loss, info_dict
