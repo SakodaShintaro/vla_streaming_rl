@@ -362,8 +362,8 @@ class VLMActorCriticWithActionValue(nn.Module):
         actor_entropy_loss = actor_loss + seq_loss
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
-        et_critic_dict = self.value_head(state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_dict.output).mean()
+        et_critic_out = self.value_head(state.detach(), action_chunk.detach())
+        neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
 
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             self._state_for_predictor(state),
@@ -614,8 +614,8 @@ class VLMActorCriticWithActionValue(nn.Module):
 
     def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Compute scalar Q-value for a (state, action) pair."""
-        q_dict = self.value_head(state, action)
-        return self.value_head.to_value(q_dict.output).view(-1)
+        q_out = self.value_head(state, action)
+        return self.value_head.to_value(q_out.output).view(-1)
 
     @torch.inference_mode()
     def _infer(
@@ -669,8 +669,8 @@ class VLMActorCriticWithActionValue(nn.Module):
     ) -> tuple[torch.Tensor, dict]:
         if self.detach_critic:
             state = state.detach()
-        curr_critic_output_dict = self.value_head(state, action_chunk)
-        logits = curr_critic_output_dict.output
+        curr_critic_out = self.value_head(state, action_chunk)
+        logits = curr_critic_out.output
 
         self.value_head.update_value_range(target_value)
         curr_critic_value = self.value_head.to_value(logits).view(-1)

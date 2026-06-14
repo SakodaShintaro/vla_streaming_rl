@@ -188,8 +188,8 @@ class ActorCriticWithActionValue(nn.Module):
         action, actor_activation = self.policy_head.get_action(x)  # (B, horizon, action_dim)
 
         # Get action-value from value_head
-        q_dict = self.value_head(x, action)
-        q_value = self.value_head.to_value(q_dict.output).item()
+        q_out = self.value_head(x, action)
+        q_value = self.value_head.to_value(q_out.output).item()
 
         # Get predicted next state
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
@@ -203,7 +203,7 @@ class ActorCriticWithActionValue(nn.Module):
         activations = ActivationFeatures(
             state=x,
             actor=actor_activation,
-            critic=q_dict.activation,
+            critic=q_out.activation,
             state_predictor=predictor_activation,
         )
 
@@ -218,13 +218,19 @@ class ActorCriticWithActionValue(nn.Module):
         )
 
     def compute_loss(self, data) -> LossResult:
-        _, _, next_q, _, _, _ = self._infer(
-            data.observations[:, self.horizon :],
-            data.obs_z[:, self.horizon :],
-            data.actions[:, self.horizon :],
-            data.rewards[:, self.horizon :],
-            data.rnn_state[:, self.horizon],
-        )
+        # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
+        with torch.inference_mode():
+            next_state, _ = self.encoder.forward(
+                data.observations[:, self.horizon :],
+                data.obs_z[:, self.horizon :],
+                data.actions[:, self.horizon :],
+                data.rewards[:, self.horizon :],
+                data.rnn_state[:, self.horizon],
+            )
+            next_action, _ = self.policy_head.get_action(next_state)
+            next_q = self.value_head.to_value(self.value_head(next_state, next_action).output).view(
+                -1
+            )
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
@@ -264,15 +270,20 @@ class ActorCriticWithActionValue(nn.Module):
 
     def infer_and_compute_loss(self, data) -> InferLossResult:
         """Combined inference and loss computation."""
-        next_state, next_action, next_q, next_rnn_state, actor_activation, critic_activation = (
-            self._infer(
+        # Next-step inference (no grad): the action the agent will take, its Q,
+        # and the activations carried into the InferResult.
+        with torch.inference_mode():
+            next_state, next_rnn_state = self.encoder.forward(
                 data.observations[:, self.horizon :],
                 data.obs_z[:, self.horizon :],
                 data.actions[:, self.horizon :],
                 data.rewards[:, self.horizon :],
                 data.rnn_state[:, self.horizon],
             )
-        )
+            next_action, actor_activation = self.policy_head.get_action(next_state)
+            next_q_out = self.value_head(next_state, next_action)
+            next_q = self.value_head.to_value(next_q_out.output).view(-1)
+            critic_activation = next_q_out.activation
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
@@ -304,8 +315,8 @@ class ActorCriticWithActionValue(nn.Module):
         actor_entropy_loss = actor_loss + seq_loss
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
-        et_critic_dict = self.value_head(prev_state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_dict.output).mean()
+        et_critic_out = self.value_head(prev_state.detach(), action_chunk.detach())
+        neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
 
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             next_state,
@@ -354,21 +365,6 @@ class ActorCriticWithActionValue(nn.Module):
     # Internal methods #
     ####################
 
-    @torch.inference_mode()
-    def _infer(
-        self,
-        obs: torch.Tensor,
-        obs_z: torch.Tensor,
-        actions: torch.Tensor,
-        rewards: torch.Tensor,
-        rnn_state: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        state, rnn_state_out = self.encoder.forward(obs, obs_z, actions, rewards, rnn_state)
-        action, actor_activation = self.policy_head.get_action(state)
-        q_dict = self.value_head(state, action)
-        q = self.value_head.to_value(q_dict.output).view(-1)
-        return state, action, q, rnn_state_out, actor_activation, q_dict.activation
-
     def _compute_critic_loss(self, curr_state, action_chunk, target_value):
         """
         Args:
@@ -379,8 +375,8 @@ class ActorCriticWithActionValue(nn.Module):
         if self.detach_critic:
             curr_state = curr_state.detach()
 
-        curr_critic_output_dict = self.value_head(curr_state, action_chunk)
-        logits = curr_critic_output_dict.output
+        curr_critic_out = self.value_head(curr_state, action_chunk)
+        logits = curr_critic_out.output
 
         self.value_head.update_value_range(target_value)
         curr_critic_value = self.value_head.to_value(logits).view(-1)
