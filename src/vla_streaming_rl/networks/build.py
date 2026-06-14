@@ -104,6 +104,7 @@ def build_network(
             critic_hidden_dim=args.critic_hidden_dim,
             critic_block_num=args.critic_block_num,
             num_bins=args.num_bins,
+            gamma=args.gamma,
             device=device,
         ).to(device)
     else:

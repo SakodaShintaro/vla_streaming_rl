@@ -60,6 +60,7 @@ class SimLingoNetwork(nn.Module):
         critic_hidden_dim: int,
         critic_block_num: int,
         num_bins: int,
+        gamma: float,
         device: torch.device,
     ) -> None:
         super().__init__()
@@ -130,6 +131,7 @@ class SimLingoNetwork(nn.Module):
                 in_channels=self.feature_dim,
                 action_dim=_ACTION_DIM,
                 horizon=1,
+                gamma=gamma,
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=self.num_bins,
@@ -140,6 +142,7 @@ class SimLingoNetwork(nn.Module):
                 in_channels=self.feature_dim,
                 action_dim=_ACTION_DIM,
                 horizon=1,
+                gamma=gamma,
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=1,
