@@ -199,13 +199,11 @@ class SimLingoAgent:
         # discounts at once (auxiliary representation-learning task). ``gamma`` is
         # the primary/rollout discount, kept last; ``multi_gammas`` come first.
         # The actor maximizes the *mean* Q over all gammas (``_critic_value``
-        # averages); each gamma's critic learns its own TD target
-        # (``_critic_values``). Empty ``multi_gammas`` == original single-gamma.
-        # Must match ``SimLingoNetwork.num_gammas`` (= len(multi_gammas) + 1).
+        # averages); each gamma's critic learns its own TD target via
+        # ``self.critic.compute_target_value`` (the critic owns the gamma list).
+        # ``self.gammas`` here is only for per-gamma logging labels.
         self.gammas = list(multi_gammas) + [gamma]
         self.num_gammas = len(self.gammas)
-        self.primary_gamma_index = self.num_gammas - 1
-        self.gammas_tensor = torch.tensor(self.gammas, dtype=torch.float32, device=self.device)
         self.config = GlobalConfig()
         self.bias = {
             "speed_scale": 1.0,
@@ -829,12 +827,10 @@ class SimLingoAgent:
         """
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
+            # Per-gamma bootstrap (B, num_gammas); the critic owns the gammas and
+            # builds the per-gamma TD target (horizon=1 → r + γ_g (1-done) Q_g).
             next_q = self._critic_values(self.critic(s_next, a_next.unsqueeze(1)).output)
-            # (B,1) + (G,) * (B,1) * (B,G) -> (B, num_gammas)
-            target_q = (
-                r.unsqueeze(-1)
-                + self.gammas_tensor.unsqueeze(0) * (1.0 - done).unsqueeze(-1) * next_q
-            )
+            target_q = self.critic.compute_target_value(next_q, r.unsqueeze(1), done.unsqueeze(1))
         current_logits = self.critic(s, a.unsqueeze(1)).output
         current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q

@@ -39,14 +39,18 @@ class DistributionalValueHead(nn.Module):
     through :meth:`_shape_logits` in ``forward``, and call :meth:`_init_value_dist`.
     """
 
-    def _init_value_dist(self, num_bins: int, num_gammas: int, primary_gamma_index: int) -> None:
+    def _init_value_dist(self, num_bins: int, gammas: list[float]) -> None:
         self.num_bins = num_bins
-        self.num_gammas = num_gammas
-        self.primary_gamma_index = primary_gamma_index
+        self.num_gammas = len(gammas)
+        # ``gammas`` is the per-gamma discount list (auxiliary gammas first, the
+        # primary/rollout discount last); the head owns it so it can build the
+        # per-gamma TD target itself (:meth:`compute_target_value`).
+        self.primary_gamma_index = self.num_gammas - 1
+        self.register_buffer("gammas_tensor", torch.tensor(gammas, dtype=torch.float32))
         # Per-gamma support half-width (PopArt-like). Grown by
         # ``update_value_range`` as each gamma's targets exceed it; stays 1.0 for
         # the scalar (``num_bins == 1``) critic.
-        self.register_buffer("value_ranges", torch.ones(num_gammas))
+        self.register_buffer("value_ranges", torch.ones(self.num_gammas))
         if num_bins > 1:
             # Fixed canonical support; per-gamma scale handled by value_ranges.
             self.hl_gauss_loss = HLGaussLoss(
@@ -117,6 +121,70 @@ class DistributionalValueHead(nn.Module):
             return self.hl_gauss_loss(logits.reshape(-1, self.num_bins), target_norm.reshape(-1))
         return F.mse_loss(self.to_values(logits), target)
 
+    @torch.no_grad()
+    def compute_target_value(
+        self,
+        next_q: torch.Tensor,
+        chunk_rewards: torch.Tensor,
+        chunk_dones: torch.Tensor,
+    ) -> torch.Tensor:
+        """n-step TD target for every gamma at once, shape ``(B, num_gammas)``.
+
+        Discounts ``chunk_rewards`` over the ``horizon``-step chunk per gamma,
+        stops the accumulation/bootstrap at the first ``done``, and bootstraps
+        from the target critic's per-gamma ``next_q`` (``(B, num_gammas)``). Uses
+        ``self.horizon`` and the head's own ``gammas_tensor``, which the
+        action-value subclasses set in ``__init__``.
+        """
+        batch_size = chunk_rewards.size(0)
+        gammas = self.gammas_tensor.to(chunk_rewards.device)  # (G,)
+        discounted_reward = torch.zeros(batch_size, self.num_gammas, device=chunk_rewards.device)
+        gamma_power = torch.ones(self.num_gammas, device=chunk_rewards.device)  # (G,)
+        continuing = torch.ones(batch_size, 1, device=chunk_rewards.device)  # (B, 1)
+        for i in range(self.horizon):
+            reward_i = chunk_rewards[:, i].view(batch_size, 1)
+            discounted_reward += continuing * gamma_power.unsqueeze(0) * reward_i
+            gamma_power = gamma_power * gammas
+            continuing = continuing * (1 - chunk_dones[:, i].view(batch_size, 1))
+        return discounted_reward + continuing * gamma_power.unsqueeze(0) * next_q
+
+    def compute_critic_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        target_value: torch.Tensor,
+        detach_critic: bool,
+    ) -> tuple[torch.Tensor, dict]:
+        """Distributional TD loss for Q(state, action_chunk) vs ``target_value``.
+
+        Mirrors :meth:`PolicyHead.compute_actor_loss`: given the state, action
+        chunk and the per-gamma TD target ``(B, num_gammas)`` (built by
+        :meth:`compute_target_value`), the value head owns its loss (forward →
+        :meth:`update_value_range` → :meth:`value_loss`) and the scalar logging
+        info. ``detach_critic`` stops the gradient into the encoder.
+        """
+        if detach_critic:
+            state = state.detach()
+
+        logits = self(state, action_chunk).output
+
+        self.update_value_range(target_value)
+        # ``to_value`` averages over gammas; the per-gamma loss is in ``value_loss``.
+        curr_critic_value = self.to_value(logits).view(-1)
+        critic_loss = self.value_loss(logits, target_value)
+
+        delta = target_value.mean(dim=1) - curr_critic_value
+
+        info = {
+            "delta": delta.mean().item(),
+            "critic_loss": critic_loss.item(),
+            "curr_critic_value": curr_critic_value.mean().item(),
+            "target_value": target_value.mean().item(),
+            "value_range": self.value_range,
+        }
+
+        return critic_loss, info
+
 
 def weights_init_(m: nn.Module) -> None:
     if isinstance(m, nn.Linear):
@@ -136,8 +204,7 @@ class ActionValueHead(DistributionalValueHead):
         hidden_dim: int,
         block_num: int,
         num_bins: int,
-        num_gammas: int,
-        primary_gamma_index: int,
+        gammas: list[float],
         sparsity: float,
     ) -> None:
         super().__init__()
@@ -145,7 +212,7 @@ class ActionValueHead(DistributionalValueHead):
         self.action_dim = action_dim
         total_action_dim = action_dim * horizon
         mid_dim = in_channels + total_action_dim
-        out_dim = num_gammas * num_bins
+        out_dim = len(gammas) * num_bins
 
         # Value stream: V(s) - depends only on state
         self.v_fc_in = nn.Linear(in_channels, hidden_dim)
@@ -164,7 +231,7 @@ class ActionValueHead(DistributionalValueHead):
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
-        self._init_value_dist(num_bins, num_gammas, primary_gamma_index)
+        self._init_value_dist(num_bins, gammas)
 
     def forward(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
         """
@@ -247,13 +314,13 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         hidden_dim: int,
         block_num: int,
         num_bins: int,
-        num_gammas: int,
-        primary_gamma_index: int,
+        gammas: list[float],
     ) -> None:
         super().__init__()
         self.horizon = horizon
         self.action_dim = action_dim
         in_dim = in_channels + action_dim * horizon
+        num_gammas = len(gammas)
 
         # Encoder scalers/alphas follow the reference critic config:
         #   scaler_init = scaler_scale = sqrt(2/dh);  alpha_init = 1/(L+1);
@@ -278,7 +345,7 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         self.value_w2 = NormedLinear(hidden_dim, num_gammas * num_bins)
         self.value_bias = nn.Parameter(torch.zeros(num_gammas * num_bins))
 
-        self._init_value_dist(num_bins, num_gammas, primary_gamma_index)
+        self._init_value_dist(num_bins, gammas)
 
     def forward(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
         """
