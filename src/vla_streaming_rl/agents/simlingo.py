@@ -176,7 +176,6 @@ class SimLingoAgent:
         self.save_path_metric = str(scratch_dir) + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
-        self.gamma = gamma
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.exploration_noise = exploration_noise
@@ -798,7 +797,9 @@ class SimLingoAgent:
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
             next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1)).output)
-            target_q = r + self.gamma * (1.0 - done) * next_q
+            target_q = self.critic.compute_target_value(
+                next_q, r.unsqueeze(1), done.unsqueeze(1)
+            )
         current_logits = self.critic(s, a.unsqueeze(1)).output
         current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q
