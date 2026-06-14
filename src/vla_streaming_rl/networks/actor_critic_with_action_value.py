@@ -55,7 +55,6 @@ class ActorCriticWithActionValue(nn.Module):
         predictor_type: str,
     ) -> None:
         super().__init__()
-        self.gamma = gamma
         self.num_bins = num_bins
         self.sparsity = sparsity
         self.seq_len = seq_len
@@ -130,6 +129,7 @@ class ActorCriticWithActionValue(nn.Module):
                 in_channels=self.encoder.output_dim,
                 action_dim=self.action_dim,
                 horizon=horizon,
+                gamma=gamma,
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=self.num_bins,
@@ -139,6 +139,7 @@ class ActorCriticWithActionValue(nn.Module):
                 in_channels=self.encoder.output_dim,
                 action_dim=self.action_dim,
                 horizon=horizon,
+                gamma=gamma,
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=self.num_bins,
@@ -226,7 +227,7 @@ class ActorCriticWithActionValue(nn.Module):
         )
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self._compute_target_value(next_q, chunk_rewards, chunk_dones)
+        target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
 
         # Use seq_len frames (excluding last horizon frames)
         curr_obs = data.observations[:, : -self.horizon]
@@ -274,7 +275,7 @@ class ActorCriticWithActionValue(nn.Module):
         )
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self._compute_target_value(next_q, chunk_rewards, chunk_dones)
+        target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
 
         prev_obs = data.observations[:, : -self.horizon]
         prev_obs_z = data.obs_z[:, : -self.horizon]
@@ -367,24 +368,6 @@ class ActorCriticWithActionValue(nn.Module):
         q_dict = self.value_head(state, action)
         q = self.value_head.to_value(q_dict.output).view(-1)
         return state, action, q, rnn_state_out, actor_activation, q_dict.activation
-
-    @torch.no_grad()
-    def _compute_target_value(
-        self,
-        next_q: torch.Tensor,
-        chunk_rewards: torch.Tensor,
-        chunk_dones: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size = chunk_rewards.size(0)
-        device = chunk_rewards.device
-        discounted_reward = torch.zeros(batch_size, device=device)
-        gamma_power = 1.0
-        continuing = torch.ones(batch_size, device=device)
-        for i in range(self.horizon):
-            discounted_reward += continuing * gamma_power * chunk_rewards[:, i].flatten()
-            gamma_power *= self.gamma
-            continuing *= 1 - chunk_dones[:, i].flatten()
-        return discounted_reward + continuing * gamma_power * next_q
 
     def _compute_critic_loss(self, curr_state, action_chunk, target_value):
         """

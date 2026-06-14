@@ -77,6 +77,31 @@ class DistributionalValueHead(nn.Module):
             return self.hl_gauss_loss(logits, target_value)
         return F.mse_loss(self.to_value(logits), target_value)
 
+    @torch.no_grad()
+    def compute_target_value(
+        self,
+        next_q: torch.Tensor,
+        chunk_rewards: torch.Tensor,
+        chunk_dones: torch.Tensor,
+    ) -> torch.Tensor:
+        """n-step TD target for the action-chunk critic.
+
+        Discounts ``chunk_rewards`` over the ``horizon``-step chunk, stops the
+        accumulation/bootstrap at the first ``done``, and bootstraps from the
+        target critic's ``next_q``. Uses ``self.horizon`` / ``self.gamma``,
+        which the action-value subclasses set in ``__init__``.
+        """
+        batch_size = chunk_rewards.size(0)
+        device = chunk_rewards.device
+        discounted_reward = torch.zeros(batch_size, device=device)
+        gamma_power = 1.0
+        continuing = torch.ones(batch_size, device=device)
+        for i in range(self.horizon):
+            discounted_reward += continuing * gamma_power * chunk_rewards[:, i].flatten()
+            gamma_power *= self.gamma
+            continuing *= 1 - chunk_dones[:, i].flatten()
+        return discounted_reward + continuing * gamma_power * next_q
+
 
 def weights_init_(m: nn.Module) -> None:
     if isinstance(m, nn.Linear):
@@ -125,6 +150,7 @@ class ActionValueHead(DistributionalValueHead):
         in_channels: int,
         action_dim: int,
         horizon: int,
+        gamma: float,
         hidden_dim: int,
         block_num: int,
         num_bins: int,
@@ -132,6 +158,7 @@ class ActionValueHead(DistributionalValueHead):
     ) -> None:
         super().__init__()
         self.horizon = horizon
+        self.gamma = gamma
         self.action_dim = action_dim
         total_action_dim = action_dim * horizon
         mid_dim = in_channels + total_action_dim
@@ -233,12 +260,14 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         in_channels: int,
         action_dim: int,
         horizon: int,
+        gamma: float,
         hidden_dim: int,
         block_num: int,
         num_bins: int,
     ) -> None:
         super().__init__()
         self.horizon = horizon
+        self.gamma = gamma
         self.action_dim = action_dim
         in_dim = in_channels + action_dim * horizon
 

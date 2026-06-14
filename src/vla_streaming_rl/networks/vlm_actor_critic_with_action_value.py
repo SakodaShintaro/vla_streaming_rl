@@ -76,7 +76,6 @@ class VLMActorCriticWithActionValue(nn.Module):
         super().__init__()
         if image_mode not in ("mem", "sequence"):
             raise ValueError(f"Unknown image_mode: {image_mode}")
-        self.gamma = gamma
         self.num_bins = num_bins
         self.seq_len = seq_len
         self.horizon = horizon
@@ -187,6 +186,7 @@ class VLMActorCriticWithActionValue(nn.Module):
                 in_channels=state_dim,
                 action_dim=self.action_dim,
                 horizon=horizon,
+                gamma=gamma,
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=num_bins,
@@ -196,6 +196,7 @@ class VLMActorCriticWithActionValue(nn.Module):
                 in_channels=state_dim,
                 action_dim=self.action_dim,
                 horizon=horizon,
+                gamma=gamma,
                 hidden_dim=critic_hidden_dim,
                 block_num=critic_block_num,
                 num_bins=num_bins,
@@ -302,7 +303,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         _, _, next_q, _, _ = self._infer(data.observations[:, self.horizon :], next_prompts)
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self._compute_target_value(next_q, chunk_rewards, chunk_dones)
+        target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
 
         curr_obs = data.observations[:, : -self.horizon]
         state, _ = self._forward_state(curr_obs, curr_prompts)
@@ -336,7 +337,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         )
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self._compute_target_value(next_q, chunk_rewards, chunk_dones)
+        target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
 
         curr_obs = data.observations[:, : -self.horizon]
         state, _ = self._forward_state(curr_obs, curr_prompts)
@@ -659,23 +660,6 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         critic_activation = self.value_head(state, action).activation
         return state, action, q, actor_activation, critic_activation
-
-    @torch.no_grad()
-    def _compute_target_value(
-        self,
-        next_q: torch.Tensor,
-        chunk_rewards: torch.Tensor,
-        chunk_dones: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size = chunk_rewards.size(0)
-        discounted_reward = torch.zeros(batch_size, device=self.device)
-        gamma_power = 1.0
-        continuing = torch.ones(batch_size, device=self.device)
-        for i in range(self.horizon):
-            discounted_reward += continuing * gamma_power * chunk_rewards[:, i].flatten()
-            gamma_power *= self.gamma
-            continuing *= 1 - chunk_dones[:, i].flatten()
-        return discounted_reward + continuing * gamma_power * next_q
 
     def _compute_critic_loss(
         self,
