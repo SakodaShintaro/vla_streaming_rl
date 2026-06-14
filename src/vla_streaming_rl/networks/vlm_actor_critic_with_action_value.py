@@ -310,7 +310,9 @@ class VLMActorCriticWithActionValue(nn.Module):
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
 
         # Critic loss
-        critic_loss, critic_info = self._compute_critic_loss(state, action_chunk, target_value)
+        critic_loss, critic_info = self.value_head.compute_critic_loss(
+            state, action_chunk, target_value, self.detach_critic
+        )
 
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state,
@@ -344,7 +346,9 @@ class VLMActorCriticWithActionValue(nn.Module):
         action_chunk = data.actions[:, -self.horizon :]
 
         # Critic loss
-        critic_loss, critic_info = self._compute_critic_loss(state, action_chunk, target_value)
+        critic_loss, critic_info = self.value_head.compute_critic_loss(
+            state, action_chunk, target_value, self.detach_critic
+        )
 
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state,
@@ -660,33 +664,6 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         critic_activation = self.value_head(state, action).activation
         return state, action, q, actor_activation, critic_activation
-
-    def _compute_critic_loss(
-        self,
-        state: torch.Tensor,
-        action_chunk: torch.Tensor,
-        target_value: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict]:
-        if self.detach_critic:
-            state = state.detach()
-        curr_critic_out = self.value_head(state, action_chunk)
-        logits = curr_critic_out.output
-
-        self.value_head.update_value_range(target_value)
-        curr_critic_value = self.value_head.to_value(logits).view(-1)
-        critic_loss = self.value_head.value_loss(logits, target_value)
-
-        delta = target_value - curr_critic_value
-
-        info_dict = {
-            "delta": delta.mean().item(),
-            "critic_loss": critic_loss.item(),
-            "curr_critic_value": curr_critic_value.mean().item(),
-            "target_value": target_value.mean().item(),
-            "value_range": self.value_head.value_range,
-        }
-
-        return critic_loss, info_dict
 
     def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
         """Reshape and project state for StatePredictionHead context."""

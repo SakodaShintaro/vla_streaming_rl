@@ -102,6 +102,42 @@ class DistributionalValueHead(nn.Module):
             continuing *= 1 - chunk_dones[:, i].flatten()
         return discounted_reward + continuing * gamma_power * next_q
 
+    def compute_critic_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        target_value: torch.Tensor,
+        detach_critic: bool,
+    ) -> tuple[torch.Tensor, dict]:
+        """Distributional TD loss for Q(state, action_chunk) vs ``target_value``.
+
+        Mirrors :meth:`PolicyHead.compute_actor_loss`: given the state, action
+        chunk and TD target, the value head owns its own loss (forward →
+        :meth:`update_value_range` → :meth:`value_loss`) and the scalar logging
+        info. ``detach_critic`` stops the gradient into the encoder.
+        """
+        if detach_critic:
+            state = state.detach()
+
+        curr_critic_out = self(state, action_chunk)
+        logits = curr_critic_out.output
+
+        self.update_value_range(target_value)
+        curr_critic_value = self.to_value(logits).view(-1)
+        critic_loss = self.value_loss(logits, target_value)
+
+        delta = target_value - curr_critic_value
+
+        info = {
+            "delta": delta.mean().item(),
+            "critic_loss": critic_loss.item(),
+            "curr_critic_value": curr_critic_value.mean().item(),
+            "target_value": target_value.mean().item(),
+            "value_range": self.value_range,
+        }
+
+        return critic_loss, info
+
 
 def weights_init_(m: nn.Module) -> None:
     if isinstance(m, nn.Linear):

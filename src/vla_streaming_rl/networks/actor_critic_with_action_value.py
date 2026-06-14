@@ -249,7 +249,9 @@ class ActorCriticWithActionValue(nn.Module):
         # Action chunk: (B, horizon, action_dim)
         action_chunk = data.actions[:, -self.horizon :]
 
-        critic_loss, critic_info = self._compute_critic_loss(curr_state, action_chunk, target_value)
+        critic_loss, critic_info = self.value_head.compute_critic_loss(
+            curr_state, action_chunk, target_value, self.detach_critic
+        )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             curr_state,
             action_chunk,
@@ -300,7 +302,9 @@ class ActorCriticWithActionValue(nn.Module):
 
         action_chunk = data.actions[:, -self.horizon :]
 
-        critic_loss, critic_info = self._compute_critic_loss(prev_state, action_chunk, target_value)
+        critic_loss, critic_info = self.value_head.compute_critic_loss(
+            prev_state, action_chunk, target_value, self.detach_critic
+        )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             prev_state,
             action_chunk,
@@ -364,35 +368,6 @@ class ActorCriticWithActionValue(nn.Module):
     ####################
     # Internal methods #
     ####################
-
-    def _compute_critic_loss(self, curr_state, action_chunk, target_value):
-        """
-        Args:
-            curr_state: (B, state_dim)
-            action_chunk: (B, horizon, action_dim)
-            target_value: (B,)
-        """
-        if self.detach_critic:
-            curr_state = curr_state.detach()
-
-        curr_critic_out = self.value_head(curr_state, action_chunk)
-        logits = curr_critic_out.output
-
-        self.value_head.update_value_range(target_value)
-        curr_critic_value = self.value_head.to_value(logits).view(-1)
-        critic_loss = self.value_head.value_loss(logits, target_value)
-
-        delta = target_value - curr_critic_value
-
-        info_dict = {
-            "delta": delta.mean().item(),
-            "critic_loss": critic_loss.item(),
-            "curr_critic_value": curr_critic_value.mean().item(),
-            "target_value": target_value.mean().item(),
-            "value_range": self.value_head.value_range,
-        }
-
-        return critic_loss, info_dict
 
     def _compute_sequence_loss(self, data, curr_state):
         if self.disable_state_predictor:
