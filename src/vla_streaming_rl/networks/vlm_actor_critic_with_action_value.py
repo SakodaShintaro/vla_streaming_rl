@@ -333,7 +333,14 @@ class VLMActorCriticWithActionValue(nn.Module):
         )
 
         # Sequence (state prediction) loss
-        seq_loss, seq_info = self._compute_sequence_loss(data, state)
+        seq_loss, seq_info = self.prediction_head.compute_loss(
+            self._state_for_predictor(state),
+            data.actions[:, -1],
+            data.observations[:, -1],
+            data.rewards[:, -1],
+            self.detach_predictor,
+            self.disable_state_predictor,
+        )
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -367,7 +374,14 @@ class VLMActorCriticWithActionValue(nn.Module):
         )
 
         # Sequence (state prediction) loss
-        seq_loss, seq_info = self._compute_sequence_loss(data, state)
+        seq_loss, seq_info = self.prediction_head.compute_loss(
+            self._state_for_predictor(state),
+            data.actions[:, -1],
+            data.observations[:, -1],
+            data.rewards[:, -1],
+            self.detach_predictor,
+            self.disable_state_predictor,
+        )
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -375,8 +389,8 @@ class VLMActorCriticWithActionValue(nn.Module):
         actor_entropy_loss = actor_loss + seq_loss
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
-        et_critic_dict = self.value_head(state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_dict.output).mean()
+        et_critic_out = self.value_head(state.detach(), action_chunk.detach())
+        neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
 
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             self._state_for_predictor(state),
@@ -627,8 +641,8 @@ class VLMActorCriticWithActionValue(nn.Module):
 
     def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Per-gamma action values (B, num_gammas) for a (state, action) pair."""
-        q_dict = self.value_head(state, action)
-        return self.value_head.to_values(q_dict.output)
+        q_out = self.value_head(state, action)
+        return self.value_head.to_values(q_out.output)
 
     @torch.inference_mode()
     def _infer(
@@ -737,34 +751,3 @@ class VLMActorCriticWithActionValue(nn.Module):
         B = state.shape[0]
         x = state.view(B, self.num_state_queries, -1)
         return self.state_to_predictor_proj(x)
-
-    def _compute_sequence_loss(self, data, curr_state):
-        if self.disable_state_predictor:
-            dummy_loss = torch.tensor(0.0, device=curr_state.device, requires_grad=True)
-            info_dict = {"seq_loss": 0.0}
-            return dummy_loss, info_dict
-
-        predictor_state = self._state_for_predictor(curr_state)
-        if self.detach_predictor:
-            predictor_state = predictor_state.detach()
-
-        curr_action = data.actions[:, -1]  # (B, action_dim)
-
-        with torch.no_grad():
-            last_obs = data.observations[:, -1]  # (B, C, H, W)
-            target_state_next = self.image_processor.encode(last_obs)  # (B, C', H', W')
-            B, C, H, W = target_state_next.shape
-            target_state_next = target_state_next.flatten(2).permute(0, 2, 1)  # (B, H'*W', C')
-
-        reward_next = data.rewards[:, -1]  # (B, 1)
-        target_reward_next = self.reward_processor.encode(reward_next)  # (B, 1, C')
-        target_reward_next = target_reward_next.squeeze(1)  # (B, C')
-        x1 = torch.cat(
-            [target_state_next, target_reward_next.unsqueeze(1)], dim=1
-        )  # (B, H'*W'+1, C')
-
-        pred_loss, _, info_dict = self.prediction_head.compute_loss(
-            predictor_state, curr_action, x1
-        )
-
-        return pred_loss, info_dict

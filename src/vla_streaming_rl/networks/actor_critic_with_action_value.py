@@ -201,8 +201,8 @@ class ActorCriticWithActionValue(nn.Module):
         action, actor_activation = self.policy_head.get_action(x)  # (B, horizon, action_dim)
 
         # Get action-value from value_head
-        q_dict = self.value_head(x, action)
-        q_value = self.value_head.to_value(q_dict.output).item()
+        q_out = self.value_head(x, action)
+        q_value = self.value_head.to_value(q_out.output).item()
 
         # Get predicted next state
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
@@ -216,7 +216,7 @@ class ActorCriticWithActionValue(nn.Module):
         activations = ActivationFeatures(
             state=x,
             actor=actor_activation,
-            critic=q_dict.activation,
+            critic=q_out.activation,
             state_predictor=predictor_activation,
         )
 
@@ -231,13 +231,18 @@ class ActorCriticWithActionValue(nn.Module):
         )
 
     def compute_loss(self, data) -> LossResult:
-        _, _, next_q, _, _, _ = self._infer(
-            data.observations[:, self.horizon :],
-            data.obs_z[:, self.horizon :],
-            data.actions[:, self.horizon :],
-            data.rewards[:, self.horizon :],
-            data.rnn_state[:, self.horizon],
-        )
+        # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
+        with torch.inference_mode():
+            next_state, _ = self.encoder.forward(
+                data.observations[:, self.horizon :],
+                data.obs_z[:, self.horizon :],
+                data.actions[:, self.horizon :],
+                data.rewards[:, self.horizon :],
+                data.rnn_state[:, self.horizon],
+            )
+            next_action, _ = self.policy_head.get_action(next_state)
+            # Per-gamma bootstrap values (B, num_gammas) for the multi-gamma TD target.
+            next_q = self.value_head.to_values(self.value_head(next_state, next_action).output)
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self._compute_target_value(next_q, chunk_rewards, chunk_dones)
@@ -263,7 +268,14 @@ class ActorCriticWithActionValue(nn.Module):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        seq_loss, seq_info = self._compute_sequence_loss(data, curr_state)
+        seq_loss, seq_info = self.prediction_head.compute_loss(
+            curr_state,
+            data.actions[:, -1],
+            data.observations[:, -1],
+            data.rewards[:, -1],
+            self.detach_predictor,
+            self.disable_state_predictor,
+        )
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -277,15 +289,21 @@ class ActorCriticWithActionValue(nn.Module):
 
     def infer_and_compute_loss(self, data) -> InferLossResult:
         """Combined inference and loss computation."""
-        next_state, next_action, next_q, next_rnn_state, actor_activation, critic_activation = (
-            self._infer(
+        # Next-step inference (no grad): the action the agent will take, its Q,
+        # and the activations carried into the InferResult.
+        with torch.inference_mode():
+            next_state, next_rnn_state = self.encoder.forward(
                 data.observations[:, self.horizon :],
                 data.obs_z[:, self.horizon :],
                 data.actions[:, self.horizon :],
                 data.rewards[:, self.horizon :],
                 data.rnn_state[:, self.horizon],
             )
-        )
+            next_action, actor_activation = self.policy_head.get_action(next_state)
+            next_q_out = self.value_head(next_state, next_action)
+            # Per-gamma bootstrap values (B, num_gammas) for the multi-gamma TD target.
+            next_q = self.value_head.to_values(next_q_out.output)
+            critic_activation = next_q_out.activation
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self._compute_target_value(next_q, chunk_rewards, chunk_dones)
@@ -309,7 +327,14 @@ class ActorCriticWithActionValue(nn.Module):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        seq_loss, seq_info = self._compute_sequence_loss(data, prev_state)
+        seq_loss, seq_info = self.prediction_head.compute_loss(
+            prev_state,
+            data.actions[:, -1],
+            data.observations[:, -1],
+            data.rewards[:, -1],
+            self.detach_predictor,
+            self.disable_state_predictor,
+        )
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -317,8 +342,8 @@ class ActorCriticWithActionValue(nn.Module):
         actor_entropy_loss = actor_loss + seq_loss
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
-        et_critic_dict = self.value_head(prev_state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_dict.output).mean()
+        et_critic_out = self.value_head(prev_state.detach(), action_chunk.detach())
+        neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
 
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             next_state,
@@ -366,22 +391,6 @@ class ActorCriticWithActionValue(nn.Module):
     ####################
     # Internal methods #
     ####################
-
-    @torch.inference_mode()
-    def _infer(
-        self,
-        obs: torch.Tensor,
-        obs_z: torch.Tensor,
-        actions: torch.Tensor,
-        rewards: torch.Tensor,
-        rnn_state: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        state, rnn_state_out = self.encoder.forward(obs, obs_z, actions, rewards, rnn_state)
-        action, actor_activation = self.policy_head.get_action(state)
-        q_dict = self.value_head(state, action)
-        # Per-gamma bootstrap values (B, num_gammas) for the multi-gamma TD target.
-        q = self.value_head.to_values(q_dict.output)
-        return state, action, q, rnn_state_out, actor_activation, q_dict.activation
 
     @torch.no_grad()
     def _compute_target_value(
@@ -440,35 +449,3 @@ class ActorCriticWithActionValue(nn.Module):
         }
 
         return critic_loss, info_dict
-
-    def _compute_sequence_loss(self, data, curr_state):
-        if self.disable_state_predictor:
-            # Return dummy loss when state_predictor is disabled
-            dummy_loss = torch.tensor(0.0, device=curr_state.device, requires_grad=True)
-            info_dict = {"seq_loss": 0.0}
-            return dummy_loss, info_dict
-
-        if self.detach_predictor:
-            curr_state = curr_state.detach()
-
-        # Get last action (actions[:, -1] corresponds to current_state)
-        curr_action = data.actions[:, -1]  # (B, action_dim)
-
-        # Encode next state
-        with torch.no_grad():
-            last_obs = data.observations[:, -1]  # (B, C, H, W)
-            target_state_next = self.image_processor.encode(last_obs)  # (B, C', H', W')
-            B, C, H, W = target_state_next.shape
-            target_state_next = target_state_next.flatten(2).permute(0, 2, 1)  # (B, H'*W', C')
-
-        reward_next = data.rewards[:, -1]  # (B, 1)
-        target_reward_next = self.reward_processor.encode(reward_next)  # (B, 1, C')
-        target_reward_next = target_reward_next.squeeze(1)  # (B, C')
-        x1 = torch.cat(
-            [target_state_next, target_reward_next.unsqueeze(1)], dim=1
-        )  # (B, H'*W'+1, C')
-
-        curr_state = curr_state.view(B, -1, C)
-        pred_loss, _, info_dict = self.prediction_head.compute_loss(curr_state, curr_action, x1)
-
-        return pred_loss, info_dict

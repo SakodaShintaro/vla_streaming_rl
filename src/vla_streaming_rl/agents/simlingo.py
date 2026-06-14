@@ -177,7 +177,6 @@ class SimLingoAgent:
         self.save_path_metric = str(scratch_dir) + "/metric"
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
-        self.gamma = gamma
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.exploration_noise = exploration_noise
@@ -206,9 +205,7 @@ class SimLingoAgent:
         self.gammas = list(multi_gammas) + [gamma]
         self.num_gammas = len(self.gammas)
         self.primary_gamma_index = self.num_gammas - 1
-        self.gammas_tensor = torch.tensor(
-            self.gammas, dtype=torch.float32, device=self.device
-        )
+        self.gammas_tensor = torch.tensor(self.gammas, dtype=torch.float32, device=self.device)
         self.config = GlobalConfig()
         self.bias = {
             "speed_scale": 1.0,
