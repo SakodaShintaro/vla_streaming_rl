@@ -199,7 +199,7 @@ class OffPolicyAgent:
             task_prompts=[task_prompt],
         )
         self.rnn_state = infer_result.rnn_state
-        metrics["value"] = infer_result.value
+        metrics.update(infer_result.value_report)
         next_image = infer_result.next_image
         next_reward = infer_result.next_reward
         # Stash the fresh prediction for next-step validation / display. Drop it

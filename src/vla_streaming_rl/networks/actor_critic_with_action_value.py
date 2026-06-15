@@ -161,7 +161,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         # Get action-value from value_head
         q_out = self.value_head(x, action)
-        q_value = self.value_head.to_value(q_out.output).item()
+        value_report = self.value_head.value_report(q_out.output)
 
         # Get predicted next state
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
@@ -181,7 +181,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         return InferResult(
             action=action,
-            value=q_value,
+            value_report=value_report,
             rnn_state=rnn_state,
             next_image=next_image,
             next_reward=next_reward,
@@ -325,7 +325,7 @@ class ActorCriticWithActionValue(nn.Module):
 
         infer_result = InferResult(
             action=next_action,
-            value=next_q.item(),
+            value_report=self.value_head.value_report(next_q_out.output),
             rnn_state=next_rnn_state,
             next_image=next_image,
             next_reward=next_reward,

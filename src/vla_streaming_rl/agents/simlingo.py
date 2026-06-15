@@ -290,6 +290,9 @@ class SimLingoAgent:
         self._viz_route = np.zeros((_ROUTE_LEN, _WP_DIM), dtype=np.float32)
         self._viz_speed = np.zeros((_SPEED_WPS_LEN, _WP_DIM), dtype=np.float32)
         self._viz_q_value = 0.0
+        # Critic value diagnostics for the executed action (incl. per-bin probs),
+        # cached by ``run_step`` and logged verbatim in ``_build_info``.
+        self._value_report: dict[str, float] = {"value": 0.0}
 
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
         # rewards (stuck) get a small negative push and collision spikes
@@ -371,10 +374,10 @@ class SimLingoAgent:
         """
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
-            # Named "value" to match off_policy / streaming telemetry (their
-            # critic logs V(s) under the same key); here it is the Q(s, a) of
-            # the executed action. Keeps --calibration etc. agent-agnostic.
-            "value": self._viz_q_value,
+            # ``value`` (+ any per-bin probs) is the value head's read-out of the
+            # executed action's Q(s, a), matching off_policy / streaming telemetry
+            # so --calibration etc. stay agent-agnostic.
+            **self._value_report,
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
         }
         panels = {
@@ -679,8 +682,9 @@ class SimLingoAgent:
         # bird's-eye visualization panel. ``s`` is the mean over the 30
         # waypoint queries, matching the critic's state convention in training.
         s_vec = features.mean(dim=0, keepdim=True)
-        q = self._critic_value(self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1)).output)
-        self._viz_q_value = float(q.item())
+        critic_out = self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1)).output
+        self._value_report = self.critic.value_report(critic_out)
+        self._viz_q_value = self._value_report["value"]
         self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
         self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
 

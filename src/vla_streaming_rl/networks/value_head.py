@@ -49,6 +49,28 @@ class DistributionalValueHead(nn.Module):
             return self.hl_gauss_loss(logits)
         return logits.squeeze(-1)
 
+    def value_report(self, logits: torch.Tensor) -> dict[str, float]:
+        """Per-sample value diagnostics for inference / rollout logging.
+
+        Always reports the expected scalar value under ``"value"``. For the
+        distributional critic (``num_bins > 1``) it summarizes the categorical
+        output with its ``"value_variance"`` (spread of the predicted return
+        distribution) and the current ``"value_range"`` (HL-Gauss support
+        half-width) — a compact alternative to logging every bin. Single-sample
+        only (``B == 1``); every value is a Python float so callers can splat the
+        dict straight into their metrics.
+        """
+        assert logits.shape[0] == 1, f"value_report expects B == 1, got B={logits.shape[0]}"
+        report = {"value": self.to_value(logits).item()}
+        if self.num_bins > 1:
+            probs = logits.softmax(dim=-1).reshape(-1)
+            centers = self.hl_gauss_loss.centers
+            mean = (probs * centers).sum()
+            variance = (probs * (centers - mean) ** 2).sum()
+            report["value_variance"] = variance.item()
+            report["value_range"] = self.value_range
+        return report
+
     def update_value_range(self, target_value: torch.Tensor) -> None:
         """Grow the HL-Gauss support to cover ``target_value`` (no-op if scalar)."""
         if self.num_bins == 1:
