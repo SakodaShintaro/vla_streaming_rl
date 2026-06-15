@@ -4,7 +4,10 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import DrivingExample
+from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
+    DrivingExample,
+    DrivingInput,
+)
 
 
 class WaypointInputAdaptor(nn.Module):
@@ -84,23 +87,11 @@ class DrivingAdaptor(nn.Module):
         self.sizes["speed_wps"] = self.future_speed_waypoints
         self.order.append("speed_wps")
 
-    def forward(self, driving_example: DrivingExample, **kwargs) -> Dict[str, Tensor]:
-
-        try:
-            driving_input = driving_example.driving_input
-        except AttributeError:
-            driving_input = driving_example
-
+    def forward(self, driving_input: DrivingInput, **kwargs) -> Dict[str, Tensor]:
         b = driving_input.camera_images.shape[0]
-        inputs = None
-
-        for input_type in self.order:
-            query_embed = self.queries[input_type]
-            if inputs is None:
-                inputs = query_embed.expand(b, -1, -1)
-            else:
-                inputs = torch.cat((inputs, query_embed.expand(b, -1, -1)), dim=1)
-
+        inputs = torch.cat(
+            [self.queries[input_type].expand(b, -1, -1) for input_type in self.order], dim=1
+        )
         inputs_mask = torch.ones_like(inputs[:, :, 0], dtype=torch.bool)
 
         return {"inputs": inputs, "inputs_mask": inputs_mask}
@@ -109,7 +100,7 @@ class DrivingAdaptor(nn.Module):
 
         current_index = 0
         predictions = {}
-        for i, input_type in enumerate(self.order):
+        for input_type in self.order:
             size = self.sizes[input_type]
 
             head = self.heads[input_type]
@@ -142,7 +133,7 @@ class DrivingAdaptor(nn.Module):
 
         current_index = 0
         loss_dict = {}
-        for i, input_type in enumerate(self.order):
+        for input_type in self.order:
             size = self.sizes[input_type]
             features_tmp = adaptor_features[:, current_index : current_index + size]
             label_tensor = labels_by_type[input_type]
@@ -171,21 +162,12 @@ class LanguageAdaptor(nn.Module):
         else:
             raise ValueError("Language model must have `lm_head` or `embed_out` attribute.")
 
-    def forward(self, example: DrivingExample, inference=False, **kwargs) -> Dict[str, Tensor]:
-        try:
-            driving_input = example.driving_input
-        except AttributeError:
-            driving_input = example
+    def forward(self, driving_input: DrivingInput, inference=False, **kwargs) -> Dict[str, Tensor]:
+        label = driving_input.prompt_inference if inference else driving_input.prompt
 
-        if inference:
-            label = driving_input.prompt_inference
-        else:
-            label = driving_input.prompt
-
-        if label is not None:
-            ids = label.phrase_ids.long()
-            ids_valid = label.phrase_valid  # true => is fed into model
-            ids_mask = label.loss_masking  # true => takes part in loss
+        ids = label.phrase_ids.long()
+        ids_valid = label.phrase_valid  # true => is fed into model
+        ids_mask = label.loss_masking  # true => takes part in loss
 
         inputs = self.embed_tokens(ids.clamp(min=0, max=self.embed_tokens.num_embeddings - 1))
         return {"inputs": inputs, "inputs_mask": ids_valid, "_ids": ids, "_ids_mask": ids_mask}
@@ -282,8 +264,6 @@ class AdaptorList(nn.Module):
 
         features_by_adaptor = self.split_outputs_by_adaptor(input_dict, features)
         logits_by_adaptor = self.split_outputs_by_adaptor(input_dict, logits)
-
-        loss_dict: Dict[str, Tuple[Tensor, Tensor]] = {}
 
         # Compute loss in each adaptor
         loss_dict: Dict[str, Tuple[Tensor, Tensor]] = {}
