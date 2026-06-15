@@ -93,12 +93,12 @@ class SimLingoNetwork(nn.Module):
         # in bfloat16. The waypoint heads are promoted to float32 below.
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
-        model_kwargs = {k: v for k, v in cfg.model.items() if k != "_target_"}
         self.vlm = DrivingModel(
             cfg_data_module=cfg.data_module,
             processor=tokenizer,
             cache_dir=cache_dir,
-            **model_kwargs,
+            vision_model_cfg=cfg.model.vision_model,
+            language_model_cfg=cfg.model.language_model,
         ).to(device)
         torch.set_default_dtype(default_dtype)
         self.vlm.load_state_dict(torch.load(config_path))

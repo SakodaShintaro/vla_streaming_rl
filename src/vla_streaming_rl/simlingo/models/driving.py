@@ -20,31 +20,28 @@ class DrivingModel(nn.Module):
         cfg_data_module,
         processor,
         cache_dir,
-        **cfg,
+        vision_model_cfg,
+        language_model_cfg,
     ):
         super().__init__()
 
-        for key, value in cfg.items():
-            setattr(self, key, value)
-
         self.processor = processor
-
         self.cfg_data_module = cfg_data_module
 
-        # ``self.vision_model`` / ``self.language_model`` are DictConfig
-        # nodes loaded from the checkpoint's ``.hydra/config.yaml``.
-        # Upstream used ``hydra.utils.instantiate(_target_=...)`` to pick
-        # the class — we always want VLMEncoderModel / LLM here, so
-        # construct them directly. Drops ``_target_`` from the kwargs
-        # since these classes take ``**cfg`` and don't expect that key.
-        vm_kwargs = {k: v for k, v in self.vision_model.items() if k != "_target_"}
+        # ``vision_model_cfg`` / ``language_model_cfg`` are DictConfig nodes loaded from
+        # the checkpoint's ``.hydra/config.yaml``. Upstream used
+        # ``hydra.utils.instantiate(_target_=...)`` to pick the class — we always
+        # want VLMEncoderModel / LLM here, so construct them directly. Drops
+        # ``_target_`` from the kwargs since these classes take ``**cfg`` and
+        # don't expect that key.
+        vm_kwargs = {k: v for k, v in vision_model_cfg.items() if k != "_target_"}
         self.vision_model = VLMEncoderModel(
             cfg_data_module=cfg_data_module,
             processor=self.processor,
             **vm_kwargs,
         )
 
-        lm_kwargs = {k: v for k, v in self.language_model.items() if k != "_target_"}
+        lm_kwargs = {k: v for k, v in language_model_cfg.items() if k != "_target_"}
         self.language_model = LLM(cache_dir=cache_dir, **lm_kwargs)
 
         self.adaptors = AdaptorList(
