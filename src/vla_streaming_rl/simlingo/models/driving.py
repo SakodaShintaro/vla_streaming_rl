@@ -1,8 +1,7 @@
 from typing import Tuple
 
-import pytorch_lightning as pl
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 from vla_streaming_rl.simlingo.models.adaptors import (
     AdaptorList,
@@ -15,7 +14,7 @@ from vla_streaming_rl.simlingo.models.vlm import VLMEncoderModel
 from vla_streaming_rl.simlingo.utils.custom_types import DrivingInput, DrivingOutput
 
 
-class DrivingModel(pl.LightningModule):
+class DrivingModel(nn.Module):
     def __init__(
         self,
         cfg_data_module,
@@ -24,7 +23,6 @@ class DrivingModel(pl.LightningModule):
         **cfg,
     ):
         super().__init__()
-        self.save_hyperparameters()
 
         for key, value in cfg.items():
             setattr(self, key, value)
