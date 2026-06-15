@@ -95,15 +95,3 @@ def preprocess_compass(compass):
     compass = normalize_angle(compass - np.deg2rad(90.0))
 
     return compass
-
-
-def command_to_one_hot(command):
-    if command < 0:
-        command = 4
-    command -= 1
-    if command not in [0, 1, 2, 3, 4, 5]:
-        command = 3
-    cmd_one_hot = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    cmd_one_hot[command] = 1.0
-
-    return np.array(cmd_one_hot)
