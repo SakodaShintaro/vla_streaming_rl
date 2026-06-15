@@ -7,52 +7,6 @@ from torch import Tensor, nn
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import DrivingExample
 
 
-def cross_track_error(points: Tensor, path: Tensor):
-    """
-    Computes the cross track error between a set of points and a path.
-
-    Args:
-        points: The set of points to compute the cross track error for with shape [b, n, 2].
-        path: The path to compute the cross track error with with shape [b, m, 2]. The path
-            can contain nan values which indicates that the path is not available for that position.
-
-    Returns:
-        The cross track error for each point in the set of points with shape [b, n].
-    """
-
-    points, path = points.float(), path.float()
-
-    ind = torch.arange(path.size(0), device=path.device)[:, None]
-    closest = torch.cdist(points, path).nan_to_num_(torch.inf).argmin(-1)
-    pt0 = path[ind, (closest - 1).clamp_min(0)]
-    pt1 = path[ind, closest]
-    pt2 = path[ind, (closest + 1).clamp_max(path.size(1) - 1)]
-
-    tangent = (pt2 - pt1).nan_to_num_(0.0) + (pt1 - pt0).nan_to_num_(0.0)
-    normal = torch.stack((tangent[..., 1], -tangent[..., 0]), dim=-1)
-    normal = normal / normal.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-2)
-
-    return (points - pt1).mul(normal).sum(-1).abs()
-
-
-class FocalLoss(nn.Module):
-    def __init__(self, gamma: float = 0, size_average: bool = True):
-        super(FocalLoss, self).__init__()
-        self.gamma = gamma
-        self.size_average = size_average
-
-    def forward(self, input, target):
-        logpt = F.log_softmax(input, dim=-1)
-        logpt = logpt.gather(1, target.view(-1, 1)).view(-1)
-        pt = logpt.exp()
-
-        loss = -1 * (1 - pt) ** self.gamma * logpt
-        if self.size_average:
-            return loss.mean()
-        else:
-            return loss.sum()
-
-
 class WaypointInputAdaptor(nn.Module):
     """
     Takes an input of shape [B, N, 2] and returns an output of shape [B, N, token_size]
