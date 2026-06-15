@@ -4,22 +4,6 @@ import torch
 from torch import Tensor
 
 
-class DatasetOutput(NamedTuple):
-    conversation: Optional[list]
-    answer: Optional[str]
-    image_ff: Optional[Tensor]
-    image_ff_org_size: Optional[Tensor]
-    waypoints: Optional[List[Tuple[float, float]]]
-    path: Optional[str]
-    target_points: Optional[List[Tuple[float, float]]]
-    speed: Optional[float]
-    placeholder_values: Optional[Dict]
-    measurement_path: Optional[str]
-    dataset: Optional[str]
-    qa_templates: Optional[Tuple[str, str]] = None
-    eval_infos: Optional[Dict] = None
-
-
 class LanguageLabel(NamedTuple):
     phrase_ids: Tensor  # [B, max(len(tokens))] int64
     phrase_valid: Tensor  # [B, max(len(tokens))] bool, valid, true => is fed into model
@@ -34,15 +18,6 @@ class DrivingOutput(NamedTuple):
     # Auxiliary outputs (MUST be at the end):
     language_tokens: Tensor  # [B, max(len(tokens))]
     trajectory_tokens: Tensor  # [B, F, max(len(tokens))]
-
-
-class TrainingOutput(NamedTuple):
-    loss: Tensor  # [] floating
-    loss_averages: Dict[str, Tensor]  # [] floating
-    loss_values: Dict[str, Tensor]  # [B] floating
-    loss_counts: Dict[str, Tensor]  # [B] int64
-
-    driving_output: Optional[DrivingOutput] = None
 
 
 class DrivingInput(NamedTuple):
