@@ -21,7 +21,7 @@ from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingMo
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (  # noqa: E501
     InternVLChatConfig,
 )
-from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
+from vla_streaming_rl.simlingo.utils.internvl2_utils import (
     SIMLINGO_ADDITIONAL_SPECIAL_TOKENS,
 )
 

@@ -20,7 +20,7 @@ import numpy as np
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored import (
     conversation as conv_module,
 )
-from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import LanguageLabel
+from vla_streaming_rl.simlingo.utils.custom_types import LanguageLabel
 
 
 class PromptBuilder:

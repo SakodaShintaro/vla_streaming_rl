@@ -12,10 +12,7 @@ from vla_streaming_rl.simlingo.simlingo_training.models.adaptors import (
 )
 from vla_streaming_rl.simlingo.simlingo_training.models.llm import LLM
 from vla_streaming_rl.simlingo.simlingo_training.models.vlm import VLMEncoderModel
-from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
-    DrivingInput,
-    DrivingOutput,
-)
+from vla_streaming_rl.simlingo.utils.custom_types import DrivingInput, DrivingOutput
 
 
 class DrivingModel(pl.LightningModule):

@@ -3,10 +3,7 @@ from typing import Dict, List, Optional
 import torch
 from torch import Tensor, nn
 
-from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
-    DrivingExample,
-    DrivingInput,
-)
+from vla_streaming_rl.simlingo.utils.custom_types import DrivingExample, DrivingInput
 
 
 class WaypointInputAdaptor(nn.Module):
