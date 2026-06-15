@@ -193,13 +193,6 @@ class SimLingoAgent:
         self._frame_step = -1
         self.initialized = False
         self.device = torch.device("cuda")
-
-        # Multi-gamma (AMAGO): the critic predicts the action value for several
-        # discounts at once (auxiliary representation-learning task). The critic
-        # owns the gamma list and builds each gamma's TD target via
-        # ``self.critic.compute_target_value``; the actor maximizes the *mean* Q
-        # over all gammas (``_critic_value`` averages). Per-gamma rollout values
-        # are surfaced for logging by ``self.critic.value_report`` (see ``step``).
         self.config = GlobalConfig()
         self.bias = {
             "speed_scale": 1.0,
@@ -297,9 +290,8 @@ class SimLingoAgent:
         self._viz_route = np.zeros((_ROUTE_LEN, _WP_DIM), dtype=np.float32)
         self._viz_speed = np.zeros((_SPEED_WPS_LEN, _WP_DIM), dtype=np.float32)
         self._viz_q_value = 0.0
-        # Critic value diagnostics for the executed action (value, per-gamma
-        # values, per-gamma variance/range), cached by ``run_step`` and logged
-        # verbatim in ``_build_info``.
+        # Critic value diagnostics for the executed action (incl. per-bin probs),
+        # cached by ``run_step`` and logged verbatim in ``_build_info``.
         self._value_report: dict[str, float] = {"value": 0.0}
 
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
@@ -382,10 +374,9 @@ class SimLingoAgent:
         """
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
-            # ``value`` plus per-gamma ``value_g{γ}`` and (distributional) variance
-            # / range, the value head's read-out of the executed action's Q(s, a).
-            # Matches off_policy / streaming telemetry so --calibration etc. stay
-            # agent-agnostic.
+            # ``value`` (+ any per-bin probs) is the value head's read-out of the
+            # executed action's Q(s, a), matching off_policy / streaming telemetry
+            # so --calibration etc. stay agent-agnostic.
             **self._value_report,
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
         }
@@ -692,8 +683,6 @@ class SimLingoAgent:
         # waypoint queries, matching the critic's state convention in training.
         s_vec = features.mean(dim=0, keepdim=True)
         critic_out = self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1)).output
-        # value_report yields {"value", per-gamma "value_g{γ}", per-gamma
-        # variance/range}; the BEV panel uses the gamma-averaged "value".
         self._value_report = self.critic.value_report(critic_out)
         self._viz_q_value = self._value_report["value"]
         self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
@@ -766,13 +755,11 @@ class SimLingoAgent:
         return self._maybe_train(global_step)
 
     def _critic_value(self, logits: torch.Tensor) -> torch.Tensor:
-        """Map the critic's raw ``"output"`` to a scalar Q (B,), **averaged over
-        all gammas** — the actor / rollout objective.
+        """Map the critic's raw ``"output"`` to a scalar Q (B,).
 
         For the distributional (``num_bins > 1``) SimbaV2 critic the output is
         ``num_bins`` categorical logits; HL-Gauss returns their expected return.
-        For a scalar critic it is just the value itself. With a single gamma this
-        is exactly the original per-gamma value.
+        For a scalar critic it is just the value itself.
         """
         return self.critic.to_value(logits).view(-1)
 
@@ -805,13 +792,10 @@ class SimLingoAgent:
     ) -> tuple:
         """TD target + current critic output for one transition batch.
 
-        DDPG target, computed per gamma: a' = μ(s'),
-        ``y_g = r + γ_g (1-done) Q_g(s', a')`` for every gamma g at once. With
-        the distributional critic the next-state value is the expectation of its
+        DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a'). With the
+        distributional critic the next-state value is the expectation of its
         categorical output (via HL-Gauss). Returns
-        ``(current_logits, current_q, target_q)`` where ``target_q`` is
-        ``(B, num_gammas)`` and ``current_q`` is the gamma-mean scalar (B,) kept
-        for logging / the streaming TD delta.
+        ``(current_logits, current_q, target_q)``.
         """
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
@@ -1008,9 +992,9 @@ class SimLingoAgent:
         _current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
 
         # TD error drives the eligibility-trace critic update; a detached
-        # scalar (AdamET multiplies the per-parameter trace by it). AdamET's
-        # trace is scalar-TD, so streaming collapses the per-gamma target to its
-        # gamma-mean (matching ``current_q``, the gamma-mean value).
+        # scalar (AdamET multiplies the per-parameter trace by it). ``target_q``
+        # is per-gamma (B, num_gammas), so collapse it to the gamma-mean to match
+        # ``current_q`` (the scalar AdamET trace is single-TD).
         delta = float((target_q.mean(dim=1) - current_q).mean().item())
 
         # Backward BOTH losses before any optimizer step so the actor graph
