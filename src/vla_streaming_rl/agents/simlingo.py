@@ -227,7 +227,6 @@ class SimLingoAgent:
         self._driving_adaptor = network.driving_adaptor
         self.actor_heads = network.actor_heads
         self.critic = network.critic
-        self.num_bins = network.num_bins
 
         self.T = 1
         self.stuck_detector = 0
@@ -951,8 +950,7 @@ class SimLingoAgent:
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
         }
-        if self.num_bins > 1:
-            info["losses/value_range"] = float(self.critic.value_range)
+        info["losses/value_range"] = float(self.critic.value_range)
         return info
 
     # --- Advantage-weighted regression (exp-weighted SL) training step -----
@@ -1000,8 +998,7 @@ class SimLingoAgent:
             "losses/target_q": float(target_q.mean().item()),
             "losses/awr_weight_entropy": float(weight_entropy.item()),
         }
-        if self.num_bins > 1:
-            info["losses/value_range"] = float(self.critic.value_range)
+        info["losses/value_range"] = float(self.critic.value_range)
         return info
 
     # --- Streaming (online TD(λ)) training step ----------------------------
@@ -1052,6 +1049,5 @@ class SimLingoAgent:
             "losses/target_q": float(target_q.mean().item()),
             "losses/delta": delta,
         }
-        if self.num_bins > 1:
-            info["losses/value_range"] = float(self.critic.value_range)
+        info["losses/value_range"] = float(self.critic.value_range)
         return info

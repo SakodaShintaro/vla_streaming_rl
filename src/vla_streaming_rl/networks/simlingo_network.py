@@ -8,6 +8,7 @@ other agent — instead of constructing the model itself. The tokenizer / config
 byproducts the agent's inference pipeline needs are exposed as attributes.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -15,7 +16,7 @@ from omegaconf import OmegaConf
 from torch import nn
 from transformers import Qwen2Tokenizer
 
-from vla_streaming_rl.networks.value_head import ActionValueHead, HypersphericalActionValueHead
+from vla_streaming_rl.networks.value_head import DistributionalValueHead
 from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
 from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (  # noqa: E501
     InternVLChatConfig,
@@ -48,7 +49,7 @@ class SimLingoNetwork(nn.Module):
 
     Exposed attributes used by ``SimLingoAgent``:
       - ``actor_heads`` / ``critic`` / ``driving_adaptor`` — for training.
-      - ``feature_dim`` / ``num_bins`` — shapes.
+      - ``feature_dim`` — shape.
       - ``tokenizer`` / ``num_image_token`` / ``cfg`` — to build the agent's
         prompt / inference pipeline.
     """
@@ -56,12 +57,7 @@ class SimLingoNetwork(nn.Module):
     def __init__(
         self,
         *,
-        critic_arch: str,
-        critic_hidden_dim: int,
-        critic_block_num: int,
-        num_bins: int,
-        gamma: float,
-        multi_gammas: list[float],
+        value_head_factory: Callable[[int], DistributionalValueHead],
         device: torch.device,
     ) -> None:
         super().__init__()
@@ -121,41 +117,10 @@ class SimLingoNetwork(nn.Module):
             p.requires_grad_(True)
 
         self.feature_dim = int(self.vlm.language_model.hidden_size)
-        # Multi-gamma (AMAGO): the critic predicts the action value for several
-        # discounts at once (auxiliary ``multi_gammas`` first, the primary
-        # ``gamma`` last). The critic owns this list and builds the per-gamma TD
-        # target / loss; empty ``multi_gammas`` == single-gamma (original).
-        self.gammas = list(multi_gammas) + [gamma]
-        # ``num_bins=1`` collapses the distributional output to a scalar.
-        #   - ``simbav2`` : SimbaV2 hyperspherical critic (arXiv:2502.15280).
-        #     Weights / features stay on the unit hypersphere so the critic's
-        #     norm cannot blow up under the TD loss.
-        #   - ``dueling`` : the original LayerNorm dueling V/A critic.
-        if critic_arch == "simbav2":
-            self.num_bins = num_bins
-            self.critic = HypersphericalActionValueHead(
-                in_channels=self.feature_dim,
-                action_dim=_ACTION_DIM,
-                horizon=1,
-                hidden_dim=critic_hidden_dim,
-                block_num=critic_block_num,
-                num_bins=self.num_bins,
-                gammas=self.gammas,
-            ).to(device)
-        elif critic_arch == "dueling":
-            self.num_bins = 1
-            self.critic = ActionValueHead(
-                in_channels=self.feature_dim,
-                action_dim=_ACTION_DIM,
-                horizon=1,
-                hidden_dim=critic_hidden_dim,
-                block_num=critic_block_num,
-                num_bins=1,
-                gammas=self.gammas,
-                sparsity=0.0,
-            ).to(device)
-        else:
-            raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
+        # The critic (action-value head) is injected as a factory so that all
+        # value-related construction lives in the network builder, not here. The
+        # builder also caps SimLingo's dueling critic to a scalar (num_bins == 1).
+        self.critic = value_head_factory(self.feature_dim).to(device)
 
     @staticmethod
     def _resolve_checkpoint() -> Path:

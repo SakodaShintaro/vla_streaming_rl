@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: MIT
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 
@@ -17,7 +19,7 @@ from vla_streaming_rl.networks.policy_head import (
 )
 from vla_streaming_rl.networks.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.reward_processor import RewardProcessor
-from vla_streaming_rl.networks.value_head import ActionValueHead, HypersphericalActionValueHead
+from vla_streaming_rl.networks.value_head import DistributionalValueHead
 
 
 class ActorCriticWithActionValue(nn.Module):
@@ -26,9 +28,7 @@ class ActorCriticWithActionValue(nn.Module):
         *,
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
-        gamma: float,
-        multi_gammas: list[float],
-        num_bins: int,
+        value_head_factory: Callable[[int], DistributionalValueHead],
         sparsity: float,
         seq_len: int,
         dacer_loss_weight: float,
@@ -44,9 +44,6 @@ class ActorCriticWithActionValue(nn.Module):
         denoising_steps: int,
         som_alpha: float,
         som_w: float,
-        critic_arch: str,
-        critic_hidden_dim: int,
-        critic_block_num: int,
         predictor_hidden_dim: int,
         predictor_block_num: int,
         detach_actor: bool,
@@ -56,13 +53,6 @@ class ActorCriticWithActionValue(nn.Module):
         predictor_type: str,
     ) -> None:
         super().__init__()
-        # Multi-gamma (AMAGO): the critic predicts the action value for several
-        # discounts at once. ``gamma`` (config) is the primary/rollout discount
-        # and is kept last; the auxiliary ``multi_gammas`` come first. The value
-        # head owns this list and builds the per-gamma TD target / loss; the
-        # actor maximizes the mean over all gammas (see ``value_head.to_value``).
-        self.gammas = list(multi_gammas) + [gamma]
-        self.num_bins = num_bins
         self.sparsity = sparsity
         self.seq_len = seq_len
         self.critic_loss_weight = critic_loss_weight
@@ -125,35 +115,10 @@ class ActorCriticWithActionValue(nn.Module):
             )
         else:
             raise ValueError(f"Unknown policy_type: {self.policy_type}")
-        # Critic architecture (the network owns hl_gauss, so ``num_bins`` from
-        # config is used as-is for both):
-        #   - ``simbav2`` : SimbaV2 hyperspherical critic (arXiv:2502.15280).
-        #     Weights / features stay on the unit hypersphere so the critic's
-        #     norm cannot blow up under the TD loss.
-        #   - ``dueling`` : the original LayerNorm dueling V/A critic.
-        if critic_arch == "simbav2":
-            self.value_head = HypersphericalActionValueHead(
-                in_channels=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                horizon=horizon,
-                hidden_dim=critic_hidden_dim,
-                block_num=critic_block_num,
-                num_bins=self.num_bins,
-                gammas=self.gammas,
-            )
-        elif critic_arch == "dueling":
-            self.value_head = ActionValueHead(
-                in_channels=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                horizon=horizon,
-                hidden_dim=critic_hidden_dim,
-                block_num=critic_block_num,
-                num_bins=self.num_bins,
-                gammas=self.gammas,
-                sparsity=sparsity,
-            )
-        else:
-            raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
+        # The critic (action-value head) is injected as a factory so that all
+        # value-related construction lives in the network builder, not here. We
+        # only supply the state width the encoder produces.
+        self.value_head = value_head_factory(self.encoder.output_dim)
         self.prediction_head = StatePredictionHead(
             image_processor=self.image_processor,
             reward_processor=self.reward_processor,
