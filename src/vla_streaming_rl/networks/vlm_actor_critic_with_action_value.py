@@ -13,7 +13,7 @@ from .loss_result import EligibilityTraceInfo, InferLossResult, LossResult
 from .policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
 from .prediction_head import StatePredictionHead
 from .reward_processor import RewardProcessor
-from .value_head import ActionValueHead, HypersphericalActionValueHead
+from .value_head import DistributionalValueHead
 from .video_encoder import VideoEncoder
 from .vlm_backbone import load_model
 from .vlm_input_cache import VLMInputCache
@@ -37,8 +37,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
         parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
-        gamma: float,
-        num_bins: int,
+        value_head_factory: Callable[[int], DistributionalValueHead],
         seq_len: int,
         horizon: int,
         critic_loss_weight: float,
@@ -63,9 +62,6 @@ class VLMActorCriticWithActionValue(nn.Module):
         state_out_dim: int,
         actor_hidden_dim: int,
         actor_block_num: int,
-        critic_arch: str,
-        critic_hidden_dim: int,
-        critic_block_num: int,
         predictor_hidden_dim: int,
         predictor_block_num: int,
         sparsity: float,
@@ -76,7 +72,6 @@ class VLMActorCriticWithActionValue(nn.Module):
         super().__init__()
         if image_mode not in ("mem", "sequence"):
             raise ValueError(f"Unknown image_mode: {image_mode}")
-        self.num_bins = num_bins
         self.seq_len = seq_len
         self.horizon = horizon
         self.action_dim = action_space_shape[0]
@@ -175,35 +170,10 @@ class VLMActorCriticWithActionValue(nn.Module):
             raise ValueError(f"Unknown policy_type: {self.policy_type}")
 
         # Critic: Q(state, action)
-        # Critic architecture (the network owns hl_gauss, so ``num_bins`` from
-        # config is used as-is for both):
-        #   - ``simbav2`` : SimbaV2 hyperspherical critic (arXiv:2502.15280).
-        #     Weights / features stay on the unit hypersphere so the critic's
-        #     norm cannot blow up under the TD loss.
-        #   - ``dueling`` : the original LayerNorm dueling V/A critic.
-        if critic_arch == "simbav2":
-            self.value_head = HypersphericalActionValueHead(
-                in_channels=state_dim,
-                action_dim=self.action_dim,
-                horizon=horizon,
-                gamma=gamma,
-                hidden_dim=critic_hidden_dim,
-                block_num=critic_block_num,
-                num_bins=num_bins,
-            )
-        elif critic_arch == "dueling":
-            self.value_head = ActionValueHead(
-                in_channels=state_dim,
-                action_dim=self.action_dim,
-                horizon=horizon,
-                gamma=gamma,
-                hidden_dim=critic_hidden_dim,
-                block_num=critic_block_num,
-                num_bins=num_bins,
-                sparsity=sparsity,
-            )
-        else:
-            raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
+        # The critic (action-value head) is injected as a factory so that all
+        # value-related construction lives in the network builder, not here. We
+        # only supply the state width produced by the VLM state extractor.
+        self.value_head = value_head_factory(state_dim)
 
         self.prediction_head = StatePredictionHead(
             image_processor=self.image_processor,
