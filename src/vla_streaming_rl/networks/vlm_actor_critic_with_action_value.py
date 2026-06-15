@@ -605,9 +605,9 @@ class VLMActorCriticWithActionValue(nn.Module):
         return first_text, vlm_past_kv
 
     def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        """Per-gamma action values (B, num_gammas) for a (state, action) pair."""
+        """Compute scalar Q-value for a (state, action) pair."""
         q_out = self.value_head(state, action)
-        return self.value_head.to_values(q_out.output)
+        return self.value_head.to_value(q_out.output).view(-1)
 
     @torch.inference_mode()
     def _infer(
@@ -632,18 +632,15 @@ class VLMActorCriticWithActionValue(nn.Module):
             raise ValueError(f"Unknown text_action_mode: {mode}")
 
         diff_action, actor_activation = self.policy_head.get_action(state)
-        diff_values = self._compute_q(state, diff_action)  # (B, num_gammas)
-        # The policy is trained on the gamma-averaged Q, so select / report on it.
-        diff_q = diff_values.mean(dim=1)  # (B,)
+        diff_q = self._compute_q(state, diff_action)
 
         if mode == "text_action":
             action_array, parse_success = self.parse_action_text(generated_text)
             text_action = torch.from_numpy(action_array).unsqueeze(0).to(obs.device)
-            text_values = self._compute_q(state, text_action)  # (B, num_gammas)
-            text_q = text_values.mean(dim=1)  # (B,)
+            text_q = self._compute_q(state, text_action)
             use_text = text_q > diff_q + self.text_q_margin
             action = torch.where(use_text.unsqueeze(-1).unsqueeze(-1), text_action, diff_action)
-            values = torch.where(use_text.unsqueeze(-1), text_values, diff_values)  # (B, G)
+            q = torch.where(use_text, text_q, diff_q)
             print(
                 f"[ActionSelect] diff_q={diff_q.item():.3f}, text_q={text_q.item():.3f}, "
                 f"use_text={use_text.item()}, parse_success={parse_success}, "
@@ -651,10 +648,10 @@ class VLMActorCriticWithActionValue(nn.Module):
             )
         else:
             action = diff_action
-            values = diff_values
+            q = diff_q
 
         critic_out = self.value_head(state, action)
-        return state, action, values, actor_activation, critic_out
+        return state, action, q, actor_activation, critic_out
 
     def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
         """Reshape and project state for StatePredictionHead context."""
