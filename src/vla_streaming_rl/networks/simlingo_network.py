@@ -117,9 +117,6 @@ class SimLingoNetwork(nn.Module):
             p.requires_grad_(True)
 
         self.feature_dim = int(self.vlm.language_model.hidden_size)
-        # The critic (action-value head) is injected as a factory so that all
-        # value-related construction lives in the network builder, not here. The
-        # builder also caps SimLingo's dueling critic to a scalar (num_bins == 1).
         self.critic = value_head_factory(self.feature_dim).to(device)
 
     @staticmethod
