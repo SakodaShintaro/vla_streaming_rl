@@ -17,8 +17,8 @@ from torch import nn
 from transformers import Qwen2Tokenizer
 
 from vla_streaming_rl.networks.value_head import DistributionalValueHead
-from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (  # noqa: E501
+from vla_streaming_rl.simlingo.models.driving import DrivingModel
+from vla_streaming_rl.simlingo.models.encoder.internvl2_vendored.configuration_internvl_chat import (
     InternVLChatConfig,
 )
 from vla_streaming_rl.simlingo.utils.internvl2_utils import (

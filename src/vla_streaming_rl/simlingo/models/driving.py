@@ -4,14 +4,14 @@ import pytorch_lightning as pl
 import torch
 from torch import Tensor
 
-from vla_streaming_rl.simlingo.simlingo_training.models.adaptors import (
+from vla_streaming_rl.simlingo.models.adaptors import (
     AdaptorList,
     DrivingAdaptor,
     LanguageAdaptor,
     WaypointInputAdaptor,
 )
-from vla_streaming_rl.simlingo.simlingo_training.models.llm import LLM
-from vla_streaming_rl.simlingo.simlingo_training.models.vlm import VLMEncoderModel
+from vla_streaming_rl.simlingo.models.llm import LLM
+from vla_streaming_rl.simlingo.models.vlm import VLMEncoderModel
 from vla_streaming_rl.simlingo.utils.custom_types import DrivingInput, DrivingOutput
 
 

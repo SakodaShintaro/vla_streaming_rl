@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.modeling_internvl_chat import (
+from vla_streaming_rl.simlingo.models.encoder.internvl2_vendored.modeling_internvl_chat import (
     InternVLChatModel,
 )
 

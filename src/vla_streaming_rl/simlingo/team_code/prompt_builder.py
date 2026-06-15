@@ -17,7 +17,7 @@ mode currently exercised); the legacy ``"command"`` and
 
 import numpy as np
 
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored import (
+from vla_streaming_rl.simlingo.models.encoder.internvl2_vendored import (
     conversation as conv_module,
 )
 from vla_streaming_rl.simlingo.utils.custom_types import LanguageLabel
