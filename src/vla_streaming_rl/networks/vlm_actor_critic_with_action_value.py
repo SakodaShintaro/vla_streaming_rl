@@ -269,10 +269,12 @@ class VLMActorCriticWithActionValue(nn.Module):
         # Use prompt at the boundary between seq and horizon for current state
         curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
 
-        _, _, next_q, _, _ = self._infer(data.observations[:, self.horizon :], next_prompts)
+        _, _, _, _, next_critic_out = self._infer(data.observations[:, self.horizon :], next_prompts)
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
+        target_value = self.value_head.compute_target_value(
+            next_critic_out.output, chunk_rewards, chunk_dones
+        )
 
         curr_obs = data.observations[:, : -self.horizon]
         state, _ = self._forward_state(curr_obs, curr_prompts)
@@ -310,13 +312,15 @@ class VLMActorCriticWithActionValue(nn.Module):
         next_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
 
-        next_state, next_action, next_q, actor_activation, critic_out = self._infer(
+        next_state, next_action, _, actor_activation, critic_out = self._infer(
             data.observations[:, self.horizon :], next_prompts
         )
         critic_activation = critic_out.activation
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
+        target_value = self.value_head.compute_target_value(
+            critic_out.output, chunk_rewards, chunk_dones
+        )
 
         curr_obs = data.observations[:, : -self.horizon]
         state, _ = self._forward_state(curr_obs, curr_prompts)

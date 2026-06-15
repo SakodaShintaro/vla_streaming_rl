@@ -776,11 +776,6 @@ class SimLingoAgent:
         """
         return self.critic.to_value(logits).view(-1)
 
-    def _critic_values(self, logits: torch.Tensor) -> torch.Tensor:
-        """Per-gamma action values (B, num_gammas) — the per-gamma TD-target
-        read-out (each gamma's critic is trained on its own target)."""
-        return self.critic.to_values(logits)
-
     def _read_transition(self, seq: torch.Tensor) -> tuple:
         """Read one transition batch for index pairs ``seq`` (B, 2).
 
@@ -820,10 +815,8 @@ class SimLingoAgent:
         """
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
-            # Per-gamma bootstrap (B, num_gammas); the critic owns the gammas and
-            # builds the per-gamma TD target (horizon=1 → r + γ_g (1-done) Q_g).
-            next_q = self._critic_values(self.critic(s_next, a_next.unsqueeze(1)).output)
-            target_q = self.critic.compute_target_value(next_q, r.unsqueeze(1), done.unsqueeze(1))
+            next_output = self.critic(s_next, a_next.unsqueeze(1)).output
+            target_q = self.critic.compute_target_value(next_output, r.unsqueeze(1), done.unsqueeze(1))
         current_logits = self.critic(s, a.unsqueeze(1)).output
         current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q
