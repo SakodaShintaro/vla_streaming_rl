@@ -1,7 +1,6 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 
 from vla_streaming_rl.simlingo.simlingo_training.utils.custom_types import (
@@ -116,38 +115,6 @@ class DrivingAdaptor(nn.Module):
 
         return predictions
 
-    def compute_loss(
-        self,
-        adaptor_features: Tensor,
-        adaptor_logits: Tensor,
-        _inputs: Dict[str, Tensor],
-        example: DrivingExample,
-    ) -> Dict[str, Tuple[Tensor, Tensor]]:
-        label = example.driving_label
-        assert label is not None
-
-        labels_by_type = {
-            "route": label.path,
-            "speed_wps": label.waypoints[:, : self.future_speed_waypoints + 1],
-        }
-
-        current_index = 0
-        loss_dict = {}
-        for input_type in self.order:
-            size = self.sizes[input_type]
-            features_tmp = adaptor_features[:, current_index : current_index + size]
-            label_tensor = labels_by_type[input_type]
-
-            prediction = self.heads[input_type](features_tmp).cumsum(1)
-            loss = F.smooth_l1_loss(prediction, label_tensor, reduction="none").sum(-1)
-
-            loss_dict[f"{input_type}_loss"] = (loss, torch.ones_like(loss, dtype=torch.long))
-            loss_dict[f"{input_type}_prediction"] = prediction
-            loss_dict[f"{input_type}_label"] = label_tensor
-            current_index += size
-
-        return loss_dict
-
 
 class LanguageAdaptor(nn.Module):
     def __init__(self, language_model):
@@ -171,24 +138,6 @@ class LanguageAdaptor(nn.Module):
 
         inputs = self.embed_tokens(ids.clamp(min=0, max=self.embed_tokens.num_embeddings - 1))
         return {"inputs": inputs, "inputs_mask": ids_valid, "_ids": ids, "_ids_mask": ids_mask}
-
-    def compute_loss(
-        self,
-        adaptor_features: Tensor,
-        adaptor_logits: Tensor,
-        inputs: Dict[str, Tensor],
-        example: DrivingExample,
-    ) -> Dict[str, Tuple[Tensor, Tensor]]:
-        del example
-
-        adaptor_logits = adaptor_logits[:, :-1]
-        labels = torch.where(inputs["_ids_mask"], inputs["_ids"], -1)
-        # Shift by 1 for next token prediction
-        labels = labels[:, 1:]
-        language_loss = F.cross_entropy(
-            adaptor_logits.flatten(0, -2), labels.flatten(), ignore_index=-1, reduction="none"
-        ).view_as(labels)
-        return {"language_loss": (language_loss, labels.ne(-1))}
 
 
 class AdaptorList(nn.Module):
@@ -249,56 +198,3 @@ class AdaptorList(nn.Module):
         input_dict["perm"] = perm
         input_dict["split_sizes"] = split_sizes
         return input_dict
-
-    def compute_loss(
-        self,
-        features: Tensor,
-        logits: Tensor,
-        input_dict: Dict[str, Tensor],
-        example: DrivingExample,
-    ) -> Dict[str, Tuple[Tensor, Tensor]]:
-        """
-        Distributes the output embeddings from the transformer to
-        the correct loss function and returns a dictionary of losses.
-        """
-
-        features_by_adaptor = self.split_outputs_by_adaptor(input_dict, features)
-        logits_by_adaptor = self.split_outputs_by_adaptor(input_dict, logits)
-
-        # Compute loss in each adaptor
-        loss_dict: Dict[str, Tuple[Tensor, Tensor]] = {}
-        for key, adaptor in self.adaptors.items():
-            adaptor_input_dict = _gather_from_dict(input_dict, key + "_")
-            adaptor_features = features_by_adaptor[key]
-            adaptor_logits = logits_by_adaptor[key]
-            losses = adaptor.compute_loss(
-                adaptor_features, adaptor_logits, adaptor_input_dict, example
-            )
-            loss_dict.update(losses)
-
-        return loss_dict
-
-    def split_outputs_by_adaptor(
-        self, input_dict: Dict[str, Tensor], outputs: Tensor
-    ) -> Dict[str, Tensor]:
-        """
-        Splits the output tensor into the correct output for each adaptor, according to the
-        split_sizes in the input_dict.
-        """
-        # First reverse permutation
-        inv_perm = input_dict["perm"].argsort(-1)
-        arange = torch.arange(inv_perm.size(0), device=inv_perm.device)[:, None]
-        outputs = outputs[arange, inv_perm]
-
-        # Now split output for each adaptor
-        split_sizes = [int(x) for x in input_dict["split_sizes"]]
-        outputs_list = list(outputs.split(split_sizes, dim=1))
-        return {key: outputs_list[i] for i, key in enumerate(self.adaptors.keys())}
-
-
-def _gather_from_dict(d: Dict[str, Tensor], prefix: str):
-    out: Dict[str, Tensor] = {}  # dict comprehensions with if not supported
-    for k, v in d.items():
-        if k.startswith(prefix):
-            out[k[len(prefix) :]] = v
-    return out
