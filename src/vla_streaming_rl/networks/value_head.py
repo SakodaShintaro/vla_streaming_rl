@@ -102,17 +102,21 @@ class DistributionalValueHead(nn.Module):
     @torch.no_grad()
     def compute_target_value(
         self,
-        next_q: torch.Tensor,
+        next_output: torch.Tensor,
         chunk_rewards: torch.Tensor,
         chunk_dones: torch.Tensor,
     ) -> torch.Tensor:
         """n-step TD target for the action-chunk critic.
 
-        Discounts ``chunk_rewards`` over the ``horizon``-step chunk, stops the
-        accumulation/bootstrap at the first ``done``, and bootstraps from the
-        target critic's ``next_q``. Uses ``self.horizon`` / ``self.gamma``,
-        which the action-value subclasses set in ``__init__``.
+        Takes the next-state critic's raw ``output`` (logits) and reduces it to
+        the bootstrap value internally (:meth:`to_value`), so callers never have
+        to collapse the distribution themselves — the value head owns the
+        distributional ⇄ scalar mapping end to end. Discounts ``chunk_rewards``
+        over the ``horizon``-step chunk, stops the accumulation/bootstrap at the
+        first ``done``, and bootstraps from that value. Uses ``self.horizon`` /
+        ``self.gamma``, which the action-value subclasses set in ``__init__``.
         """
+        next_q = self.to_value(next_output).view(-1)
         batch_size = chunk_rewards.size(0)
         device = chunk_rewards.device
         discounted_reward = torch.zeros(batch_size, device=device)

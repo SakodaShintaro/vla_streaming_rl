@@ -799,8 +799,8 @@ class SimLingoAgent:
         """
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
-            next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1)).output)
-            target_q = self.critic.compute_target_value(next_q, r.unsqueeze(1), done.unsqueeze(1))
+            next_output = self.critic(s_next, a_next.unsqueeze(1)).output
+            target_q = self.critic.compute_target_value(next_output, r.unsqueeze(1), done.unsqueeze(1))
         current_logits = self.critic(s, a.unsqueeze(1)).output
         current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q

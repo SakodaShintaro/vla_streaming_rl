@@ -200,12 +200,10 @@ class ActorCriticWithActionValue(nn.Module):
                 data.rnn_state[:, self.horizon],
             )
             next_action, _ = self.policy_head.get_action(next_state)
-            next_q = self.value_head.to_value(self.value_head(next_state, next_action).output).view(
-                -1
-            )
+            next_output = self.value_head(next_state, next_action).output
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
+        target_value = self.value_head.compute_target_value(next_output, chunk_rewards, chunk_dones)
 
         # Use seq_len frames (excluding last horizon frames)
         curr_obs = data.observations[:, : -self.horizon]
@@ -263,11 +261,12 @@ class ActorCriticWithActionValue(nn.Module):
             )
             next_action, actor_activation = self.policy_head.get_action(next_state)
             next_q_out = self.value_head(next_state, next_action)
-            next_q = self.value_head.to_value(next_q_out.output).view(-1)
             critic_activation = next_q_out.activation
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
+        target_value = self.value_head.compute_target_value(
+            next_q_out.output, chunk_rewards, chunk_dones
+        )
 
         prev_obs = data.observations[:, : -self.horizon]
         prev_obs_z = data.obs_z[:, : -self.horizon]
