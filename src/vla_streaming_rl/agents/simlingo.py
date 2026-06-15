@@ -216,7 +216,6 @@ class SimLingoAgent:
         self._driving_adaptor = network.driving_adaptor
         self.actor_heads = network.actor_heads
         self.critic = network.critic
-        self.num_bins = network.num_bins
 
         self.T = 1
         self.stuck_detector = 0
@@ -797,9 +796,7 @@ class SimLingoAgent:
         with torch.no_grad():
             a_next = self._policy_action(feat_next)
             next_q = self._critic_value(self.critic(s_next, a_next.unsqueeze(1)).output)
-            target_q = self.critic.compute_target_value(
-                next_q, r.unsqueeze(1), done.unsqueeze(1)
-            )
+            target_q = self.critic.compute_target_value(next_q, r.unsqueeze(1), done.unsqueeze(1))
         current_logits = self.critic(s, a.unsqueeze(1)).output
         current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q
@@ -920,8 +917,7 @@ class SimLingoAgent:
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
         }
-        if self.num_bins > 1:
-            info["losses/value_range"] = float(self.critic.value_range)
+        info["losses/value_range"] = float(self.critic.value_range)
         return info
 
     # --- Advantage-weighted regression (exp-weighted SL) training step -----
@@ -969,8 +965,7 @@ class SimLingoAgent:
             "losses/target_q": float(target_q.mean().item()),
             "losses/awr_weight_entropy": float(weight_entropy.item()),
         }
-        if self.num_bins > 1:
-            info["losses/value_range"] = float(self.critic.value_range)
+        info["losses/value_range"] = float(self.critic.value_range)
         return info
 
     # --- Streaming (online TD(λ)) training step ----------------------------
@@ -1019,6 +1014,5 @@ class SimLingoAgent:
             "losses/target_q": float(target_q.mean().item()),
             "losses/delta": delta,
         }
-        if self.num_bins > 1:
-            info["losses/value_range"] = float(self.critic.value_range)
+        info["losses/value_range"] = float(self.critic.value_range)
         return info

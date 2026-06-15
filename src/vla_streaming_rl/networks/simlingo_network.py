@@ -49,7 +49,7 @@ class SimLingoNetwork(nn.Module):
 
     Exposed attributes used by ``SimLingoAgent``:
       - ``actor_heads`` / ``critic`` / ``driving_adaptor`` — for training.
-      - ``feature_dim`` / ``num_bins`` — shapes.
+      - ``feature_dim`` — shape.
       - ``tokenizer`` / ``num_image_token`` / ``cfg`` — to build the agent's
         prompt / inference pipeline.
     """
@@ -117,12 +117,7 @@ class SimLingoNetwork(nn.Module):
             p.requires_grad_(True)
 
         self.feature_dim = int(self.vlm.language_model.hidden_size)
-        # The critic (action-value head) is injected as a factory so that all
-        # value-related construction lives in the network builder, not here. We
-        # only supply the per-query feature width the VLM produces. ``num_bins``
-        # is exposed for the agent (it branches on the distributional critic).
         self.critic = value_head_factory(self.feature_dim).to(device)
-        self.num_bins = self.critic.num_bins
 
     @staticmethod
     def _resolve_checkpoint() -> Path:
