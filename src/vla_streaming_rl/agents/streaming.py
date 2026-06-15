@@ -203,7 +203,7 @@ class StreamingAgent:
     ) -> tuple[np.ndarray, np.ndarray, float]:
         self.rnn_state = infer_result.rnn_state
         self.prev_action_token_ids = infer_result.action_token_ids
-        metrics["value"] = infer_result.value
+        metrics.update(infer_result.value_report)
         next_image = infer_result.next_image
         next_reward = infer_result.next_reward
 

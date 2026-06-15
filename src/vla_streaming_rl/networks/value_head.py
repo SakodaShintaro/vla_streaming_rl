@@ -97,6 +97,39 @@ class DistributionalValueHead(nn.Module):
         """
         return self.to_values(logits).mean(dim=1)
 
+    def value_report(self, logits: torch.Tensor) -> dict[str, float]:
+        """Per-sample value diagnostics for inference / rollout logging.
+
+        Always reports the gamma-averaged scalar value under ``"value"``. With
+        more than one gamma it adds each gamma's value under ``"value_g{γ}"``.
+        For the distributional critic (``num_bins > 1``) it summarizes each
+        gamma's categorical output with its ``"value_variance"`` (spread of the
+        predicted return distribution) and ``"value_range"`` (PopArt support
+        half-width) — a compact alternative to logging every bin; per-gamma runs
+        suffix these with ``_g{γ}``. Single-sample only (``B == 1``); every value
+        is a Python float so callers can splat the dict straight into metrics.
+        """
+        assert logits.shape[0] == 1, f"value_report expects B == 1, got B={logits.shape[0]}"
+        per_gamma = self.to_values(logits).reshape(-1)  # (num_gammas,)
+        multi = self.num_gammas > 1
+        gammas = self.gammas_tensor.tolist()
+        report = {"value": per_gamma.mean().item()}
+        if multi:
+            for g, v in zip(gammas, per_gamma):
+                report[f"value_g{g:.3f}"] = v.item()
+        if self.num_bins > 1:
+            # ``centers`` live in the normalized [-1, 1] support; the real-unit
+            # variance scales by each gamma's value_range². probs: (num_gammas, num_bins).
+            probs = logits.softmax(dim=-1).reshape(self.num_gammas, self.num_bins)
+            centers = self.hl_gauss_loss.centers
+            mean = (probs * centers).sum(dim=-1, keepdim=True)
+            variance = (probs * (centers - mean) ** 2).sum(dim=-1) * self.value_ranges**2
+            for i, g in enumerate(gammas):
+                sfx = f"_g{g:.3f}" if multi else ""
+                report[f"value_variance{sfx}"] = variance[i].item()
+                report[f"value_range{sfx}"] = self.value_ranges[i].item()
+        return report
+
     def update_value_range(self, target_value: torch.Tensor) -> None:
         """Grow each gamma's HL-Gauss support to cover its targets (no-op if scalar)."""
         if self.num_bins == 1:

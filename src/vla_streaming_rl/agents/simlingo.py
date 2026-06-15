@@ -154,7 +154,6 @@ class SimLingoAgent:
         network: nn.Module,
         scratch_dir: Path,
         gamma: float,
-        multi_gammas: list[float],
         buffer_size: int,
         batch_size: int,
         learning_starts: int,
@@ -196,14 +195,11 @@ class SimLingoAgent:
         self.device = torch.device("cuda")
 
         # Multi-gamma (AMAGO): the critic predicts the action value for several
-        # discounts at once (auxiliary representation-learning task). ``gamma`` is
-        # the primary/rollout discount, kept last; ``multi_gammas`` come first.
-        # The actor maximizes the *mean* Q over all gammas (``_critic_value``
-        # averages); each gamma's critic learns its own TD target via
-        # ``self.critic.compute_target_value`` (the critic owns the gamma list).
-        # ``self.gammas`` here is only for per-gamma logging labels.
-        self.gammas = list(multi_gammas) + [gamma]
-        self.num_gammas = len(self.gammas)
+        # discounts at once (auxiliary representation-learning task). The critic
+        # owns the gamma list and builds each gamma's TD target via
+        # ``self.critic.compute_target_value``; the actor maximizes the *mean* Q
+        # over all gammas (``_critic_value`` averages). Per-gamma rollout values
+        # are surfaced for logging by ``self.critic.value_report`` (see ``step``).
         self.config = GlobalConfig()
         self.bias = {
             "speed_scale": 1.0,
@@ -301,7 +297,10 @@ class SimLingoAgent:
         self._viz_route = np.zeros((_ROUTE_LEN, _WP_DIM), dtype=np.float32)
         self._viz_speed = np.zeros((_SPEED_WPS_LEN, _WP_DIM), dtype=np.float32)
         self._viz_q_value = 0.0
-        self._viz_q_values_per_gamma = [0.0] * self.num_gammas
+        # Critic value diagnostics for the executed action (value, per-gamma
+        # values, per-gamma variance/range), cached by ``run_step`` and logged
+        # verbatim in ``_build_info``.
+        self._value_report: dict[str, float] = {"value": 0.0}
 
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
         # rewards (stuck) get a small negative push and collision spikes
@@ -383,16 +382,13 @@ class SimLingoAgent:
         """
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
-            # Named "value" to match off_policy / streaming telemetry (their
-            # critic logs V(s) under the same key); here it is the Q(s, a) of
-            # the executed action. Keeps --calibration etc. agent-agnostic.
-            "value": self._viz_q_value,
+            # ``value`` plus per-gamma ``value_g{γ}`` and (distributional) variance
+            # / range, the value head's read-out of the executed action's Q(s, a).
+            # Matches off_policy / streaming telemetry so --calibration etc. stay
+            # agent-agnostic.
+            **self._value_report,
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
         }
-        # Per-gamma executed-action values for per-gamma --calibration.
-        if self.num_gammas > 1:
-            for g, v in zip(self.gammas, self._viz_q_values_per_gamma):
-                metrics[f"value_g{g:.3f}"] = float(v)
         panels = {
             "reward": create_reward_image(None, reward),
             "bev_value": self._render_bev_panel(),
@@ -696,12 +692,10 @@ class SimLingoAgent:
         # waypoint queries, matching the critic's state convention in training.
         s_vec = features.mean(dim=0, keepdim=True)
         critic_out = self.critic(s_vec, action_taken.unsqueeze(0).unsqueeze(1)).output
-        q = self._critic_value(critic_out)
-        self._viz_q_value = float(q.item())
-        # Per-gamma rollout values Q_g(s, a) for per-gamma calibration (Q_g vs
-        # realized γ_g return-to-go). Logged per env-step in ``step`` under
-        # ``value_g{γ}``; single-gamma runs skip these.
-        self._viz_q_values_per_gamma = self._critic_values(critic_out).view(-1).tolist()
+        # value_report yields {"value", per-gamma "value_g{γ}", per-gamma
+        # variance/range}; the BEV panel uses the gamma-averaged "value".
+        self._value_report = self.critic.value_report(critic_out)
+        self._viz_q_value = self._value_report["value"]
         self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
         self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
 

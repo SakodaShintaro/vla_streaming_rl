@@ -28,7 +28,7 @@ class InferResult:
     """
 
     action: torch.Tensor  # (B, horizon, action_dim)
-    value: float
+    value_report: dict[str, float]  # value head diagnostics (incl. "value"); see value_head.value_report
     rnn_state: torch.Tensor  # (B, ...)
     next_image: np.ndarray  # predicted next image (H, W, 3)
     next_reward: float  # predicted next reward

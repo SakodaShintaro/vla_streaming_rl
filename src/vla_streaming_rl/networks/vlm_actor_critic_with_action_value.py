@@ -7,6 +7,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from .head_output import HeadOutput
 from .image_processor import ImageProcessor
 from .infer_result import ActivationFeatures, InferResult
 from .loss_result import EligibilityTraceInfo, InferLossResult, LossResult
@@ -235,9 +236,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         rnn_state: torch.Tensor,
         task_prompts: list[str],
     ) -> InferResult:
-        state, action, q_values, actor_activation, critic_activation = self._infer(
-            s_seq, task_prompts
-        )
+        state, action, _, actor_activation, critic_out = self._infer(s_seq, task_prompts)
 
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             self._state_for_predictor(state),
@@ -250,13 +249,13 @@ class VLMActorCriticWithActionValue(nn.Module):
         activations = ActivationFeatures(
             state=state,
             actor=actor_activation,
-            critic=critic_activation,
+            critic=critic_out.activation,
             state_predictor=predictor_activation,
         )
 
         return InferResult(
             action=action,
-            value=q_values.mean().item(),
+            value_report=self.value_head.value_report(critic_out.output),
             rnn_state=rnn_state,
             next_image=next_image,
             next_reward=next_reward,
@@ -311,9 +310,10 @@ class VLMActorCriticWithActionValue(nn.Module):
         next_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
 
-        next_state, next_action, next_q, actor_activation, critic_activation = self._infer(
+        next_state, next_action, next_q, actor_activation, critic_out = self._infer(
             data.observations[:, self.horizon :], next_prompts
         )
+        critic_activation = critic_out.activation
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(next_q, chunk_rewards, chunk_dones)
@@ -370,7 +370,7 @@ class VLMActorCriticWithActionValue(nn.Module):
 
         infer_result = InferResult(
             action=next_action,
-            value=next_q.mean().item(),
+            value_report=self.value_head.value_report(critic_out.output),
             rnn_state=self._dummy_state.clone(),
             next_image=next_image,
             next_reward=next_reward,
@@ -608,7 +608,7 @@ class VLMActorCriticWithActionValue(nn.Module):
     @torch.inference_mode()
     def _infer(
         self, obs: torch.Tensor, task_prompts: list[str]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
         state, vlm_past_kv = self._forward_state(obs, task_prompts)
         mode = self.text_action_mode
 
@@ -649,8 +649,8 @@ class VLMActorCriticWithActionValue(nn.Module):
             action = diff_action
             values = diff_values
 
-        critic_activation = self.value_head(state, action).activation
-        return state, action, values, actor_activation, critic_activation
+        critic_out = self.value_head(state, action)
+        return state, action, values, actor_activation, critic_out
 
     def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
         """Reshape and project state for StatePredictionHead context."""
