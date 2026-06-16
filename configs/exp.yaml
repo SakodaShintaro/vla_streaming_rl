@@ -2,7 +2,7 @@ program: scripts/train.py
 method: grid
 parameters:
   env:
-    value: gui
+    value: placeholder
   agent:
     values: [cnn_off_policy_bs16, vlm_off_policy_bs16, vlm_off_policy_bs1, vlm_streaming]
   seed:
