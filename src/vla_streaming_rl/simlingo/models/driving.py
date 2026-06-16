@@ -61,14 +61,6 @@ class DrivingModel(nn.Module):
             self.tokenizer = self.processor
 
     # ------------------------------------------------------------------
-    # Policy head
-    # ------------------------------------------------------------------
-    @property
-    def policy_head(self) -> DrivingAdaptor:
-        """Maps the encoder's driving-query features to waypoint/route predictions."""
-        return self.adaptors.driving
-
-    # ------------------------------------------------------------------
     # Encoder + policy head (inference)
     # ------------------------------------------------------------------
     def forward(self, driving_input: DrivingInput) -> DrivingOutput:
@@ -88,7 +80,14 @@ class DrivingModel(nn.Module):
         having to re-run the VLM.
         """
         # Encoder: embed the prompt and splice in the VLM image features.
-        prompt_embeds, prompt_masks = self._encode_prompt(driving_input)
+        adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
+            adaptor_dict=self.adaptors(driving_input, inference=True),
+            pixel_values=driving_input.camera_images,
+            placeholder_values=driving_input.prompt_inference.placeholder_values,
+            wp_encoder=self.wp_encoder,
+        )
+        prompt_embeds = adaptor_dict["language_inputs"]
+        prompt_masks = adaptor_dict["language_inputs_mask"]
 
         # Decode each batch item separately (padding differs per item) and
         # collect the per-item outputs.
@@ -100,7 +99,7 @@ class DrivingModel(nn.Module):
             )
 
             # Policy head: features -> {"route": ..., "speed_wps": ...}.
-            predictions = self.policy_head.get_predictions(driving_features, driving_logits)
+            predictions = self.adaptors.driving.get_predictions(driving_features, driving_logits)
             route_per_item.append(predictions["route"])
             speed_wps_per_item.append(predictions["speed_wps"])
             features_per_item.append(driving_features)
@@ -116,20 +115,6 @@ class DrivingModel(nn.Module):
 
         return speed_wps, route, language, driving_features
 
-    def _encode_prompt(self, driving_input: DrivingInput) -> Tuple[Tensor, Tensor]:
-        """
-        Embed the inference prompt and splice the VLM image features into the
-        placeholder tokens. Returns ``(input_embeds, attention_mask)`` for the
-        full batch — the language-model input before generation.
-        """
-        adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
-            adaptor_dict=self.adaptors(driving_input, inference=True),
-            pixel_values=driving_input.camera_images,
-            placeholder_values=driving_input.prompt_inference.placeholder_values,
-            wp_encoder=self.wp_encoder,
-        )
-        return adaptor_dict["language_inputs"], adaptor_dict["language_inputs_mask"]
-
     def _generate_driving_features(
         self,
         prompt_embed: Tensor,
@@ -143,7 +128,6 @@ class DrivingModel(nn.Module):
         Returns ``(sampled_tokens, driving_features, driving_logits)`` where the
         features/logits cover only the driving-query positions.
         """
-        # BUG: input_embeds, cot
         sampled_tokens, prompt_embed = self.language_model.greedy_sample(
             prompt_embed,
             eos_token_id=self.tokenizer.eos_token_id,
@@ -151,10 +135,9 @@ class DrivingModel(nn.Module):
             input_embed_matrix=self.adaptors.language.embed_tokens.weight,
             logit_matrix=self.adaptors.language.lm_head.weight,
             attention_mask=prompt_mask,
-            # position_ids=position_ids,
         )
 
-        driving_inputs = self.policy_head(driving_input)
+        driving_inputs = self.adaptors.driving(driving_input)
         input_embed_concat = torch.cat(
             (prompt_embed, driving_inputs["inputs"][b_idx].unsqueeze(0)), dim=1
         )
