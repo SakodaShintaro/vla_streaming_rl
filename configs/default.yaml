@@ -25,10 +25,6 @@ episode_limit: 1_000_000_000
 max_grad_norm: 5.0
 sparsity: 0.0
 gamma: 0.99
-# Multi-gamma (AMAGO): auxiliary discount factors the critic predicts alongside
-# the primary ``gamma``. Empty = single-gamma (original behavior). The actor /
-# rollout optimize the mean over [*multi_gammas, gamma]; each gamma's critic is
-# trained on its own per-gamma TD target. e.g. [0.1, 0.9, 0.95, 0.97]
 multi_gammas: [0.1, 0.9, 0.95, 0.97]
 seq_len: 1
 horizon: 1
