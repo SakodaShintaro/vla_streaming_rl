@@ -1,31 +1,7 @@
 import math
 
-import cv2
 import numpy as np
 import torch
-
-
-def project_points(points2D_list, K, tvec=None, rvec=None):
-
-    all_points_2d = []
-    if rvec is None:
-        rvec_new = np.zeros((3, 1), np.float32)
-    else:
-        rvec_new = np.array([[-rvec[1], rvec[2], rvec[0]]], np.float32)
-    if tvec is None:
-        tvec = np.array([[0.0, 2.0, 1.5]], np.float32)
-
-    # print(f"rvec_new: {rvec_new}")
-    for point in points2D_list:
-        pos_3d = np.array([point[1], 0, point[0] + tvec[0][2]])
-        # Define the distortion coefficients
-        dist_coeffs = np.zeros((5, 1), np.float32)
-        points_2d, _ = cv2.projectPoints(
-            pos_3d, rvec=rvec_new, tvec=tvec, cameraMatrix=K, distCoeffs=dist_coeffs
-        )
-        all_points_2d.append(points_2d[0][0])
-
-    return all_points_2d
 
 
 def get_camera_intrinsics(w, h, fov):
@@ -95,15 +71,3 @@ def preprocess_compass(compass):
     compass = normalize_angle(compass - np.deg2rad(90.0))
 
     return compass
-
-
-def command_to_one_hot(command):
-    if command < 0:
-        command = 4
-    command -= 1
-    if command not in [0, 1, 2, 3, 4, 5]:
-        command = 3
-    cmd_one_hot = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    cmd_one_hot[command] = 1.0
-
-    return np.array(cmd_one_hot)

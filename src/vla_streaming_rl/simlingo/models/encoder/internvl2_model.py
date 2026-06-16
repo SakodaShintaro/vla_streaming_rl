@@ -3,10 +3,10 @@ from typing import List
 import torch
 from torch import nn
 
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.modeling_internvl_chat import (
+from vla_streaming_rl.simlingo.models.encoder.internvl2_vendored.modeling_internvl_chat import (
     InternVLChatModel,
 )
-from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
+from vla_streaming_rl.simlingo.utils.internvl2_utils import (
     SIMLINGO_ADDITIONAL_SPECIAL_TOKENS,
 )
 

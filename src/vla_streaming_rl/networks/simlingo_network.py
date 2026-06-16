@@ -17,11 +17,11 @@ from torch import nn
 from transformers import Qwen2Tokenizer
 
 from vla_streaming_rl.networks.value_head import DistributionalValueHead
-from vla_streaming_rl.simlingo.simlingo_training.models.driving import DrivingModel
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_vendored.configuration_internvl_chat import (  # noqa: E501
+from vla_streaming_rl.simlingo.models.driving import DrivingModel
+from vla_streaming_rl.simlingo.models.encoder.internvl2_vendored.configuration_internvl_chat import (
     InternVLChatConfig,
 )
-from vla_streaming_rl.simlingo.simlingo_training.utils.internvl2_utils import (
+from vla_streaming_rl.simlingo.utils.internvl2_utils import (
     SIMLINGO_ADDITIONAL_SPECIAL_TOKENS,
 )
 
@@ -93,12 +93,12 @@ class SimLingoNetwork(nn.Module):
         # in bfloat16. The waypoint heads are promoted to float32 below.
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
-        model_kwargs = {k: v for k, v in cfg.model.items() if k != "_target_"}
         self.vlm = DrivingModel(
             cfg_data_module=cfg.data_module,
             processor=tokenizer,
             cache_dir=cache_dir,
-            **model_kwargs,
+            vision_model_cfg=cfg.model.vision_model,
+            language_model_cfg=cfg.model.language_model,
         ).to(device)
         torch.set_default_dtype(default_dtype)
         self.vlm.load_state_dict(torch.load(config_path))

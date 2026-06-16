@@ -1,6 +1,6 @@
 from torch import nn
 
-from vla_streaming_rl.simlingo.simlingo_training.models.encoder.internvl2_model import (
+from vla_streaming_rl.simlingo.models.encoder.internvl2_model import (
     LingoInternVLModel,
 )
 
