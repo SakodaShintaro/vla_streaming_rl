@@ -12,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import torch
+from huggingface_hub import snapshot_download
 from omegaconf import OmegaConf
 from torch import nn
 from transformers import Qwen2Tokenizer
@@ -24,19 +25,6 @@ from vla_streaming_rl.simlingo.models.encoder.internvl2_vendored.configuration_i
 from vla_streaming_rl.simlingo.utils.internvl2_utils import (
     SIMLINGO_ADDITIONAL_SPECIAL_TOKENS,
 )
-
-# SimLingo's driving adaptor emits 20 route waypoints + 10 speed waypoints, each
-# 2-D — see DrivingAdaptor in simlingo_training/models/adaptors.py.
-_ROUTE_LEN = 20
-_SPEED_WPS_LEN = 10
-_WP_DIM = 2
-# Number of waypoint-query positions in ``driving_features`` (route then speed).
-# The DrivingAdaptor heads consume one feature vector per query.
-_NUM_WP_QUERIES = _ROUTE_LEN + _SPEED_WPS_LEN
-_ACTION_DIM = _NUM_WP_QUERIES * _WP_DIM
-
-_HF_REPO_ID = "RenzKa/simlingo"
-_HF_CKPT_NAME = "pytorch_model.pt"
 
 
 class SimLingoNetwork(nn.Module):
@@ -121,20 +109,11 @@ class SimLingoNetwork(nn.Module):
 
     @staticmethod
     def _resolve_checkpoint() -> Path:
-        """Pull the SimLingo checkpoint from HF and return its local path.
-
-        ``snapshot_download`` populates the HF cache; we pick the single
-        ``pytorch_model.pt`` inside (excluding the blob-store hardlinks, which
-        point to the same file but live under a content-addressed path that
-        breaks SimLingo's ``Path(...).parent.parent.parent / .hydra/config.yaml``
-        lookup).
-        """
-        from huggingface_hub import snapshot_download
-
-        snapshot = Path(snapshot_download(_HF_REPO_ID))
-        candidates = [p for p in snapshot.rglob(_HF_CKPT_NAME) if "/blobs/" not in str(p)]
-        if not candidates:
-            raise RuntimeError(f"no {_HF_CKPT_NAME} in HF snapshot of {_HF_REPO_ID} at {snapshot}")
+        HF_REPO_ID = "RenzKa/simlingo"
+        HF_CKPT_NAME = "pytorch_model.pt"
+        snapshot = Path(snapshot_download(HF_REPO_ID))
+        candidates = [p for p in snapshot.rglob(HF_CKPT_NAME) if "/blobs/" not in str(p)]
+        assert candidates, f"No {HF_CKPT_NAME} found in HF snapshot of {HF_REPO_ID} at {snapshot}"
         return candidates[0]
 
     def forward(self, driving_input):
