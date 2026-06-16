@@ -9,4 +9,4 @@ defaults:
 
 agent_type: streaming
 network_class: vlm_actor_critic_with_action_value
-seq_len: 2
+seq_len: 1
