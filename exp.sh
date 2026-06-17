@@ -9,5 +9,5 @@ cd $(dirname $0)
 ENV_NAME=$(basename "$ENV_PATH" .yaml)
 ENV_ID=$(grep '^env_id:' "$ENV_PATH" | awk '{print $2}')
 
-sed "s|value: gui|value: ${ENV_NAME}|" configs/exp.yaml \
+sed "s|value: placeholder|value: ${ENV_NAME}|" configs/exp.yaml \
   | wandb sweep --name "$SWEEP_NAME" /dev/stdin --project "vla_streaming_rl_${ENV_ID}"

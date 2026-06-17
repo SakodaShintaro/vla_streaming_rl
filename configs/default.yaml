@@ -10,7 +10,7 @@ hydra:
     dir: ${result_dir}
     subdir: ${now:%Y%m%d_%H%M%S}_${agent_type}_${exp_name}
 
-exp_name: default
+exp_name: ${hydra:runtime.choices.agent}_${seed}
 result_dir: results
 env_factory: null
 trial_num: 1

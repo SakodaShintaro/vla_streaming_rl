@@ -2,11 +2,11 @@ program: scripts/train.py
 method: grid
 parameters:
   env:
-    value: gui
+    value: placeholder
   agent:
     values: [cnn_off_policy_bs16, vlm_off_policy_bs16, vlm_off_policy_bs1, vlm_streaming]
   seed:
-    values: [0, 1, 2]
+    values: [0]
 command:
   - ${env}
   - uv
@@ -14,4 +14,3 @@ command:
   - python
   - ${program}
   - ${args_no_hyphens}
-  - exp_name=${agent}_${seed}
