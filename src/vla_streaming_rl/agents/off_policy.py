@@ -5,6 +5,7 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
+from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
@@ -195,12 +196,14 @@ class OffPolicyAgent:
         # inference - predict new action chunk
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
-            latest_data.observations,
-            latest_data.obs_z,
-            latest_data.actions,
-            latest_data.rewards,
-            self.rnn_state,
-            task_prompts=[task_prompt],
+            InferInput(
+                s_seq=latest_data.observations,
+                obs_z_seq=latest_data.obs_z,
+                a_seq=latest_data.actions,
+                r_seq=latest_data.rewards,
+                rnn_state=self.rnn_state,
+                task_prompts=[task_prompt],
+            )
         )
         self.rnn_state = infer_result.rnn_state
         metrics.update(infer_result.value_report)

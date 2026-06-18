@@ -5,7 +5,7 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
-from vla_streaming_rl.networks.interface import InferResult
+from vla_streaming_rl.networks.interface import InferInput, InferResult
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -242,12 +242,14 @@ class StreamingAgent:
 
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
-            latest_data.observations,
-            latest_data.obs_z,
-            latest_data.actions,
-            latest_data.rewards,
-            self.rnn_state,
-            task_prompts=[task_prompt],
+            InferInput(
+                s_seq=latest_data.observations,
+                obs_z_seq=latest_data.obs_z,
+                a_seq=latest_data.actions,
+                r_seq=latest_data.rewards,
+                rnn_state=self.rnn_state,
+                task_prompts=[task_prompt],
+            )
         )
         action, next_image, next_reward = self._start_new_chunk(infer_result, metrics)
         self._store_prediction(next_image, next_reward, terminated or truncated)

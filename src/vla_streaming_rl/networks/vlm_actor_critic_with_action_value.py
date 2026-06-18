@@ -7,9 +7,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ..replay_buffer import ReplayBufferData
 from .interface import (
     ActivationFeatures,
     EligibilityTraceInfo,
+    InferInput,
     InferLossResult,
     InferResult,
     LossResult,
@@ -230,16 +232,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return results
 
     @torch.inference_mode()
-    def infer(
-        self,
-        s_seq: torch.Tensor,
-        obs_z_seq: torch.Tensor,
-        a_seq: torch.Tensor,
-        r_seq: torch.Tensor,
-        rnn_state: torch.Tensor,
-        task_prompts: list[str],
-    ) -> InferResult:
-        state, action, _, actor_activation, critic_out = self._infer(s_seq, task_prompts)
+    def infer(self, data: InferInput) -> InferResult:
+        state, action, _, actor_activation, critic_out = self._infer(data.s_seq, data.task_prompts)
 
         next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
             self._state_for_predictor(state),
@@ -259,14 +253,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return InferResult(
             action=action,
             value_report=self.value_head.value_report(critic_out.output),
-            rnn_state=rnn_state,
+            rnn_state=data.rnn_state,
             next_image=next_image,
             next_reward=next_reward,
             action_token_ids=[],
             activations=activations,
         )
 
-    def compute_loss(self, data) -> LossResult:
+    def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # Decode task prompts from buffer: use last timestep's prompt for next-state
         next_prompts = self._decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         # Use prompt at the boundary between seq and horizon for current state
@@ -315,7 +309,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
         return LossResult(loss=total_loss, info=info_dict)
 
-    def infer_and_compute_loss(self, data) -> InferLossResult:
+    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         next_prompts = self._decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         curr_prompts = self._decode_task_prompt_ids(
             data.task_prompt_token_ids[:, -self.horizon - 1]

@@ -6,6 +6,7 @@ import torch
 from vla_streaming_rl.networks.interface import (
     ActivationFeatures,
     EligibilityTraceInfo,
+    InferInput,
     InferLossResult,
     InferResult,
     LossResult,
@@ -21,6 +22,7 @@ from vla_streaming_rl.networks.modules.policy_head import (
 from vla_streaming_rl.networks.modules.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
+from vla_streaming_rl.replay_buffer import ReplayBufferData
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -139,18 +141,12 @@ class ActorCriticWithActionValue(NetworkInterface):
         return []
 
     @torch.inference_mode()
-    def infer(
-        self,
-        s_seq: torch.Tensor,  # (B, T, C, H, W)
-        obs_z_seq: torch.Tensor,  # (B, T, C', H', W')
-        a_seq: torch.Tensor,  # (B, T, action_dim)
-        r_seq: torch.Tensor,  # (B, T, 1)
-        rnn_state: torch.Tensor,
-        task_prompts: list[str],
-    ) -> InferResult:
-        assert s_seq.shape[0] == 1, "Batch size must be 1 for inference"
+    def infer(self, data: InferInput) -> InferResult:
+        assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
 
-        x, rnn_state = self.encoder(s_seq, obs_z_seq, a_seq, r_seq, rnn_state)  # (B, hidden_dim)
+        x, rnn_state = self.encoder(
+            data.s_seq, data.obs_z_seq, data.a_seq, data.r_seq, data.rnn_state
+        )  # (B, hidden_dim)
 
         # Get action chunk from policy_head
         action, actor_activation = self.policy_head.get_action(x)  # (B, horizon, action_dim)
@@ -185,7 +181,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             activations=activations,
         )
 
-    def compute_loss(self, data) -> LossResult:
+    def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
         with torch.inference_mode():
             next_state, _ = self.encoder.forward(
@@ -243,7 +239,7 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         return LossResult(loss=total_loss, info=info_dict)
 
-    def infer_and_compute_loss(self, data) -> InferLossResult:
+    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         """Combined inference and loss computation."""
         # Next-step inference (no grad): the action the agent will take, its Q,
         # and the activations carried into the InferResult.

@@ -16,6 +16,27 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vla_streaming_rl.replay_buffer import ReplayBufferData
+
+
+@dataclass
+class InferInput:
+    """Inputs to a network's ``infer`` (the live, single-step inference call).
+
+    Unlike ``compute_loss`` / ``infer_and_compute_loss`` — which read a replay
+    batch (:class:`ReplayBufferData`) — inference assembles its window from the
+    buffer's latest frames but carries the *live* recurrent state and task prompt
+    held by the agent. Those two therefore are explicit fields here rather than
+    read off the buffer. Batch size is 1.
+    """
+
+    s_seq: torch.Tensor  # (B, T, *obs_shape) observation window
+    obs_z_seq: torch.Tensor  # (B, T, *obs_z_shape) encoded observations
+    a_seq: torch.Tensor  # (B, T, action_dim)
+    r_seq: torch.Tensor  # (B, T, 1)
+    rnn_state: torch.Tensor  # live recurrent state carried by the agent
+    task_prompts: list[str]  # one prompt per batch element
+
 
 @dataclass
 class ActivationFeatures:
@@ -104,27 +125,14 @@ class NetworkInterface(nn.Module, abc.ABC):
         """Token ids for a task-prompt string (empty for non-VLM networks)."""
 
     @abc.abstractmethod
-    def infer(
-        self,
-        s_seq: torch.Tensor,
-        obs_z_seq: torch.Tensor,
-        a_seq: torch.Tensor,
-        r_seq: torch.Tensor,
-        rnn_state: torch.Tensor,
-        task_prompts: list[str],
-    ) -> InferResult:
+    def infer(self, data: InferInput) -> InferResult:
         """Single-step inference: the action to take, its value report, the
-        carried RNN state and predicted next state. Batch size is 1.
-
-        TODO: the agreed direction is to collapse these arguments into a single
-        ``data`` object (matching ``compute_loss`` / ``infer_and_compute_loss``).
-        That also needs the streaming call site to fold the live ``rnn_state``
-        and ``task_prompts`` into the data window, so it is a separate refactor."""
+        carried RNN state and predicted next state. Batch size is 1."""
 
     @abc.abstractmethod
-    def compute_loss(self, data) -> LossResult:
+    def compute_loss(self, data: ReplayBufferData) -> LossResult:
         """Training loss over a replay batch."""
 
     @abc.abstractmethod
-    def infer_and_compute_loss(self, data) -> InferLossResult:
+    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         """Combined inference + loss in one forward, sharing the encoder pass."""
