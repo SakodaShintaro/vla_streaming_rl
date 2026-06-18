@@ -41,10 +41,10 @@ class LiberoPi05Network(nn.Module):
     def __init__(
         self,
         *,
-        checkpoint_repo: str,
         device: torch.device,
     ) -> None:
         super().__init__()
+        checkpoint_repo = "lerobot/pi05_libero_finetuned_quantiles_v044"
         cfg = PreTrainedConfig.from_pretrained(checkpoint_repo)
         cfg.device = str(device)
         # Freeze the PaliGemma vision + LLM; keep only the action expert and its
