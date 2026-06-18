@@ -56,7 +56,6 @@ class SimLingoNetwork(nn.Module):
         self,
         *,
         value_head_factory: Callable[[int], DistributionalValueHead],
-        device: torch.device,
         actor_loss_type: str,
         awr_num_samples: int,
         awr_temperature: float,
@@ -116,7 +115,7 @@ class SimLingoNetwork(nn.Module):
             cache_dir=cache_dir,
             vision_model_cfg=cfg.model.vision_model,
             language_model_cfg=cfg.model.language_model,
-        ).to(device)
+        )
         torch.set_default_dtype(default_dtype)
         self.vlm.load_state_dict(torch.load(config_path))
 
@@ -134,7 +133,7 @@ class SimLingoNetwork(nn.Module):
             p.requires_grad_(True)
 
         self.feature_dim = int(self.vlm.language_model.hidden_size)
-        self.critic = value_head_factory(self.feature_dim).to(device)
+        self.critic = value_head_factory(self.feature_dim)
 
     @staticmethod
     def _resolve_checkpoint() -> Path:
