@@ -22,6 +22,7 @@ Examples:
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -172,11 +173,26 @@ def parse_args() -> argparse.Namespace:
         "the key (e.g. -k reward --cumulative gives cumulative reward / return).",
     )
     parser.add_argument(
+        "--per-gamma",
+        metavar="BASE",
+        default=None,
+        help="Multi-gamma view: auto-discover all per-gamma series "
+        "'<BASE>_g<gamma>' (BASE='value' for the per-step inference Q_g) and "
+        "overlay one line per discount, colored by gamma. Pair with --smooth.",
+    )
+    parser.add_argument(
         "--calibration",
         action="store_true",
         help="Q-overestimation diagnostic: scatter the critic value (key, default value) vs "
         "the realized discounted return-to-go, colored by episode id, plus the "
         "per-episode mean gap (Q - return). Reveals critic divergence.",
+    )
+    parser.add_argument(
+        "--calibration-per-gamma",
+        action="store_true",
+        help="One --calibration image per discount (gammas discovered from the "
+        "logged per-gamma series): Q_g (value_g{g}, or gamma-mean 'value' if "
+        "per-step per-gamma was not logged) vs the γ_g return-to-go.",
     )
     parser.add_argument(
         "--reward-key",
@@ -216,7 +232,9 @@ def resolve_output(args: argparse.Namespace) -> Path:
     out_dir = args.out_dir if args.out_dir is not None else args.run_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     keys = "_".join(k.replace("/", "_") for k in (args.keys or ["value"]))
-    if args.calibration:
+    if args.per_gamma:
+        name = f"per_gamma_{args.per_gamma.replace('/', '_')}"
+    elif args.calibration:
         name = f"calibration_{keys}"
     elif args.per_episode:
         name = f"{keys}_per_episode" + ("_cumulative" if args.cumulative else "")
@@ -260,13 +278,67 @@ def plot_q_calibration(
     q_key = args.keys[0] if args.keys else "value"
     if q_key not in history:
         raise SystemExit(f"Q key '{q_key}' not found in run")
+    gamma = _resolve_gamma(args.run_dir, args.gamma)
+    _render_calibration(
+        args, history, x, x_key, q_key=q_key, gamma=gamma, output=resolve_output(args)
+    )
+
+
+def plot_calibration_per_gamma(
+    args: argparse.Namespace, history: dict[str, np.ndarray], x: np.ndarray, x_key: str
+) -> None:
+    """One Q-calibration image per discount: for each gamma g, scatter the
+    per-gamma rollout value ``value_g{g}`` (Q of the executed action at each
+    env-step, logged at inference) against the realized γ_g return-to-go.
+
+    Gammas are discovered from the per-step ``value_g{g}`` keys. A run that did
+    not log them (single-gamma, or pre-dating per-gamma inference logging) has
+    nothing to plot here — falls back to the gamma-mean ``value`` for Q with a
+    warning, in which case only the *discount* is per-gamma, not the Q itself.
+    """
+    gamma_keys = discover_gamma_keys(history, "value")
+    if not gamma_keys:
+        raise SystemExit(
+            "No per-gamma rollout series ('value_g*') found in run — was it "
+            "trained with per-gamma inference logging and multi_gammas set?"
+        )
+    out_dir = args.out_dir if args.out_dir is not None else args.run_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for gamma, _ in gamma_keys:
+        per_step_key = f"value_g{gamma:.3f}"
+        if per_step_key in history:
+            q_key = per_step_key
+        else:
+            q_key = "value"
+            print(
+                f"γ={gamma:g}: per-step '{per_step_key}' absent; "
+                f"falling back to gamma-mean 'value' (Q not per-gamma)"
+            )
+        _render_calibration(
+            args, history, x, x_key, q_key=q_key, gamma=gamma,
+            output=out_dir / f"calibration_g{gamma:.3f}.png",
+        )
+
+
+def _render_calibration(
+    args: argparse.Namespace,
+    history: dict[str, np.ndarray],
+    x: np.ndarray,
+    x_key: str,
+    *,
+    q_key: str,
+    gamma: float,
+    output: Path,
+) -> None:
+    """Render one calibration figure (Q vs γ return-to-go + per-episode gap)."""
+    if q_key not in history:
+        raise SystemExit(f"Q key '{q_key}' not found in run")
     r_key = args.reward_key
     if r_key not in history:
         if "reward" not in history:
             raise SystemExit(f"reward key '{r_key}' (and fallback 'reward') not found")
         print(f"'{r_key}' absent; falling back to raw 'reward' for return-to-go")
         r_key = "reward"
-    gamma = _resolve_gamma(args.run_dir, args.gamma)
 
     valid = ~(np.isnan(x) | np.isnan(history[q_key]) | np.isnan(history[r_key]))
     gs = x[valid]
@@ -336,9 +408,10 @@ def plot_q_calibration(
             handles.append(score_line)
     ax2.legend(handles=handles, loc="upper left")
 
-    fig.suptitle(f"{args.run_dir.name} — Q calibration ({n} episodes)")
+    fig.suptitle(
+        f"{args.run_dir.name} — Q calibration ({q_key}, γ={gamma:g}, {n} episodes)"
+    )
     fig.tight_layout()
-    output = resolve_output(args)
     fig.savefig(output, dpi=120)
     print(f"Saved {output}")
     if args.show:
@@ -393,6 +466,66 @@ def plot_per_episode(
         plt.show()
 
 
+def discover_gamma_keys(history: dict[str, np.ndarray], base: str) -> list[tuple[float, str]]:
+    """Find logged keys of the form ``...<base>_g<gamma>`` and return
+    ``[(gamma, key), ...]`` sorted by gamma (e.g. base='q_value' →
+    'losses/q_value_g0.100'). The gamma is parsed from the ``_g<float>`` suffix."""
+    pat = re.compile(rf"{re.escape(base)}_g(-?\d+(?:\.\d+)?)$")
+    found = []
+    for key in history:
+        m = pat.search(key)
+        if m:
+            found.append((float(m.group(1)), key))
+    found.sort(key=lambda gk: gk[0])
+    return found
+
+
+def plot_per_gamma(
+    args: argparse.Namespace, history: dict[str, np.ndarray], x: np.ndarray, x_key: str
+) -> None:
+    """Overlay one curve per discount for a multi-gamma metric, colored by gamma."""
+    gamma_keys = discover_gamma_keys(history, args.per_gamma)
+    if not gamma_keys:
+        avail = sorted(k for k in history if "_g" in k)
+        raise SystemExit(
+            f"No per-gamma series found for base '{args.per_gamma}'. "
+            f"Keys containing '_g': {avail}"
+        )
+
+    cmap = plt.cm.viridis
+    norm = plt.Normalize(vmin=0, vmax=max(1, len(gamma_keys) - 1))
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for i, (gamma, key) in enumerate(gamma_keys):
+        y = history[key]
+        valid = ~(np.isnan(x) | np.isnan(y))
+        ys = smooth(y[valid], args.smooth)
+        ax.plot(x[valid], ys, color=cmap(norm(i)), linewidth=1.3, label=f"γ={gamma:g}")
+
+    if not args.no_episode_lines:
+        for i, xb in enumerate(episode_boundaries(history, x_key, args.episode_key)):
+            ax.axvline(
+                xb, color="gray", linestyle="--", linewidth=0.8, alpha=0.4,
+                label="episode boundary" if i == 0 else None,
+            )
+
+    ax.set_xlabel(x_key)
+    ax.set_ylabel(args.per_gamma)
+    ax.grid(alpha=0.3)
+    ax.legend(title="discount", ncol=2)
+    title = f"{args.run_dir.name} — {args.per_gamma} per gamma ({len(gamma_keys)})"
+    if args.smooth > 1:
+        title += f" (smooth={args.smooth})"
+    ax.set_title(title)
+    fig.tight_layout()
+
+    output = resolve_output(args)
+    fig.savefig(output, dpi=120)
+    print(f"Saved {output}")
+    if args.show:
+        plt.show()
+
+
 def main() -> None:
     args = parse_args()
 
@@ -404,7 +537,10 @@ def main() -> None:
     if args.calibration and not args.keys:
         args.keys = ["value"]
 
-    if args.list or not args.keys:
+    # --per-gamma / --calibration-per-gamma discover their own keys, so -k is
+    # not required for them either.
+    needs_keys = not (args.per_gamma or args.calibration_per_gamma or args.list)
+    if args.list or (needs_keys and not args.keys):
         print(f"Available keys ({len(history)}):")
         for k in sorted(history):
             print(f"  {k}")
@@ -413,9 +549,10 @@ def main() -> None:
         if not args.keys:
             raise SystemExit("Specify -k <key> [<key> ...] to plot")
 
-    missing = [k for k in args.keys if k not in history]
-    if missing:
-        raise SystemExit(f"Keys not found in run: {missing}")
+    if args.keys:
+        missing = [k for k in args.keys if k not in history]
+        if missing:
+            raise SystemExit(f"Keys not found in run: {missing}")
 
     if args.x_key in history:
         x_key = args.x_key
@@ -424,6 +561,14 @@ def main() -> None:
     else:
         raise SystemExit(f"x-axis key '{args.x_key}' not found and no '_step' fallback")
     x = history[x_key]
+
+    if args.per_gamma:
+        plot_per_gamma(args, history, x, x_key)
+        return
+
+    if args.calibration_per_gamma:
+        plot_calibration_per_gamma(args, history, x, x_key)
+        return
 
     if args.calibration:
         plot_q_calibration(args, history, x, x_key)

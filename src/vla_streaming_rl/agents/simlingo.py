@@ -991,8 +991,10 @@ class SimLingoAgent:
         _current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
 
         # TD error drives the eligibility-trace critic update; a detached
-        # scalar (AdamET multiplies the per-parameter trace by it).
-        delta = float((target_q - current_q).mean().item())
+        # scalar (AdamET multiplies the per-parameter trace by it). ``target_q``
+        # is per-gamma (B, num_gammas), so collapse it to the gamma-mean to match
+        # ``current_q`` (the scalar AdamET trace is single-TD).
+        delta = float((target_q.mean(dim=1) - current_q).mean().item())
 
         # Backward BOTH losses before any optimizer step so the actor graph
         # still sees the pre-update critic weights (``AdamET.step`` mutates
