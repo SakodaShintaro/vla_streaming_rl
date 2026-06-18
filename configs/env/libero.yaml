@@ -14,6 +14,6 @@ env_factory:
   # - horizon: max controllable steps before truncation.
   task_suite_name: libero_spatial
   task_id: -1
-  resolution: 128
+  resolution: 256
   settle_steps: 10
   horizon: 300

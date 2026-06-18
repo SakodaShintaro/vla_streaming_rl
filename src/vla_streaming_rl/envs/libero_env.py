@@ -128,9 +128,10 @@ class LiberoEnv(gym.Env):
         self._loaded_task_id = -1
         self._env = None
         self._task_prompt = ""
-        self._last_agentview = np.zeros(
-            (resolution, resolution, 3), dtype=np.uint8
-        )
+        self._last_agentview = np.zeros((resolution, resolution, 3), dtype=np.uint8)
+        self.last_wrist_image = np.zeros((resolution, resolution, 3), dtype=np.uint8)
+        self.last_proprio = np.zeros(8, dtype=np.float32)
+        self.last_instruction = ""
 
         self.observation_space = gym.spaces.Box(
             low=0, high=255, shape=(resolution, resolution, 3), dtype=np.uint8
@@ -165,12 +166,26 @@ class LiberoEnv(gym.Env):
         self._loaded_task_id = task_id
 
     def _extract(self, obs: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+        from robosuite.utils.transform_utils import quat2axisangle
+
         agentview = np.ascontiguousarray(obs[_OBS_AGENTVIEW][_VERTICAL_FLIP])
         wrist = np.ascontiguousarray(obs[_OBS_WRIST][_VERTICAL_FLIP])
+        # 8-D proprio matching the LIBERO pi0.5 checkpoint's state feature:
+        # end-effector position, orientation as axis-angle, and gripper width.
         proprio = np.concatenate(
-            [obs[_OBS_EEF_POS], obs[_OBS_EEF_QUAT], obs[_OBS_GRIPPER_QPOS]]
+            [
+                obs[_OBS_EEF_POS],
+                quat2axisangle(obs[_OBS_EEF_QUAT]),
+                obs[_OBS_GRIPPER_QPOS],
+            ]
         ).astype(np.float32)
         self._last_agentview = agentview
+        # Cached so an agent holding the env (e.g. the pi0.5 agent) can read the
+        # modalities that don't fit the single-RGB observation slot, alongside
+        # publishing them in info. See the module docstring's stop-gap note.
+        self.last_wrist_image = wrist
+        self.last_proprio = proprio
+        self.last_instruction = self._task_prompt
         info = {
             INFO_KEY_TASK_PROMPT: self._task_prompt,
             INFO_KEY_WRIST_IMAGE: wrist,

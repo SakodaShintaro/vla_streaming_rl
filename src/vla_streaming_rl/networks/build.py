@@ -186,6 +186,15 @@ def build_network(
             value_head_factory=value_head_factory,
             device=device,
         ).to(device)
+    elif args.network_class == "libero_pi05":
+        from vla_streaming_rl.networks.libero_pi05_network import LiberoPi05Network
+
+        # pi0.5 loads its own pretrained backbone + processors from the HF
+        # checkpoint; the env observation/action shapes are unused.
+        network = LiberoPi05Network(
+            checkpoint_repo=args.pi05_checkpoint_repo,
+            device=device,
+        )
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
 

@@ -1,0 +1,45 @@
+# @package _global_
+# pi0.5 (LeRobot PI05Policy) + online return-weighted regression on LIBERO.
+#
+# The pi0.5 backbone (PaliGemma vision + LLM) is frozen; only the action expert
+# fine-tunes online. The agent reads the wrist camera / proprio / language
+# instruction directly from LiberoEnv (the single-RGB observation slot only
+# carries the agentview); the trainer still builds an idle CNN-free network
+# because build_network returns LiberoPi05Network for this network_class.
+#
+# The pi0.5 checkpoint (policy weights + LIBERO normalization stats) is pulled
+# from the HF hub into the local cache on first use.
+defaults:
+  - base_network
+  - base_off_policy
+  - base_streaming
+  - base_cnn
+  - base_vlm
+  - _self_
+
+agent_type: libero_pi05
+network_class: libero_pi05
+
+# HF checkpoint: LIBERO-configured pi0.5 with quantile normalization stats
+# (state dim 8, action dim 7, 2 cameras).
+pi05_checkpoint_repo: lerobot/pi05_libero_finetuned_quantiles_v044
+
+# Overrides consumed by LiberoPi05Agent.
+image_save_interval: 50
+print_interval: 1
+batch_size: 8
+# Warmup before the first update; also ensures the buffer holds a few episodes
+# of chunks so the return-to-go weighting has signal.
+learning_starts: 2000
+# Replay holds completed action chunks (agentview + wrist uint8 + proprio +
+# instruction + executed chunk), weighted by discounted return-to-go.
+buffer_size: 4096
+
+# Std of the Gaussian exploration noise added to each executed action
+# (action space is [-1, 1]). Set to 0 for greedy evaluation.
+exploration_noise: 0.1
+# Fine-tuning LR for the action expert.
+learning_rate: 1e-5
+# Softmax temperature on the per-batch z-scored returns used as RWR weights;
+# lower → weights concentrate on the highest-return chunks.
+awr_temperature: 0.1

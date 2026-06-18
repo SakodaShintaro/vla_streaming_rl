@@ -268,6 +268,23 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             awr_temperature=float(args.awr_temperature),
             awr_sample_noise=float(args.awr_sample_noise),
         )
+    elif args.agent_type == "libero_pi05":
+        from vla_streaming_rl.agents.libero_pi05 import LiberoPi05Agent
+
+        agent = LiberoPi05Agent(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            env=env,
+            network=network,
+            gamma=float(args.gamma),
+            buffer_size=int(args.buffer_size),
+            batch_size=int(args.batch_size),
+            learning_starts=int(args.learning_starts),
+            exploration_noise=float(args.exploration_noise),
+            learning_rate=float(args.learning_rate),
+            max_grad_norm=float(args.max_grad_norm),
+            awr_temperature=float(args.awr_temperature),
+        )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
 
