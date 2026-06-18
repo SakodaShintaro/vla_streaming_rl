@@ -227,7 +227,11 @@ class StreamingAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
+        # ``info`` is the env's step/reset info dict (used by env-coupled agents
+        # such as SimLingo); the obs-driven streaming agent ignores it.
+        del info
         metrics = {}
         panels = {}
         self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)
@@ -274,7 +278,9 @@ class StreamingAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
+        del info
         metrics = {}
         panels = {}
         self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)

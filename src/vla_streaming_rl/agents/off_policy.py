@@ -114,7 +114,11 @@ class OffPolicyAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
+        # ``info`` is the env's step/reset info dict (used by env-coupled agents
+        # such as SimLingo); the obs-driven off-policy agent ignores it.
+        del info
         metrics = {}
         panels = {}
 
@@ -244,11 +248,14 @@ class OffPolicyAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
         # train, then make decision; the training metrics merge into the
         # action's StepResult.
         train_metrics = self._train(global_step)
-        result = self.select_action(global_step, obs, reward, terminated, truncated, task_prompt)
+        result = self.select_action(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
+        )
         result.metrics.update(train_metrics)
         return result
 

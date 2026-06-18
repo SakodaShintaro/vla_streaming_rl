@@ -521,9 +521,17 @@ class CARLALeaderboardEnv(gym.Env):
 
         self._update_spectator()
 
-        return self.current_image.copy(), self._build_scenario_info(
-            {"task_prompt": self.prompt, "sensors": self._build_sensors_dict()}
-        )
+        reset_info = {"task_prompt": self.prompt, "sensors": self._build_sensors_dict()}
+        # The (gps, world-coord) global plan for VLA agents that build their own
+        # route planner (e.g. SimLingo). Only the Bench2Drive runtime has a
+        # RouteScenario; reset info carries it once per episode so the agent
+        # never reaches into the env to fetch it.
+        if self.runtime is not None and self.runtime.route_scenario is not None:
+            reset_info["route_plan"] = (
+                self.runtime.route_scenario.gps_route,
+                self.runtime.route_scenario.route,
+            )
+        return self.current_image.copy(), self._build_scenario_info(reset_info)
 
     # ``final_eval_summary`` is populated by ``close()`` (auto-merge of the
     # 220-route sweep). Trainer reads it after env.close() for wandb

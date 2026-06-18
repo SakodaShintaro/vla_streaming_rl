@@ -1,62 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""DDPG-style RL agent built on top of SimLingo.
-
-The action is SimLingo's full waypoint output: ``pred_route`` (20×2)
-concatenated with ``pred_speed_wps`` (10×2), flattened to a 60-D
-continuous vector. The deterministic PID controller that turns
-waypoints into ``carla.VehicleControl`` is treated as part of the
-environment — the policy emits waypoints, PID emits 2-D control, env
-sees ``[steer, throttle - brake]``.
-
-  μ(s) = waypoint_heads(features(s))   ← SimLingo's own route / speed
-                                         MLP heads, trained directly
-  Q(s, a) = ActionValueHead(pool(features(s)), a)
-
-Rather than learning a residual on top of frozen waypoints, this is a
-DDPG-like setup: the SimLingo waypoint heads (``DrivingAdaptor.route_head``
-and ``speed_wps_head``) *are* the deterministic policy μ and are updated
-to ascend the critic's Q-gradient. The rest of the VLM stays frozen.
-
-Critic update (off-policy, batch from replay):
-  a' = μ(s')
-  y = r + γ (1 − done) Q(s', a')
-  L_critic = MSE(Q(s, a), y)
-
-Actor update (off-policy, batch from replay):
-  L_actor = − Q(s, μ(s))      (deterministic policy gradient)
-  Gradients flow through the waypoint heads only; the pooled state fed
-  to Q is detached so the actor loss cannot move the frozen backbone.
-
-The VLM backbone (everything except the two waypoint heads) is frozen.
-``run_step`` caches the per-query VLM features and the action it took
-for each tick directly into the replay buffer, so training reads
-``(features, action, reward, done)`` straight from the buffer and only
-re-applies the (cheap) waypoint heads — no VLM re-forward. Only the
-waypoint heads and Q learn.
-
-Three learning modes (``learning_mode``):
-  - ``off_policy``: random replay batches (the critic/actor updates above).
-  - ``streaming``: online TD(λ) on the latest transition every step, with the
-    critic updated by eligibility traces (``AdamET``) and the actor by the
-    same deterministic policy gradient + AdamW — mirroring ``StreamingAgent``.
-  - ``awr``: same random-replay TD critic, but the actor is exp-weighted
-    supervised regression (advantage-weighted regression). For each state we
-    sample N actions around μ(s), score them with Q(s, a_i), normalize the
-    scores per state and turn them into softmax weights
-    w_i = softmax((Q_i − mean)/std / temperature), then regress μ(s) toward
-    the candidates weighted by w_i. The critic is not differentiated through —
-    only the supervised regression trains the waypoint heads.
-
-Because the env owns the sensor lifecycle, SimLingoAgent does **not**
-spawn its own multi-camera stack or wire a leaderboard
-``SensorInterface``. New-episode handover (set_global_plan, hero_actor,
-re-init) is detected automatically via ``env.unwrapped.vehicle.id``
-changing between ticks.
-"""
-
-import json
-from pathlib import Path
-
 import carla
 import cv2
 import gymnasium as gym
@@ -147,9 +89,7 @@ class SimLingoAgent:
         *,
         observation_space: gym.spaces.Box,
         action_space: gym.spaces.Box,
-        env: gym.Env,
         network: nn.Module,
-        scratch_dir: Path,
         gamma: float,
         buffer_size: int,
         batch_size: int,
@@ -160,31 +100,14 @@ class SimLingoAgent:
         max_grad_norm: float,
         learning_mode: str,
         et_lambda: float,
-        awr_num_samples: int,
-        awr_temperature: float,
-        awr_sample_noise: float,
     ) -> None:
         self.observation_space = observation_space
         del action_space
-        self._env_unwrapped = env.unwrapped
-
-        scratch_dir = Path(scratch_dir)
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-        self.save_path_metric = str(scratch_dir) + "/metric"
-        Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.exploration_noise = exploration_noise
         self.max_grad_norm = max_grad_norm
-
-        # Advantage-weighted-regression (``learning_mode == "awr"``) actor knobs:
-        # how many actions to sample per state, the softmax temperature on the
-        # per-state-normalized Q advantages, and the Gaussian std of the
-        # candidate actions around μ(s). Unused in off_policy / streaming.
-        self.awr_num_samples = int(awr_num_samples)
-        self.awr_temperature = float(awr_temperature)
-        self.awr_sample_noise = float(awr_sample_noise)
 
         torch.cuda.empty_cache()
         self._frame_step = -1
@@ -210,7 +133,6 @@ class SimLingoAgent:
         # pipeline below needs.
         self.network = network
         self.cfg = network.cfg
-        self._driving_adaptor = network.driving_adaptor
         self.actor_heads = network.actor_heads
         self.critic = network.critic
 
@@ -279,7 +201,10 @@ class SimLingoAgent:
         )
         self._current_action_taken: torch.Tensor = torch.zeros(ACTION_DIM, device=self.device)
 
-        self._attached_ego_id: int | None = None
+        # Re-run ``_init`` (rebuild the RoutePlanner from the new episode's
+        # route plan) on the next tick. Set on construction and by
+        # ``on_episode_end``; consumed by ``_maybe_handover_episode``.
+        self._need_handover = True
         self._prev_action = torch.zeros(ACTION_DIM, device=self.device)
 
         # Latest executed trajectory + its critic value, cached by ``run_step``
@@ -307,9 +232,10 @@ class SimLingoAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
-        self._maybe_handover_episode()
-        env_action = self._act()
+        self._maybe_handover_episode(info)
+        env_action = self._act(info["sensors"])
         metrics, panels = self._build_info(env_action, reward)
         return StepResult(action=env_action, metrics=metrics, panels=panels)
 
@@ -321,10 +247,11 @@ class SimLingoAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
-        self._maybe_handover_episode()
+        self._maybe_handover_episode(info)
         episode_done = terminated or truncated
-        env_action = self._act()
+        env_action = self._act(info["sensors"])
         metrics, panels = self._build_info(env_action, reward)
 
         # Store (features_t, action_{t-1}, reward, done). The per-query VLM
@@ -355,8 +282,9 @@ class SimLingoAgent:
         return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        # Force re-init on the next select_action.
-        self._attached_ego_id = None
+        # Force handover (RoutePlanner rebuild) on the next select_action, which
+        # receives the new episode's reset info.
+        self._need_handover = True
         return {}
 
     def _build_info(self, env_action: np.ndarray, reward: float) -> tuple[dict, dict]:
@@ -367,7 +295,7 @@ class SimLingoAgent:
         reward only (``pred=None``). ``action_norm`` is a scalar telemetry hook.
         ``processed_reward`` is the exact reward the critic trains on — the
         "carla" transform is stateless, so logging it here matches the value
-        used at train time (see ``_read_transition``).
+        used at train time.
         """
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
@@ -432,25 +360,22 @@ class SimLingoAgent:
 
     # --- Episode handover --------------------------------------------------
 
-    def _maybe_handover_episode(self) -> None:
-        """When the env reset to a new scenario, hand the agent the new
-        ego + route plan and force ``_init`` to re-run on the next tick.
-        """
-        ego = self._env_unwrapped.vehicle
-        if ego is None:
-            raise RuntimeError("SimLingoAgent: env has no live ego — was env.reset() called?")
-        if ego.id == self._attached_ego_id:
-            return
+    def _maybe_handover_episode(self, info: dict) -> None:
+        """On the first tick of a new episode, take the route plan from the
+        env's reset ``info`` and force ``_init`` to rebuild the RoutePlanner.
 
-        runtime = self._env_unwrapped.runtime
-        if runtime is None or runtime.route_scenario is None:
-            raise RuntimeError("SimLingoAgent requires Bench2DriveRuntime with an active scenario")
-        # ``set_global_plan`` is the standard leaderboard handover —
-        # RouteScenario builds both gps_route and world-coord route.
-        self._set_global_plan(runtime.route_scenario.gps_route, runtime.route_scenario.route)
-        self.hero_actor = ego
+        ``_need_handover`` is set on construction and by ``on_episode_end``; the
+        next ``select_action`` carries the new episode's reset info (which holds
+        ``route_plan``), so no reach into the env is needed.
+        """
+        if not self._need_handover:
+            return
+        # ``route_plan`` is the standard leaderboard handover — RouteScenario
+        # builds both the gps and world-coord route (see CARLALeaderboardEnv).
+        gps_route, world_route = info["route_plan"]
+        self._set_global_plan(gps_route, world_route)
         self.initialized = False
-        self._attached_ego_id = ego.id
+        self._need_handover = False
 
     def _set_global_plan(self, global_plan_gps, global_plan_world_coord) -> None:
         """Downsample the route (matches leaderboard ``AutonomousAgent.set_global_plan``)
@@ -467,7 +392,7 @@ class SimLingoAgent:
 
     def _init(self) -> None:
         """First-tick lazy init: build the RoutePlanner once the global
-        plan has been set, and clear the per-episode metric log.
+        plan has been set.
         """
         self._route_planner = RoutePlanner(
             self.route_planner_min_distance,
@@ -476,36 +401,18 @@ class SimLingoAgent:
             self._global_plan_world_coord,
         )
         self.initialized = True
-        self.metric_info = {}
-
-    def get_metric_info(self):
-        """Per-frame ego pose / velocity snapshot. Inlined from leaderboard
-        ``AutonomousAgent.get_metric_info``."""
-
-        def v(vec, rot=False):
-            return [vec.roll, vec.pitch, vec.yaw] if rot else [vec.x, vec.y, vec.z]
-
-        hero = self.hero_actor
-        return {
-            "acceleration": v(hero.get_acceleration()),
-            "angular_velocity": v(hero.get_angular_velocity()),
-            "forward_vector": v(hero.get_transform().get_forward_vector()),
-            "right_vector": v(hero.get_transform().get_right_vector()),
-            "location": v(hero.get_transform().location),
-            "rotation": v(hero.get_transform().rotation, rot=True),
-        }
 
     # --- Per-tick inference ------------------------------------------------
 
-    def _act(self) -> np.ndarray:
+    def _act(self, sensors: dict) -> np.ndarray:
         """One inference tick + 2-D env-action conversion.
 
-        Reads :meth:`CARLALeaderboardEnv._build_sensors_dict` (already
-        in the leaderboard ``input_data`` shape ``{id: (frame, payload)}``)
-        and remaps ``rgb`` → ``rgb_<N>`` per SimLingo's
-        ``config.num_cameras`` so ``_tick`` sees the keys it expects.
+        ``sensors`` is the env's ``info["sensors"]`` snapshot (the leaderboard
+        ``{id: (frame, payload)}`` shape from
+        :meth:`CARLALeaderboardEnv._build_sensors_dict`); we remap ``rgb`` →
+        ``rgb_<N>`` per SimLingo's ``config.num_cameras`` so ``_tick`` sees the
+        keys it expects.
         """
-        sensors = self._env_unwrapped._build_sensors_dict()
         # SimLingo's sensors() declares per-camera ids ``rgb_{N}`` where
         # ``N`` iterates over ``config.num_cameras`` (typically just [0]).
         # We only have a single env camera, so map it to whatever id the
@@ -715,59 +622,25 @@ class SimLingoAgent:
         else:
             self.control = control
 
-        metric_info = self.get_metric_info()
-        self.metric_info[self._frame_step] = metric_info
-        if self.save_path_metric is not None and self._frame_step % 1 == 0:
-            # metric info
-            outfile = open(f"{self.save_path_metric}/metric_info.json", "w")
-            json.dump(self.metric_info, outfile, indent=4)
-            outfile.close()
-
         return control
 
     # --- Off-policy training step -----------------------------------------
 
-    def _policy_action(self, features: torch.Tensor) -> torch.Tensor:
-        """Apply the SimLingo waypoint heads to per-query features and
-        return the flattened action μ(s).
-
-        Args:
-            features: ``(B, 30, hidden)`` per-query VLM features.
-
-        Returns:
-            ``(B, 60)`` action: route waypoints (20×2) then speed
-            waypoints (10×2), matching ``_waypoints_to_action_vec``.
-        """
-        preds = self._driving_adaptor.get_predictions(features)
-        b = features.shape[0]
-        route = preds["route"].reshape(b, -1)  # (B, 40)
-        speed = preds["speed_wps"].reshape(b, -1)  # (B, 20)
-        return torch.cat([route, speed], dim=1)
-
     def _train(self, global_step: int, episode_done: bool) -> dict:
         if self.learning_mode == "streaming":
             return self._train_streaming(global_step, episode_done)
-        if self.learning_mode == "awr":
-            return self._train_awr(global_step)
         return self._maybe_train(global_step)
 
-    def _critic_value(self, logits: torch.Tensor) -> torch.Tensor:
-        """Map the critic's raw ``"output"`` to a scalar Q (B,).
+    def _read_and_compute(self, seq: torch.Tensor) -> tuple:
+        """Read one transition batch and build the loss tensors.
 
-        For the distributional (``num_bins > 1``) SimbaV2 critic the output is
-        ``num_bins`` categorical logits; HL-Gauss returns their expected return.
-        For a scalar critic it is just the value itself.
-        """
-        return self.critic.to_value(logits).view(-1)
-
-    def _read_transition(self, seq: torch.Tensor) -> tuple:
-        """Read one transition batch for index pairs ``seq`` (B, 2).
-
-        ``seq[:, 0] = t``, ``seq[:, 1] = t+1``; the replay convention puts a_t
-        at ``actions[t+1]``, r_t at ``rewards[t+1]``, done_t at ``dones[t+1]``.
-        The per-query features were cached into the obs slot at write time; the
-        critic state is their mean over the 30 waypoint queries. Returns
-        ``(a, r, done, feat, feat_next, s, s_next)``.
+        Returns ``(current_logits, current_q, target_q, actor_loss, actor_info)``
+        — used by ``off_policy`` and ``streaming``. ``current_logits`` is the raw
+        critic output kept for the (distributional) critic loss; ``current_q`` /
+        ``target_q`` are scalars; ``actor_info`` is the network's actor-loss
+        telemetry (e.g. AWR weight entropy). The (s, a) → loss-tensor math lives
+        on the network; the agent only feeds it the transition it read from the
+        replay buffer and does not know which actor loss the network uses.
         """
         a = self.rb.actions[seq[:, 1]].to(self.device)
         r = self.reward_processor.normalize(self.rb.rewards[seq[:, 1], 0].to(self.device))
@@ -776,111 +649,11 @@ class SimLingoAgent:
         feat_next = self.rb.observations[seq[:, 1]].to(self.device)
         s = feat.mean(dim=1)
         s_next = feat_next.mean(dim=1)
-        return a, r, done, feat, feat_next, s, s_next
-
-    def _critic_targets(
-        self,
-        a: torch.Tensor,
-        r: torch.Tensor,
-        done: torch.Tensor,
-        s: torch.Tensor,
-        s_next: torch.Tensor,
-        feat_next: torch.Tensor,
-    ) -> tuple:
-        """TD target + current critic output for one transition batch.
-
-        DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a'). With the
-        distributional critic the next-state value is the expectation of its
-        categorical output (via HL-Gauss). Returns
-        ``(current_logits, current_q, target_q)``.
-        """
-        with torch.no_grad():
-            a_next = self._policy_action(feat_next)
-            next_output = self.critic(s_next, a_next.unsqueeze(1)).output
-            target_q = self.critic.compute_target_value(
-                next_output, r.unsqueeze(1), done.unsqueeze(1)
-            )
-        current_logits = self.critic(s, a.unsqueeze(1)).output
-        current_q = self._critic_value(current_logits)
-        return current_logits, current_q, target_q
-
-    def _ddpg_actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-        """L_actor = − Q(s, μ(s)) (deterministic policy gradient).
-
-        Freeze the critic's params during this Q forward so the −Q gradient
-        flows only into the waypoint heads, not the critic. ``s`` is a buffer
-        read with no grad, so the heads are the sole path to the loss.
-        """
-        a_pred = self._policy_action(feat)
-        for p in self.critic.parameters():
-            p.requires_grad_(False)
-        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1)).output)
-        for p in self.critic.parameters():
-            p.requires_grad_(True)
-        return -actor_q.mean()
-
-    def _awr_actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
-        """Exp-weighted (advantage-weighted) supervised regression actor.
-
-        Instead of ascending the critic's Q-gradient (``_ddpg_actor_loss``),
-        sample ``awr_num_samples`` candidate actions around the current
-        deterministic policy μ(s), score each with the critic Q(s, a_i),
-        normalize the scores *per state* (zero-mean / unit-std advantages) and
-        turn them into softmax weights ``w_i = softmax(adv_i / temperature)``,
-        then regress μ(s) toward the candidates weighted by ``w_i``. This is
-        reward/advantage-weighted regression (AWR): a supervised loss that pulls
-        the policy toward the higher-Q samples *without* backpropagating through
-        the critic — the Q forward (and hence the weights and the candidate
-        actions) is fully detached, so the only gradient path is μ(s).
-
-        Returns ``(actor_loss, weight_entropy)`` where ``weight_entropy`` is a
-        telemetry scalar (mean per-state Shannon entropy of the softmax weights,
-        nats) — low entropy means the weights collapsed onto a single candidate.
-        """
-        mu = self._policy_action(feat)  # (B, A), grad flows into the heads
-        b, action_dim = mu.shape
-        n = self.awr_num_samples
-
-        # Candidates + their Q scores live entirely under no_grad: they are
-        # regression *targets*, must not carry gradient into the heads/critic.
-        with torch.no_grad():
-            noise = torch.randn(b, n, action_dim, device=self.device) * self.awr_sample_noise
-            # Keep μ(s) itself as the first candidate so the current policy is
-            # always represented in the mix (zero noise on sample 0).
-            noise[:, 0, :] = 0.0
-            cand = mu.unsqueeze(1) + noise  # (B, N, A)
-
-            # Q(s, a_i): broadcast the state over the N samples and score the
-            # whole (B*N) batch in one critic forward.
-            s_rep = s.unsqueeze(1).expand(b, n, s.shape[-1]).reshape(b * n, -1)
-            a_rep = cand.reshape(b * n, action_dim).unsqueeze(1)  # (B*N, 1, A)
-            q = self._critic_value(self.critic(s_rep, a_rep).output).view(b, n)
-
-            # Per-state exp weights via softmax (handles the exp and the
-            # normalize-to-sum-1). softmax is shift-invariant, so centering the
-            # Q's would be a no-op — we only rescale by the per-state std, which
-            # keeps the temperature scale-invariant to the critic's magnitude.
-            adv = q / (q.std(dim=1, keepdim=True) + 1e-8)
-            weights = torch.softmax(adv / self.awr_temperature, dim=1)  # (B, N)
-            weight_entropy = -(weights * (weights + 1e-8).log()).sum(dim=1).mean()
-
-        # Weighted regression of μ(s) toward the candidates.
-        sq = ((mu.unsqueeze(1) - cand) ** 2).sum(dim=-1)  # (B, N)
-        actor_loss = (weights * sq).sum(dim=1).mean()
-        return actor_loss, weight_entropy
-
-    def _read_and_compute(self, seq: torch.Tensor) -> tuple:
-        """Read one transition batch and build the DDPG losses' tensors.
-
-        Returns ``(current_logits, current_q, target_q, actor_loss)`` with the
-        deterministic-policy-gradient actor loss — used by ``off_policy`` and
-        ``streaming``. ``current_logits`` is the raw critic output kept for the
-        (distributional) critic loss; ``current_q`` / ``target_q`` are scalars.
-        """
-        a, r, done, feat, feat_next, s, s_next = self._read_transition(seq)
-        current_logits, current_q, target_q = self._critic_targets(a, r, done, s, s_next, feat_next)
-        actor_loss = self._ddpg_actor_loss(feat, s)
-        return current_logits, current_q, target_q, actor_loss
+        current_logits, current_q, target_q = self.network.critic_targets(
+            a, r, done, s, s_next, feat_next
+        )
+        actor_loss, actor_info = self.network.actor_loss(feat, s)
+        return current_logits, current_q, target_q, actor_loss, actor_info
 
     # --- Off-policy training step -----------------------------------------
 
@@ -895,7 +668,7 @@ class SimLingoAgent:
         span = _SEQ_LEN + _HORIZON
         start = torch.randint(0, curr_size - span, (self.batch_size,))
         seq = start[:, None] + torch.arange(span)[None, :]
-        current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
+        current_logits, current_q, target_q, actor_loss, actor_info = self._read_and_compute(seq)
         # Distributional critic: cross-entropy of the categorical output against
         # the (support-projected) scalar TD target via HL-Gauss; grow the support
         # first if the target exceeds the current range. Scalar critic: MSE.
@@ -904,7 +677,7 @@ class SimLingoAgent:
 
         # One backward over (critic_loss + actor_loss) so no ``step`` lands
         # between the two graphs (which would invalidate them in-place). The
-        # critic-freeze in ``_read_and_compute`` keeps the two losses on
+        # critic-freeze in the network's actor loss keeps the two losses on
         # disjoint param sets, so each optimizer only steps the params it owns.
         self.critic_optimizer.zero_grad(set_to_none=True)
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -919,54 +692,7 @@ class SimLingoAgent:
             "losses/actor_loss": float(actor_loss.item()),
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
-        }
-        info["losses/value_range"] = float(self.critic.value_range)
-        return info
-
-    # --- Advantage-weighted regression (exp-weighted SL) training step -----
-
-    def _train_awr(self, global_step: int) -> dict:
-        """Off-policy critic (TD) + exp-weighted supervised-regression actor.
-
-        Same random-replay critic update as ``_maybe_train`` (the critic still
-        learns Q via the TD loss), but the waypoint heads are trained by
-        :meth:`_awr_actor_loss` — sample multiple actions, score them with Q,
-        normalize and exp-weight the scores, and regress the policy toward the
-        higher-scoring samples (advantage-weighted regression) instead of the
-        deterministic ``-Q`` policy gradient.
-        """
-        if global_step < self.learning_starts:
-            return {}
-
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        span = _SEQ_LEN + _HORIZON
-        start = torch.randint(0, curr_size - span, (self.batch_size,))
-        seq = start[:, None] + torch.arange(span)[None, :]
-
-        a, r, done, feat, feat_next, s, s_next = self._read_transition(seq)
-        current_logits, current_q, target_q = self._critic_targets(a, r, done, s, s_next, feat_next)
-        self.critic.update_value_range(target_q)
-        critic_loss = self.critic.value_loss(current_logits, target_q)
-        actor_loss, weight_entropy = self._awr_actor_loss(feat, s)
-
-        # One backward over (critic_loss + actor_loss): the AWR actor loss scores
-        # candidates under ``no_grad``, so it touches the heads only and the
-        # critic loss touches the critic only — each optimizer steps its own
-        # params. (Same single-backward discipline as ``_maybe_train``.)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        (critic_loss + actor_loss).backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        nn.utils.clip_grad_norm_(self.actor_heads.parameters(), self.max_grad_norm)
-        self.critic_optimizer.step()
-        self.actor_optimizer.step()
-
-        info = {
-            "losses/critic_loss": float(critic_loss.item()),
-            "losses/actor_loss": float(actor_loss.item()),
-            "losses/q_value": float(current_q.mean().item()),
-            "losses/target_q": float(target_q.mean().item()),
-            "losses/awr_weight_entropy": float(weight_entropy.item()),
+            **actor_info,
         }
         info["losses/value_range"] = float(self.critic.value_range)
         return info
@@ -988,7 +714,7 @@ class SimLingoAgent:
         # AdamET's eligibility trace is inherently scalar-TD, so streaming uses
         # the expected value (``current_q``) of the distributional critic rather
         # than the full categorical cross-entropy (which only off_policy uses).
-        _current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
+        _current_logits, current_q, target_q, actor_loss, actor_info = self._read_and_compute(seq)
 
         # TD error drives the eligibility-trace critic update; a detached
         # scalar (AdamET multiplies the per-parameter trace by it). ``target_q``
@@ -1018,6 +744,7 @@ class SimLingoAgent:
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
             "losses/delta": delta,
+            **actor_info,
         }
         info["losses/value_range"] = float(self.critic.value_range)
         return info
