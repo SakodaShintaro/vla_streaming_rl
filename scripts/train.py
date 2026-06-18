@@ -76,8 +76,7 @@ def save_episode_data(
     h, w = bgr_image_list[0].shape[:2]
     if h % 2 or w % 2:
         bgr_image_list = [
-            np.pad(img, ((0, h % 2), (0, w % 2), (0, 0)), mode="constant")
-            for img in bgr_image_list
+            np.pad(img, ((0, h % 2), (0, w % 2), (0, 0)), mode="constant") for img in bgr_image_list
         ]
 
     video_path = video_dir / f"{name}.mp4"
@@ -249,11 +248,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         agent = SimLingoAgent(
             observation_space=env.observation_space,
             action_space=env.action_space,
-            env=env,
             network=network,
-            scratch_dir=(result_dir / "simlingo_scratch")
-            if result_dir is not None
-            else Path("/tmp/simlingo_scratch"),
             gamma=float(args.gamma),
             buffer_size=int(args.buffer_size),
             batch_size=int(args.batch_size),
@@ -290,7 +285,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         task_prompt = reset_info["task_prompt"] if args.use_prompt else ""
 
         # initial action
-        result = agent.select_action(global_step, obs, 0.0, False, False, task_prompt)
+        result = agent.select_action(global_step, obs, 0.0, False, False, task_prompt, reset_info)
         action = result.action
 
         # initial render. The trainer only owns the environment / observation
@@ -325,7 +320,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             obs_list.append(obs.copy())
 
             agent_step_start = time.time()
-            result = agent.step(global_step, obs, reward, terminated, truncated, task_prompt)
+            result = agent.step(
+                global_step, obs, reward, terminated, truncated, task_prompt, env_info
+            )
             action = result.action
             agent_step_time_msec = (time.time() - agent_step_start) * 1000
 

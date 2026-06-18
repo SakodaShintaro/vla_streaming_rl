@@ -1,62 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""DDPG-style RL agent built on top of SimLingo.
-
-The action is SimLingo's full waypoint output: ``pred_route`` (20×2)
-concatenated with ``pred_speed_wps`` (10×2), flattened to a 60-D
-continuous vector. The deterministic PID controller that turns
-waypoints into ``carla.VehicleControl`` is treated as part of the
-environment — the policy emits waypoints, PID emits 2-D control, env
-sees ``[steer, throttle - brake]``.
-
-  μ(s) = waypoint_heads(features(s))   ← SimLingo's own route / speed
-                                         MLP heads, trained directly
-  Q(s, a) = ActionValueHead(pool(features(s)), a)
-
-Rather than learning a residual on top of frozen waypoints, this is a
-DDPG-like setup: the SimLingo waypoint heads (``DrivingAdaptor.route_head``
-and ``speed_wps_head``) *are* the deterministic policy μ and are updated
-to ascend the critic's Q-gradient. The rest of the VLM stays frozen.
-
-Critic update (off-policy, batch from replay):
-  a' = μ(s')
-  y = r + γ (1 − done) Q(s', a')
-  L_critic = MSE(Q(s, a), y)
-
-Actor update (off-policy, batch from replay):
-  L_actor = − Q(s, μ(s))      (deterministic policy gradient)
-  Gradients flow through the waypoint heads only; the pooled state fed
-  to Q is detached so the actor loss cannot move the frozen backbone.
-
-The VLM backbone (everything except the two waypoint heads) is frozen.
-``run_step`` caches the per-query VLM features and the action it took
-for each tick directly into the replay buffer, so training reads
-``(features, action, reward, done)`` straight from the buffer and only
-re-applies the (cheap) waypoint heads — no VLM re-forward. Only the
-waypoint heads and Q learn.
-
-Three learning modes (``learning_mode``):
-  - ``off_policy``: random replay batches (the critic/actor updates above).
-  - ``streaming``: online TD(λ) on the latest transition every step, with the
-    critic updated by eligibility traces (``AdamET``) and the actor by the
-    same deterministic policy gradient + AdamW — mirroring ``StreamingAgent``.
-  - ``awr``: same random-replay TD critic, but the actor is exp-weighted
-    supervised regression (advantage-weighted regression). For each state we
-    sample N actions around μ(s), score them with Q(s, a_i), normalize the
-    scores per state and turn them into softmax weights
-    w_i = softmax((Q_i − mean)/std / temperature), then regress μ(s) toward
-    the candidates weighted by w_i. The critic is not differentiated through —
-    only the supervised regression trains the waypoint heads.
-
-Because the env owns the sensor lifecycle, SimLingoAgent does **not**
-spawn its own multi-camera stack or wire a leaderboard
-``SensorInterface``. New-episode handover (set_global_plan, hero_actor,
-re-init) is detected automatically via ``env.unwrapped.vehicle.id``
-changing between ticks.
-"""
-
-import json
-from pathlib import Path
-
 import carla
 import cv2
 import gymnasium as gym
@@ -147,9 +89,7 @@ class SimLingoAgent:
         *,
         observation_space: gym.spaces.Box,
         action_space: gym.spaces.Box,
-        env: gym.Env,
         network: nn.Module,
-        scratch_dir: Path,
         gamma: float,
         buffer_size: int,
         batch_size: int,
@@ -163,12 +103,6 @@ class SimLingoAgent:
     ) -> None:
         self.observation_space = observation_space
         del action_space
-        self._env_unwrapped = env.unwrapped
-
-        scratch_dir = Path(scratch_dir)
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-        self.save_path_metric = str(scratch_dir) + "/metric"
-        Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
 
         self.batch_size = batch_size
         self.learning_starts = learning_starts
@@ -267,7 +201,10 @@ class SimLingoAgent:
         )
         self._current_action_taken: torch.Tensor = torch.zeros(ACTION_DIM, device=self.device)
 
-        self._attached_ego_id: int | None = None
+        # Re-run ``_init`` (rebuild the RoutePlanner from the new episode's
+        # route plan) on the next tick. Set on construction and by
+        # ``on_episode_end``; consumed by ``_maybe_handover_episode``.
+        self._need_handover = True
         self._prev_action = torch.zeros(ACTION_DIM, device=self.device)
 
         # Latest executed trajectory + its critic value, cached by ``run_step``
@@ -295,9 +232,10 @@ class SimLingoAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
-        self._maybe_handover_episode()
-        env_action = self._act()
+        self._maybe_handover_episode(info)
+        env_action = self._act(info["sensors"])
         metrics, panels = self._build_info(env_action, reward)
         return StepResult(action=env_action, metrics=metrics, panels=panels)
 
@@ -309,10 +247,11 @@ class SimLingoAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
-        self._maybe_handover_episode()
+        self._maybe_handover_episode(info)
         episode_done = terminated or truncated
-        env_action = self._act()
+        env_action = self._act(info["sensors"])
         metrics, panels = self._build_info(env_action, reward)
 
         # Store (features_t, action_{t-1}, reward, done). The per-query VLM
@@ -343,8 +282,9 @@ class SimLingoAgent:
         return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        # Force re-init on the next select_action.
-        self._attached_ego_id = None
+        # Force handover (RoutePlanner rebuild) on the next select_action, which
+        # receives the new episode's reset info.
+        self._need_handover = True
         return {}
 
     def _build_info(self, env_action: np.ndarray, reward: float) -> tuple[dict, dict]:
@@ -420,25 +360,22 @@ class SimLingoAgent:
 
     # --- Episode handover --------------------------------------------------
 
-    def _maybe_handover_episode(self) -> None:
-        """When the env reset to a new scenario, hand the agent the new
-        ego + route plan and force ``_init`` to re-run on the next tick.
-        """
-        ego = self._env_unwrapped.vehicle
-        if ego is None:
-            raise RuntimeError("SimLingoAgent: env has no live ego — was env.reset() called?")
-        if ego.id == self._attached_ego_id:
-            return
+    def _maybe_handover_episode(self, info: dict) -> None:
+        """On the first tick of a new episode, take the route plan from the
+        env's reset ``info`` and force ``_init`` to rebuild the RoutePlanner.
 
-        runtime = self._env_unwrapped.runtime
-        if runtime is None or runtime.route_scenario is None:
-            raise RuntimeError("SimLingoAgent requires Bench2DriveRuntime with an active scenario")
-        # ``set_global_plan`` is the standard leaderboard handover —
-        # RouteScenario builds both gps_route and world-coord route.
-        self._set_global_plan(runtime.route_scenario.gps_route, runtime.route_scenario.route)
-        self.hero_actor = ego
+        ``_need_handover`` is set on construction and by ``on_episode_end``; the
+        next ``select_action`` carries the new episode's reset info (which holds
+        ``route_plan``), so no reach into the env is needed.
+        """
+        if not self._need_handover:
+            return
+        # ``route_plan`` is the standard leaderboard handover — RouteScenario
+        # builds both the gps and world-coord route (see CARLALeaderboardEnv).
+        gps_route, world_route = info["route_plan"]
+        self._set_global_plan(gps_route, world_route)
         self.initialized = False
-        self._attached_ego_id = ego.id
+        self._need_handover = False
 
     def _set_global_plan(self, global_plan_gps, global_plan_world_coord) -> None:
         """Downsample the route (matches leaderboard ``AutonomousAgent.set_global_plan``)
@@ -455,7 +392,7 @@ class SimLingoAgent:
 
     def _init(self) -> None:
         """First-tick lazy init: build the RoutePlanner once the global
-        plan has been set, and clear the per-episode metric log.
+        plan has been set.
         """
         self._route_planner = RoutePlanner(
             self.route_planner_min_distance,
@@ -464,36 +401,18 @@ class SimLingoAgent:
             self._global_plan_world_coord,
         )
         self.initialized = True
-        self.metric_info = {}
-
-    def get_metric_info(self):
-        """Per-frame ego pose / velocity snapshot. Inlined from leaderboard
-        ``AutonomousAgent.get_metric_info``."""
-
-        def v(vec, rot=False):
-            return [vec.roll, vec.pitch, vec.yaw] if rot else [vec.x, vec.y, vec.z]
-
-        hero = self.hero_actor
-        return {
-            "acceleration": v(hero.get_acceleration()),
-            "angular_velocity": v(hero.get_angular_velocity()),
-            "forward_vector": v(hero.get_transform().get_forward_vector()),
-            "right_vector": v(hero.get_transform().get_right_vector()),
-            "location": v(hero.get_transform().location),
-            "rotation": v(hero.get_transform().rotation, rot=True),
-        }
 
     # --- Per-tick inference ------------------------------------------------
 
-    def _act(self) -> np.ndarray:
+    def _act(self, sensors: dict) -> np.ndarray:
         """One inference tick + 2-D env-action conversion.
 
-        Reads :meth:`CARLALeaderboardEnv._build_sensors_dict` (already
-        in the leaderboard ``input_data`` shape ``{id: (frame, payload)}``)
-        and remaps ``rgb`` → ``rgb_<N>`` per SimLingo's
-        ``config.num_cameras`` so ``_tick`` sees the keys it expects.
+        ``sensors`` is the env's ``info["sensors"]`` snapshot (the leaderboard
+        ``{id: (frame, payload)}`` shape from
+        :meth:`CARLALeaderboardEnv._build_sensors_dict`); we remap ``rgb`` →
+        ``rgb_<N>`` per SimLingo's ``config.num_cameras`` so ``_tick`` sees the
+        keys it expects.
         """
-        sensors = self._env_unwrapped._build_sensors_dict()
         # SimLingo's sensors() declares per-camera ids ``rgb_{N}`` where
         # ``N`` iterates over ``config.num_cameras`` (typically just [0]).
         # We only have a single env camera, so map it to whatever id the
@@ -702,14 +621,6 @@ class SimLingoAgent:
             self.control = carla.VehicleControl(0.0, 0.0, 1.0)
         else:
             self.control = control
-
-        metric_info = self.get_metric_info()
-        self.metric_info[self._frame_step] = metric_info
-        if self.save_path_metric is not None and self._frame_step % 1 == 0:
-            # metric info
-            outfile = open(f"{self.save_path_metric}/metric_info.json", "w")
-            json.dump(self.metric_info, outfile, indent=4)
-            outfile.close()
 
         return control
 
