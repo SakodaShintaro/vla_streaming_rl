@@ -51,12 +51,16 @@ class LiberoPi05Network(nn.Module):
         # projections trainable. PI05Pytorch reads these flags at construction.
         cfg.freeze_vision_encoder = True
         cfg.train_expert_only = True
-        # The checkpoint ships with torch.compile (max-autotune) and gradient
-        # checkpointing enabled for dataset training. Both are disabled here:
-        # compile traces a fixed shape and breaks on the loss path, and
-        # checkpointing only helps when the backbone trains (it is frozen).
+        # torch.compile (max-autotune) is disabled: it traces a fixed shape and
+        # breaks on the loss path. Gradient checkpointing is kept ON: even with a
+        # frozen backbone, the training forward runs the full PaliGemma in the
+        # same graph as the trainable action expert, so its activations are
+        # retained for the expert's backward. Recomputing them (checkpointing)
+        # rather than storing them is what makes the 4B model's update fit in
+        # GPU memory. (Requires the policy be in train() mode at loss time, which
+        # ``_apply_checkpoint`` gates on — see LiberoPi05Agent._train.)
         cfg.compile_model = False
-        cfg.gradient_checkpointing = False
+        cfg.gradient_checkpointing = True
         self.cfg = cfg
 
         self.policy = PI05Policy.from_pretrained(checkpoint_repo, config=cfg).to(device)
