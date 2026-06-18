@@ -7,17 +7,17 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .head_output import HeadOutput
-from .image_processor import ImageProcessor
 from .infer_result import ActivationFeatures, InferResult
 from .loss_result import EligibilityTraceInfo, InferLossResult, LossResult
-from .policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
-from .prediction_head import StatePredictionHead
-from .reward_processor import RewardProcessor
-from .value_head import DistributionalValueHead
-from .video_encoder import VideoEncoder
-from .vlm_backbone import load_model
-from .vlm_input_cache import VLMInputCache
+from .modules.head_output import HeadOutput
+from .modules.image_processor import ImageProcessor
+from .modules.policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
+from .modules.prediction_head import StatePredictionHead
+from .modules.reward_processor import RewardProcessor
+from .modules.value_head import DistributionalValueHead
+from .modules.video_encoder import VideoEncoder
+from .modules.vlm_backbone import load_model
+from .modules.vlm_input_cache import VLMInputCache
 
 
 class VLMActorCriticWithActionValue(nn.Module):

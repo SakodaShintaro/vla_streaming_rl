@@ -9,7 +9,7 @@ from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers import StoppingCriteria, StoppingCriteriaList
 
-from vla_streaming_rl.networks.vlm_backbone import load_model
+from vla_streaming_rl.networks.modules.vlm_backbone import load_model
 
 PERCEPTION_OPEN = "<perception>\n"
 REASONING_CLOSE = "</reasoning>"

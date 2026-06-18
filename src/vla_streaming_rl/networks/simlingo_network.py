@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 from torch import nn
 from transformers import Qwen2Tokenizer
 
-from vla_streaming_rl.networks.value_head import DistributionalValueHead
+from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.simlingo.models.driving import DrivingModel
 from vla_streaming_rl.simlingo.models.encoder.internvl2_vendored.configuration_internvl_chat import (
     InternVLChatConfig,

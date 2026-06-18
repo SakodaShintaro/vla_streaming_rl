@@ -4,22 +4,22 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
-from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder
-from vla_streaming_rl.networks.image_processor import ImageProcessor
 from vla_streaming_rl.networks.infer_result import ActivationFeatures, InferResult
 from vla_streaming_rl.networks.loss_result import (
     EligibilityTraceInfo,
     InferLossResult,
     LossResult,
 )
-from vla_streaming_rl.networks.policy_head import (
+from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
+from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
+from vla_streaming_rl.networks.modules.policy_head import (
     CFGDiffusionPolicy,
     DiffusionPolicy,
     MeanFlowPolicy,
 )
-from vla_streaming_rl.networks.prediction_head import StatePredictionHead
-from vla_streaming_rl.networks.reward_processor import RewardProcessor
-from vla_streaming_rl.networks.value_head import DistributionalValueHead
+from vla_streaming_rl.networks.modules.prediction_head import StatePredictionHead
+from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
+from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 
 
 class ActorCriticWithActionValue(nn.Module):

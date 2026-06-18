@@ -7,7 +7,7 @@ from typing import Callable
 import torch
 from qwen_vl_utils import process_vision_info
 
-from vla_streaming_rl.networks.vlm_backbone import load_model
+from vla_streaming_rl.networks.modules.vlm_backbone import load_model
 
 
 def parse_args() -> argparse.Namespace:

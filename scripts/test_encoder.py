@@ -9,9 +9,9 @@ import numpy as np
 import torch
 from torchvision import transforms
 
-from vla_streaming_rl.networks.backbone import SpatialTemporalEncoder
-from vla_streaming_rl.networks.image_processor import ImageProcessor
-from vla_streaming_rl.networks.reward_processor import RewardProcessor
+from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
+from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
+from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.wrappers import _car_racing_parse_action
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")

@@ -7,7 +7,7 @@ import torch
 from omegaconf import DictConfig
 from torch import nn
 
-from vla_streaming_rl.networks.value_head import (
+from vla_streaming_rl.networks.modules.value_head import (
     ActionValueHead,
     DistributionalValueHead,
     HypersphericalActionValueHead,

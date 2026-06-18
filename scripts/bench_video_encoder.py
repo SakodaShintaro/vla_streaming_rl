@@ -188,7 +188,7 @@ def main():
     # Try importing VideoEncoder
     video_encoder = None
     try:
-        from vla_streaming_rl.networks.video_encoder import VideoEncoder
+        from vla_streaming_rl.networks.modules.video_encoder import VideoEncoder
 
         video_encoder = VideoEncoder().to(device)
         print("VideoEncoder found (feat/mem branch)")
