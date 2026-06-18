@@ -295,7 +295,7 @@ class SimLingoAgent:
         reward only (``pred=None``). ``action_norm`` is a scalar telemetry hook.
         ``processed_reward`` is the exact reward the critic trains on — the
         "carla" transform is stateless, so logging it here matches the value
-        used at train time (see ``_read_transition``).
+        used at train time.
         """
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
@@ -631,24 +631,6 @@ class SimLingoAgent:
             return self._train_streaming(global_step, episode_done)
         return self._maybe_train(global_step)
 
-    def _read_transition(self, seq: torch.Tensor) -> tuple:
-        """Read one transition batch for index pairs ``seq`` (B, 2).
-
-        ``seq[:, 0] = t``, ``seq[:, 1] = t+1``; the replay convention puts a_t
-        at ``actions[t+1]``, r_t at ``rewards[t+1]``, done_t at ``dones[t+1]``.
-        The per-query features were cached into the obs slot at write time; the
-        critic state is their mean over the 30 waypoint queries. Returns
-        ``(a, r, done, feat, feat_next, s, s_next)``.
-        """
-        a = self.rb.actions[seq[:, 1]].to(self.device)
-        r = self.reward_processor.normalize(self.rb.rewards[seq[:, 1], 0].to(self.device))
-        done = self.rb.dones[seq[:, 1], 0].to(self.device)
-        feat = self.rb.observations[seq[:, 0]].to(self.device)  # (B, 30, hidden)
-        feat_next = self.rb.observations[seq[:, 1]].to(self.device)
-        s = feat.mean(dim=1)
-        s_next = feat_next.mean(dim=1)
-        return a, r, done, feat, feat_next, s, s_next
-
     def _read_and_compute(self, seq: torch.Tensor) -> tuple:
         """Read one transition batch and build the loss tensors.
 
@@ -660,7 +642,13 @@ class SimLingoAgent:
         on the network; the agent only feeds it the transition it read from the
         replay buffer and does not know which actor loss the network uses.
         """
-        a, r, done, feat, feat_next, s, s_next = self._read_transition(seq)
+        a = self.rb.actions[seq[:, 1]].to(self.device)
+        r = self.reward_processor.normalize(self.rb.rewards[seq[:, 1], 0].to(self.device))
+        done = self.rb.dones[seq[:, 1], 0].to(self.device)
+        feat = self.rb.observations[seq[:, 0]].to(self.device)  # (B, 30, hidden)
+        feat_next = self.rb.observations[seq[:, 1]].to(self.device)
+        s = feat.mean(dim=1)
+        s_next = feat_next.mean(dim=1)
         current_logits, current_q, target_q = self.network.critic_targets(
             a, r, done, s, s_next, feat_next
         )
