@@ -21,6 +21,7 @@ def _build_value_head(
     action_dim: int,
     horizon: int,
     gamma: float,
+    multi_gammas: list[float],
     hidden_dim: int,
     block_num: int,
     num_bins: int,
@@ -33,13 +34,19 @@ def _build_value_head(
     construction — critic architecture, discount, bins, hidden sizes — lives
     here, so a value change touches only this builder and ``value_head``, never
     the networks.
+
+    Multi-gamma (AMAGO): the head predicts the action value for several discounts
+    at once. ``gamma`` is the primary/rollout discount and is kept last; the
+    auxiliary ``multi_gammas`` come first. The head owns this list and builds the
+    per-gamma TD target / loss; empty ``multi_gammas`` == single-gamma (original).
     """
+    gammas = list(multi_gammas) + [gamma]
     if critic_arch == "simbav2":
         return HypersphericalActionValueHead(
             in_channels=in_channels,
             action_dim=action_dim,
             horizon=horizon,
-            gamma=gamma,
+            gammas=gammas,
             hidden_dim=hidden_dim,
             block_num=block_num,
             num_bins=num_bins,
@@ -49,7 +56,7 @@ def _build_value_head(
             in_channels=in_channels,
             action_dim=action_dim,
             horizon=horizon,
-            gamma=gamma,
+            gammas=gammas,
             hidden_dim=hidden_dim,
             block_num=block_num,
             num_bins=num_bins,
@@ -76,6 +83,7 @@ def build_network(
             action_dim=action_space_shape[0],
             horizon=args.horizon,
             gamma=args.gamma,
+            multi_gammas=list(args.multi_gammas),
             hidden_dim=args.critic_hidden_dim,
             block_num=args.critic_block_num,
             num_bins=args.num_bins,
@@ -121,6 +129,7 @@ def build_network(
             action_dim=action_space_shape[0],
             horizon=args.horizon,
             gamma=args.gamma,
+            multi_gammas=list(args.multi_gammas),
             hidden_dim=args.critic_hidden_dim,
             block_num=args.critic_block_num,
             num_bins=args.num_bins,
@@ -164,7 +173,7 @@ def build_network(
             policy_type=args.policy_type,
         ).to(device)
     elif args.network_class == "simlingo":
-        from vla_streaming_rl.networks.simlingo_network import _ACTION_DIM, SimLingoNetwork
+        from vla_streaming_rl.networks.simlingo_network import ACTION_DIM, SimLingoNetwork
 
         # SimLingo's dueling critic is always scalar (num_bins == 1); SimbaV2
         # honors the configured bins. The critic acts on a single (horizon == 1)
@@ -173,9 +182,10 @@ def build_network(
         value_head_factory = functools.partial(
             _build_value_head,
             critic_arch=args.critic_arch,
-            action_dim=_ACTION_DIM,
+            action_dim=ACTION_DIM,
             horizon=1,
             gamma=args.gamma,
+            multi_gammas=list(args.multi_gammas),
             hidden_dim=args.critic_hidden_dim,
             block_num=args.critic_block_num,
             num_bins=critic_num_bins,

@@ -68,11 +68,11 @@ from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.simlingo_network import (
-    _ACTION_DIM,
-    _NUM_WP_QUERIES,
-    _ROUTE_LEN,
-    _SPEED_WPS_LEN,
-    _WP_DIM,
+    ACTION_DIM,
+    NUM_WP_QUERIES,
+    ROUTE_LEN,
+    SPEED_WPS_LEN,
+    WP_DIM,
 )
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
@@ -98,8 +98,8 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.allow_tf32 = True
 
-# Waypoint shape constants (_ROUTE_LEN, _SPEED_WPS_LEN, _WP_DIM, _NUM_WP_QUERIES,
-# _ACTION_DIM) are imported from ``networks.simlingo_network`` — they describe
+# Waypoint shape constants (ROUTE_LEN, SPEED_WPS_LEN, WP_DIM, NUM_WP_QUERIES,
+# ACTION_DIM) are imported from ``networks.simlingo_network`` — they describe
 # the SimLingo waypoint output that the network produces.
 
 # Single-frame VLM input (seq_len=1) with a one-step bootstrap horizon, so the
@@ -118,11 +118,11 @@ def _waypoints_to_action_vec(route_wps: torch.Tensor, speed_wps: torch.Tensor) -
 
 
 def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    route_flat = a[: _ROUTE_LEN * _WP_DIM]
-    speed_flat = a[_ROUTE_LEN * _WP_DIM :]
+    route_flat = a[: ROUTE_LEN * WP_DIM]
+    speed_flat = a[ROUTE_LEN * WP_DIM :]
     return (
-        route_flat.view(1, _ROUTE_LEN, _WP_DIM),
-        speed_flat.view(1, _SPEED_WPS_LEN, _WP_DIM),
+        route_flat.view(1, ROUTE_LEN, WP_DIM),
+        speed_flat.view(1, SPEED_WPS_LEN, WP_DIM),
     )
 
 
@@ -257,10 +257,10 @@ class SimLingoAgent:
         self.rb = ReplayBuffer(
             size=buffer_size,
             seq_len=_SEQ_LEN + _HORIZON,
-            obs_shape=(_NUM_WP_QUERIES, feature_dim),
+            obs_shape=(NUM_WP_QUERIES, feature_dim),
             obs_z_shape=(1,),
             rnn_state_shape=(1,),
-            action_shape=(_ACTION_DIM,),
+            action_shape=(ACTION_DIM,),
             output_device=self.device,
             storage_device=torch.device("cpu"),
             max_new_tokens=0,
@@ -275,17 +275,17 @@ class SimLingoAgent:
         # current timestep (the project's convention puts the action that
         # produced state t at ``actions[t]``).
         self._current_state: torch.Tensor = torch.zeros(
-            _NUM_WP_QUERIES, feature_dim, device=self.device
+            NUM_WP_QUERIES, feature_dim, device=self.device
         )
-        self._current_action_taken: torch.Tensor = torch.zeros(_ACTION_DIM, device=self.device)
+        self._current_action_taken: torch.Tensor = torch.zeros(ACTION_DIM, device=self.device)
 
         self._attached_ego_id: int | None = None
-        self._prev_action = torch.zeros(_ACTION_DIM, device=self.device)
+        self._prev_action = torch.zeros(ACTION_DIM, device=self.device)
 
         # Latest executed trajectory + its critic value, cached by ``run_step``
         # for the bird's-eye visualization panel built in ``_build_info``.
-        self._viz_route = np.zeros((_ROUTE_LEN, _WP_DIM), dtype=np.float32)
-        self._viz_speed = np.zeros((_SPEED_WPS_LEN, _WP_DIM), dtype=np.float32)
+        self._viz_route = np.zeros((ROUTE_LEN, WP_DIM), dtype=np.float32)
+        self._viz_speed = np.zeros((SPEED_WPS_LEN, WP_DIM), dtype=np.float32)
         self._viz_q_value = 0.0
         # Critic value diagnostics for the executed action (incl. per-bin probs),
         # cached by ``run_step`` and logged verbatim in ``_build_info``.
@@ -991,8 +991,10 @@ class SimLingoAgent:
         _current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
 
         # TD error drives the eligibility-trace critic update; a detached
-        # scalar (AdamET multiplies the per-parameter trace by it).
-        delta = float((target_q - current_q).mean().item())
+        # scalar (AdamET multiplies the per-parameter trace by it). ``target_q``
+        # is per-gamma (B, num_gammas), so collapse it to the gamma-mean to match
+        # ``current_q`` (the scalar AdamET trace is single-TD).
+        delta = float((target_q.mean(dim=1) - current_q).mean().item())
 
         # Backward BOTH losses before any optimizer step so the actor graph
         # still sees the pre-update critic weights (``AdamET.step`` mutates
