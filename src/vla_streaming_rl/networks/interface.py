@@ -61,9 +61,7 @@ class InferResult:
     """
 
     action: torch.Tensor  # (B, horizon, action_dim)
-    value_report: dict[
-        str, float
-    ]  # value head diagnostics (incl. "value"); see value_head.value_report
+    value_report: dict[str, float]  # value head diagnostics (incl. "value")
     rnn_state: torch.Tensor  # (B, ...)
     next_image: np.ndarray  # predicted next image (H, W, 3)
     next_reward: float  # predicted next reward
@@ -109,7 +107,7 @@ class InferLossResult:
 class NetworkInterface(nn.Module, abc.ABC):
     """Abstract base for all policy/value networks.
 
-    The contract is the three abstract methods below. A subclass missing any of
+    The contract is the five abstract methods below. A subclass missing any of
     them raises ``TypeError`` on instantiation. ``nn.Module`` is mixed in so
     concrete networks keep full PyTorch behaviour (``parameters()``, ``.to()``,
     ``state_dict()`` …); ``ABCMeta`` derives from ``type`` so there is no
