@@ -13,6 +13,7 @@ from .interface import (
     InferLossResult,
     InferResult,
     LossResult,
+    NetworkInterface,
 )
 from .modules.head_output import HeadOutput
 from .modules.image_processor import ImageProcessor
@@ -25,7 +26,7 @@ from .modules.vlm_backbone import load_model
 from .modules.vlm_input_cache import VLMInputCache
 
 
-class VLMActorCriticWithActionValue(nn.Module):
+class VLMActorCriticWithActionValue(NetworkInterface):
     """VLM backbone + DiffusionPolicy + Action Value critic.
 
     Architecture:
@@ -210,7 +211,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         """Tokenize a task prompt string into token IDs."""
         return self.processor.tokenizer.encode(task_prompt, add_special_tokens=False)
 
-    def decode_task_prompt_ids(self, token_ids: torch.Tensor) -> list[str]:
+    def _decode_task_prompt_ids(self, token_ids: torch.Tensor) -> list[str]:
         """Decode task prompt token IDs back to strings.
 
         Args:
@@ -267,9 +268,11 @@ class VLMActorCriticWithActionValue(nn.Module):
 
     def compute_loss(self, data) -> LossResult:
         # Decode task prompts from buffer: use last timestep's prompt for next-state
-        next_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
+        next_prompts = self._decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
         # Use prompt at the boundary between seq and horizon for current state
-        curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
+        curr_prompts = self._decode_task_prompt_ids(
+            data.task_prompt_token_ids[:, -self.horizon - 1]
+        )
 
         _, _, _, _, next_critic_out = self._infer(
             data.observations[:, self.horizon :], next_prompts
@@ -313,8 +316,10 @@ class VLMActorCriticWithActionValue(nn.Module):
         return LossResult(loss=total_loss, info=info_dict)
 
     def infer_and_compute_loss(self, data) -> InferLossResult:
-        next_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
-        curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
+        next_prompts = self._decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
+        curr_prompts = self._decode_task_prompt_ids(
+            data.task_prompt_token_ids[:, -self.horizon - 1]
+        )
 
         next_state, next_action, _, actor_activation, critic_out = self._infer(
             data.observations[:, self.horizon :], next_prompts

@@ -2,7 +2,6 @@
 from collections.abc import Callable
 
 import torch
-import torch.nn as nn
 
 from vla_streaming_rl.networks.interface import (
     ActivationFeatures,
@@ -10,6 +9,7 @@ from vla_streaming_rl.networks.interface import (
     InferLossResult,
     InferResult,
     LossResult,
+    NetworkInterface,
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
@@ -23,7 +23,7 @@ from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 
 
-class ActorCriticWithActionValue(nn.Module):
+class ActorCriticWithActionValue(NetworkInterface):
     def __init__(
         self,
         *,
@@ -137,9 +137,6 @@ class ActorCriticWithActionValue(nn.Module):
 
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
         return []
-
-    def decode_task_prompt_ids(self, token_ids: torch.Tensor) -> list[str]:
-        return [""] * token_ids.shape[0]
 
     @torch.inference_mode()
     def infer(

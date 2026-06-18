@@ -96,9 +96,30 @@ class NetworkInterface(nn.Module, abc.ABC):
     """
 
     @abc.abstractmethod
-    def infer(self, data) -> InferResult:
+    def infer(
+        self,
+        s_seq: torch.Tensor,
+        obs_z_seq: torch.Tensor,
+        a_seq: torch.Tensor,
+        r_seq: torch.Tensor,
+        rnn_state: torch.Tensor,
+        task_prompts: list[str],
+    ) -> InferResult:
         """Single-step inference: the action to take, its value report, the
-        carried RNN state and predicted next state. Batch size is 1."""
+        carried RNN state and predicted next state. Batch size is 1.
+
+        TODO: the agreed direction is to collapse these arguments into a single
+        ``data`` object (matching ``compute_loss`` / ``infer_and_compute_loss``).
+        That also needs the streaming call site to fold the live ``rnn_state``
+        and ``task_prompts`` into the data window, so it is a separate refactor."""
+
+    @abc.abstractmethod
+    def init_state(self) -> torch.Tensor:
+        """Initial recurrent state the agent carries between steps."""
+
+    @abc.abstractmethod
+    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
+        """Token ids for a task-prompt string (empty for non-VLM networks)."""
 
     @abc.abstractmethod
     def compute_loss(self, data) -> LossResult:
