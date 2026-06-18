@@ -80,6 +80,19 @@ def _bootstrap_libero_runtime() -> None:
         yaml.dump(path_dict, f)
 
 
+# LIBERO / robosuite are imported at module top level (not lazily inside the
+# methods) because nothing imports this module at import time: the sole importer
+# is ``make_libero_env``, which already defers ``import libero_env`` until the
+# LIBERO env is actually requested. So the "repo stays importable without LIBERO"
+# guarantee lives there, and these imports only run once the user opts in.
+# ``_bootstrap_libero_runtime`` must run *before* ``import libero.libero`` (the
+# import is what triggers LIBERO's stdin config prompt), so it is called here.
+_bootstrap_libero_runtime()
+from libero.libero import benchmark, get_libero_path  # noqa: E402
+from libero.libero.envs import OffScreenRenderEnv  # noqa: E402
+from robosuite.utils.transform_utils import quat2axisangle  # noqa: E402
+
+
 class LiberoEnv(gym.Env):
     """Single-camera-observation Gymnasium view over one LIBERO task suite.
 
@@ -108,10 +121,6 @@ class LiberoEnv(gym.Env):
         seed: int,
     ) -> None:
         super().__init__()
-        _bootstrap_libero_runtime()
-        # Imported lazily so the repo stays importable without LIBERO installed.
-        from libero.libero import benchmark, get_libero_path
-
         self._benchmark_dict = benchmark.get_benchmark_dict()
         self._task_suite_name = task_suite_name
         self._task_suite = self._benchmark_dict[task_suite_name]()
@@ -148,8 +157,6 @@ class LiberoEnv(gym.Env):
         return self._task_id
 
     def _build_env_for_task(self, task_id: int) -> None:
-        from libero.libero.envs import OffScreenRenderEnv
-
         task = self._task_suite.get_task(task_id)
         bddl_file = (
             f"{self._libero_bddl_root}/{task.problem_folder}/{task.bddl_file}"
@@ -166,8 +173,6 @@ class LiberoEnv(gym.Env):
         self._loaded_task_id = task_id
 
     def _extract(self, obs: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
-        from robosuite.utils.transform_utils import quat2axisangle
-
         agentview = np.ascontiguousarray(obs[_OBS_AGENTVIEW][_VERTICAL_FLIP])
         wrist = np.ascontiguousarray(obs[_OBS_WRIST][_VERTICAL_FLIP])
         # 8-D proprio matching the LIBERO pi0.5 checkpoint's state feature:
