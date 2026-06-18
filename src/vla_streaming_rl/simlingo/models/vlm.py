@@ -32,11 +32,8 @@ class VLMEncoderModel(nn.Module):
         self.image_encoder.language_model = None
         self.image_encoder.model.language_model = None
 
-        print("\033[91m" + f"Using {self.variant} as the image encoder." + "\033[0m")
-
         # freeze the parameters -> no gradient updates
         if self.freeze:
-            print("\033[91m" + "Image encoder weights frozen." + "\033[0m")
             # for p in self.image_encoder.model.base_model.parameters():
             for p in self.parameters():
                 p.requires_grad = False

@@ -78,7 +78,6 @@ class SimLingoNetwork(nn.Module):
         self.awr_temperature = float(awr_temperature)
         self.awr_sample_noise = float(awr_sample_noise)
         config_path = str(self._resolve_checkpoint())
-        print(f"Config path: {config_path}")
 
         # load config from the checkpoint's .hydra folder
         config_load_path = Path(config_path).parent.parent.parent / ".hydra" / "config.yaml"

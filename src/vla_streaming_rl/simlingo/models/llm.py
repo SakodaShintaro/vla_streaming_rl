@@ -31,7 +31,6 @@ class LLM(nn.Module):
         if self.lora:
             from peft import LoraConfig, get_peft_model
 
-            print("Using PEFT model")
             peft_config = LoraConfig(
                 inference_mode=False,
                 r=self.lora_r,
