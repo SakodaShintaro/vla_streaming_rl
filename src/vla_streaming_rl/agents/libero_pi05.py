@@ -267,7 +267,7 @@ class LiberoPi05Agent:
                     "instruction": r.instruction,
                 }
             )
-            raw[ACTION_KEY] = torch.from_numpy(r.actions).float()
+            raw[ACTION_KEY] = torch.from_numpy(r.actions).float().unsqueeze(0)
             processed_list.append(self.preprocessor(raw))
 
         batch = {}
