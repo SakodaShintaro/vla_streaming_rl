@@ -1,0 +1,19 @@
+# @package _global_
+env_id: LIBERO-v0
+step_limit: 500_000
+image_save_interval: 10
+
+env_factory:
+  _target_: vla_streaming_rl.wrappers.make_libero_env
+  # - task_suite_name: libero_spatial / libero_object / libero_goal /
+  #   libero_90 / libero_10.
+  # - task_id: index of the task within the suite, or -1 to draw a fresh
+  #   task on every reset (whole-suite training).
+  # - resolution: square camera height/width (kept divisible by the VAE stride).
+  # - settle_steps: zero-action steps after set_init_state to settle physics.
+  # - horizon: max controllable steps before truncation.
+  task_suite_name: libero_spatial
+  task_id: -1
+  resolution: 256
+  settle_steps: 10
+  horizon: 300

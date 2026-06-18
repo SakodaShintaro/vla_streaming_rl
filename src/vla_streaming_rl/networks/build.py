@@ -200,6 +200,10 @@ def build_network(
             awr_temperature=args.awr_temperature,
             awr_sample_noise=args.awr_sample_noise,
         ).to(device)
+    elif args.network_class == "libero_pi05":
+        from vla_streaming_rl.networks.libero_pi05_network import LiberoPi05Network
+
+        network = LiberoPi05Network(device=device)
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
 

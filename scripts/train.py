@@ -28,7 +28,7 @@ from vla_streaming_rl.agents.off_policy import OffPolicyAgent
 from vla_streaming_rl.agents.streaming import StreamingAgent
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
-from vla_streaming_rl.utils import concat_labeled_images
+from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
 from vla_streaming_rl.wrappers import make_env
 
 torch.set_float32_matmul_precision("high")
@@ -260,6 +260,21 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             learning_mode=str(args.learning_mode),
             et_lambda=float(args.et_lambda),
         )
+    elif args.agent_type == "libero_pi05":
+        from vla_streaming_rl.agents.libero_pi05 import LiberoPi05Agent
+
+        agent = LiberoPi05Agent(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            network=network,
+            gamma=float(args.gamma),
+            buffer_size=int(args.buffer_size),
+            batch_size=int(args.batch_size),
+            learning_starts=int(args.learning_starts),
+            learning_rate=float(args.learning_rate),
+            max_grad_norm=float(args.max_grad_norm),
+            awr_temperature=float(args.awr_temperature),
+        )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
 
@@ -293,7 +308,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         obs_for_render = obs.copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
         panels = {
-            "environment": env.render(),
+            "environment": overlay_caption(env.render(), task_prompt),
             "observation": obs_viz,
             **result.panels,
         }
@@ -345,7 +360,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
             obs_viz = _viz_resize(obs_for_render, args.render_scale)
             panels = {
-                "environment": env.render(),
+                "environment": overlay_caption(env.render(), task_prompt),
                 "observation": obs_viz,
                 **result.panels,
             }

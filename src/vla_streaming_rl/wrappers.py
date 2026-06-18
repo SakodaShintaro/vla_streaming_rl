@@ -86,6 +86,31 @@ def make_animalai_env() -> gym.Env:
     )
 
 
+def make_libero_env(
+    task_suite_name: str,
+    task_id: int,
+    resolution: int,
+    settle_steps: int,
+    horizon: int,
+) -> gym.Env:
+    """Hydra `_target_` factory for the raw LIBERO env (no wrappers).
+
+    The wrist camera, proprioceptive state and language instruction are
+    published in the info dict (see ``LiberoEnv``); ``make_env`` only adds the
+    image-observation wrappers shared with the other pixel envs.
+    """
+    from vla_streaming_rl.envs.libero_env import LiberoEnv
+
+    return LiberoEnv(
+        task_suite_name=task_suite_name,
+        task_id=task_id,
+        resolution=resolution,
+        settle_steps=settle_steps,
+        horizon=horizon,
+        seed=0,
+    )
+
+
 def make_carla_env(
     route_id: str | None,
     sequence_mode: str,
@@ -228,6 +253,16 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = TransposeAndNormalizeObs(env)
         env.unwrapped.eval_range = 40
         env.unwrapped.parse_action_text = _color_panel_parse_action
+        return env
+
+    elif env_id == "LIBERO-v0":
+        # The env already publishes task_prompt (the language instruction) plus
+        # the wrist camera and proprio in info, so no PromptWrapper is needed.
+        env = hydra.utils.instantiate(env_factory)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = TransposeAndNormalizeObs(env)
+        env = ZeroObsOnDoneWrapper(env)
+        env.unwrapped.eval_range = 20
         return env
 
     elif env_id == "Hopper-v5":
