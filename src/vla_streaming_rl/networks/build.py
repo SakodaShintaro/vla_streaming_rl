@@ -169,10 +169,7 @@ def build_network(
     elif args.network_class == "simlingo":
         from vla_streaming_rl.networks.simlingo_network import SimLingoNetwork
 
-        # SimLingo's critic scores a single 60-D waypoint action, so it requires
-        # horizon == 1; assert the config rather than overriding it, so the whole
-        # critic config flows through args like every other network. (The 60-D
-        # action_dim is supplied by SimLingoNetwork at the value_head call site.)
+        # SimLingo's critic scores a single 60-D waypoint action
         assert args.horizon == 1, f"SimLingo requires horizon == 1, got {args.horizon}"
 
         network = SimLingoNetwork(
