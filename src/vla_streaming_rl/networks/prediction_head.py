@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .epona.flux_dit import FluxDiT
+from .flux_dit import FluxDiT
 from .image_processor import ImageProcessor
 from .reward_processor import RewardProcessor
 
