@@ -272,7 +272,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             buffer_size=int(args.buffer_size),
             batch_size=int(args.batch_size),
             learning_starts=int(args.learning_starts),
-            exploration_noise=float(args.exploration_noise),
             learning_rate=float(args.learning_rate),
             max_grad_norm=float(args.max_grad_norm),
             awr_temperature=float(args.awr_temperature),

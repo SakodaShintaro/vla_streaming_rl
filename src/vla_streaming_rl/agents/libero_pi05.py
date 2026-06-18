@@ -77,7 +77,6 @@ class LiberoPi05Agent:
         buffer_size: int,
         batch_size: int,
         learning_starts: int,
-        exploration_noise: float,
         learning_rate: float,
         max_grad_norm: float,
         awr_temperature: float,
@@ -94,7 +93,6 @@ class LiberoPi05Agent:
         self.gamma = float(gamma)
         self.batch_size = int(batch_size)
         self.learning_starts = int(learning_starts)
-        self.exploration_noise = float(exploration_noise)
         self.max_grad_norm = float(max_grad_norm)
         self.awr_temperature = float(awr_temperature)
 
@@ -159,10 +157,9 @@ class LiberoPi05Agent:
         self._queue = collections.deque(chunk)
 
     def _next_action(self) -> np.ndarray:
-        """Pop the next planned action, apply exploration noise, and record it."""
-        action = self._queue.popleft()
-        noise = np.random.randn(self.action_dim).astype(np.float32) * self.exploration_noise
-        action = np.clip(action + noise, self._action_low, self._action_high).astype(np.float32)
+        action = np.clip(
+            self._queue.popleft(), self._action_low, self._action_high
+        ).astype(np.float32)
         self._cur_actions.append(action)
         return action
 

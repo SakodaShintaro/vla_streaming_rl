@@ -35,9 +35,6 @@ learning_starts: 2000
 # instruction + executed chunk), weighted by discounted return-to-go.
 buffer_size: 4096
 
-# Std of the Gaussian exploration noise added to each executed action
-# (action space is [-1, 1]). Set to 0 for greedy evaluation.
-exploration_noise: 0.1
 # Fine-tuning LR for the action expert.
 learning_rate: 1e-5
 # Softmax temperature on the per-batch z-scored returns used as RWR weights;
