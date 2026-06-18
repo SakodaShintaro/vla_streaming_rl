@@ -198,8 +198,11 @@ class LiberoPi05Agent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
-        del global_step, reward, terminated, truncated, task_prompt
+        # ``info`` is the env's reset/step info dict; the wrist image and proprio
+        # this agent needs are read directly off the env, so it is ignored here.
+        del global_step, reward, terminated, truncated, task_prompt, info
         self._plan_chunk(obs)
         action = self._next_action()
         return StepResult(action=action, metrics={}, panels=self._panels())
@@ -212,8 +215,9 @@ class LiberoPi05Agent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
-        del task_prompt
+        del task_prompt, info
         self._cur_reward += float(reward)
 
         if terminated or truncated:
