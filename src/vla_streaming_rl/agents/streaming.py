@@ -5,7 +5,7 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
-from vla_streaming_rl.networks.infer_result import InferResult
+from vla_streaming_rl.networks.interface import InferResult
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor

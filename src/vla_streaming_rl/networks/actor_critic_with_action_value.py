@@ -4,10 +4,11 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
-from vla_streaming_rl.networks.infer_result import ActivationFeatures, InferResult
-from vla_streaming_rl.networks.loss_result import (
+from vla_streaming_rl.networks.interface import (
+    ActivationFeatures,
     EligibilityTraceInfo,
     InferLossResult,
+    InferResult,
     LossResult,
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder

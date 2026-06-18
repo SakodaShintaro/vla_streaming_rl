@@ -7,8 +7,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .infer_result import ActivationFeatures, InferResult
-from .loss_result import EligibilityTraceInfo, InferLossResult, LossResult
+from .interface import (
+    ActivationFeatures,
+    EligibilityTraceInfo,
+    InferLossResult,
+    InferResult,
+    LossResult,
+)
 from .modules.head_output import HeadOutput
 from .modules.image_processor import ImageProcessor
 from .modules.policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
