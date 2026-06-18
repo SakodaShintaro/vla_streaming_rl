@@ -266,7 +266,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         agent = LiberoPi05Agent(
             observation_space=env.observation_space,
             action_space=env.action_space,
-            env=env,
             network=network,
             gamma=float(args.gamma),
             buffer_size=int(args.buffer_size),

@@ -44,7 +44,6 @@ class LiberoPi05Agent:
         *,
         observation_space: gym.spaces.Box,
         action_space: gym.spaces.Box,
-        env: gym.Env,
         network: LiberoPi05Network,
         gamma: float,
         buffer_size: int,
@@ -54,8 +53,12 @@ class LiberoPi05Agent:
         max_grad_norm: float,
         awr_temperature: float,
     ) -> None:
-        del observation_space
-        self._env_unwrapped = env.unwrapped
+        # The wrist camera, proprio and instruction pi0.5 needs arrive through
+        # the env's ``info`` dict (LiberoEnv publishes them), so the agent never
+        # holds the env. ``_last_wrist`` backs the render panel; seed it with a
+        # zero frame of the observation shape so the panel has a constant shape
+        # before the first observation.
+        self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
         self.network = network
         self.policy = network.policy
         self.preprocessor = network.preprocessor
@@ -91,19 +94,22 @@ class LiberoPi05Agent:
 
     # --- input assembly ----------------------------------------------------
 
-    def _capture_inputs(self, obs: np.ndarray) -> dict:
+    def _capture_inputs(self, obs: np.ndarray, info: dict) -> dict:
         """Snapshot the multi-modal observation pi0.5 consumes.
 
         ``obs`` is the agentview RGB as ``(3, H, W)`` float in [0, 1]; the wrist
-        image and proprio come from the env (uint8 ``(H, W, 3)`` and the raw
-        8-D state vector).
+        image (uint8 ``(H, W, 3)``), the raw 8-D proprio and the language
+        instruction are read from the env ``info`` dict under the keys LiberoEnv
+        publishes (``wrist_image`` / ``proprio`` / ``task_prompt``).
         """
         agentview_uint8 = (obs * 255.0).astype(np.uint8).transpose(1, 2, 0)
+        wrist_uint8 = info["wrist_image"].copy()
+        self._last_wrist = wrist_uint8
         return {
             "agentview_uint8": agentview_uint8,
-            "wrist_uint8": self._env_unwrapped.last_wrist_image.copy(),
-            "proprio": self._env_unwrapped.last_proprio.copy(),
-            "instruction": self._env_unwrapped.last_instruction,
+            "wrist_uint8": wrist_uint8,
+            "proprio": info["proprio"].copy(),
+            "instruction": info["task_prompt"],
         }
 
     def _raw_obs_dict(self, inputs: dict) -> dict:
@@ -118,9 +124,9 @@ class LiberoPi05Agent:
         }
 
     @torch.no_grad()
-    def _plan_chunk(self, obs: np.ndarray) -> None:
+    def _plan_chunk(self, obs: np.ndarray, info: dict) -> None:
         """Run pi0.5 inference, capture inputs, and fill the action queue."""
-        inputs = self._capture_inputs(obs)
+        inputs = self._capture_inputs(obs, info)
         processed = self.preprocessor(self._raw_obs_dict(inputs))
         chunk = self.policy.predict_action_chunk(processed)  # (1, chunk_size, action_dim)
         chunk = self.postprocessor(chunk)
@@ -172,10 +178,8 @@ class LiberoPi05Agent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        # ``info`` is the env's reset/step info dict; the wrist image and proprio
-        # this agent needs are read directly off the env, so it is ignored here.
-        del global_step, reward, terminated, truncated, task_prompt, info
-        self._plan_chunk(obs)
+        del global_step, reward, terminated, truncated, task_prompt
+        self._plan_chunk(obs, info)
         action = self._next_action()
         return StepResult(action=action, metrics={}, panels=self._panels())
 
@@ -189,7 +193,7 @@ class LiberoPi05Agent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        del task_prompt, info
+        del task_prompt
         self._cur_reward += float(reward)
 
         if terminated or truncated:
@@ -203,7 +207,7 @@ class LiberoPi05Agent:
 
         if not self._queue:
             self._finalize_chunk()
-            self._plan_chunk(obs)
+            self._plan_chunk(obs, info)
 
         action = self._next_action()
         return StepResult(
@@ -298,7 +302,7 @@ class LiberoPi05Agent:
 
     def _panels(self) -> dict:
         """Wrist-camera panel (constant shape across the run)."""
-        return {"wrist": self._env_unwrapped.last_wrist_image}
+        return {"wrist": self._last_wrist}
 
 
 def _as_list(value) -> list:
