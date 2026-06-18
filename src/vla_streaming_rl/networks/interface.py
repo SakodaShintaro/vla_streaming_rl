@@ -96,6 +96,14 @@ class NetworkInterface(nn.Module, abc.ABC):
     """
 
     @abc.abstractmethod
+    def init_state(self) -> torch.Tensor:
+        """Initial recurrent state the agent carries between steps."""
+
+    @abc.abstractmethod
+    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
+        """Token ids for a task-prompt string (empty for non-VLM networks)."""
+
+    @abc.abstractmethod
     def infer(
         self,
         s_seq: torch.Tensor,
@@ -112,14 +120,6 @@ class NetworkInterface(nn.Module, abc.ABC):
         ``data`` object (matching ``compute_loss`` / ``infer_and_compute_loss``).
         That also needs the streaming call site to fold the live ``rnn_state``
         and ``task_prompts`` into the data window, so it is a separate refactor."""
-
-    @abc.abstractmethod
-    def init_state(self) -> torch.Tensor:
-        """Initial recurrent state the agent carries between steps."""
-
-    @abc.abstractmethod
-    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
-        """Token ids for a task-prompt string (empty for non-VLM networks)."""
 
     @abc.abstractmethod
     def compute_loss(self, data) -> LossResult:
