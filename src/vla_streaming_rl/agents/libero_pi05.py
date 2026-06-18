@@ -132,9 +132,9 @@ class LiberoPi05Agent:
         self._queue = collections.deque(chunk)
 
     def _next_action(self) -> np.ndarray:
-        action = np.clip(
-            self._queue.popleft(), self._action_low, self._action_high
-        ).astype(np.float32)
+        action = np.clip(self._queue.popleft(), self._action_low, self._action_high).astype(
+            np.float32
+        )
         self._cur_actions.append(action)
         return action
 
@@ -206,7 +206,9 @@ class LiberoPi05Agent:
             self._plan_chunk(obs)
 
         action = self._next_action()
-        return StepResult(action=action, metrics={"chunk_reward": self._cur_reward}, panels=self._panels())
+        return StepResult(
+            action=action, metrics={"chunk_reward": self._cur_reward}, panels=self._panels()
+        )
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
@@ -260,14 +262,23 @@ class LiberoPi05Agent:
 
         # Softmax advantage weights over the sampled batch's returns. softmax is
         # shift-invariant, so only the per-batch std rescaling sets the
-        # temperature scale; weights sum to 1 across the batch.
+        # temperature scale; weights sum to 1 across the batch. Use the
+        # population std (unbiased=False) so a degenerate single-sample batch
+        # yields 0 rather than NaN (the unbiased std of one element is NaN, which
+        # would poison the weights and, via backward, the action expert).
         returns = torch.tensor([r.weight for r in records], device=self.device, dtype=torch.float32)
-        adv = returns / (returns.std() + 1e-8)
+        adv = returns / (returns.std(unbiased=False) + 1e-8)
         weights = torch.softmax(adv / self.awr_temperature, dim=0)
 
         self.policy.train()
         per_sample_loss, _ = self.policy.forward(batch, reduction="none")
         loss = (weights * per_sample_loss).sum()
+
+        # Never let a non-finite loss reach the optimizer: a single NaN/Inf step
+        # silently corrupts the expert and every subsequent rollout (NaN actions
+        # → unstable sim). Skip the update instead.
+        if not torch.isfinite(loss):
+            return {"losses/skipped_nonfinite": 1.0}
 
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()

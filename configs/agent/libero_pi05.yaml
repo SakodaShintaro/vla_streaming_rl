@@ -27,7 +27,7 @@ pi05_checkpoint_repo: lerobot/pi05_libero_finetuned_quantiles_v044
 # Overrides consumed by LiberoPi05Agent.
 image_save_interval: 50
 print_interval: 1
-batch_size: 1
+batch_size: 2
 # Warmup before the first update; also ensures the buffer holds a few episodes
 # of chunks so the return-to-go weighting has signal.
 learning_starts: 2000

@@ -108,6 +108,51 @@ def add_text_label_on_top(image: np.ndarray, text: str) -> np.ndarray:
     return result
 
 
+def overlay_caption(image: np.ndarray, text: str, max_lines: int = 3) -> np.ndarray:
+    """Append a word-wrapped text caption on a dark band below ``image``.
+
+    Used to annotate a panel with free-form text (e.g. the LIBERO task prompt)
+    that is too long to fit on a single-line panel label. Returns a new image;
+    empty ``text`` returns the (uint8-converted) image unchanged.
+    """
+    image = convert_to_uint8(image)
+    if not text:
+        return image
+
+    width = image.shape[1]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.4
+    thickness = 1
+
+    # Greedy word-wrap to the panel width.
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        trial = f"{current} {word}".strip()
+        (trial_width, _), _ = cv2.getTextSize(trial, font, font_scale, thickness)
+        if trial_width <= width - 10 or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    lines = lines[:max_lines]
+
+    (_, text_height), baseline = cv2.getTextSize("Ag", font, font_scale, thickness)
+    line_height = text_height + baseline + 4
+    band_height = line_height * len(lines) + 6
+    if band_height % 2 != 0:  # keep even for the libx264 video writer
+        band_height += 1
+
+    band = np.full((band_height, width, 3), (50, 50, 50), dtype=np.uint8)
+    for i, line in enumerate(lines):
+        cv2.putText(
+            band, line, (5, (i + 1) * line_height), font, font_scale, (255, 255, 255), thickness
+        )
+    return np.vstack((image, band))
+
+
 def concat_labeled_images(panels: dict[str, np.ndarray]) -> np.ndarray:
     """Lay out named image panels side by side as a single RGB strip.
 
