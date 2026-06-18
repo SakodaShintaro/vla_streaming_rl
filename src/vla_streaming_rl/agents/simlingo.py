@@ -175,7 +175,6 @@ class SimLingoAgent:
         self.exploration_noise = exploration_noise
         self.max_grad_norm = max_grad_norm
 
-
         torch.cuda.empty_cache()
         self._frame_step = -1
         self.initialized = False
