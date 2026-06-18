@@ -164,7 +164,7 @@ def build_network(
             policy_type=args.policy_type,
         ).to(device)
     elif args.network_class == "simlingo":
-        from vla_streaming_rl.networks.simlingo_network import _ACTION_DIM, SimLingoNetwork
+        from vla_streaming_rl.networks.simlingo_network import ACTION_DIM, SimLingoNetwork
 
         # SimLingo's dueling critic is always scalar (num_bins == 1); SimbaV2
         # honors the configured bins. The critic acts on a single (horizon == 1)
@@ -173,7 +173,7 @@ def build_network(
         value_head_factory = functools.partial(
             _build_value_head,
             critic_arch=args.critic_arch,
-            action_dim=_ACTION_DIM,
+            action_dim=ACTION_DIM,
             horizon=1,
             gamma=args.gamma,
             hidden_dim=args.critic_hidden_dim,
