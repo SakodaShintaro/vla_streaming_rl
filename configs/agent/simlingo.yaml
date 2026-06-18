@@ -46,19 +46,24 @@ exploration_noise: 0.0
 actor_lr: 2e-7
 critic_lr: 5e-7
 
-# Training mode for the waypoint-head policy / critic:
-#   off_policy : random replay batches (DDPG, the default).
+# How the agent samples transitions + updates the critic (the agent-level
+# axis; the actor loss is chosen separately by ``actor_loss_type``):
+#   off_policy : random replay batches, critic via AdamW.
 #   streaming  : online TD(λ) on the latest transition every step, critic
 #                via AdamET eligibility traces (uses ``et_lambda`` from
-#                base_streaming). Actor stays DDPG (-Q) + AdamW.
-#   awr        : random-replay critic (TD), but the actor is exp-weighted
-#                supervised regression — sample ``awr_num_samples`` actions
-#                per state, score each with Q, normalize the scores per state
-#                and softmax-weight them (``awr_temperature``), then regress
-#                the waypoint heads toward the higher-Q samples.
+#                base_streaming).
 learning_mode: off_policy
 
-# Advantage-weighted-regression actor knobs (``learning_mode: awr`` only).
+# Which actor loss trains the waypoint heads (owned by the network, so the
+# agent does not branch on it):
+#   ddpg : deterministic policy gradient, −Q(s, μ(s)).
+#   awr  : advantage-weighted regression — sample ``awr_num_samples`` actions
+#          per state, score each with Q, normalize per state and softmax-weight
+#          them (``awr_temperature``), then regress the heads toward the
+#          higher-Q samples.
+actor_loss_type: ddpg
+
+# Advantage-weighted-regression actor knobs (``actor_loss_type: awr`` only).
 # awr_num_samples : candidate actions sampled per state (sample 0 is μ(s)).
 # awr_temperature : softmax temperature on the per-state z-scored Q advantages;
 #                   lower → weights concentrate harder on the best samples.

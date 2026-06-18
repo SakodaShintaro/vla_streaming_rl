@@ -57,8 +57,27 @@ class SimLingoNetwork(nn.Module):
         *,
         value_head_factory: Callable[[int], DistributionalValueHead],
         device: torch.device,
+        actor_loss_type: str,
+        awr_num_samples: int,
+        awr_temperature: float,
+        awr_sample_noise: float,
     ) -> None:
         super().__init__()
+
+        # Which actor loss trains the waypoint heads: ``ddpg`` (deterministic
+        # policy gradient, −Q(s, μ(s))) or ``awr`` (advantage-weighted
+        # regression). The agent only asks the network for ``actor_loss`` and
+        # does not branch on this.
+        self.actor_loss_type = actor_loss_type
+
+        # Advantage-weighted-regression actor knobs (used by ``awr_actor_loss``):
+        # how many actions to sample per state, the softmax temperature on the
+        # per-state-normalized Q advantages, and the Gaussian std of the
+        # candidate actions around μ(s). Unused by the off_policy / streaming
+        # actor losses.
+        self.awr_num_samples = int(awr_num_samples)
+        self.awr_temperature = float(awr_temperature)
+        self.awr_sample_noise = float(awr_sample_noise)
         config_path = str(self._resolve_checkpoint())
         print(f"Config path: {config_path}")
 
@@ -129,3 +148,128 @@ class SimLingoNetwork(nn.Module):
     def forward(self, driving_input):
         """VLM forward → ``(pred_speed_wps, pred_route, language, features)``."""
         return self.vlm(driving_input)
+
+    def policy_action(self, features: torch.Tensor) -> torch.Tensor:
+        """Apply the SimLingo waypoint heads to per-query features → μ(s).
+
+        Args:
+            features: ``(B, NUM_WP_QUERIES, hidden)`` per-query VLM features.
+
+        Returns:
+            ``(B, ACTION_DIM)`` action: route waypoints then speed waypoints,
+            matching the agent's action-vector layout.
+        """
+        preds = self.driving_adaptor.get_predictions(features)
+        b = features.shape[0]
+        route = preds["route"].reshape(b, -1)
+        speed = preds["speed_wps"].reshape(b, -1)
+        return torch.cat([route, speed], dim=1)
+
+    def critic_value(self, logits: torch.Tensor) -> torch.Tensor:
+        """Map the critic's raw ``"output"`` to a scalar Q (B,)."""
+        return self.critic.to_value(logits).view(-1)
+
+    def critic_targets(
+        self,
+        a: torch.Tensor,
+        r: torch.Tensor,
+        done: torch.Tensor,
+        s: torch.Tensor,
+        s_next: torch.Tensor,
+        feat_next: torch.Tensor,
+    ) -> tuple:
+        """TD target + current critic output for one transition batch.
+
+        DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a'). With the
+        distributional critic the next-state value is the expectation of its
+        categorical output (via HL-Gauss). Returns
+        ``(current_logits, current_q, target_q)``.
+        """
+        with torch.no_grad():
+            a_next = self.policy_action(feat_next)
+            next_output = self.critic(s_next, a_next.unsqueeze(1)).output
+            target_q = self.critic.compute_target_value(
+                next_output, r.unsqueeze(1), done.unsqueeze(1)
+            )
+        current_logits = self.critic(s, a.unsqueeze(1)).output
+        current_q = self.critic_value(current_logits)
+        return current_logits, current_q, target_q
+
+    def actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
+        """Actor loss for the waypoint heads + telemetry, per ``actor_loss_type``.
+
+        Returns ``(loss, info)``. ``ddpg`` is the deterministic policy gradient
+        (−Q(s, μ(s)), no extra telemetry); ``awr`` is advantage-weighted
+        regression (reports the softmax weight entropy). The agent calls this
+        without knowing which loss is configured.
+        """
+        if self.actor_loss_type == "ddpg":
+            return self._ddpg_actor_loss(feat, s), {}
+        if self.actor_loss_type == "awr":
+            loss, weight_entropy = self._awr_actor_loss(feat, s)
+            return loss, {"losses/awr_weight_entropy": float(weight_entropy.item())}
+        raise ValueError(f"Unknown actor_loss_type: {self.actor_loss_type}")
+
+    def _ddpg_actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        """L_actor = − Q(s, μ(s)) (deterministic policy gradient).
+
+        Freeze the critic's params during this Q forward so the −Q gradient
+        flows only into the waypoint heads, not the critic. ``s`` is a buffer
+        read with no grad, so the heads are the sole path to the loss.
+        """
+        a_pred = self.policy_action(feat)
+        for p in self.critic.parameters():
+            p.requires_grad_(False)
+        actor_q = self.critic_value(self.critic(s, a_pred.unsqueeze(1)).output)
+        for p in self.critic.parameters():
+            p.requires_grad_(True)
+        return -actor_q.mean()
+
+    def _awr_actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
+        """Exp-weighted (advantage-weighted) supervised regression actor.
+
+        Sample ``awr_num_samples`` candidate actions around the current
+        deterministic policy μ(s), score each with the critic Q(s, a_i),
+        normalize the scores *per state* (unit-std advantages) and turn them
+        into softmax weights ``w_i = softmax(adv_i / temperature)``, then regress
+        μ(s) toward the candidates weighted by ``w_i``. This is
+        reward/advantage-weighted regression (AWR): a supervised loss that pulls
+        the policy toward the higher-Q samples *without* backpropagating through
+        the critic — the Q forward (and hence the weights and the candidate
+        actions) is fully detached, so the only gradient path is μ(s).
+
+        Returns ``(actor_loss, weight_entropy)`` where ``weight_entropy`` is a
+        telemetry scalar (mean per-state Shannon entropy of the softmax weights,
+        nats) — low entropy means the weights collapsed onto a single candidate.
+        """
+        mu = self.policy_action(feat)  # (B, A), grad flows into the heads
+        b, action_dim = mu.shape
+        n = self.awr_num_samples
+
+        # Candidates + their Q scores live entirely under no_grad: they are
+        # regression *targets*, must not carry gradient into the heads/critic.
+        with torch.no_grad():
+            noise = torch.randn(b, n, action_dim, device=mu.device) * self.awr_sample_noise
+            # Keep μ(s) itself as the first candidate so the current policy is
+            # always represented in the mix (zero noise on sample 0).
+            noise[:, 0, :] = 0.0
+            cand = mu.unsqueeze(1) + noise  # (B, N, A)
+
+            # Q(s, a_i): broadcast the state over the N samples and score the
+            # whole (B*N) batch in one critic forward.
+            s_rep = s.unsqueeze(1).expand(b, n, s.shape[-1]).reshape(b * n, -1)
+            a_rep = cand.reshape(b * n, action_dim).unsqueeze(1)  # (B*N, 1, A)
+            q = self.critic_value(self.critic(s_rep, a_rep).output).view(b, n)
+
+            # Per-state exp weights via softmax (handles the exp and the
+            # normalize-to-sum-1). softmax is shift-invariant, so centering the
+            # Q's would be a no-op — we only rescale by the per-state std, which
+            # keeps the temperature scale-invariant to the critic's magnitude.
+            adv = q / (q.std(dim=1, keepdim=True) + 1e-8)
+            weights = torch.softmax(adv / self.awr_temperature, dim=1)  # (B, N)
+            weight_entropy = -(weights * (weights + 1e-8).log()).sum(dim=1).mean()
+
+        # Weighted regression of μ(s) toward the candidates.
+        sq = ((mu.unsqueeze(1) - cand) ** 2).sum(dim=-1)  # (B, N)
+        actor_loss = (weights * sq).sum(dim=1).mean()
+        return actor_loss, weight_entropy

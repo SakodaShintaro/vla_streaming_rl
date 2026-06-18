@@ -160,9 +160,6 @@ class SimLingoAgent:
         max_grad_norm: float,
         learning_mode: str,
         et_lambda: float,
-        awr_num_samples: int,
-        awr_temperature: float,
-        awr_sample_noise: float,
     ) -> None:
         self.observation_space = observation_space
         del action_space
@@ -178,13 +175,6 @@ class SimLingoAgent:
         self.exploration_noise = exploration_noise
         self.max_grad_norm = max_grad_norm
 
-        # Advantage-weighted-regression (``learning_mode == "awr"``) actor knobs:
-        # how many actions to sample per state, the softmax temperature on the
-        # per-state-normalized Q advantages, and the Gaussian std of the
-        # candidate actions around μ(s). Unused in off_policy / streaming.
-        self.awr_num_samples = int(awr_num_samples)
-        self.awr_temperature = float(awr_temperature)
-        self.awr_sample_noise = float(awr_sample_noise)
 
         torch.cuda.empty_cache()
         self._frame_step = -1
@@ -210,7 +200,6 @@ class SimLingoAgent:
         # pipeline below needs.
         self.network = network
         self.cfg = network.cfg
-        self._driving_adaptor = network.driving_adaptor
         self.actor_heads = network.actor_heads
         self.critic = network.critic
 
@@ -727,38 +716,10 @@ class SimLingoAgent:
 
     # --- Off-policy training step -----------------------------------------
 
-    def _policy_action(self, features: torch.Tensor) -> torch.Tensor:
-        """Apply the SimLingo waypoint heads to per-query features and
-        return the flattened action μ(s).
-
-        Args:
-            features: ``(B, 30, hidden)`` per-query VLM features.
-
-        Returns:
-            ``(B, 60)`` action: route waypoints (20×2) then speed
-            waypoints (10×2), matching ``_waypoints_to_action_vec``.
-        """
-        preds = self._driving_adaptor.get_predictions(features)
-        b = features.shape[0]
-        route = preds["route"].reshape(b, -1)  # (B, 40)
-        speed = preds["speed_wps"].reshape(b, -1)  # (B, 20)
-        return torch.cat([route, speed], dim=1)
-
     def _train(self, global_step: int, episode_done: bool) -> dict:
         if self.learning_mode == "streaming":
             return self._train_streaming(global_step, episode_done)
-        if self.learning_mode == "awr":
-            return self._train_awr(global_step)
         return self._maybe_train(global_step)
-
-    def _critic_value(self, logits: torch.Tensor) -> torch.Tensor:
-        """Map the critic's raw ``"output"`` to a scalar Q (B,).
-
-        For the distributional (``num_bins > 1``) SimbaV2 critic the output is
-        ``num_bins`` categorical logits; HL-Gauss returns their expected return.
-        For a scalar critic it is just the value itself.
-        """
-        return self.critic.to_value(logits).view(-1)
 
     def _read_transition(self, seq: torch.Tensor) -> tuple:
         """Read one transition batch for index pairs ``seq`` (B, 2).
@@ -778,109 +739,23 @@ class SimLingoAgent:
         s_next = feat_next.mean(dim=1)
         return a, r, done, feat, feat_next, s, s_next
 
-    def _critic_targets(
-        self,
-        a: torch.Tensor,
-        r: torch.Tensor,
-        done: torch.Tensor,
-        s: torch.Tensor,
-        s_next: torch.Tensor,
-        feat_next: torch.Tensor,
-    ) -> tuple:
-        """TD target + current critic output for one transition batch.
-
-        DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a'). With the
-        distributional critic the next-state value is the expectation of its
-        categorical output (via HL-Gauss). Returns
-        ``(current_logits, current_q, target_q)``.
-        """
-        with torch.no_grad():
-            a_next = self._policy_action(feat_next)
-            next_output = self.critic(s_next, a_next.unsqueeze(1)).output
-            target_q = self.critic.compute_target_value(
-                next_output, r.unsqueeze(1), done.unsqueeze(1)
-            )
-        current_logits = self.critic(s, a.unsqueeze(1)).output
-        current_q = self._critic_value(current_logits)
-        return current_logits, current_q, target_q
-
-    def _ddpg_actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-        """L_actor = − Q(s, μ(s)) (deterministic policy gradient).
-
-        Freeze the critic's params during this Q forward so the −Q gradient
-        flows only into the waypoint heads, not the critic. ``s`` is a buffer
-        read with no grad, so the heads are the sole path to the loss.
-        """
-        a_pred = self._policy_action(feat)
-        for p in self.critic.parameters():
-            p.requires_grad_(False)
-        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1)).output)
-        for p in self.critic.parameters():
-            p.requires_grad_(True)
-        return -actor_q.mean()
-
-    def _awr_actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
-        """Exp-weighted (advantage-weighted) supervised regression actor.
-
-        Instead of ascending the critic's Q-gradient (``_ddpg_actor_loss``),
-        sample ``awr_num_samples`` candidate actions around the current
-        deterministic policy μ(s), score each with the critic Q(s, a_i),
-        normalize the scores *per state* (zero-mean / unit-std advantages) and
-        turn them into softmax weights ``w_i = softmax(adv_i / temperature)``,
-        then regress μ(s) toward the candidates weighted by ``w_i``. This is
-        reward/advantage-weighted regression (AWR): a supervised loss that pulls
-        the policy toward the higher-Q samples *without* backpropagating through
-        the critic — the Q forward (and hence the weights and the candidate
-        actions) is fully detached, so the only gradient path is μ(s).
-
-        Returns ``(actor_loss, weight_entropy)`` where ``weight_entropy`` is a
-        telemetry scalar (mean per-state Shannon entropy of the softmax weights,
-        nats) — low entropy means the weights collapsed onto a single candidate.
-        """
-        mu = self._policy_action(feat)  # (B, A), grad flows into the heads
-        b, action_dim = mu.shape
-        n = self.awr_num_samples
-
-        # Candidates + their Q scores live entirely under no_grad: they are
-        # regression *targets*, must not carry gradient into the heads/critic.
-        with torch.no_grad():
-            noise = torch.randn(b, n, action_dim, device=self.device) * self.awr_sample_noise
-            # Keep μ(s) itself as the first candidate so the current policy is
-            # always represented in the mix (zero noise on sample 0).
-            noise[:, 0, :] = 0.0
-            cand = mu.unsqueeze(1) + noise  # (B, N, A)
-
-            # Q(s, a_i): broadcast the state over the N samples and score the
-            # whole (B*N) batch in one critic forward.
-            s_rep = s.unsqueeze(1).expand(b, n, s.shape[-1]).reshape(b * n, -1)
-            a_rep = cand.reshape(b * n, action_dim).unsqueeze(1)  # (B*N, 1, A)
-            q = self._critic_value(self.critic(s_rep, a_rep).output).view(b, n)
-
-            # Per-state exp weights via softmax (handles the exp and the
-            # normalize-to-sum-1). softmax is shift-invariant, so centering the
-            # Q's would be a no-op — we only rescale by the per-state std, which
-            # keeps the temperature scale-invariant to the critic's magnitude.
-            adv = q / (q.std(dim=1, keepdim=True) + 1e-8)
-            weights = torch.softmax(adv / self.awr_temperature, dim=1)  # (B, N)
-            weight_entropy = -(weights * (weights + 1e-8).log()).sum(dim=1).mean()
-
-        # Weighted regression of μ(s) toward the candidates.
-        sq = ((mu.unsqueeze(1) - cand) ** 2).sum(dim=-1)  # (B, N)
-        actor_loss = (weights * sq).sum(dim=1).mean()
-        return actor_loss, weight_entropy
-
     def _read_and_compute(self, seq: torch.Tensor) -> tuple:
-        """Read one transition batch and build the DDPG losses' tensors.
+        """Read one transition batch and build the loss tensors.
 
-        Returns ``(current_logits, current_q, target_q, actor_loss)`` with the
-        deterministic-policy-gradient actor loss — used by ``off_policy`` and
-        ``streaming``. ``current_logits`` is the raw critic output kept for the
-        (distributional) critic loss; ``current_q`` / ``target_q`` are scalars.
+        Returns ``(current_logits, current_q, target_q, actor_loss, actor_info)``
+        — used by ``off_policy`` and ``streaming``. ``current_logits`` is the raw
+        critic output kept for the (distributional) critic loss; ``current_q`` /
+        ``target_q`` are scalars; ``actor_info`` is the network's actor-loss
+        telemetry (e.g. AWR weight entropy). The (s, a) → loss-tensor math lives
+        on the network; the agent only feeds it the transition it read from the
+        replay buffer and does not know which actor loss the network uses.
         """
         a, r, done, feat, feat_next, s, s_next = self._read_transition(seq)
-        current_logits, current_q, target_q = self._critic_targets(a, r, done, s, s_next, feat_next)
-        actor_loss = self._ddpg_actor_loss(feat, s)
-        return current_logits, current_q, target_q, actor_loss
+        current_logits, current_q, target_q = self.network.critic_targets(
+            a, r, done, s, s_next, feat_next
+        )
+        actor_loss, actor_info = self.network.actor_loss(feat, s)
+        return current_logits, current_q, target_q, actor_loss, actor_info
 
     # --- Off-policy training step -----------------------------------------
 
@@ -895,7 +770,7 @@ class SimLingoAgent:
         span = _SEQ_LEN + _HORIZON
         start = torch.randint(0, curr_size - span, (self.batch_size,))
         seq = start[:, None] + torch.arange(span)[None, :]
-        current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
+        current_logits, current_q, target_q, actor_loss, actor_info = self._read_and_compute(seq)
         # Distributional critic: cross-entropy of the categorical output against
         # the (support-projected) scalar TD target via HL-Gauss; grow the support
         # first if the target exceeds the current range. Scalar critic: MSE.
@@ -904,7 +779,7 @@ class SimLingoAgent:
 
         # One backward over (critic_loss + actor_loss) so no ``step`` lands
         # between the two graphs (which would invalidate them in-place). The
-        # critic-freeze in ``_read_and_compute`` keeps the two losses on
+        # critic-freeze in the network's actor loss keeps the two losses on
         # disjoint param sets, so each optimizer only steps the params it owns.
         self.critic_optimizer.zero_grad(set_to_none=True)
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -919,54 +794,7 @@ class SimLingoAgent:
             "losses/actor_loss": float(actor_loss.item()),
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
-        }
-        info["losses/value_range"] = float(self.critic.value_range)
-        return info
-
-    # --- Advantage-weighted regression (exp-weighted SL) training step -----
-
-    def _train_awr(self, global_step: int) -> dict:
-        """Off-policy critic (TD) + exp-weighted supervised-regression actor.
-
-        Same random-replay critic update as ``_maybe_train`` (the critic still
-        learns Q via the TD loss), but the waypoint heads are trained by
-        :meth:`_awr_actor_loss` — sample multiple actions, score them with Q,
-        normalize and exp-weight the scores, and regress the policy toward the
-        higher-scoring samples (advantage-weighted regression) instead of the
-        deterministic ``-Q`` policy gradient.
-        """
-        if global_step < self.learning_starts:
-            return {}
-
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        span = _SEQ_LEN + _HORIZON
-        start = torch.randint(0, curr_size - span, (self.batch_size,))
-        seq = start[:, None] + torch.arange(span)[None, :]
-
-        a, r, done, feat, feat_next, s, s_next = self._read_transition(seq)
-        current_logits, current_q, target_q = self._critic_targets(a, r, done, s, s_next, feat_next)
-        self.critic.update_value_range(target_q)
-        critic_loss = self.critic.value_loss(current_logits, target_q)
-        actor_loss, weight_entropy = self._awr_actor_loss(feat, s)
-
-        # One backward over (critic_loss + actor_loss): the AWR actor loss scores
-        # candidates under ``no_grad``, so it touches the heads only and the
-        # critic loss touches the critic only — each optimizer steps its own
-        # params. (Same single-backward discipline as ``_maybe_train``.)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        (critic_loss + actor_loss).backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        nn.utils.clip_grad_norm_(self.actor_heads.parameters(), self.max_grad_norm)
-        self.critic_optimizer.step()
-        self.actor_optimizer.step()
-
-        info = {
-            "losses/critic_loss": float(critic_loss.item()),
-            "losses/actor_loss": float(actor_loss.item()),
-            "losses/q_value": float(current_q.mean().item()),
-            "losses/target_q": float(target_q.mean().item()),
-            "losses/awr_weight_entropy": float(weight_entropy.item()),
+            **actor_info,
         }
         info["losses/value_range"] = float(self.critic.value_range)
         return info
@@ -988,7 +816,7 @@ class SimLingoAgent:
         # AdamET's eligibility trace is inherently scalar-TD, so streaming uses
         # the expected value (``current_q``) of the distributional critic rather
         # than the full categorical cross-entropy (which only off_policy uses).
-        _current_logits, current_q, target_q, actor_loss = self._read_and_compute(seq)
+        _current_logits, current_q, target_q, actor_loss, actor_info = self._read_and_compute(seq)
 
         # TD error drives the eligibility-trace critic update; a detached
         # scalar (AdamET multiplies the per-parameter trace by it). ``target_q``
@@ -1018,6 +846,7 @@ class SimLingoAgent:
             "losses/q_value": float(current_q.mean().item()),
             "losses/target_q": float(target_q.mean().item()),
             "losses/delta": delta,
+            **actor_info,
         }
         info["losses/value_range"] = float(self.critic.value_range)
         return info

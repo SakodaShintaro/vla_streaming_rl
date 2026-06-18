@@ -195,6 +195,10 @@ def build_network(
         network = SimLingoNetwork(
             value_head_factory=value_head_factory,
             device=device,
+            actor_loss_type=args.actor_loss_type,
+            awr_num_samples=args.awr_num_samples,
+            awr_temperature=args.awr_temperature,
+            awr_sample_noise=args.awr_sample_noise,
         ).to(device)
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
