@@ -1,31 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""Online return-weighted fine-tuning of pi0.5 on LIBERO.
-
-This agent runs LeRobot's pi0.5 flow-matching VLA inside the repo's online RL
-loop and fine-tunes it with **return-weighted regression (RWR)** — the
-critic-free member of the advantage-weighted-regression family, a natural first
-step before a Q-critic is added (mirroring the ``awr`` idea in
-``SimLingoAgent``).
-
-How it works each episode:
-  - pi0.5 predicts an action *chunk* (``chunk_size`` steps); the agent executes
-    it open-loop, one action per env step, then re-plans. Exploration noise is
-    added to the executed actions.
-  - Each completed chunk is stored with the observation that produced it, the
-    executed actions, and the reward accumulated while it ran.
-  - At episode end every stored chunk gets a discounted return-to-go; chunks are
-    pushed to a replay buffer with a softmax weight over the per-batch
-    advantages.
-
-Training re-runs pi0.5's per-sample flow-matching loss on sampled chunks and
-weights it by those advantages, so the (frozen-backbone) action expert is pulled
-toward the actions of high-return chunks.
-
-The wrist camera, proprioceptive state and language instruction that pi0.5 needs
-but the single-RGB observation slot cannot carry are read from the env (see
-``LiberoEnv``); the agentview image arrives through the normal ``obs`` argument.
-"""
-
 import collections
 
 import gymnasium as gym
