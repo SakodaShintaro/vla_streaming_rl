@@ -28,7 +28,7 @@ class ActorCriticWithActionValue(nn.Module):
         *,
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
-        value_head_factory: Callable[[int], DistributionalValueHead],
+        value_head_factory: Callable[[int, int], DistributionalValueHead],
         sparsity: float,
         seq_len: int,
         dacer_loss_weight: float,
@@ -115,10 +115,8 @@ class ActorCriticWithActionValue(nn.Module):
             )
         else:
             raise ValueError(f"Unknown policy_type: {self.policy_type}")
-        # The critic (action-value head) is injected as a factory so that all
-        # value-related construction lives in the network builder, not here. We
-        # only supply the state width the encoder produces.
-        self.value_head = value_head_factory(self.encoder.output_dim)
+
+        self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)
         self.prediction_head = StatePredictionHead(
             image_processor=self.image_processor,
             reward_processor=self.reward_processor,

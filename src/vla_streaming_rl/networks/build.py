@@ -16,9 +16,9 @@ from vla_streaming_rl.networks.value_head import (
 
 def _build_value_head(
     in_channels: int,
+    action_dim: int,
     *,
     critic_arch: str,
-    action_dim: int,
     horizon: int,
     gamma: float,
     multi_gammas: list[float],
@@ -29,11 +29,13 @@ def _build_value_head(
 ) -> DistributionalValueHead:
     """Build the action-value head for a state of width ``in_channels``.
 
-    Networks receive this (via ``functools.partial`` fixing everything but
-    ``in_channels``) and call it with their own state dim. All value-related
-    construction — critic architecture, discount, bins, hidden sizes — lives
-    here, so a value change touches only this builder and ``value_head``, never
-    the networks.
+    Networks receive this (via ``functools.partial`` fixing every config knob but
+    ``in_channels`` and ``action_dim``) and call it with their own state width and
+    action dim — the two shape values only the network knows (RL networks use the
+    env action dim, SimLingo a fixed 60-D waypoint action). All value-related
+    construction — critic architecture, discount, bins, hidden sizes — lives here,
+    so a value change touches only this builder and ``value_head``, never the
+    networks.
 
     Multi-gamma (AMAGO): the head predicts the action value for several discounts
     at once. ``gamma`` is the primary/rollout discount and is kept last; the
@@ -72,22 +74,25 @@ def build_network(
     parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
     device: torch.device,
 ) -> nn.Module:
+    # One factory for every network: all critic config comes from ``args`` and is
+    # bound here, leaving ``in_channels`` and ``action_dim`` for the network to
+    # supply at call time (see ``_build_value_head``). LiberoPi05Network has no
+    # critic and ignores it.
+    value_head_factory = functools.partial(
+        _build_value_head,
+        critic_arch=args.critic_arch,
+        horizon=args.horizon,
+        gamma=args.gamma,
+        multi_gammas=list(args.multi_gammas),
+        hidden_dim=args.critic_hidden_dim,
+        block_num=args.critic_block_num,
+        num_bins=args.num_bins,
+        sparsity=args.sparsity,
+    )
+
     if args.network_class == "actor_critic_with_action_value":
         from vla_streaming_rl.networks.actor_critic_with_action_value import (
             ActorCriticWithActionValue,
-        )
-
-        value_head_factory = functools.partial(
-            _build_value_head,
-            critic_arch=args.critic_arch,
-            action_dim=action_space_shape[0],
-            horizon=args.horizon,
-            gamma=args.gamma,
-            multi_gammas=list(args.multi_gammas),
-            hidden_dim=args.critic_hidden_dim,
-            block_num=args.critic_block_num,
-            num_bins=args.num_bins,
-            sparsity=args.sparsity,
         )
 
         network = ActorCriticWithActionValue(
@@ -118,22 +123,10 @@ def build_network(
             predictor_type=args.predictor_type,
         ).to(device)
         network = torch.compile(network)
+
     elif args.network_class == "vlm_actor_critic_with_action_value":
         from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
             VLMActorCriticWithActionValue,
-        )
-
-        value_head_factory = functools.partial(
-            _build_value_head,
-            critic_arch=args.critic_arch,
-            action_dim=action_space_shape[0],
-            horizon=args.horizon,
-            gamma=args.gamma,
-            multi_gammas=list(args.multi_gammas),
-            hidden_dim=args.critic_hidden_dim,
-            block_num=args.critic_block_num,
-            num_bins=args.num_bins,
-            sparsity=args.sparsity,
         )
 
         network = VLMActorCriticWithActionValue(
@@ -172,25 +165,15 @@ def build_network(
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,
         ).to(device)
-    elif args.network_class == "simlingo":
-        from vla_streaming_rl.networks.simlingo_network import ACTION_DIM, SimLingoNetwork
 
-        # SimLingo's dueling critic is always scalar (num_bins == 1); SimbaV2
-        # honors the configured bins. The critic acts on a single (horizon == 1)
-        # 60-D waypoint action.
-        critic_num_bins = args.num_bins if args.critic_arch == "simbav2" else 1
-        value_head_factory = functools.partial(
-            _build_value_head,
-            critic_arch=args.critic_arch,
-            action_dim=ACTION_DIM,
-            horizon=1,
-            gamma=args.gamma,
-            multi_gammas=list(args.multi_gammas),
-            hidden_dim=args.critic_hidden_dim,
-            block_num=args.critic_block_num,
-            num_bins=critic_num_bins,
-            sparsity=0.0,
-        )
+    elif args.network_class == "simlingo":
+        from vla_streaming_rl.networks.simlingo_network import SimLingoNetwork
+
+        # SimLingo's critic scores a single 60-D waypoint action, so it requires
+        # horizon == 1; assert the config rather than overriding it, so the whole
+        # critic config flows through args like every other network. (The 60-D
+        # action_dim is supplied by SimLingoNetwork at the value_head call site.)
+        assert args.horizon == 1, f"SimLingo requires horizon == 1, got {args.horizon}"
 
         network = SimLingoNetwork(
             value_head_factory=value_head_factory,
@@ -199,10 +182,12 @@ def build_network(
             awr_temperature=args.awr_temperature,
             awr_sample_noise=args.awr_sample_noise,
         ).to(device)
+
     elif args.network_class == "libero_pi05":
         from vla_streaming_rl.networks.libero_pi05_network import LiberoPi05Network
 
         network = LiberoPi05Network(device=device)
+
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
 

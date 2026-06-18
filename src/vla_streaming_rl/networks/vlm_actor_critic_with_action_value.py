@@ -38,7 +38,7 @@ class VLMActorCriticWithActionValue(nn.Module):
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
         parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
-        value_head_factory: Callable[[int], DistributionalValueHead],
+        value_head_factory: Callable[[int, int], DistributionalValueHead],
         seq_len: int,
         horizon: int,
         critic_loss_weight: float,
@@ -171,10 +171,7 @@ class VLMActorCriticWithActionValue(nn.Module):
             raise ValueError(f"Unknown policy_type: {self.policy_type}")
 
         # Critic: Q(state, action)
-        # The critic (action-value head) is injected as a factory so that all
-        # value-related construction lives in the network builder, not here. We
-        # only supply the state width produced by the VLM state extractor.
-        self.value_head = value_head_factory(state_dim)
+        self.value_head = value_head_factory(state_dim, self.action_dim)
 
         self.prediction_head = StatePredictionHead(
             image_processor=self.image_processor,
@@ -269,7 +266,9 @@ class VLMActorCriticWithActionValue(nn.Module):
         # Use prompt at the boundary between seq and horizon for current state
         curr_prompts = self.decode_task_prompt_ids(data.task_prompt_token_ids[:, -self.horizon - 1])
 
-        _, _, _, _, next_critic_out = self._infer(data.observations[:, self.horizon :], next_prompts)
+        _, _, _, _, next_critic_out = self._infer(
+            data.observations[:, self.horizon :], next_prompts
+        )
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(

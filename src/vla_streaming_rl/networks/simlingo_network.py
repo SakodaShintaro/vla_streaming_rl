@@ -55,7 +55,7 @@ class SimLingoNetwork(nn.Module):
     def __init__(
         self,
         *,
-        value_head_factory: Callable[[int], DistributionalValueHead],
+        value_head_factory: Callable[[int, int], DistributionalValueHead],
         actor_loss_type: str,
         awr_num_samples: int,
         awr_temperature: float,
@@ -132,7 +132,7 @@ class SimLingoNetwork(nn.Module):
             p.requires_grad_(True)
 
         self.feature_dim = int(self.vlm.language_model.hidden_size)
-        self.critic = value_head_factory(self.feature_dim)
+        self.critic = value_head_factory(self.feature_dim, ACTION_DIM)
 
     @staticmethod
     def _resolve_checkpoint() -> Path:
