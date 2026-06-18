@@ -73,18 +73,6 @@ uv tool install pre-commit
 pre-commit install
 ```
 
-Useful commands:
-
-```bash
-# Run hooks against all files (not just staged ones).
-pre-commit run --all-files
-
-# Bypass hooks for a single commit.
-git commit --no-verify
-```
-
-If hooks rewrite files, the commit aborts — re-`git add` the changes and commit again.
-
 ## Usage
 
 ### Training
@@ -97,19 +85,4 @@ If hooks rewrite files, the commit aborts — re-`git add` the changes and commi
 
 ```bash
 ./test.sh
-```
-
-## Project Structure
-
-```bash
-vla_streaming_rl/
-├── src/vla_streaming_rl/     # Library code
-│   ├── agents/          # RL agents (on-policy, off-policy)
-│   ├── envs/            # Custom environments
-│   ├── networks/        # Neural network architectures
-│   ├── metrics/         # Metrics computation
-│   └── optimizers/      # Custom optimizers
-├── scripts/             # Executable scripts
-│   └── train.py         # Main training script
-└── train_*.sh           # Training shell scripts
 ```
