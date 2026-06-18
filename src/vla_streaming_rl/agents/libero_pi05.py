@@ -59,6 +59,7 @@ class LiberoPi05Agent:
         self.network = network
         self.policy = network.policy
         self.preprocessor = network.preprocessor
+        self.postprocessor = network.postprocessor
         self.device = torch.device(network.cfg.device)
         self.chunk_size = network.chunk_size
         self.action_dim = network.action_dim
@@ -122,6 +123,7 @@ class LiberoPi05Agent:
         inputs = self._capture_inputs(obs)
         processed = self.preprocessor(self._raw_obs_dict(inputs))
         chunk = self.policy.predict_action_chunk(processed)  # (1, chunk_size, action_dim)
+        chunk = self.postprocessor(chunk)
         chunk = chunk.squeeze(0).float().cpu().numpy()
 
         self._cur_inputs = inputs
@@ -263,6 +265,7 @@ class LiberoPi05Agent:
         adv = returns / (returns.std() + 1e-8)
         weights = torch.softmax(adv / self.awr_temperature, dim=0)
 
+        self.policy.train()
         per_sample_loss, _ = self.policy.forward(batch, reduction="none")
         loss = (weights * per_sample_loss).sum()
 
