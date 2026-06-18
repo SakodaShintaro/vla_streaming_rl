@@ -29,9 +29,13 @@ INFO_KEY_TASK_PROMPT = "task_prompt"
 INFO_KEY_WRIST_IMAGE = "wrist_image"
 INFO_KEY_PROPRIO = "proprio"
 
-# robosuite renders camera frames bottom-up; flip vertically to get a
-# top-down-natural RGB image.
-_VERTICAL_FLIP = slice(None, None, -1)
+# The LIBERO pi0.5 checkpoint was trained with the HuggingFace-LIBERO camera
+# convention: every camera frame is rotated 180° (both height and width flipped).
+# This must match exactly or the policy sees a mirrored world and reaches in the
+# wrong direction. See lerobot ``LiberoEnvProcessor._process_observation``
+# (``torch.flip(img, dims=[2, 3])``). A plain vertical flip is NOT equivalent —
+# it leaves the image horizontally mirrored relative to training.
+_ROT180 = (slice(None, None, -1), slice(None, None, -1))
 
 # robosuite obs keys.
 _OBS_AGENTVIEW = "agentview_image"
@@ -158,9 +162,7 @@ class LiberoEnv(gym.Env):
 
     def _build_env_for_task(self, task_id: int) -> None:
         task = self._task_suite.get_task(task_id)
-        bddl_file = (
-            f"{self._libero_bddl_root}/{task.problem_folder}/{task.bddl_file}"
-        )
+        bddl_file = f"{self._libero_bddl_root}/{task.problem_folder}/{task.bddl_file}"
         env_args = {
             "bddl_file_name": bddl_file,
             "camera_heights": self._resolution,
@@ -173,8 +175,8 @@ class LiberoEnv(gym.Env):
         self._loaded_task_id = task_id
 
     def _extract(self, obs: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
-        agentview = np.ascontiguousarray(obs[_OBS_AGENTVIEW][_VERTICAL_FLIP])
-        wrist = np.ascontiguousarray(obs[_OBS_WRIST][_VERTICAL_FLIP])
+        agentview = np.ascontiguousarray(obs[_OBS_AGENTVIEW][_ROT180])
+        wrist = np.ascontiguousarray(obs[_OBS_WRIST][_ROT180])
         # 8-D proprio matching the LIBERO pi0.5 checkpoint's state feature:
         # end-effector position, orientation as axis-angle, and gripper width.
         proprio = np.concatenate(
@@ -220,9 +222,7 @@ class LiberoEnv(gym.Env):
         self._step_count = 0
         return self._extract(obs)
 
-    def step(
-        self, action: np.ndarray
-    ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         self._step_count += 1
         obs, reward, done, _ = self._env.step(np.asarray(action, dtype=np.float32))
 
@@ -230,9 +230,7 @@ class LiberoEnv(gym.Env):
         # reward means the task goal was satisfied this step.
         success = reward > 0.0
         terminated = bool(success)
-        truncated = (not terminated) and (
-            bool(done) or self._step_count >= self._horizon
-        )
+        truncated = (not terminated) and (bool(done) or self._step_count >= self._horizon)
 
         observation, info = self._extract(obs)
         info["is_success"] = float(success)
