@@ -364,20 +364,6 @@ class SimLingoAgent:
         ]
         self._global_plan = [global_plan_gps[x] for x in ds_ids]
 
-    # --- Setup helpers -----------------------------------------------------
-
-    def _init(self) -> None:
-        """First-tick lazy init: build the RoutePlanner once the global
-        plan has been set.
-        """
-        self._route_planner = RoutePlanner(
-            self.route_planner_min_distance,
-            self.route_planner_max_distance,
-            self._global_plan,
-            self._global_plan_world_coord,
-        )
-        self.initialized = True
-
     # --- Per-tick inference ------------------------------------------------
 
     def _act(self, sensors: dict) -> np.ndarray:
@@ -529,7 +515,13 @@ class SimLingoAgent:
         self._frame_step += 1
 
         if not self.initialized:
-            self._init()
+            self._route_planner = RoutePlanner(
+                self.route_planner_min_distance,
+                self.route_planner_max_distance,
+                self._global_plan,
+                self._global_plan_world_coord,
+            )
+            self.initialized = True
             control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
             self.control = control
             self._tick(input_data)  # seed UKF; output discarded since we return brake
