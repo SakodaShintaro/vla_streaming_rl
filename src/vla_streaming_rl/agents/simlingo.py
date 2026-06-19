@@ -338,7 +338,7 @@ class SimLingoAgent:
 
     def _maybe_handover_episode(self, info: dict) -> None:
         """On the first tick of a new episode, take the route plan from the
-        env's reset ``info`` and force ``_init`` to rebuild the RoutePlanner.
+        env's reset ``info`` and rebuild the RoutePlanner.
 
         ``_need_handover`` is set on construction and by ``on_episode_end``; the
         next ``select_action`` carries the new episode's reset info (which holds
@@ -350,8 +350,14 @@ class SimLingoAgent:
         # builds both the gps and world-coord route (see CARLALeaderboardEnv).
         gps_route, world_route = info["route_plan"]
         ds_ids = downsample_route(world_route, 50)
-        self._global_plan_world_coord = [(world_route[x][0], world_route[x][1]) for x in ds_ids]
-        self._global_plan = [gps_route[x] for x in ds_ids]
+        global_plan_world_coord = [(world_route[x][0], world_route[x][1]) for x in ds_ids]
+        global_plan = [gps_route[x] for x in ds_ids]
+        self._route_planner = RoutePlanner(
+            self.route_planner_min_distance,
+            self.route_planner_max_distance,
+            global_plan,
+            global_plan_world_coord,
+        )
         self.initialized = False
         self._need_handover = False
 
@@ -506,12 +512,6 @@ class SimLingoAgent:
         self._frame_step += 1
 
         if not self.initialized:
-            self._route_planner = RoutePlanner(
-                self.route_planner_min_distance,
-                self.route_planner_max_distance,
-                self._global_plan,
-                self._global_plan_world_coord,
-            )
             self.initialized = True
             control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
             self.control = control
