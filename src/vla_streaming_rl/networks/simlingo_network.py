@@ -11,13 +11,25 @@ byproducts the agent's inference pipeline needs are exposed as attributes.
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import torch
 from huggingface_hub import snapshot_download
 from omegaconf import OmegaConf
 from torch import nn
 from transformers import Qwen2Tokenizer
 
+from vla_streaming_rl.networks.interface import (
+    ActivationFeatures,
+    EligibilityTraceInfo,
+    InferInput,
+    InferLossResult,
+    InferResult,
+    LossResult,
+    NetworkInterface,
+)
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
+from vla_streaming_rl.replay_buffer import ReplayBufferData
+from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.simlingo.models.driving import DrivingModel
 from vla_streaming_rl.simlingo.models.encoder.internvl2_vendored.configuration_internvl_chat import (
     InternVLChatConfig,
@@ -37,7 +49,7 @@ NUM_WP_QUERIES = ROUTE_LEN + SPEED_WPS_LEN
 ACTION_DIM = NUM_WP_QUERIES * WP_DIM
 
 
-class SimLingoNetwork(nn.Module):
+class SimLingoNetwork(NetworkInterface):
     """SimLingo VLM + waypoint heads (policy μ) + Q critic.
 
     ``forward(driving_input)`` is the VLM forward, returning SimLingo's
@@ -134,6 +146,99 @@ class SimLingoNetwork(nn.Module):
         self.feature_dim = int(self.vlm.language_model.hidden_size)
         self.critic = value_head_factory(self.feature_dim, ACTION_DIM)
 
+        # ``compute_loss`` normalizes the raw env reward with the same stateless
+        # "carla" transform the agent uses for telemetry, so the value the critic
+        # trains on is self-contained in the contract method.
+        self.reward_processor = RewardProcessor("carla", 1.0)
+
+    # --- NetworkInterface contract ----------------------------------------
+
+    def init_state(self) -> torch.Tensor:
+        return torch.zeros(1)
+
+    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
+        del task_prompt
+        return []
+
+    def infer(self, data: InferInput) -> InferResult:
+        features = data.s_seq  # (NUM_WP_QUERIES, hidden) or (B, NUM_WP_QUERIES, hidden)
+        if features.dim() == 2:
+            features = features.unsqueeze(0)
+        action = self._policy_action(features)
+        s = features.mean(dim=1)
+        critic_out = self.critic(s, action.unsqueeze(1)).output
+        return self._infer_result(action, s, critic_out)
+
+    def compute_loss(self, data: ReplayBufferData) -> LossResult:
+        # Buffer window is two columns: col 0 = state t, col 1 = state t+1. The
+        # combined critic + actor loss is one tensor; the critic-freeze in the
+        # actor loss keeps them on disjoint parameters, so a single backward works.
+        feat = data.observations[:, 0]  # (B, NUM_WP_QUERIES, hidden)
+        feat_next = data.observations[:, 1]
+        a = data.actions[:, 1]
+        r = self.reward_processor.normalize(data.rewards[:, 1, 0])
+        done = data.dones[:, 1, 0]
+        s = feat.mean(dim=1)
+        s_next = feat_next.mean(dim=1)
+
+        current_logits, current_q, target_q = self._critic_targets(a, r, done, s, s_next, feat_next)
+        self.critic.update_value_range(target_q)
+        critic_loss = self.critic.value_loss(current_logits, target_q)
+        actor_loss, actor_info = self._actor_loss(feat, s)
+
+        info = {
+            "losses/critic_loss": float(critic_loss.item()),
+            "losses/actor_loss": float(actor_loss.item()),
+            "losses/q_value": float(current_q.mean().item()),
+            "losses/target_q": float(target_q.mean().item()),
+            "losses/value_range": float(self.critic.value_range),
+            **actor_info,
+        }
+        return LossResult(loss=critic_loss + actor_loss, info=info)
+
+    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
+        # Streaming (online TD(λ)) read-out. The critic uses the expected value
+        # current_q (scalar TD), not the categorical value_loss, so there is no
+        # update_value_range here — matching the off_policy/streaming split.
+        feat = data.observations[:, 0]
+        feat_next = data.observations[:, 1]
+        a = data.actions[:, 1]
+        r = self.reward_processor.normalize(data.rewards[:, 1, 0])
+        done = data.dones[:, 1, 0]
+        s = feat.mean(dim=1)
+        s_next = feat_next.mean(dim=1)
+
+        _current_logits, current_q, target_q = self._critic_targets(
+            a, r, done, s, s_next, feat_next
+        )
+        actor_loss, actor_info = self._actor_loss(feat, s)
+        delta = (target_q.mean(dim=1) - current_q).mean().detach()
+
+        # AdamET trace inputs: actor loss → heads, -Q(s,a) → critic, TD error.
+        et_info = EligibilityTraceInfo(
+            actor_entropy_loss=actor_loss, neg_value=-current_q.mean(), delta=delta
+        )
+        info = {
+            "losses/critic_loss": float((delta * delta).item()),
+            "losses/actor_loss": float(actor_loss.item()),
+            "losses/q_value": float(current_q.mean().item()),
+            "losses/target_q": float(target_q.mean().item()),
+            "losses/delta": float(delta.item()),
+            "losses/value_range": float(self.critic.value_range),
+            **actor_info,
+        }
+        # loss_result.loss is unused by the streaming agent (the critic learns via
+        # the eligibility trace); kept as a valid tensor for the contract.
+        loss_result = LossResult(loss=actor_loss, info=info)
+
+        with torch.no_grad():
+            action = self._policy_action(feat)
+            critic_out = self.critic(s, action.unsqueeze(1)).output
+            infer_result = self._infer_result(action, s, critic_out)
+        return InferLossResult(infer_result=infer_result, loss_result=loss_result, et_info=et_info)
+
+    # --- internals --------------------------------------------------------
+
     @staticmethod
     def _resolve_checkpoint() -> Path:
         HF_REPO_ID = "RenzKa/simlingo"
@@ -143,11 +248,24 @@ class SimLingoNetwork(nn.Module):
         assert candidates, f"No {HF_CKPT_NAME} found in HF snapshot of {HF_REPO_ID} at {snapshot}"
         return candidates[0]
 
-    def forward(self, driving_input):
-        """VLM forward → ``(pred_speed_wps, pred_route, language, features)``."""
-        return self.vlm(driving_input)
+    def _infer_result(
+        self, action: torch.Tensor, s: torch.Tensor, critic_out: torch.Tensor
+    ) -> InferResult:
+        # SimLingo has no next-state predictor; the agent reads only ``action`` and
+        # ``value_report``, so the predictor/recurrent fields are placeholders.
+        return InferResult(
+            action=action,
+            value_report=self.critic.value_report(critic_out),
+            rnn_state=torch.zeros(1),
+            next_image=np.zeros((1, 1, 3), dtype=np.uint8),
+            next_reward=0.0,
+            action_token_ids=[],
+            activations=ActivationFeatures(
+                state=s, actor=action, critic=critic_out, state_predictor=s
+            ),
+        )
 
-    def policy_action(self, features: torch.Tensor) -> torch.Tensor:
+    def _policy_action(self, features: torch.Tensor) -> torch.Tensor:
         """Apply the SimLingo waypoint heads to per-query features → μ(s).
 
         Args:
@@ -163,11 +281,11 @@ class SimLingoNetwork(nn.Module):
         speed = preds["speed_wps"].reshape(b, -1)
         return torch.cat([route, speed], dim=1)
 
-    def critic_value(self, logits: torch.Tensor) -> torch.Tensor:
+    def _critic_value(self, logits: torch.Tensor) -> torch.Tensor:
         """Map the critic's raw ``"output"`` to a scalar Q (B,)."""
         return self.critic.to_value(logits).view(-1)
 
-    def critic_targets(
+    def _critic_targets(
         self,
         a: torch.Tensor,
         r: torch.Tensor,
@@ -184,16 +302,16 @@ class SimLingoNetwork(nn.Module):
         ``(current_logits, current_q, target_q)``.
         """
         with torch.no_grad():
-            a_next = self.policy_action(feat_next)
+            a_next = self._policy_action(feat_next)
             next_output = self.critic(s_next, a_next.unsqueeze(1)).output
             target_q = self.critic.compute_target_value(
                 next_output, r.unsqueeze(1), done.unsqueeze(1)
             )
         current_logits = self.critic(s, a.unsqueeze(1)).output
-        current_q = self.critic_value(current_logits)
+        current_q = self._critic_value(current_logits)
         return current_logits, current_q, target_q
 
-    def actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
+    def _actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
         """Actor loss for the waypoint heads + telemetry, per ``actor_loss_type``.
 
         Returns ``(loss, info)``. ``ddpg`` is the deterministic policy gradient
@@ -215,10 +333,10 @@ class SimLingoNetwork(nn.Module):
         flows only into the waypoint heads, not the critic. ``s`` is a buffer
         read with no grad, so the heads are the sole path to the loss.
         """
-        a_pred = self.policy_action(feat)
+        a_pred = self._policy_action(feat)
         for p in self.critic.parameters():
             p.requires_grad_(False)
-        actor_q = self.critic_value(self.critic(s, a_pred.unsqueeze(1)).output)
+        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1)).output)
         for p in self.critic.parameters():
             p.requires_grad_(True)
         return -actor_q.mean()
@@ -240,7 +358,7 @@ class SimLingoNetwork(nn.Module):
         telemetry scalar (mean per-state Shannon entropy of the softmax weights,
         nats) — low entropy means the weights collapsed onto a single candidate.
         """
-        mu = self.policy_action(feat)  # (B, A), grad flows into the heads
+        mu = self._policy_action(feat)  # (B, A), grad flows into the heads
         b, action_dim = mu.shape
         n = self.awr_num_samples
 
@@ -257,7 +375,7 @@ class SimLingoNetwork(nn.Module):
             # whole (B*N) batch in one critic forward.
             s_rep = s.unsqueeze(1).expand(b, n, s.shape[-1]).reshape(b * n, -1)
             a_rep = cand.reshape(b * n, action_dim).unsqueeze(1)  # (B*N, 1, A)
-            q = self.critic_value(self.critic(s_rep, a_rep).output).view(b, n)
+            q = self._critic_value(self.critic(s_rep, a_rep).output).view(b, n)
 
             # Per-state exp weights via softmax (handles the exp and the
             # normalize-to-sum-1). softmax is shift-invariant, so centering the
