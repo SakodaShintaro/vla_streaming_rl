@@ -349,20 +349,11 @@ class SimLingoAgent:
         # ``route_plan`` is the standard leaderboard handover — RouteScenario
         # builds both the gps and world-coord route (see CARLALeaderboardEnv).
         gps_route, world_route = info["route_plan"]
-        self._set_global_plan(gps_route, world_route)
+        ds_ids = downsample_route(world_route, 50)
+        self._global_plan_world_coord = [(world_route[x][0], world_route[x][1]) for x in ds_ids]
+        self._global_plan = [gps_route[x] for x in ds_ids]
         self.initialized = False
         self._need_handover = False
-
-    def _set_global_plan(self, global_plan_gps, global_plan_world_coord) -> None:
-        """Downsample the route (matches leaderboard ``AutonomousAgent.set_global_plan``)
-        and populate the plan attributes so ``_init`` constructs the
-        ``RoutePlanner`` on the first tick.
-        """
-        ds_ids = downsample_route(global_plan_world_coord, 50)
-        self._global_plan_world_coord = [
-            (global_plan_world_coord[x][0], global_plan_world_coord[x][1]) for x in ds_ids
-        ]
-        self._global_plan = [global_plan_gps[x] for x in ds_ids]
 
     # --- Per-tick inference ------------------------------------------------
 
