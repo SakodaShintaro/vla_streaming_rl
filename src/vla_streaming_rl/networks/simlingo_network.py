@@ -179,25 +179,29 @@ class SimLingoNetwork(NetworkInterface):
         s = feat.mean(dim=1)
         s_next = feat_next.mean(dim=1)
 
-        current_logits, current_q, target_q = self._critic_targets(a, r, done, s, s_next, feat_next)
-        self.critic.update_value_range(target_q)
-        critic_loss = self.critic.value_loss(current_logits, target_q)
+        # Bootstrap value Q(s', μ(s')) on the next-state column, no grad.
+        with torch.no_grad():
+            next_output = self.critic(s_next, self._policy_action(feat_next).unsqueeze(1)).output
+        target_q = self.critic.compute_target_value(next_output, r.unsqueeze(1), done.unsqueeze(1))
+
+        # The value head owns forward → range update → categorical loss; simlingo
+        # just hands it (state, action chunk, per-gamma target).
+        critic_loss, critic_info = self.critic.compute_critic_loss(
+            s, a.unsqueeze(1), target_q, False
+        )
         actor_loss, actor_info = self._actor_loss(feat, s)
 
         info = {
-            "losses/critic_loss": float(critic_loss.item()),
+            "losses/critic_loss": critic_info["critic_loss"],
             "losses/actor_loss": float(actor_loss.item()),
-            "losses/q_value": float(current_q.mean().item()),
-            "losses/target_q": float(target_q.mean().item()),
-            "losses/value_range": float(self.critic.value_range),
+            "losses/q_value": critic_info["curr_critic_value"],
+            "losses/target_q": critic_info["target_value"],
+            "losses/value_range": critic_info["value_range"],
             **actor_info,
         }
         return LossResult(loss=critic_loss + actor_loss, info=info)
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
-        # Streaming (online TD(λ)) read-out. The critic uses the expected value
-        # current_q (scalar TD), not the categorical value_loss, so there is no
-        # update_value_range here — matching the off_policy/streaming split.
         feat = data.observations[:, 0]
         feat_next = data.observations[:, 1]
         a = data.actions[:, 1]
@@ -206,28 +210,32 @@ class SimLingoNetwork(NetworkInterface):
         s = feat.mean(dim=1)
         s_next = feat_next.mean(dim=1)
 
-        _current_logits, current_q, target_q = self._critic_targets(
-            a, r, done, s, s_next, feat_next
+        # Bootstrap value Q(s', μ(s')) on the next-state column, no grad.
+        with torch.no_grad():
+            next_output = self.critic(s_next, self._policy_action(feat_next).unsqueeze(1)).output
+        target_q = self.critic.compute_target_value(next_output, r.unsqueeze(1), done.unsqueeze(1))
+
+        critic_loss, critic_info = self.critic.compute_critic_loss(
+            s, a.unsqueeze(1), target_q, False
         )
         actor_loss, actor_info = self._actor_loss(feat, s)
-        delta = (target_q.mean(dim=1) - current_q).mean().detach()
 
         # AdamET trace inputs: actor loss → heads, -Q(s,a) → critic, TD error.
+        neg_value = -self._critic_value(self.critic(s, a.unsqueeze(1)).output).mean()
         et_info = EligibilityTraceInfo(
-            actor_entropy_loss=actor_loss, neg_value=-current_q.mean(), delta=delta
+            actor_entropy_loss=actor_loss, neg_value=neg_value, delta=critic_info["delta"]
         )
         info = {
-            "losses/critic_loss": float((delta * delta).item()),
+            "losses/critic_loss": critic_info["critic_loss"],
             "losses/actor_loss": float(actor_loss.item()),
-            "losses/q_value": float(current_q.mean().item()),
-            "losses/target_q": float(target_q.mean().item()),
-            "losses/delta": float(delta.item()),
-            "losses/value_range": float(self.critic.value_range),
+            "losses/q_value": critic_info["curr_critic_value"],
+            "losses/target_q": critic_info["target_value"],
+            "losses/delta": critic_info["delta"],
+            "losses/value_range": critic_info["value_range"],
             **actor_info,
         }
-        # loss_result.loss is unused by the streaming agent (the critic learns via
-        # the eligibility trace); kept as a valid tensor for the contract.
-        loss_result = LossResult(loss=actor_loss, info=info)
+
+        loss_result = LossResult(loss=critic_loss + actor_loss, info=info)
 
         with torch.no_grad():
             action = self._policy_action(feat)
@@ -282,32 +290,6 @@ class SimLingoNetwork(NetworkInterface):
     def _critic_value(self, logits: torch.Tensor) -> torch.Tensor:
         """Map the critic's raw ``"output"`` to a scalar Q (B,)."""
         return self.critic.to_value(logits).view(-1)
-
-    def _critic_targets(
-        self,
-        a: torch.Tensor,
-        r: torch.Tensor,
-        done: torch.Tensor,
-        s: torch.Tensor,
-        s_next: torch.Tensor,
-        feat_next: torch.Tensor,
-    ) -> tuple:
-        """TD target + current critic output for one transition batch.
-
-        DDPG target: a' = μ(s'), y = r + γ(1-done) Q(s', a'). With the
-        distributional critic the next-state value is the expectation of its
-        categorical output (via HL-Gauss). Returns
-        ``(current_logits, current_q, target_q)``.
-        """
-        with torch.no_grad():
-            a_next = self._policy_action(feat_next)
-            next_output = self.critic(s_next, a_next.unsqueeze(1)).output
-            target_q = self.critic.compute_target_value(
-                next_output, r.unsqueeze(1), done.unsqueeze(1)
-            )
-        current_logits = self.critic(s, a.unsqueeze(1)).output
-        current_q = self._critic_value(current_logits)
-        return current_logits, current_q, target_q
 
     def _actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
         """Actor loss for the waypoint heads + telemetry, per ``actor_loss_type``.
