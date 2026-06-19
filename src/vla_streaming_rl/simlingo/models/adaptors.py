@@ -92,10 +92,15 @@ class DrivingAdaptor(nn.Module):
 
         return {"inputs": inputs, "inputs_mask": inputs_mask}
 
-    def get_predictions(self, features: Tensor, logits: Optional[Tensor] = None) -> Dict:
+    def get_predictions(self, features: Tensor) -> Tensor:
+        """Waypoint heads → policy action ``(B, sum_i size_i * dim_i)``.
 
+        Route waypoints then speed waypoints (``self.order``); each head's output
+        is cumsum'd along the waypoint axis, flattened, and the per-head chunks
+        are concatenated into the flat action vector the RL agent consumes (μ(s)).
+        """
         current_index = 0
-        predictions = {}
+        chunks = []
         for input_type in self.order:
             size = self.sizes[input_type]
 
@@ -107,10 +112,10 @@ class DrivingAdaptor(nn.Module):
             feature = feature.to(head[0].weight.dtype)
             prediction = head(feature).cumsum(1)
 
-            predictions[input_type] = prediction
+            chunks.append(prediction.flatten(1))
             current_index += size
 
-        return predictions
+        return torch.cat(chunks, dim=1)
 
 
 class LanguageAdaptor(nn.Module):

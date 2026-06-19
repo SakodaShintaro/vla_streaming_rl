@@ -72,12 +72,12 @@ class DrivingModel(nn.Module):
         features, then the **policy head** maps those features to the
         waypoint/route predictions.
 
-        Returns ``(speed_wps, route, language, driving_features)``. The
-        last element is the (B, 30, hidden) slice of the LLM's last
-        hidden state at the waypoint-query positions — i.e. the input
-        to the policy head's waypoint MLPs. It's exposed so downstream RL
-        wrappers can use it as a state vector for a critic without
-        having to re-run the VLM.
+        Returns ``(action, language, driving_features)``. ``action`` is the
+        policy head's flat waypoint vector (route then speed). The last element
+        is the (B, 30, hidden) slice of the LLM's last hidden state at the
+        waypoint-query positions — i.e. the input to the policy head's waypoint
+        MLPs. It's exposed so downstream RL wrappers can use it as a state vector
+        for a critic without having to re-run the VLM.
         """
         # Encoder: embed the prompt and splice in the VLM image features.
         adaptor_dict = self.vision_model.image_encoder.replace_placeholder_tokens(
@@ -92,28 +92,22 @@ class DrivingModel(nn.Module):
         # Decode each batch item separately (padding differs per item) and
         # collect the per-item outputs.
         language = []
-        route_per_item, speed_wps_per_item, features_per_item = [], [], []
+        features_per_item = []
         for b_idx, (prompt_embed, prompt_mask) in enumerate(zip(prompt_embeds, prompt_masks)):
-            sampled_tokens, driving_features, driving_logits = self._generate_driving_features(
+            sampled_tokens, driving_features, _ = self._generate_driving_features(
                 prompt_embed.unsqueeze(0), prompt_mask.unsqueeze(0), driving_input, b_idx
             )
-
-            # Policy head: features -> {"route": ..., "speed_wps": ...}.
-            predictions = self.adaptors.driving.get_predictions(driving_features, driving_logits)
-            route_per_item.append(predictions["route"])
-            speed_wps_per_item.append(predictions["speed_wps"])
             features_per_item.append(driving_features)
-
             language.append(
                 self.tokenizer.batch_decode(sampled_tokens, skip_special_tokens=True)[0]
             )
 
-        # Concatenate across batch items -> leading dim B.
-        route = torch.cat(route_per_item, dim=0)
-        speed_wps = torch.cat(speed_wps_per_item, dim=0)
+        # Concatenate across batch items -> leading dim B, then run the policy
+        # head once on the full batch (it is a plain per-position MLP).
         driving_features = torch.cat(features_per_item, dim=0)
+        action = self.adaptors.driving.get_predictions(driving_features)
 
-        return speed_wps, route, language, driving_features
+        return action, language, driving_features
 
     def _generate_driving_features(
         self,

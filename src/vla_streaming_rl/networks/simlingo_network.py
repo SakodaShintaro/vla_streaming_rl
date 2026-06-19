@@ -168,7 +168,7 @@ class SimLingoNetwork(NetworkInterface):
 
     def infer(self, data: InferInput) -> InferResult:
         features = data.s_seq  # (B, NUM_WP_QUERIES, hidden)
-        action = self._policy_action(features)
+        action = self.driving_adaptor.get_predictions(features)
         s = features.mean(dim=1)
         critic_out = self.critic(s, action.unsqueeze(1)).output
         return self._infer_result(action, s, critic_out)
@@ -187,7 +187,8 @@ class SimLingoNetwork(NetworkInterface):
 
         # Bootstrap value Q(s', μ(s')) on the next-state column, no grad.
         with torch.no_grad():
-            next_output = self.critic(s_next, self._policy_action(feat_next).unsqueeze(1)).output
+            a_next = self.driving_adaptor.get_predictions(feat_next)
+            next_output = self.critic(s_next, a_next.unsqueeze(1)).output
         target_q = self.critic.compute_target_value(next_output, r.unsqueeze(1), done.unsqueeze(1))
 
         # The value head owns forward → range update → categorical loss; simlingo
@@ -218,7 +219,8 @@ class SimLingoNetwork(NetworkInterface):
 
         # Bootstrap value Q(s', μ(s')) on the next-state column, no grad.
         with torch.no_grad():
-            next_output = self.critic(s_next, self._policy_action(feat_next).unsqueeze(1)).output
+            a_next = self.driving_adaptor.get_predictions(feat_next)
+            next_output = self.critic(s_next, a_next.unsqueeze(1)).output
         target_q = self.critic.compute_target_value(next_output, r.unsqueeze(1), done.unsqueeze(1))
 
         critic_loss, critic_info = self.critic.compute_critic_loss(
@@ -244,7 +246,7 @@ class SimLingoNetwork(NetworkInterface):
         loss_result = LossResult(loss=critic_loss + actor_loss, info=info)
 
         with torch.no_grad():
-            action = self._policy_action(feat)
+            action = self.driving_adaptor.get_predictions(feat)
             critic_out = self.critic(s, action.unsqueeze(1)).output
             infer_result = self._infer_result(action, s, critic_out)
         return InferLossResult(infer_result=infer_result, loss_result=loss_result, et_info=et_info)
@@ -268,22 +270,6 @@ class SimLingoNetwork(NetworkInterface):
             ),
         )
 
-    def _policy_action(self, features: torch.Tensor) -> torch.Tensor:
-        """Apply the SimLingo waypoint heads to per-query features → μ(s).
-
-        Args:
-            features: ``(B, NUM_WP_QUERIES, hidden)`` per-query VLM features.
-
-        Returns:
-            ``(B, ACTION_DIM)`` action: route waypoints then speed waypoints,
-            matching the agent's action-vector layout.
-        """
-        preds = self.driving_adaptor.get_predictions(features)
-        b = features.shape[0]
-        route = preds["route"].reshape(b, -1)
-        speed = preds["speed_wps"].reshape(b, -1)
-        return torch.cat([route, speed], dim=1)
-
     def _actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
         """Actor loss for the waypoint heads + telemetry, per ``actor_loss_type``.
 
@@ -306,7 +292,7 @@ class SimLingoNetwork(NetworkInterface):
         flows only into the waypoint heads, not the critic. ``s`` is a buffer
         read with no grad, so the heads are the sole path to the loss.
         """
-        a_pred = self._policy_action(feat)
+        a_pred = self.driving_adaptor.get_predictions(feat)
         for p in self.critic.parameters():
             p.requires_grad_(False)
         actor_q = self.critic.to_value(self.critic(s, a_pred.unsqueeze(1)).output).view(-1)
@@ -331,7 +317,7 @@ class SimLingoNetwork(NetworkInterface):
         telemetry scalar (mean per-state Shannon entropy of the softmax weights,
         nats) — low entropy means the weights collapsed onto a single candidate.
         """
-        mu = self._policy_action(feat)  # (B, A), grad flows into the heads
+        mu = self.driving_adaptor.get_predictions(feat)  # (B, A), grad flows into the heads
         b, action_dim = mu.shape
         n = self.awr_num_samples
 

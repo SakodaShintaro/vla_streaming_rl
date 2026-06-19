@@ -66,10 +66,6 @@ def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
 class SimLingoAgent:
     """DDPG-style off-policy agent built on SimLingo's waypoint output.
 
-    ``DrivingModel.forward`` returns ``(speed_wps, route, language,
-    driving_features)``. The fourth element is the (1, 30, hidden) slice
-    of per-query VLM features; the waypoint heads map it to the action
-    and its mean over the 30 queries is the critic's state vector.
 
     ``run_step`` is pure inference: VLM forward → waypoint heads → action
     (+ Gaussian exploration noise) → PID. Training is off-policy:
