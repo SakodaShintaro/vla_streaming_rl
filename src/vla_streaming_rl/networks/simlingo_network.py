@@ -89,7 +89,13 @@ class SimLingoNetwork(NetworkInterface):
         self.awr_num_samples = int(awr_num_samples)
         self.awr_temperature = float(awr_temperature)
         self.awr_sample_noise = float(awr_sample_noise)
-        config_path = str(self._resolve_checkpoint())
+
+        HF_REPO_ID = "RenzKa/simlingo"
+        HF_CKPT_NAME = "pytorch_model.pt"
+        snapshot = Path(snapshot_download(HF_REPO_ID))
+        candidates = [p for p in snapshot.rglob(HF_CKPT_NAME) if "/blobs/" not in str(p)]
+        assert candidates, f"No {HF_CKPT_NAME} found in HF snapshot of {HF_REPO_ID} at {snapshot}"
+        config_path = str(candidates[0])
 
         # load config from the checkpoint's .hydra folder
         config_load_path = Path(config_path).parent.parent.parent / ".hydra" / "config.yaml"
@@ -244,15 +250,6 @@ class SimLingoNetwork(NetworkInterface):
         return InferLossResult(infer_result=infer_result, loss_result=loss_result, et_info=et_info)
 
     # --- internals --------------------------------------------------------
-
-    @staticmethod
-    def _resolve_checkpoint() -> Path:
-        HF_REPO_ID = "RenzKa/simlingo"
-        HF_CKPT_NAME = "pytorch_model.pt"
-        snapshot = Path(snapshot_download(HF_REPO_ID))
-        candidates = [p for p in snapshot.rglob(HF_CKPT_NAME) if "/blobs/" not in str(p)]
-        assert candidates, f"No {HF_CKPT_NAME} found in HF snapshot of {HF_REPO_ID} at {snapshot}"
-        return candidates[0]
 
     def _infer_result(
         self, action: torch.Tensor, s: torch.Tensor, critic_out: torch.Tensor
