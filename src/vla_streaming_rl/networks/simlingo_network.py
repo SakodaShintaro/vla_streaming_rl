@@ -161,9 +161,7 @@ class SimLingoNetwork(NetworkInterface):
         return []
 
     def infer(self, data: InferInput) -> InferResult:
-        features = data.s_seq  # (NUM_WP_QUERIES, hidden) or (B, NUM_WP_QUERIES, hidden)
-        if features.dim() == 2:
-            features = features.unsqueeze(0)
+        features = data.s_seq  # (B, NUM_WP_QUERIES, hidden)
         action = self._policy_action(features)
         s = features.mean(dim=1)
         critic_out = self.critic(s, action.unsqueeze(1)).output

@@ -558,7 +558,7 @@ class SimLingoAgent:
         # features. The waypoint heads (μ(s)) and the critic read-out are applied
         # by the network's ``infer`` contract method.
         *_, driving_features = self.network.vlm(model_input)
-        features = driving_features.squeeze(0).to(torch.float32)  # (30, hidden)
+        features = driving_features.to(torch.float32)  # (1, 30, hidden)
 
         # SimLingo's infer reads only s_seq; the other InferInput fields are dummies.
         infer_result = self.network.infer(
@@ -576,7 +576,7 @@ class SimLingoAgent:
 
         noise = torch.randn_like(action_mean) * self.exploration_noise
         action_taken = action_mean + noise
-        self._current_state = features
+        self._current_state = features.squeeze(0)  # (30, hidden) for the buffer
         self._current_action_taken = action_taken
 
         # Feed the (noised) waypoints to the deterministic PID, and cache the
