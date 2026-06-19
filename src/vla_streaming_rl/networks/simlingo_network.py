@@ -227,7 +227,7 @@ class SimLingoNetwork(NetworkInterface):
         actor_loss, actor_info = self._actor_loss(feat, s)
 
         # AdamET trace inputs: actor loss → heads, -Q(s,a) → critic, TD error.
-        neg_value = -self._critic_value(self.critic(s, a.unsqueeze(1)).output).mean()
+        neg_value = -self.critic.to_value(self.critic(s, a.unsqueeze(1)).output).view(-1).mean()
         et_info = EligibilityTraceInfo(
             actor_entropy_loss=actor_loss, neg_value=neg_value, delta=critic_info["delta"]
         )
@@ -284,10 +284,6 @@ class SimLingoNetwork(NetworkInterface):
         speed = preds["speed_wps"].reshape(b, -1)
         return torch.cat([route, speed], dim=1)
 
-    def _critic_value(self, logits: torch.Tensor) -> torch.Tensor:
-        """Map the critic's raw ``"output"`` to a scalar Q (B,)."""
-        return self.critic.to_value(logits).view(-1)
-
     def _actor_loss(self, feat: torch.Tensor, s: torch.Tensor) -> tuple:
         """Actor loss for the waypoint heads + telemetry, per ``actor_loss_type``.
 
@@ -313,7 +309,7 @@ class SimLingoNetwork(NetworkInterface):
         a_pred = self._policy_action(feat)
         for p in self.critic.parameters():
             p.requires_grad_(False)
-        actor_q = self._critic_value(self.critic(s, a_pred.unsqueeze(1)).output)
+        actor_q = self.critic.to_value(self.critic(s, a_pred.unsqueeze(1)).output).view(-1)
         for p in self.critic.parameters():
             p.requires_grad_(True)
         return -actor_q.mean()
@@ -352,7 +348,7 @@ class SimLingoNetwork(NetworkInterface):
             # whole (B*N) batch in one critic forward.
             s_rep = s.unsqueeze(1).expand(b, n, s.shape[-1]).reshape(b * n, -1)
             a_rep = cand.reshape(b * n, action_dim).unsqueeze(1)  # (B*N, 1, A)
-            q = self._critic_value(self.critic(s_rep, a_rep).output).view(b, n)
+            q = self.critic.to_value(self.critic(s_rep, a_rep).output).view(b, n)
 
             # Per-state exp weights via softmax (handles the exp and the
             # normalize-to-sum-1). softmax is shift-invariant, so centering the
