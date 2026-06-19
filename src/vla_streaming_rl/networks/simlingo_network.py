@@ -52,10 +52,11 @@ ACTION_DIM = NUM_WP_QUERIES * WP_DIM
 class SimLingoNetwork(NetworkInterface):
     """SimLingo VLM + waypoint heads (policy μ) + Q critic.
 
-    ``forward(driving_input)`` is the VLM forward, returning SimLingo's
-    ``(pred_speed_wps, pred_route, language, driving_features)``. The whole VLM
-    is frozen except the two waypoint heads (``actor_heads``); those and the
-    ``critic`` are the only trainable parameters.
+    ``infer`` runs the (frozen) VLM forward on the live ``DrivingInput`` and
+    returns the action plus the per-query ``features`` the agent caches into the
+    replay buffer (so training never re-runs the VLM). The whole VLM is frozen
+    except the two waypoint heads (``actor_heads``); those and the ``critic`` are
+    the only trainable parameters.
 
     Exposed attributes used by ``SimLingoAgent``:
       - ``actor_heads`` / ``critic`` / ``driving_adaptor`` — for training.
@@ -166,12 +167,14 @@ class SimLingoNetwork(NetworkInterface):
         del task_prompt
         return []
 
+    @torch.no_grad()
     def infer(self, data: InferInput) -> InferResult:
-        features = data.s_seq  # (B, NUM_WP_QUERIES, hidden)
+        *_, driving_features = self.vlm(data.s_seq)
+        features = driving_features.to(torch.float32)  # (1, NUM_WP_QUERIES, hidden)
         action = self.driving_adaptor.get_predictions(features)
         s = features.mean(dim=1)
         critic_out = self.critic(s, action.unsqueeze(1)).output
-        return self._infer_result(action, s, critic_out)
+        return self._infer_result(action, s, critic_out, features)
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # Buffer window is two columns: col 0 = state t, col 1 = state t+1. The
@@ -248,16 +251,18 @@ class SimLingoNetwork(NetworkInterface):
         with torch.no_grad():
             action = self.driving_adaptor.get_predictions(feat)
             critic_out = self.critic(s, action.unsqueeze(1)).output
-            infer_result = self._infer_result(action, s, critic_out)
+            infer_result = self._infer_result(action, s, critic_out, feat)
         return InferLossResult(infer_result=infer_result, loss_result=loss_result, et_info=et_info)
 
     # --- internals --------------------------------------------------------
 
     def _infer_result(
-        self, action: torch.Tensor, s: torch.Tensor, critic_out: torch.Tensor
+        self,
+        action: torch.Tensor,
+        s: torch.Tensor,
+        critic_out: torch.Tensor,
+        features: torch.Tensor,
     ) -> InferResult:
-        # SimLingo has no next-state predictor; the agent reads only ``action`` and
-        # ``value_report``, so the predictor/recurrent fields are placeholders.
         return InferResult(
             action=action,
             value_report=self.critic.value_report(critic_out),
@@ -265,6 +270,7 @@ class SimLingoNetwork(NetworkInterface):
             next_image=np.zeros((1, 1, 3), dtype=np.uint8),
             next_reward=0.0,
             action_token_ids=[],
+            features=features,
             activations=ActivationFeatures(
                 state=s, actor=action, critic=critic_out, state_predictor=s
             ),

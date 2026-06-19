@@ -67,6 +67,7 @@ class InferResult:
     next_reward: float  # predicted next reward
     action_token_ids: list  # token ids for VLM action chunk; empty for non-VLM
     activations: ActivationFeatures  # forward-pass features for statistical metrics
+    features: torch.Tensor
 
 
 @dataclass

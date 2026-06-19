@@ -64,17 +64,6 @@ def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
 
 
 class SimLingoAgent:
-    """DDPG-style off-policy agent built on SimLingo's waypoint output.
-
-
-    ``run_step`` is pure inference: VLM forward → waypoint heads → action
-    (+ Gaussian exploration noise) → PID. Training is off-policy:
-    ``step`` writes (features, action, reward, done) into the replay
-    buffer — the per-query VLM features cached by ``run_step`` go into the
-    obs slot — so ``network.compute_loss`` re-applies the waypoint heads to
-    those cached features (no VLM re-forward) and trains them to maximize Q.
-    """
-
     def __init__(
         self,
         *,
@@ -550,16 +539,12 @@ class SimLingoAgent:
         driving_input_kwargs = self._tick(input_data)
 
         model_input = DrivingInput(**driving_input_kwargs)
-        # Perception only: the frozen VLM forward yields the per-query waypoint
-        # features. The waypoint heads (μ(s)) and the critic read-out are applied
-        # by the network's ``infer`` contract method.
-        *_, driving_features = self.network.vlm(model_input)
-        features = driving_features.to(torch.float32)  # (1, 30, hidden)
-
-        # SimLingo's infer reads only s_seq; the other InferInput fields are dummies.
+        # The network owns the VLM forward: ``infer`` runs it on the driving input
+        # and returns both the action and the per-query features to cache. SimLingo
+        # passes the DrivingInput as s_seq; the other InferInput fields are dummies.
         infer_result = self.network.infer(
             InferInput(
-                s_seq=features,
+                s_seq=model_input,
                 obs_z_seq=self._dummy_obs_z,
                 a_seq=self._prev_action,
                 r_seq=self._dummy_rnn_state,
@@ -572,7 +557,7 @@ class SimLingoAgent:
 
         noise = torch.randn_like(action_mean) * self.exploration_noise
         action_taken = action_mean + noise
-        self._current_state = features.squeeze(0)  # (30, hidden) for the buffer
+        self._current_state = infer_result.features.squeeze(0)  # (30, hidden) for the buffer
         self._current_action_taken = action_taken
 
         # Feed the (noised) waypoints to the deterministic PID, and cache the

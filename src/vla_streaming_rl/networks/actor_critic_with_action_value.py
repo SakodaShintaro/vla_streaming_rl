@@ -179,6 +179,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             next_reward=next_reward,
             action_token_ids=[],
             activations=activations,
+            features=x,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -322,6 +323,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             next_reward=next_reward,
             action_token_ids=[],
             activations=activations,
+            features=next_state,
         )
 
         info_dict = {

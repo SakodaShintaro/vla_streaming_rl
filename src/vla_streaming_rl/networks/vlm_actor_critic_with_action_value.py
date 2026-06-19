@@ -258,6 +258,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             next_reward=next_reward,
             action_token_ids=[],
             activations=activations,
+            features=state,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -383,6 +384,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             next_reward=next_reward,
             action_token_ids=[],
             activations=activations,
+            features=next_state,
         )
         info_dict = {**critic_info, **actor_info, **seq_info}
 
