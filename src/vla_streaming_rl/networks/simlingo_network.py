@@ -229,7 +229,7 @@ class SimLingoNetwork(NetworkInterface):
         critic_loss, critic_info = self.critic.compute_critic_loss(
             s, a.unsqueeze(1), target_q, False
         )
-        actor_loss, actor_info = self._actor_loss(feat, s)
+        actor_loss, actor_info = self._actor_loss(feat_next, s_next)
 
         # AdamET trace inputs: actor loss → heads, -Q(s,a) → critic, TD error.
         neg_value = -self.critic.to_value(self.critic(s, a.unsqueeze(1)).output).view(-1).mean()
@@ -249,9 +249,9 @@ class SimLingoNetwork(NetworkInterface):
         loss_result = LossResult(loss=critic_loss + actor_loss, info=info)
 
         with torch.no_grad():
-            action = self.driving_adaptor.get_predictions(feat)
-            critic_out = self.critic(s, action.unsqueeze(1)).output
-            infer_result = self._infer_result(action, s, critic_out, feat)
+            action = self.driving_adaptor.get_predictions(feat_next)
+            critic_out = self.critic(s_next, action.unsqueeze(1)).output
+            infer_result = self._infer_result(action, s_next, critic_out, feat_next)
         return InferLossResult(infer_result=infer_result, loss_result=loss_result, et_info=et_info)
 
     # --- internals --------------------------------------------------------
