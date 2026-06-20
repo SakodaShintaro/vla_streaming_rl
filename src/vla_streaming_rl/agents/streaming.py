@@ -26,7 +26,8 @@ class StreamingAgent:
         seq_len: int,
         horizon: int,
         use_eligibility_trace: bool,
-        learning_rate: float,
+        actor_lr: float,
+        critic_lr: float,
         gamma: float,
         et_lambda: float,
         buffer_device: str,
@@ -64,22 +65,16 @@ class StreamingAgent:
         self.rnn_state = self.network.init_state().to(self.device)
 
         self.use_eligibility_trace = bool(use_eligibility_trace)
-        self.critic_optimizer = None
+        critic_params = list(self.network.value_head.parameters())
+        critic_param_ids = {id(p) for p in critic_params}
+        actor_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]
+        self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=0.1)
         if self.use_eligibility_trace:
-            critic_params = list(self.network.value_head.parameters())
-            critic_param_ids = {id(p) for p in critic_params}
-            other_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]
             self.critic_optimizer = AdamET(
-                critic_params,
-                lr=learning_rate,
-                gamma=gamma,
-                et_lambda=et_lambda,
+                critic_params, lr=critic_lr, gamma=gamma, et_lambda=et_lambda
             )
-            self.optimizer = optim.AdamW(other_params, lr=learning_rate, weight_decay=0.1)
         else:
-            self.optimizer = optim.AdamW(
-                self.network.parameters(), lr=learning_rate, weight_decay=0.1
-            )
+            self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=0.1)
 
         obs_z_shape = tuple(self.network.image_processor.output_shape)
         self.rb = ReplayBuffer(
@@ -299,25 +294,22 @@ class StreamingAgent:
 
         metrics.update({f"losses/{key}": value for key, value in result.loss_result.info.items()})
 
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
         if self.use_eligibility_trace:
-            # Actor: backward actor-only loss → encoder + actor grads
-            actor_loss = result.et_info.actor_entropy_loss
-            actor_loss.backward(retain_graph=True)
-
-            # Critic: backward -V(s) → value_head grads only (detached from encoder)
-            neg_value = result.et_info.neg_value
-            neg_value.backward()
-        else:
-            scaled_loss = result.loss_result.loss
-            scaled_loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
-        self.optimizer.step()
-        if self.use_eligibility_trace:
+            # Actor: backward actor-only loss → encoder + actor grads.
+            result.et_info.actor_entropy_loss.backward(retain_graph=True)
+            # Critic: backward -V(s) → value_head grads only (detached from encoder).
+            result.et_info.neg_value.backward()
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+            self.actor_optimizer.step()
             self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
             self._episode_reset = False
-            self.critic_optimizer.zero_grad()
-        self.optimizer.zero_grad()
+        else:
+            result.loss_result.loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+            self.actor_optimizer.step()
+            self.critic_optimizer.step()
 
         return StepResult(action=action, metrics=metrics, panels=panels)
 

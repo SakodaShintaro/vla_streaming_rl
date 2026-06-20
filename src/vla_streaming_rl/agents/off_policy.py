@@ -26,7 +26,8 @@ class OffPolicyAgent:
         use_done: bool,
         seq_len: int,
         horizon: int,
-        learning_rate: float,
+        actor_lr: float,
+        critic_lr: float,
         buffer_size: int,
         buffer_device: str,
         max_new_tokens: int,
@@ -63,7 +64,12 @@ class OffPolicyAgent:
 
         self.network = network
         self.rnn_state = self.network.init_state().to(self.device)
-        self.optimizer = optim.AdamW(self.network.parameters(), lr=learning_rate, weight_decay=0.0)
+
+        critic_params = list(self.network.value_head.parameters())
+        critic_param_ids = {id(p) for p in critic_params}
+        actor_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]
+        self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=0.0)
+        self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=0.0)
 
         obs_z_shape = tuple(self.network.image_processor.output_shape)
         self.rb = ReplayBuffer(
@@ -286,10 +292,11 @@ class OffPolicyAgent:
         # add prefixes to info_dict keys
         info_dict = {f"losses/{key}": value for key, value in loss_result.info.items()}
 
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
         loss_result.loss.backward()
-
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+        self.actor_optimizer.step()
+        self.critic_optimizer.step()
 
         return info_dict

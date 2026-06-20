@@ -12,4 +12,5 @@ dacer_loss_weight: 0.05
 denoising_time: 0.9
 denoising_steps: 1
 batch_size: 16
-learning_rate: 1e-5
+actor_lr: 1e-5
+critic_lr: 1e-5
