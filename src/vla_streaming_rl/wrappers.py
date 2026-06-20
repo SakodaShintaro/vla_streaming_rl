@@ -262,7 +262,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = TransposeAndNormalizeObs(env)
         env = ZeroObsOnDoneWrapper(env)
-        env.unwrapped.eval_range = 20
+        env.unwrapped.eval_range = 100
         return env
 
     elif env_id == "Hopper-v5":
