@@ -63,7 +63,6 @@ class LiberoPi05Agent:
         # before the first observation.
         self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
         self.network = network
-        self.policy = network.policy
         self.preprocessor = network.preprocessor
         self.postprocessor = network.postprocessor
         self.device = torch.device(network.cfg.device)
@@ -329,7 +328,7 @@ class LiberoPi05Agent:
         records = [self._buffer[i] for i in idx]
         data = self._collate(records)
 
-        self.policy.train()
+        self.network.policy.train()
         result = self.network.compute_loss(data)
 
         # Never let a non-finite loss reach an optimizer: a single NaN/Inf step
