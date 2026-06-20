@@ -359,6 +359,7 @@ class SimLingoAgent:
 
     # --- Per-tick inference ------------------------------------------------
 
+    @torch.no_grad()
     def _act(self, sensors: dict) -> np.ndarray:
         """One inference tick + 2-D env-action conversion.
 
@@ -379,7 +380,69 @@ class SimLingoAgent:
             "imu": sensors["imu"],
             "speed": sensors["speed"],
         }
-        control = self.run_step(input_data)
+        self._frame_step += 1
+
+        driving_input_kwargs = self._preprocess(input_data)
+
+        model_input = DrivingInput(**driving_input_kwargs)
+        # The network owns the VLM forward: ``infer`` runs it on the driving input
+        # and returns both the action and the per-query features to cache. SimLingo
+        # passes the DrivingInput as s_seq; the other InferInput fields are dummies.
+        infer_result = self.network.infer(
+            InferInput(
+                s_seq=model_input,
+                obs_z_seq=self._dummy_obs_z,
+                a_seq=self._prev_action,
+                r_seq=self._dummy_rnn_state,
+                rnn_state=self._dummy_rnn_state,
+                task_prompts=[],
+            )
+        )
+        action_mean = infer_result.action.squeeze(0)  # (ACTION_DIM,)
+        self._value_report = infer_result.value_report
+
+        noise = torch.randn_like(action_mean) * self.exploration_noise
+        action_taken = action_mean + noise
+        self._current_state = infer_result.features.squeeze(0)  # (30, hidden) for the buffer
+        self._current_action_taken = action_taken
+
+        # Feed the (noised) waypoints to the deterministic PID, and cache the
+        # executed trajectory + its critic value Q(s, a) for the bird's-eye panel.
+        pred_route, pred_speed_wps = _action_vec_to_waypoints(action_taken)
+        self._viz_q_value = self._value_report["value"]
+        self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
+        self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
+
+        gt_velocity = driving_input_kwargs["vehicle_speed"]
+
+        steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed_wps)
+
+        # # 0.1 is just an arbitrary low number to threshold when the car is stopped
+        if gt_velocity < 0.1:
+            self.stuck_detector += 1
+        else:
+            self.stuck_detector = 0
+
+        # Restart mechanism in case the car got stuck. Not used a lot anymore but doesn't hurt to keep it.
+        if self.stuck_detector > self.config.stuck_threshold:
+            self.force_move = self.config.creep_duration
+
+        if self.force_move > 0:
+            throttle = max(self.config.creep_throttle, throttle)
+            brake = False
+            self.force_move -= 1
+
+        control = carla.VehicleControl(
+            steer=float(steer), throttle=float(throttle), brake=float(brake)
+        )
+
+        # CARLA will not let the car drive in the initial frames.
+        # We set the action to brake so that the filter does not get confused.
+        if self._frame_step < self.config.initial_frames_delay:
+            self.control = carla.VehicleControl(0.0, 0.0, 1.0)
+        else:
+            self.control = control
+
         steer = float(control.steer)
         # 2-D env action: positive → throttle, negative → brake. SimLingo
         # never sets both at once in practice, so this collapse is
@@ -495,79 +558,6 @@ class SimLingoAgent:
             "prompt": ll,
             "prompt_inference": ll,
         }
-
-    @torch.no_grad()
-    def run_step(self, input_data):
-        """Pure inference: VLM forward → SimLingo waypoint heads → μ(s) →
-        add Gaussian exploration noise (std ``exploration_noise``) → PID.
-        The policy is deterministic; the only exploration is the additive
-        action noise, which is zero at eval time when ``exploration_noise``
-        is set to 0.
-        """
-        self._frame_step += 1
-
-        driving_input_kwargs = self._preprocess(input_data)
-
-        model_input = DrivingInput(**driving_input_kwargs)
-        # The network owns the VLM forward: ``infer`` runs it on the driving input
-        # and returns both the action and the per-query features to cache. SimLingo
-        # passes the DrivingInput as s_seq; the other InferInput fields are dummies.
-        infer_result = self.network.infer(
-            InferInput(
-                s_seq=model_input,
-                obs_z_seq=self._dummy_obs_z,
-                a_seq=self._prev_action,
-                r_seq=self._dummy_rnn_state,
-                rnn_state=self._dummy_rnn_state,
-                task_prompts=[],
-            )
-        )
-        action_mean = infer_result.action.squeeze(0)  # (ACTION_DIM,)
-        self._value_report = infer_result.value_report
-
-        noise = torch.randn_like(action_mean) * self.exploration_noise
-        action_taken = action_mean + noise
-        self._current_state = infer_result.features.squeeze(0)  # (30, hidden) for the buffer
-        self._current_action_taken = action_taken
-
-        # Feed the (noised) waypoints to the deterministic PID, and cache the
-        # executed trajectory + its critic value Q(s, a) for the bird's-eye panel.
-        pred_route, pred_speed_wps = _action_vec_to_waypoints(action_taken)
-        self._viz_q_value = self._value_report["value"]
-        self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
-        self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
-
-        gt_velocity = driving_input_kwargs["vehicle_speed"]
-
-        steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed_wps)
-
-        # # 0.1 is just an arbitrary low number to threshold when the car is stopped
-        if gt_velocity < 0.1:
-            self.stuck_detector += 1
-        else:
-            self.stuck_detector = 0
-
-        # Restart mechanism in case the car got stuck. Not used a lot anymore but doesn't hurt to keep it.
-        if self.stuck_detector > self.config.stuck_threshold:
-            self.force_move = self.config.creep_duration
-
-        if self.force_move > 0:
-            throttle = max(self.config.creep_throttle, throttle)
-            brake = False
-            self.force_move -= 1
-
-        control = carla.VehicleControl(
-            steer=float(steer), throttle=float(throttle), brake=float(brake)
-        )
-
-        # CARLA will not let the car drive in the initial frames.
-        # We set the action to brake so that the filter does not get confused.
-        if self._frame_step < self.config.initial_frames_delay:
-            self.control = carla.VehicleControl(0.0, 0.0, 1.0)
-        else:
-            self.control = control
-
-        return control
 
     # --- Training step ----------------------------------------------------
 
