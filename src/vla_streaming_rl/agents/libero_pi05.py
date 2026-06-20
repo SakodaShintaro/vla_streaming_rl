@@ -102,8 +102,6 @@ class LiberoPi05Agent:
         # Latest critic read-out, for the render/telemetry path.
         self._value_report: dict[str, float] = {"value": 0.0}
 
-        self._train_step = 0
-
     # --- input assembly ----------------------------------------------------
 
     def _capture_inputs(self, obs: np.ndarray, info: dict) -> dict:
@@ -345,7 +343,6 @@ class LiberoPi05Agent:
         actor_grad = nn.utils.clip_grad_norm_(self.network.actor_parameters, self.max_grad_norm)
         self.critic_optimizer.step()
         self.actor_optimizer.step()
-        self._train_step += 1
 
         return {
             **result.info,
