@@ -1,11 +1,17 @@
 # @package _global_
-# pi0.5 (LeRobot PI05Policy) + online return-weighted regression on LIBERO.
+# pi0.5 (LeRobot PI05Policy) + flow-matching policy RL on LIBERO.
 #
 # The pi0.5 backbone (PaliGemma vision + LLM) is frozen; only the action expert
-# fine-tunes online. The agent reads the wrist camera / proprio / language
-# instruction directly from LiberoEnv (the single-RGB observation slot only
-# carries the agentview); the trainer still builds an idle CNN-free network
-# because build_network returns LiberoPi05Network for this network_class.
+# (the flow-matching policy μ) and the injected action-value critic learn. The
+# agent reads the wrist camera / proprio / language instruction directly from
+# LiberoEnv (the single-RGB observation slot only carries the agentview).
+#
+# Learning (see networks/libero_pi05_network.py):
+#   * Critic — TD bootstrap on action chunks; the bootstrap action π(s') is
+#     sampled from pi0.5 itself. State = mean-pooled VLM prefix ⊕ proprio.
+#   * Actor — DACER2 (the project's flow-matching policy-RL loss): advantage
+#     maximization -E[Q(s, π(s))] through pi0.5's differentiable denoiser, plus
+#     a Q-gradient-guided flow-matching term toward a Q-improved action.
 #
 # The pi0.5 checkpoint (policy weights + LIBERO normalization stats) is pulled
 # from the HF hub into the local cache on first use.
@@ -20,19 +26,40 @@ defaults:
 agent_type: libero_pi05
 network_class: libero_pi05
 
-# Overrides consumed by LiberoPi05Agent.
+# Overrides consumed by LiberoPi05Agent / LiberoPi05Network.
 image_save_interval: 50
 print_interval: 1
 batch_size: 2
 # Warmup before the first update; also ensures the buffer holds a few episodes
-# of chunks so the return-to-go weighting has signal.
+# of chunk transitions before TD learning starts.
 learning_starts: 2000
-# Replay holds completed action chunks (agentview + wrist uint8 + proprio +
-# instruction + executed chunk), weighted by discounted return-to-go.
+# Replay holds linked chunk transitions (agentview + wrist uint8 + proprio +
+# instruction + executed chunk + per-step rewards/dones + next obs).
 buffer_size: 4096
 
-# Fine-tuning LR for the action expert.
-learning_rate: 1e-5
-# Softmax temperature on the per-batch z-scored returns used as RWR weights;
-# lower → weights concentrate on the highest-return chunks.
-awr_temperature: 0.1
+# The critic scores the full pi0.5 action chunk, so the value-head horizon must
+# equal the policy's chunk_size (asserted in the network).
+horizon: 50
+
+# SimbaV2 hyperspherical critic: weights/features stay on the unit hypersphere
+# so the TD loss cannot blow up the critic norm — the project's countermeasure
+# for the "good early, score degrades mid-training" RL instability.
+critic_arch: simbav2
+
+# Fine-tuning LRs: tiny actor LR so the expert is nudged, not overwritten;
+# the critic learns faster.
+actor_lr: 1e-5
+critic_lr: 5e-5
+
+# DACER2 actor knobs.
+# actor_denoising_steps : Euler steps when sampling π(s) for the (differentiable)
+#                         advantage term and the (no-grad) TD bootstrap. Fewer
+#                         than num_inference_steps(=10) to bound the unrolled
+#                         expert backward cost.
+# q_grad_eta            : action-space step size for the Q-improved target a* =
+#                         clip(π(s) + eta·∂Q/∂a) the flow term regresses toward.
+# dacer_loss_weight     : weight of the Q-guided flow-matching term (inherited
+#                         default 0.05 from base_off_policy; pinned here).
+actor_denoising_steps: 4
+q_grad_eta: 0.05
+dacer_loss_weight: 0.05

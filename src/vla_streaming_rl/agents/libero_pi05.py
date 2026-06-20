@@ -7,6 +7,7 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
+from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.libero_pi05_network import (
     ACTION_KEY,
     OBS_IMAGE_AGENTVIEW,
@@ -15,27 +16,30 @@ from vla_streaming_rl.networks.libero_pi05_network import (
     TASK_KEY,
     LiberoPi05Network,
 )
+from vla_streaming_rl.replay_buffer import ReplayBufferData
 
 
 class _ChunkRecord:
-    """One executed action chunk and the observation that produced it."""
+    """One executed action chunk + the observation that produced it, as a fully
+    formed RL transition: the current obs ``inputs``, the executed chunk, the
+    per-env-step rewards/dones over the chunk, and the next chunk's obs
+    (``next_inputs``) for the TD bootstrap. Built only once the episode ends, so
+    every field — including ``next_inputs`` and the terminal ``dones`` — is known
+    and passed explicitly (see ``_end_episode``)."""
 
     def __init__(
         self,
-        agentview_uint8: np.ndarray,
-        wrist_uint8: np.ndarray,
-        proprio: np.ndarray,
-        instruction: str,
+        inputs: dict,
         actions: np.ndarray,
-        reward: float,
+        rewards: np.ndarray,
+        dones: np.ndarray,
+        next_inputs: dict,
     ) -> None:
-        self.agentview_uint8 = agentview_uint8
-        self.wrist_uint8 = wrist_uint8
-        self.proprio = proprio
-        self.instruction = instruction
+        self.inputs = inputs
         self.actions = actions
-        self.reward = reward
-        self.weight = 0.0
+        self.rewards = rewards
+        self.dones = dones
+        self.next_inputs = next_inputs
 
 
 class LiberoPi05Agent:
@@ -45,13 +49,12 @@ class LiberoPi05Agent:
         observation_space: gym.spaces.Box,
         action_space: gym.spaces.Box,
         network: LiberoPi05Network,
-        gamma: float,
         buffer_size: int,
         batch_size: int,
         learning_starts: int,
-        learning_rate: float,
+        actor_lr: float,
+        critic_lr: float,
         max_grad_norm: float,
-        awr_temperature: float,
     ) -> None:
         # The wrist camera, proprio and instruction pi0.5 needs arrive through
         # the env's ``info`` dict (LiberoEnv publishes them), so the agent never
@@ -67,18 +70,25 @@ class LiberoPi05Agent:
         self.chunk_size = network.chunk_size
         self.action_dim = network.action_dim
 
-        self.gamma = float(gamma)
         self.batch_size = int(batch_size)
         self.learning_starts = int(learning_starts)
         self.max_grad_norm = float(max_grad_norm)
-        self.awr_temperature = float(awr_temperature)
 
         self._action_low = action_space.low
         self._action_high = action_space.high
 
-        self.optimizer = optim.AdamW(
-            network.trainable_parameters, lr=learning_rate, weight_decay=0.0
+        # Separate optimizers for the policy μ (action expert) and the injected
+        # critic, mirroring SimLingoAgent — the actor LR is tiny so fine-tuning
+        # the expert does not wash out the pretrained flow.
+        self.actor_optimizer = optim.AdamW(network.actor_parameters, lr=actor_lr, weight_decay=0.0)
+        self.critic_optimizer = optim.AdamW(
+            network.critic.parameters(), lr=critic_lr, weight_decay=0.0
         )
+
+        # Dummy tensor for the InferInput / ReplayBufferData slots pi0.5 does not
+        # use (recurrent state, encoded obs, log-probs, token ids …): pi0.5's
+        # multimodal observation rides ``s_seq`` / ``observations`` instead.
+        self._dummy = torch.zeros(1, device=self.device)
 
         self._buffer: collections.deque[_ChunkRecord] = collections.deque(maxlen=int(buffer_size))
 
@@ -86,9 +96,12 @@ class LiberoPi05Agent:
         self._queue: collections.deque[np.ndarray] = collections.deque()
         self._cur_inputs: dict | None = None
         self._cur_actions: list[np.ndarray] = []
-        self._cur_reward = 0.0
-        # Chunks completed in the ongoing episode, pending return-to-go weighting.
-        self._episode_chunks: list[_ChunkRecord] = []
+        self._cur_rewards: list[float] = []
+        # Raw ``(inputs, actions, rewards)`` of chunks completed in the ongoing
+        # episode; turned into linked ``_ChunkRecord`` transitions at episode end.
+        self._episode_chunks: list[tuple[dict, np.ndarray, np.ndarray]] = []
+        # Latest critic read-out, for the render/telemetry path.
+        self._value_report: dict[str, float] = {"value": 0.0}
 
         self._train_step = 0
 
@@ -123,18 +136,32 @@ class LiberoPi05Agent:
             TASK_KEY: inputs["instruction"],
         }
 
-    @torch.no_grad()
     def _plan_chunk(self, obs: np.ndarray, info: dict) -> None:
-        """Run pi0.5 inference, capture inputs, and fill the action queue."""
+        """Run pi0.5 inference, capture inputs, and fill the action queue.
+
+        ``network.infer`` returns the *normalized* action chunk plus the critic's
+        value report from a single prefix forward; the postprocessor un-normalizes
+        the chunk into the env's action space.
+        """
         inputs = self._capture_inputs(obs, info)
         processed = self.preprocessor(self._raw_obs_dict(inputs))
-        chunk = self.policy.predict_action_chunk(processed)  # (1, chunk_size, action_dim)
-        chunk = self.postprocessor(chunk)
+        infer_result = self.network.infer(
+            InferInput(
+                s_seq=processed,
+                obs_z_seq=self._dummy,
+                a_seq=self._dummy,
+                r_seq=self._dummy,
+                rnn_state=self._dummy,
+                task_prompts=[],
+            )
+        )
+        chunk = self.postprocessor(infer_result.action)  # (1, chunk_size, action_dim)
         chunk = chunk.squeeze(0).float().cpu().numpy()
+        self._value_report = infer_result.value_report
 
         self._cur_inputs = inputs
         self._cur_actions = []
-        self._cur_reward = 0.0
+        self._cur_rewards = []
         self._queue = collections.deque(chunk)
 
     def _next_action(self) -> np.ndarray:
@@ -147,21 +174,19 @@ class LiberoPi05Agent:
     def _finalize_chunk(self) -> None:
         """Store the just-executed chunk as a pending episode record.
 
-        Only complete chunks (one executed action per predicted step) become
-        training targets; a partial trailing chunk at episode end is dropped so
-        the flow-matching target always spans the full prediction horizon.
+        Only complete chunks (one executed action *and* one reward per predicted
+        step) become training targets; a partial trailing chunk at episode end is
+        dropped so both the flow-matching target and the per-step reward vector
+        span the full prediction horizon.
         """
         if self._cur_inputs is None:
             return
-        if len(self._cur_actions) == self.chunk_size:
+        if len(self._cur_actions) == self.chunk_size and len(self._cur_rewards) == self.chunk_size:
             self._episode_chunks.append(
-                _ChunkRecord(
-                    agentview_uint8=self._cur_inputs["agentview_uint8"],
-                    wrist_uint8=self._cur_inputs["wrist_uint8"],
-                    proprio=self._cur_inputs["proprio"],
-                    instruction=self._cur_inputs["instruction"],
-                    actions=np.stack(self._cur_actions).astype(np.float32),
-                    reward=self._cur_reward,
+                (
+                    self._cur_inputs,
+                    np.stack(self._cur_actions).astype(np.float32),
+                    np.asarray(self._cur_rewards, dtype=np.float32),
                 )
             )
         self._cur_inputs = None
@@ -194,11 +219,14 @@ class LiberoPi05Agent:
         info: dict,
     ) -> StepResult:
         del task_prompt
-        self._cur_reward += float(reward)
+        # This reward is the consequence of the action returned last call, so it
+        # belongs to the current (not-yet-finalized) chunk.
+        self._cur_rewards.append(float(reward))
 
         if terminated or truncated:
             self._finalize_chunk()
-            metrics = self._end_episode_and_train(global_step)
+            metrics = self._end_episode(global_step, terminated)
+            metrics.update(self._value_report)
             return StepResult(
                 action=np.zeros(self.action_dim, dtype=np.float32),
                 metrics=metrics,
@@ -211,50 +239,87 @@ class LiberoPi05Agent:
 
         action = self._next_action()
         return StepResult(
-            action=action, metrics={"chunk_reward": self._cur_reward}, panels=self._panels()
+            action=action,
+            metrics={"chunk_reward": float(np.sum(self._cur_rewards))},
+            panels=self._panels(),
         )
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
         return {}
 
-    # --- return-to-go weighting + training ---------------------------------
+    # --- transition linking + training -------------------------------------
 
-    def _end_episode_and_train(self, global_step: int) -> dict:
-        """Assign discounted return-to-go weights to this episode's chunks,
-        push them to the buffer, then run a training update.
+    def _end_episode(self, global_step: int, terminated: bool) -> dict:
+        """Link this episode's chunks into TD transitions, push to the buffer,
+        then run a training update.
+
+        Each chunk's ``next_inputs`` points at the next chunk's observation. The
+        final chunk has no successor: on a true ``terminated`` it is marked
+        terminal (last-step done = 1 → bootstrap masked); on truncation it
+        bootstraps from its own state (``next_inputs = inputs``), the standard
+        no-true-terminal approximation.
         """
-        running = 0.0
-        for record in reversed(self._episode_chunks):
-            running = record.reward + self.gamma * running
-            record.weight = running
-        self._buffer.extend(self._episode_chunks)
+        chunks = self._episode_chunks
+        for i, (inputs, actions, rewards) in enumerate(chunks):
+            dones = np.zeros(self.chunk_size, dtype=np.float32)
+            if i + 1 < len(chunks):
+                next_inputs = chunks[i + 1][0]
+            else:
+                next_inputs = inputs
+                if terminated:
+                    dones[-1] = 1.0
+            self._buffer.append(
+                _ChunkRecord(
+                    inputs=inputs,
+                    actions=actions,
+                    rewards=rewards,
+                    dones=dones,
+                    next_inputs=next_inputs,
+                )
+            )
         self._episode_chunks = []
-
         return self._train(global_step)
 
-    def _collate(self, records: list[_ChunkRecord]) -> dict:
-        """Preprocess each record and stack the processed tensors into a batch."""
-        processed_list = []
-        for r in records:
-            raw = self._raw_obs_dict(
-                {
-                    "agentview_uint8": r.agentview_uint8,
-                    "wrist_uint8": r.wrist_uint8,
-                    "proprio": r.proprio,
-                    "instruction": r.instruction,
-                }
-            )
-            raw[ACTION_KEY] = torch.from_numpy(r.actions).float().unsqueeze(0)
-            processed_list.append(self.preprocessor(raw))
+    def _collate(self, records: list[_ChunkRecord]) -> ReplayBufferData:
+        """Preprocess each record's current + next observation into the
+        ``ReplayBufferData`` ``compute_loss`` consumes.
 
-        batch = {}
-        for key, value in processed_list[0].items():
-            if isinstance(value, torch.Tensor):
-                batch[key] = torch.cat([p[key] for p in processed_list], dim=0)
-            else:
-                batch[key] = [item for p in processed_list for item in _as_list(p[key])]
-        return batch
+        pi0.5's multimodal observation cannot live in a tensor buffer, so
+        ``observations`` is a length-2 ``[cur_batch, next_batch]`` list of
+        preprocessed pi0.5 batches. ``cur`` carries the executed (real-space)
+        action under ``ACTION_KEY`` so the preprocessor normalizes it into pi0.5's
+        action space — that normalized chunk (read back as ``actions``) is what
+        the critic and the DACER2 actor operate on. ``next`` is observation-only
+        (the bootstrap re-samples π(s')). The remaining slots are unused dummies.
+        """
+        cur_list, next_list = [], []
+        for r in records:
+            cur = self._raw_obs_dict(r.inputs)
+            cur[ACTION_KEY] = torch.from_numpy(r.actions).float().unsqueeze(0)
+            cur_list.append(self.preprocessor(cur))
+            next_list.append(self.preprocessor(self._raw_obs_dict(r.next_inputs)))
+
+        cur_batch = _stack_processed(cur_list)
+        next_batch = _stack_processed(next_list)
+        rewards = torch.tensor(
+            np.stack([r.rewards for r in records]), device=self.device, dtype=torch.float32
+        )
+        dones = torch.tensor(
+            np.stack([r.dones for r in records]), device=self.device, dtype=torch.float32
+        )
+        return ReplayBufferData(
+            observations=[cur_batch, next_batch],
+            actions=cur_batch[ACTION_KEY],
+            rewards=rewards,
+            dones=dones,
+            obs_z=self._dummy,
+            rnn_state=self._dummy,
+            log_probs=self._dummy,
+            values=self._dummy,
+            action_token_ids=self._dummy,
+            task_prompt_token_ids=self._dummy,
+        )
 
     def _train(self, global_step: int) -> dict:
         if global_step < self.learning_starts or len(self._buffer) < self.batch_size:
@@ -262,39 +327,33 @@ class LiberoPi05Agent:
 
         idx = np.random.randint(0, len(self._buffer), size=self.batch_size)
         records = [self._buffer[i] for i in idx]
-        batch = self._collate(records)
-
-        # Softmax advantage weights over the sampled batch's returns. softmax is
-        # shift-invariant, so only the per-batch std rescaling sets the
-        # temperature scale; weights sum to 1 across the batch. Use the
-        # population std (unbiased=False) so a degenerate single-sample batch
-        # yields 0 rather than NaN (the unbiased std of one element is NaN, which
-        # would poison the weights and, via backward, the action expert).
-        returns = torch.tensor([r.weight for r in records], device=self.device, dtype=torch.float32)
-        adv = returns / (returns.std(unbiased=False) + 1e-8)
-        weights = torch.softmax(adv / self.awr_temperature, dim=0)
+        data = self._collate(records)
 
         self.policy.train()
-        per_sample_loss, _ = self.policy.forward(batch, reduction="none")
-        loss = (weights * per_sample_loss).sum()
+        result = self.network.compute_loss(data)
 
-        # Never let a non-finite loss reach the optimizer: a single NaN/Inf step
-        # silently corrupts the expert and every subsequent rollout (NaN actions
-        # → unstable sim). Skip the update instead.
-        if not torch.isfinite(loss):
+        # Never let a non-finite loss reach an optimizer: a single NaN/Inf step
+        # silently corrupts the expert/critic and every subsequent rollout.
+        if not torch.isfinite(result.loss):
             return {"losses/skipped_nonfinite": 1.0}
 
-        self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(self.network.trainable_parameters, self.max_grad_norm)
-        self.optimizer.step()
+        # One backward over the combined critic+actor loss, then step each
+        # optimizer (the DACER2 actor loss froze the critic during its Q forwards,
+        # so the gradients land on disjoint params) — same pattern as
+        # SimLingoAgent._train_offpolicy.
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        result.loss.backward()
+        critic_grad = nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.max_grad_norm)
+        actor_grad = nn.utils.clip_grad_norm_(self.network.actor_parameters, self.max_grad_norm)
+        self.critic_optimizer.step()
+        self.actor_optimizer.step()
         self._train_step += 1
 
         return {
-            "losses/flow_matching_loss": float(per_sample_loss.mean().item()),
-            "losses/weighted_loss": float(loss.item()),
-            "losses/grad_norm": float(grad_norm),
-            "losses/return_mean": float(returns.mean().item()),
+            **result.info,
+            "losses/critic_grad_norm": float(critic_grad),
+            "losses/actor_grad_norm": float(actor_grad),
             "losses/buffer_size": float(len(self._buffer)),
         }
 
@@ -303,6 +362,17 @@ class LiberoPi05Agent:
     def _panels(self) -> dict:
         """Wrist-camera panel (constant shape across the run)."""
         return {"wrist": self._last_wrist}
+
+
+def _stack_processed(processed_list: list[dict]) -> dict:
+    """Concatenate a list of single-sample preprocessed batches along dim 0."""
+    batch = {}
+    for key, value in processed_list[0].items():
+        if isinstance(value, torch.Tensor):
+            batch[key] = torch.cat([p[key] for p in processed_list], dim=0)
+        else:
+            batch[key] = [item for p in processed_list for item in _as_list(p[key])]
+    return batch
 
 
 def _as_list(value) -> list:

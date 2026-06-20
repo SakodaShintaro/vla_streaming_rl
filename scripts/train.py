@@ -267,13 +267,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             observation_space=env.observation_space,
             action_space=env.action_space,
             network=network,
-            gamma=float(args.gamma),
             buffer_size=int(args.buffer_size),
             batch_size=int(args.batch_size),
             learning_starts=int(args.learning_starts),
-            learning_rate=float(args.learning_rate),
+            actor_lr=float(args.actor_lr),
+            critic_lr=float(args.critic_lr),
             max_grad_norm=float(args.max_grad_norm),
-            awr_temperature=float(args.awr_temperature),
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

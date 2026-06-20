@@ -183,7 +183,15 @@ def build_network(
     elif args.network_class == "libero_pi05":
         from vla_streaming_rl.networks.libero_pi05_network import LiberoPi05Network
 
-        network = LiberoPi05Network(device=device)
+        network = LiberoPi05Network(
+            device=device,
+            value_head_factory=value_head_factory,
+            actor_denoising_steps=args.actor_denoising_steps,
+            q_grad_eta=args.q_grad_eta,
+            dacer_loss_weight=args.dacer_loss_weight,
+            critic_loss_weight=args.critic_loss_weight,
+            detach_critic=bool(args.detach_critic),
+        )
 
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
