@@ -292,14 +292,14 @@ class LiberoPi05Agent:
         the critic and the DACER2 actor operate on. ``next`` is observation-only
         (the bootstrap re-samples π(s')). The remaining slots are unused dummies.
         """
-        cur_list, next_list = [], []
+        curr_list, next_list = [], []
         for r in records:
-            cur = self._raw_obs_dict(r.inputs)
-            cur[ACTION_KEY] = torch.from_numpy(r.actions).float().unsqueeze(0)
-            cur_list.append(self.preprocessor(cur))
+            curr = self._raw_obs_dict(r.inputs)
+            curr[ACTION_KEY] = torch.from_numpy(r.actions).float().unsqueeze(0)
+            curr_list.append(self.preprocessor(curr))
             next_list.append(self.preprocessor(self._raw_obs_dict(r.next_inputs)))
 
-        cur_batch = _stack_processed(cur_list)
+        curr_batch = _stack_processed(curr_list)
         next_batch = _stack_processed(next_list)
         rewards = torch.tensor(
             np.stack([r.rewards for r in records]), device=self.device, dtype=torch.float32
@@ -308,8 +308,8 @@ class LiberoPi05Agent:
             np.stack([r.dones for r in records]), device=self.device, dtype=torch.float32
         )
         return ReplayBufferData(
-            observations=[cur_batch, next_batch],
-            actions=cur_batch[ACTION_KEY],
+            observations=[curr_batch, next_batch],
+            actions=curr_batch[ACTION_KEY],
             rewards=rewards,
             dones=dones,
             obs_z=self._dummy,
