@@ -149,7 +149,7 @@ class StandardAgent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt)
+        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
         action, act_metrics = self._act(global_step, obs, task_prompt, info)
         metrics.update(act_metrics)
         return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
@@ -201,7 +201,7 @@ class StandardAgent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt)
+        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
         panels = self._panels(obs, reward)
 
         # cached chunk: no inference, no training
@@ -224,10 +224,7 @@ class StandardAgent:
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
         self.chunk_step = 1
-        action = action_chunk[0]
-        action = np.clip(
-            action * self.action_scale + self.action_bias, self.action_low, self.action_high
-        )
+        action = self._to_env_action(action_chunk[0])
         self.prev_action = action
         metrics["chunk_step"] = self.chunk_step
         self._last_pred_image = infer_result.next_image
@@ -300,6 +297,7 @@ class StandardAgent:
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> dict:
         """Record the current timestep into the replay buffer and return the
         per-tick telemetry it produces (processed reward, action norm, and the
@@ -336,11 +334,8 @@ class StandardAgent:
             metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
             self._fresh_pred_reward = None
 
-        obs_tensor = torch.from_numpy(obs).to(self.device)
-        with torch.inference_mode():
-            obs_z = self.network.image_processor.encode(obs_tensor.unsqueeze(0)).squeeze(0)
+        obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info, task_prompt)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
-        task_prompt_token_ids = self.network.tokenize_task_prompt(task_prompt)
         self.rb.add(
             obs_tensor,
             obs_z,
@@ -368,10 +363,7 @@ class StandardAgent:
         warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
 
         if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self.action_chunk[self.chunk_step]
-            action = np.clip(
-                action * self.action_scale + self.action_bias, self.action_low, self.action_high
-            )
+            action = self._to_env_action(self.action_chunk[self.chunk_step])
             self.prev_action = action
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
@@ -395,10 +387,7 @@ class StandardAgent:
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
         self.chunk_step = 1
-        action = action_chunk[0]
-        action = np.clip(
-            action * self.action_scale + self.action_bias, self.action_low, self.action_high
-        )
+        action = self._to_env_action(action_chunk[0])
         self.prev_action = action
         metrics["chunk_step"] = self.chunk_step
         self._last_pred_image = infer_result.next_image
@@ -425,3 +414,20 @@ class StandardAgent:
         if self.goal_predictor.enabled:
             panels["goal"] = goal_image
         return panels
+
+    def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> tuple:
+        """Turn the raw observation into what the replay buffer stores this tick:
+        the raw obs tensor, its encoded latent ``obs_z``, and the tokenized task
+        prompt. ``info`` is unused by the obs-driven standard agent."""
+        del info
+        obs_tensor = torch.from_numpy(obs).to(self.device)
+        with torch.inference_mode():
+            obs_z = self.network.image_processor.encode(obs_tensor.unsqueeze(0)).squeeze(0)
+        task_prompt_token_ids = self.network.tokenize_task_prompt(task_prompt)
+        return obs_tensor, obs_z, task_prompt_token_ids
+
+    def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
+        """Map a single normalized policy action into the env's action space."""
+        return np.clip(
+            net_action * self.action_scale + self.action_bias, self.action_low, self.action_high
+        )
