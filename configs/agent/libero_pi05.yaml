@@ -41,11 +41,6 @@ buffer_size: 8000
 # equal the policy's chunk_size (asserted in the network).
 horizon: 50
 
-# SimbaV2 hyperspherical critic: weights/features stay on the unit hypersphere
-# so the TD loss cannot blow up the critic norm — the project's countermeasure
-# for the "good early, score degrades mid-training" RL instability.
-critic_arch: simbav2
-
 # Fine-tuning LRs: tiny actor LR so the expert is nudged, not overwritten;
 # the critic learns faster.
 actor_lr: 5e-6
