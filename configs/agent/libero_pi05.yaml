@@ -29,13 +29,13 @@ network_class: libero_pi05
 # Overrides consumed by LiberoPi05Agent / LiberoPi05Network.
 image_save_interval: 50
 print_interval: 1
-batch_size: 2
+batch_size: 16
 # Warmup before the first update; also ensures the buffer holds a few episodes
 # of chunk transitions before TD learning starts.
-learning_starts: 2000
+learning_starts: 4000
 # Replay holds linked chunk transitions (agentview + wrist uint8 + proprio +
 # instruction + executed chunk + per-step rewards/dones + next obs).
-buffer_size: 4096
+buffer_size: 8000
 
 # The critic scores the full pi0.5 action chunk, so the value-head horizon must
 # equal the policy's chunk_size (asserted in the network).
@@ -48,8 +48,8 @@ critic_arch: simbav2
 
 # Fine-tuning LRs: tiny actor LR so the expert is nudged, not overwritten;
 # the critic learns faster.
-actor_lr: 1e-5
-critic_lr: 5e-5
+actor_lr: 5e-6
+critic_lr: 5e-6
 
 # DACER2 actor knobs.
 # actor_denoising_steps : Euler steps when sampling π(s) for the (differentiable)
@@ -60,6 +60,6 @@ critic_lr: 5e-5
 #                         clip(π(s) + eta·∂Q/∂a) the flow term regresses toward.
 # dacer_loss_weight     : weight of the Q-guided flow-matching term (inherited
 #                         default 0.05 from base_off_policy; pinned here).
-actor_denoising_steps: 4
+actor_denoising_steps: 1
 q_grad_eta: 0.05
 dacer_loss_weight: 0.05
