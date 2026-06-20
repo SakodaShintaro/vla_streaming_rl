@@ -5,7 +5,7 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
-from vla_streaming_rl.networks.interface import InferInput, InferResult
+from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -14,24 +14,6 @@ from vla_streaming_rl.utils import create_reward_image
 
 
 class StandardAgent:
-    """RNN world-model agent for the obs-driven envs, switchable between two
-    learning modes via ``learning_mode``:
-
-    - ``"off_policy"``: a large replay buffer trained on random minibatches
-      (``network.compute_loss``), with a random-exploration warmup before
-      ``learning_starts``. Inference (``select_action``) and the training update
-      (``_train_offpolicy``) are separate forwards.
-
-    - ``"streaming"``: a one-window buffer trained online on the latest
-      transition (``network.infer_and_compute_loss``), optionally with TD(λ)
-      eligibility traces on the critic (AdamET). The inference and training
-      forwards are fused into a single grad-enabled pass in ``step``.
-
-    Everything outside the training update — action chunking, the replay-buffer
-    bookkeeping, and the next-frame / next-reward prediction panels — is shared
-    between the two modes.
-    """
-
     def __init__(
         self,
         *,
@@ -154,142 +136,7 @@ class StandardAgent:
 
         self.goal_predictor = goal_predictor
 
-    ####################
-    # Shared per-step machinery
-    ####################
-
-    def _prepare_step(
-        self,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        metrics: dict,
-        panels: dict,
-        task_prompt: str,
-    ) -> None:
-        episode_done = terminated or truncated
-        if episode_done:
-            self.action_chunk = None
-            self.chunk_step = 0
-            self.prev_action_token_ids = []
-            self._episode_reset = self.use_done
-
-        action_norm = np.linalg.norm(self.prev_action)
-        if not self.normalizing_by_return:
-            self.reward_processor.update(reward)
-        metrics["action_norm"] = action_norm
-        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-
-        # Validate the previous inference's next-frame prediction against this
-        # observation. The loss is logged only while the prediction is fresh
-        # (one step old); the panel persists the latest prediction so it stays
-        # visible across cached-chunk steps.
-        obs_hwc = obs.transpose(1, 2, 0)
-        if self._fresh_pred_image is not None:
-            metrics["losses/pred_image_loss"] = float(
-                np.mean(np.abs(self._fresh_pred_image - obs_hwc))
-            )
-            self._fresh_pred_image = None
-        panels["prediction"] = (
-            self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
-        )
-        if self._fresh_pred_reward is not None:
-            metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
-            self._fresh_pred_reward = None
-        pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
-        panels["reward"] = create_reward_image(pred_reward, reward)
-
-        obs_tensor = torch.from_numpy(obs).to(self.device)
-        with torch.inference_mode():
-            obs_z = self.network.image_processor.encode(obs_tensor.unsqueeze(0))
-            obs_z = obs_z.squeeze(0)
-        normalized_action = (self.prev_action - self.action_bias) / self.action_scale
-        task_prompt_token_ids = self.network.tokenize_task_prompt(task_prompt)
-        self.rb.add(
-            obs_tensor,
-            obs_z,
-            reward,
-            episode_done if self.use_done else False,
-            self.rnn_state.squeeze(0),
-            torch.from_numpy(normalized_action).to(self.device),
-            0.0,
-            0.0,
-            self.prev_action_token_ids,
-            task_prompt_token_ids,
-        )
-
-        goal_image = self.goal_predictor.step(obs)
-        if self.goal_predictor.enabled:
-            panels["goal"] = goal_image
-        if episode_done:
-            self.goal_predictor.reset()
-
-    def _use_action_chunk(self, metrics: dict) -> np.ndarray:
-        action = self.action_chunk[self.chunk_step]
-        action = action * self.action_scale + self.action_bias
-        action = np.clip(action, self.action_low, self.action_high)
-        self.prev_action = action
-        self.chunk_step += 1
-        metrics["chunk_step"] = self.chunk_step
-        return action
-
-    def _start_new_chunk(
-        self, infer_result: InferResult, metrics: dict
-    ) -> tuple[np.ndarray, np.ndarray, float]:
-        self.rnn_state = infer_result.rnn_state
-        # Off-policy stored empty action token ids (it never trains on them);
-        # only streaming carries the chunk's token ids into the buffer.
-        if self.learning_mode == "streaming":
-            self.prev_action_token_ids = infer_result.action_token_ids
-        metrics.update(infer_result.value_report)
-        next_image = infer_result.next_image
-        next_reward = infer_result.next_reward
-
-        action_chunk = infer_result.action[0].cpu().numpy()
-        self.action_chunk = action_chunk
-        self.chunk_step = 1
-
-        action = action_chunk[0]
-        action = action * self.action_scale + self.action_bias
-        action = np.clip(action, self.action_low, self.action_high)
-        self.prev_action = action
-        metrics["chunk_step"] = self.chunk_step
-        return action, next_image, next_reward
-
-    def _store_prediction(
-        self, next_image: np.ndarray, next_reward: float, episode_done: bool
-    ) -> None:
-        """Stash the fresh next-frame / next-reward predictions for next-step
-        validation and display. Drop them at an episode boundary so they are
-        never compared against the next episode's first step."""
-        if episode_done:
-            self._last_pred_image = None
-            self._fresh_pred_image = None
-            self._last_pred_reward = None
-            self._fresh_pred_reward = None
-        else:
-            self._last_pred_image = next_image
-            self._fresh_pred_image = next_image
-            self._last_pred_reward = next_reward
-            self._fresh_pred_reward = next_reward
-
-    def _infer(self, task_prompt: str) -> InferResult:
-        latest_data = self.rb.get_latest(self.seq_len)
-        return self.network.infer(
-            InferInput(
-                s_seq=latest_data.observations,
-                obs_z_seq=latest_data.obs_z,
-                a_seq=latest_data.actions,
-                r_seq=latest_data.rewards,
-                rnn_state=self.rnn_state,
-                task_prompts=[task_prompt],
-            )
-        )
-
-    ####################
-    # RL-agent protocol
-    ####################
+    # --- agent surface -----------------------------------------------------
 
     @torch.inference_mode()
     def select_action(
@@ -302,32 +149,10 @@ class StandardAgent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        # ``info`` is the env's step/reset info dict (used by env-coupled agents
-        # such as SimLingo); the obs-driven standard agent ignores it.
-        del info
-        metrics = {}
-        panels = {}
-        self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)
-
-        # Off-policy explores randomly before ``learning_starts`` and does not
-        # reuse cached chunks during that warmup; streaming has no warmup.
-        warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
-
-        if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self._use_action_chunk(metrics)
-            return StepResult(action=action, metrics=metrics, panels=panels)
-
-        infer_result = self._infer(task_prompt)
-        action, next_image, next_reward = self._start_new_chunk(infer_result, metrics)
-        self._store_prediction(next_image, next_reward, terminated or truncated)
-
-        if warmup:
-            action = self.action_space.sample()
-            self.action_chunk = None
-            self.chunk_step = 0
-            self.prev_action = action
-            metrics["chunk_step"] = self.chunk_step
-        return StepResult(action=action, metrics=metrics, panels=panels)
+        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt)
+        action, act_metrics = self._act(global_step, obs, task_prompt, info)
+        metrics.update(act_metrics)
+        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     def step(
         self,
@@ -340,67 +165,75 @@ class StandardAgent:
         info: dict,
     ) -> StepResult:
         if self.learning_mode == "off_policy":
-            # Train on a random batch (separate forward), then act; the training
-            # metrics merge into the action's StepResult.
-            train_metrics = self._train_offpolicy(global_step)
-            result = self.select_action(
+            return self._step_offpolicy(
                 global_step, obs, reward, terminated, truncated, task_prompt, info
             )
-            result.metrics.update(train_metrics)
-            return result
-        return self._step_streaming(obs, reward, terminated, truncated, task_prompt)
+        return self._step_streaming(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
+        )
 
-    def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        return {}
-
-    ####################
-    # Training (per mode)
-    ####################
-
-    def _train_offpolicy(self, global_step: int) -> dict:
-        if global_step < self.learning_starts:
-            return {}
-        elif global_step == self.learning_starts:
-            print(f"Start training at global step {global_step}.")
-
-        data = self.rb.sample(self.batch_size)
-        data.rewards = self.reward_processor.normalize(data.rewards)
-        loss_result = self.network.compute_loss(data)
-        info_dict = {f"losses/{key}": value for key, value in loss_result.info.items()}
-
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        loss_result.loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
-        self.actor_optimizer.step()
-        self.critic_optimizer.step()
-        return info_dict
-
-    def _step_streaming(
+    def _step_offpolicy(
         self,
+        global_step: int,
         obs: np.ndarray,
         reward: float,
         terminated: bool,
         truncated: bool,
         task_prompt: str,
+        info: dict,
     ) -> StepResult:
-        metrics = {}
-        panels = {}
-        self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)
+        # Train on a random replay batch (its own forward), then act; the
+        # training metrics merge into the action's StepResult.
+        train_metrics = self._train_offpolicy(global_step)
+        result = self.select_action(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
+        )
+        result.metrics.update(train_metrics)
+        return result
 
-        # cached action: no inference, no training
+    def _step_streaming(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> StepResult:
+        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt)
+        panels = self._panels(obs, reward)
+
+        # cached chunk: no inference, no training
         if self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self._use_action_chunk(metrics)
+            action, act_metrics = self._act(global_step, obs, task_prompt, info)
+            metrics.update(act_metrics)
             return StepResult(action=action, metrics=metrics, panels=panels)
 
-        # combined inference + training in one grad-enabled forward
+        # new chunk: a single grad-enabled forward yields both the action chunk
+        # and the training loss (fused inference + training).
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_processor.normalize(data.rewards)
-
         result = self.network.infer_and_compute_loss(data)
-        action, next_image, next_reward = self._start_new_chunk(result.infer_result, metrics)
-        self._store_prediction(next_image, next_reward, terminated or truncated)
 
+        infer_result = result.infer_result
+        self.rnn_state = infer_result.rnn_state
+        if self.learning_mode == "streaming":
+            self.prev_action_token_ids = infer_result.action_token_ids
+        metrics.update(infer_result.value_report)
+        action_chunk = infer_result.action[0].cpu().numpy()
+        self.action_chunk = action_chunk
+        self.chunk_step = 1
+        action = action_chunk[0]
+        action = np.clip(
+            action * self.action_scale + self.action_bias, self.action_low, self.action_high
+        )
+        self.prev_action = action
+        metrics["chunk_step"] = self.chunk_step
+        self._last_pred_image = infer_result.next_image
+        self._fresh_pred_image = infer_result.next_image
+        self._last_pred_reward = infer_result.next_reward
+        self._fresh_pred_reward = infer_result.next_reward
         metrics.update({f"losses/{key}": value for key, value in result.loss_result.info.items()})
 
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -421,3 +254,174 @@ class StandardAgent:
             self.critic_optimizer.step()
 
         return StepResult(action=action, metrics=metrics, panels=panels)
+
+    def on_episode_end(self, score: float, feedback_text: str) -> dict:
+        del score, feedback_text
+        # Between-episode cleanup of state that outlives the terminal step's own
+        # processing: the next-frame / reward predictions (stashed during the
+        # terminal step, dropped here so they are never validated against the next
+        # episode's first frame) and the world-model goal predictor. The chunk /
+        # eligibility-trace reset is done in ``_store_transition`` instead, since
+        # it must take effect *before* the terminal step trains.
+        self._last_pred_image = None
+        self._fresh_pred_image = None
+        self._last_pred_reward = None
+        self._fresh_pred_reward = None
+        self.goal_predictor.reset()
+        return {}
+
+    # --- training ----------------------------------------------------------
+
+    def _train_offpolicy(self, global_step: int) -> dict:
+        if global_step < self.learning_starts:
+            return {}
+        elif global_step == self.learning_starts:
+            print(f"Start training at global step {global_step}.")
+
+        data = self.rb.sample(self.batch_size)
+        data.rewards = self.reward_processor.normalize(data.rewards)
+        loss_result = self.network.compute_loss(data)
+        info_dict = {f"losses/{key}": value for key, value in loss_result.info.items()}
+
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        loss_result.loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+        self.actor_optimizer.step()
+        self.critic_optimizer.step()
+        return info_dict
+
+    # --- per-tick machinery ------------------------------------------------
+
+    def _store_transition(
+        self,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+    ) -> dict:
+        """Record the current timestep into the replay buffer and return the
+        per-tick telemetry it produces (processed reward, action norm, and the
+        previous prediction's validation losses).
+
+        On an episode boundary it also clears the chunk and arms the
+        eligibility-trace reset — both must take effect before the terminal step
+        trains (a cleared chunk forces the terminal transition through the
+        training path instead of the cached-action fast path)."""
+        metrics = {}
+        episode_done = terminated or truncated
+        if episode_done:
+            self.action_chunk = None
+            self.chunk_step = 0
+            self.prev_action_token_ids = []
+            self._episode_reset = self.use_done
+
+        action_norm = np.linalg.norm(self.prev_action)
+        if not self.normalizing_by_return:
+            self.reward_processor.update(reward)
+        metrics["action_norm"] = action_norm
+        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+
+        # Validate the previous inference's next-frame / reward prediction against
+        # this observation. Logged only while the prediction is fresh (one step
+        # old); the panels persist the latest prediction across cached steps.
+        obs_hwc = obs.transpose(1, 2, 0)
+        if self._fresh_pred_image is not None:
+            metrics["losses/pred_image_loss"] = float(
+                np.mean(np.abs(self._fresh_pred_image - obs_hwc))
+            )
+            self._fresh_pred_image = None
+        if self._fresh_pred_reward is not None:
+            metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
+            self._fresh_pred_reward = None
+
+        obs_tensor = torch.from_numpy(obs).to(self.device)
+        with torch.inference_mode():
+            obs_z = self.network.image_processor.encode(obs_tensor.unsqueeze(0)).squeeze(0)
+        normalized_action = (self.prev_action - self.action_bias) / self.action_scale
+        task_prompt_token_ids = self.network.tokenize_task_prompt(task_prompt)
+        self.rb.add(
+            obs_tensor,
+            obs_z,
+            reward,
+            episode_done if self.use_done else False,
+            self.rnn_state.squeeze(0),
+            torch.from_numpy(normalized_action).to(self.device),
+            0.0,
+            0.0,
+            self.prev_action_token_ids,
+            task_prompt_token_ids,
+        )
+        return metrics
+
+    def _act(
+        self, global_step: int, obs: np.ndarray, task_prompt: str, info: dict
+    ) -> tuple[np.ndarray, dict]:
+        """Produce the env action for this tick: replay a cached chunk action
+        when one is available, otherwise run inference for a fresh chunk. During
+        the off-policy warmup (``global_step < learning_starts``) the action is a
+        random sample, but inference still runs so the recurrent state and the
+        prediction panels keep advancing."""
+        del obs, info  # the obs-driven standard agent acts off the replay buffer
+        metrics = {}
+        warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
+
+        if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
+            action = self.action_chunk[self.chunk_step]
+            action = np.clip(
+                action * self.action_scale + self.action_bias, self.action_low, self.action_high
+            )
+            self.prev_action = action
+            self.chunk_step += 1
+            metrics["chunk_step"] = self.chunk_step
+            return action, metrics
+
+        latest_data = self.rb.get_latest(self.seq_len)
+        infer_result = self.network.infer(
+            InferInput(
+                s_seq=latest_data.observations,
+                obs_z_seq=latest_data.obs_z,
+                a_seq=latest_data.actions,
+                r_seq=latest_data.rewards,
+                rnn_state=self.rnn_state,
+                task_prompts=[task_prompt],
+            )
+        )
+        self.rnn_state = infer_result.rnn_state
+        if self.learning_mode == "streaming":
+            self.prev_action_token_ids = infer_result.action_token_ids
+        metrics.update(infer_result.value_report)
+        action_chunk = infer_result.action[0].cpu().numpy()
+        self.action_chunk = action_chunk
+        self.chunk_step = 1
+        action = action_chunk[0]
+        action = np.clip(
+            action * self.action_scale + self.action_bias, self.action_low, self.action_high
+        )
+        self.prev_action = action
+        metrics["chunk_step"] = self.chunk_step
+        self._last_pred_image = infer_result.next_image
+        self._fresh_pred_image = infer_result.next_image
+        self._last_pred_reward = infer_result.next_reward
+        self._fresh_pred_reward = infer_result.next_reward
+
+        if warmup:
+            action = self.action_space.sample()
+            self.action_chunk = None
+            self.chunk_step = 0
+            self.prev_action = action
+            metrics["chunk_step"] = self.chunk_step
+        return action, metrics
+
+    def _panels(self, obs: np.ndarray, reward: float) -> dict:
+        panels = {}
+        panels["prediction"] = (
+            self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
+        )
+        pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
+        panels["reward"] = create_reward_image(pred_reward, reward)
+        goal_image = self.goal_predictor.step(obs)
+        if self.goal_predictor.enabled:
+            panels["goal"] = goal_image
+        return panels
