@@ -13,14 +13,35 @@ from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
 from vla_streaming_rl.utils import create_reward_image
 
 
-class StreamingAgent:
+class StandardAgent:
+    """RNN world-model agent for the obs-driven envs, switchable between two
+    learning modes via ``learning_mode``:
+
+    - ``"off_policy"``: a large replay buffer trained on random minibatches
+      (``network.compute_loss``), with a random-exploration warmup before
+      ``learning_starts``. Inference (``select_action``) and the training update
+      (``_train_offpolicy``) are separate forwards.
+
+    - ``"streaming"``: a one-window buffer trained online on the latest
+      transition (``network.infer_and_compute_loss``), optionally with TD(λ)
+      eligibility traces on the critic (AdamET). The inference and training
+      forwards are fused into a single grad-enabled pass in ``step``.
+
+    Everything outside the training update — action chunking, the replay-buffer
+    bookkeeping, and the next-frame / next-reward prediction panels — is shared
+    between the two modes.
+    """
+
     def __init__(
         self,
         *,
         observation_space: gym.spaces.Box,
         action_space: gym.spaces.Box,
         network: nn.Module,
+        learning_mode: str,
         normalizing_by_return: bool,
+        learning_starts: int,
+        batch_size: int,
         max_grad_norm: float,
         use_done: bool,
         seq_len: int,
@@ -30,12 +51,16 @@ class StreamingAgent:
         critic_lr: float,
         gamma: float,
         et_lambda: float,
+        buffer_size: int,
         buffer_device: str,
         max_new_tokens: int,
         max_prompt_tokens: int,
         pad_token_id: int,
         goal_predictor: WorldModelGoalPredictor,
     ) -> None:
+        if learning_mode not in ("off_policy", "streaming"):
+            raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
+        self.learning_mode = learning_mode
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
@@ -50,6 +75,8 @@ class StreamingAgent:
         self.reward_processor = RewardProcessor("scaling", 1.0)
         self.normalizing_by_return = normalizing_by_return
 
+        self.learning_starts = learning_starts
+        self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
         self.use_done = use_done
 
@@ -64,21 +91,32 @@ class StreamingAgent:
         self.network = network
         self.rnn_state = self.network.init_state().to(self.device)
 
+        # Actor / critic optimizer split (critic == value head). The critic uses
+        # AdamET (eligibility traces) only in streaming-trace mode, AdamW
+        # otherwise; the actor is always AdamW. Off-policy uses no weight decay,
+        # streaming uses 0.1 — preserving the per-mode behavior of the original
+        # OffPolicyAgent / StreamingAgent.
         self.use_eligibility_trace = bool(use_eligibility_trace)
+        weight_decay = 0.0 if learning_mode == "off_policy" else 0.1
         critic_params = list(self.network.value_head.parameters())
         critic_param_ids = {id(p) for p in critic_params}
         actor_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]
-        self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=0.1)
-        if self.use_eligibility_trace:
+        self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
+        if learning_mode == "streaming" and self.use_eligibility_trace:
             self.critic_optimizer = AdamET(
                 critic_params, lr=critic_lr, gamma=gamma, et_lambda=et_lambda
             )
         else:
-            self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=0.1)
+            self.critic_optimizer = optim.AdamW(
+                critic_params, lr=critic_lr, weight_decay=weight_decay
+            )
 
+        # Off-policy keeps a large replay buffer; streaming keeps only the one
+        # window it trains on (the latest seq_len + horizon transition).
+        buffer_capacity = buffer_size if learning_mode == "off_policy" else seq_len + horizon
         obs_z_shape = tuple(self.network.image_processor.output_shape)
         self.rb = ReplayBuffer(
-            size=self.seq_len + self.horizon,
+            size=buffer_capacity,
             seq_len=self.seq_len + self.horizon,
             obs_shape=observation_space.shape,
             obs_z_shape=obs_z_shape,
@@ -92,6 +130,8 @@ class StreamingAgent:
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
+        # Streaming stores the VLM action chunk's token ids alongside the
+        # transition; off-policy never uses them and leaves this empty.
         self.prev_action_token_ids = []
         self._episode_reset = False
 
@@ -113,6 +153,10 @@ class StreamingAgent:
         self._fresh_pred_reward: float | None = None
 
         self.goal_predictor = goal_predictor
+
+    ####################
+    # Shared per-step machinery
+    ####################
 
     def _prepare_step(
         self,
@@ -194,7 +238,10 @@ class StreamingAgent:
         self, infer_result: InferResult, metrics: dict
     ) -> tuple[np.ndarray, np.ndarray, float]:
         self.rnn_state = infer_result.rnn_state
-        self.prev_action_token_ids = infer_result.action_token_ids
+        # Off-policy stored empty action token ids (it never trains on them);
+        # only streaming carries the chunk's token ids into the buffer.
+        if self.learning_mode == "streaming":
+            self.prev_action_token_ids = infer_result.action_token_ids
         metrics.update(infer_result.value_report)
         next_image = infer_result.next_image
         next_reward = infer_result.next_reward
@@ -209,43 +256,6 @@ class StreamingAgent:
         self.prev_action = action
         metrics["chunk_step"] = self.chunk_step
         return action, next_image, next_reward
-
-    @torch.inference_mode()
-    def select_action(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult:
-        # ``info`` is the env's step/reset info dict (used by env-coupled agents
-        # such as SimLingo); the obs-driven streaming agent ignores it.
-        del info
-        metrics = {}
-        panels = {}
-        self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)
-
-        if self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self._use_action_chunk(metrics)
-            return StepResult(action=action, metrics=metrics, panels=panels)
-
-        latest_data = self.rb.get_latest(self.seq_len)
-        infer_result = self.network.infer(
-            InferInput(
-                s_seq=latest_data.observations,
-                obs_z_seq=latest_data.obs_z,
-                a_seq=latest_data.actions,
-                r_seq=latest_data.rewards,
-                rnn_state=self.rnn_state,
-                task_prompts=[task_prompt],
-            )
-        )
-        action, next_image, next_reward = self._start_new_chunk(infer_result, metrics)
-        self._store_prediction(next_image, next_reward, terminated or truncated)
-        return StepResult(action=action, metrics=metrics, panels=panels)
 
     def _store_prediction(
         self, next_image: np.ndarray, next_reward: float, episode_done: bool
@@ -264,6 +274,61 @@ class StreamingAgent:
             self._last_pred_reward = next_reward
             self._fresh_pred_reward = next_reward
 
+    def _infer(self, task_prompt: str) -> InferResult:
+        latest_data = self.rb.get_latest(self.seq_len)
+        return self.network.infer(
+            InferInput(
+                s_seq=latest_data.observations,
+                obs_z_seq=latest_data.obs_z,
+                a_seq=latest_data.actions,
+                r_seq=latest_data.rewards,
+                rnn_state=self.rnn_state,
+                task_prompts=[task_prompt],
+            )
+        )
+
+    ####################
+    # RL-agent protocol
+    ####################
+
+    @torch.inference_mode()
+    def select_action(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> StepResult:
+        # ``info`` is the env's step/reset info dict (used by env-coupled agents
+        # such as SimLingo); the obs-driven standard agent ignores it.
+        del info
+        metrics = {}
+        panels = {}
+        self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)
+
+        # Off-policy explores randomly before ``learning_starts`` and does not
+        # reuse cached chunks during that warmup; streaming has no warmup.
+        warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
+
+        if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
+            action = self._use_action_chunk(metrics)
+            return StepResult(action=action, metrics=metrics, panels=panels)
+
+        infer_result = self._infer(task_prompt)
+        action, next_image, next_reward = self._start_new_chunk(infer_result, metrics)
+        self._store_prediction(next_image, next_reward, terminated or truncated)
+
+        if warmup:
+            action = self.action_space.sample()
+            self.action_chunk = None
+            self.chunk_step = 0
+            self.prev_action = action
+            metrics["chunk_step"] = self.chunk_step
+        return StepResult(action=action, metrics=metrics, panels=panels)
+
     def step(
         self,
         global_step: int,
@@ -274,7 +339,51 @@ class StreamingAgent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        del info
+        if self.learning_mode == "off_policy":
+            # Train on a random batch (separate forward), then act; the training
+            # metrics merge into the action's StepResult.
+            train_metrics = self._train_offpolicy(global_step)
+            result = self.select_action(
+                global_step, obs, reward, terminated, truncated, task_prompt, info
+            )
+            result.metrics.update(train_metrics)
+            return result
+        return self._step_streaming(obs, reward, terminated, truncated, task_prompt)
+
+    def on_episode_end(self, score: float, feedback_text: str) -> dict:
+        return {}
+
+    ####################
+    # Training (per mode)
+    ####################
+
+    def _train_offpolicy(self, global_step: int) -> dict:
+        if global_step < self.learning_starts:
+            return {}
+        elif global_step == self.learning_starts:
+            print(f"Start training at global step {global_step}.")
+
+        data = self.rb.sample(self.batch_size)
+        data.rewards = self.reward_processor.normalize(data.rewards)
+        loss_result = self.network.compute_loss(data)
+        info_dict = {f"losses/{key}": value for key, value in loss_result.info.items()}
+
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        loss_result.loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+        self.actor_optimizer.step()
+        self.critic_optimizer.step()
+        return info_dict
+
+    def _step_streaming(
+        self,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+    ) -> StepResult:
         metrics = {}
         panels = {}
         self._prepare_step(obs, reward, terminated, truncated, metrics, panels, task_prompt)
@@ -284,7 +393,7 @@ class StreamingAgent:
             action = self._use_action_chunk(metrics)
             return StepResult(action=action, metrics=metrics, panels=panels)
 
-        # combined inference + training
+        # combined inference + training in one grad-enabled forward
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_processor.normalize(data.rewards)
 
@@ -312,6 +421,3 @@ class StreamingAgent:
             self.critic_optimizer.step()
 
         return StepResult(action=action, metrics=metrics, panels=panels)
-
-    def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        return {}

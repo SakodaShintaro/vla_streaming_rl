@@ -7,5 +7,6 @@ defaults:
   - base_vlm
   - _self_
 
-agent_type: streaming
+agent_type: standard
+learning_mode: streaming
 network_class: actor_critic_with_action_value

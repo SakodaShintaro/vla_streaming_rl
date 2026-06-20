@@ -24,8 +24,7 @@ import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from vla_streaming_rl.agents.off_policy import OffPolicyAgent
-from vla_streaming_rl.agents.streaming import StreamingAgent
+from vla_streaming_rl.agents.standard import StandardAgent
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
 from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
@@ -200,33 +199,15 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         num_context_blocks=int(args.self_forcing.num_context_blocks),
     )
 
-    if args.agent_type == "off_policy":
-        agent = OffPolicyAgent(
+    if args.agent_type == "standard":
+        agent = StandardAgent(
             observation_space=env.observation_space,
             action_space=env.action_space,
             network=network,
+            learning_mode=args.learning_mode,
             normalizing_by_return=args.normalizing_by_return,
             learning_starts=args.learning_starts,
             batch_size=args.batch_size,
-            max_grad_norm=args.max_grad_norm,
-            use_done=args.use_done,
-            seq_len=args.seq_len,
-            horizon=args.horizon,
-            actor_lr=args.actor_lr,
-            critic_lr=args.critic_lr,
-            buffer_size=args.buffer_size,
-            buffer_device=args.buffer_device,
-            max_new_tokens=args.max_new_tokens,
-            max_prompt_tokens=args.max_prompt_tokens,
-            pad_token_id=args.pad_token_id,
-            goal_predictor=goal_predictor,
-        )
-    elif args.agent_type == "streaming":
-        agent = StreamingAgent(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
-            network=network,
-            normalizing_by_return=args.normalizing_by_return,
             max_grad_norm=args.max_grad_norm,
             use_done=args.use_done,
             seq_len=args.seq_len,
@@ -236,6 +217,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             critic_lr=args.critic_lr,
             gamma=args.gamma,
             et_lambda=args.et_lambda,
+            buffer_size=args.buffer_size,
             buffer_device=args.buffer_device,
             max_new_tokens=args.max_new_tokens,
             max_prompt_tokens=args.max_prompt_tokens,
@@ -528,7 +510,12 @@ def hydra_main(cfg: DictConfig) -> None:
         print("Because a headless environment is detected, rendering is automatically disabled.")
         cfg.render = 0
 
-    exp_name = f"{cfg.agent_type.upper()}_{cfg.exp_name}"
+    # ``agent_type`` is the agent class; ``learning_mode`` (when present) is the
+    # off_policy / streaming variant — keep it in the run name so the two stay
+    # distinguishable now that both map to the same StandardAgent class.
+    learning_mode = OmegaConf.select(cfg, "learning_mode", default=None)
+    agent_tag = cfg.agent_type.upper() + (f"_{learning_mode.upper()}" if learning_mode else "")
+    exp_name = f"{agent_tag}_{cfg.exp_name}"
     seed = cfg.seed if cfg.seed != -1 else np.random.randint(0, 10000)
 
     for i in range(cfg.trial_num):
