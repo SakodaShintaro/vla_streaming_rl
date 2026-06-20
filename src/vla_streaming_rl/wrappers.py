@@ -92,6 +92,7 @@ def make_libero_env(
     resolution: int,
     settle_steps: int,
     horizon: int,
+    perturb_robot_joint_std: float,
 ) -> gym.Env:
     """Hydra `_target_` factory for the raw LIBERO env (no wrappers).
 
@@ -107,6 +108,7 @@ def make_libero_env(
         resolution=resolution,
         settle_steps=settle_steps,
         horizon=horizon,
+        perturb_robot_joint_std=perturb_robot_joint_std,
         seed=0,
     )
 

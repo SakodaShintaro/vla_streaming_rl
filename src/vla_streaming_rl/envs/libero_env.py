@@ -122,6 +122,7 @@ class LiberoEnv(gym.Env):
         resolution: int,
         settle_steps: int,
         horizon: int,
+        perturb_robot_joint_std: float,
         seed: int,
     ) -> None:
         super().__init__()
@@ -133,6 +134,13 @@ class LiberoEnv(gym.Env):
         self._resolution = resolution
         self._settle_steps = settle_steps
         self._horizon = horizon
+        # LIBERO-PRO-style initial-state perturbation: per-arm-joint Gaussian
+        # jitter (radians) applied to the robot's initial joint configuration at
+        # reset. LIBERO replays a fixed pool of demonstration init states that
+        # the policy has memorized, saturating the success rate; perturbing the
+        # robot's starting pose breaks that memorization and gives RL headroom.
+        # 0.0 reproduces the stock (unperturbed) behavior. See ``_perturb_robot``.
+        self._perturb_robot_joint_std = float(perturb_robot_joint_std)
 
         self._np_random = np.random.default_rng(seed)
 
@@ -215,12 +223,35 @@ class LiberoEnv(gym.Env):
         init_state_id = int(self._np_random.integers(0, len(init_states)))
         obs = self._env.set_init_state(init_states[init_state_id])
 
+        # Perturb the robot's starting joint configuration *after* the fixed
+        # init state is loaded (it overwrites the robot qpos) and *before* the
+        # settle steps, so the zero-action settle holds the new pose.
+        self._perturb_robot()
+
         zero_action = np.zeros(_ACTION_DIM, dtype=np.float32)
         for _ in range(self._settle_steps):
             obs, _, _, _ = self._env.step(zero_action)
 
         self._step_count = 0
         return self._extract(obs)
+
+    def _perturb_robot(self) -> None:
+        """Add Gaussian jitter to the robot's initial arm-joint positions.
+
+        No-op when ``perturb_robot_joint_std == 0``. The OSC controller derives
+        its goal from the current pose on every step (delta input), so a
+        zero-action settle holds the perturbed configuration rather than snapping
+        back; the joint velocities are zeroed so the settle starts at rest.
+        """
+        if self._perturb_robot_joint_std <= 0.0:
+            return
+        robot = self._env.env.robots[0]
+        sim = self._env.sim
+        pos_idx = robot._ref_joint_pos_indexes
+        noise = self._np_random.normal(0.0, self._perturb_robot_joint_std, size=len(pos_idx))
+        sim.data.qpos[pos_idx] += noise
+        sim.data.qvel[robot._ref_joint_vel_indexes] = 0.0
+        sim.forward()
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         self._step_count += 1
