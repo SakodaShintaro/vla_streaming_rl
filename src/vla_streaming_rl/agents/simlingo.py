@@ -562,11 +562,14 @@ class SimLingoAgent:
     # --- Training step ----------------------------------------------------
 
     def _train(self, global_step: int, episode_done: bool) -> dict:
-        if global_step < self.learning_starts:
-            return {}
         if self.learning_mode == "streaming":
             return self._train_streaming(episode_done)
-        return self._train_offpolicy()
+        elif self.learning_mode == "off_policy":
+            if global_step < self.learning_starts:
+                return {}
+            return self._train_offpolicy()
+        else:
+            raise ValueError(f"Unknown learning_mode: {self.learning_mode}")
 
     def _train_offpolicy(self) -> dict:
         """Single combined-loss update on a random replay batch (AdamW + AdamW)."""
