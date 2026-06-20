@@ -102,26 +102,6 @@ class LiberoPi05Agent:
         # Latest critic read-out, for the render/telemetry path.
         self._value_report: dict[str, float] = {"value": 0.0}
 
-    # --- input assembly ----------------------------------------------------
-
-    def _capture_inputs(self, obs: np.ndarray, info: dict) -> dict:
-        """Snapshot the multi-modal observation pi0.5 consumes.
-
-        ``obs`` is the agentview RGB as ``(3, H, W)`` float in [0, 1]; the wrist
-        image (uint8 ``(H, W, 3)``), the raw 8-D proprio and the language
-        instruction are read from the env ``info`` dict under the keys LiberoEnv
-        publishes (``wrist_image`` / ``proprio`` / ``task_prompt``).
-        """
-        agentview_uint8 = (obs * 255.0).astype(np.uint8).transpose(1, 2, 0)
-        wrist_uint8 = info["wrist_image"].copy()
-        self._last_wrist = wrist_uint8
-        return {
-            "agentview_uint8": agentview_uint8,
-            "wrist_uint8": wrist_uint8,
-            "proprio": info["proprio"].copy(),
-            "instruction": info["task_prompt"],
-        }
-
     def _raw_obs_dict(self, inputs: dict) -> dict:
         """Build the raw observation dict the pi0.5 preprocessor expects."""
         agentview = torch.from_numpy(inputs["agentview_uint8"]).permute(2, 0, 1).float() / 255.0
@@ -140,7 +120,15 @@ class LiberoPi05Agent:
         value report from a single prefix forward; the postprocessor un-normalizes
         the chunk into the env's action space.
         """
-        inputs = self._capture_inputs(obs, info)
+        agentview_uint8 = (obs * 255.0).astype(np.uint8).transpose(1, 2, 0)
+        wrist_uint8 = info["wrist_image"].copy()
+        self._last_wrist = wrist_uint8
+        inputs = {
+            "agentview_uint8": agentview_uint8,
+            "wrist_uint8": wrist_uint8,
+            "proprio": info["proprio"].copy(),
+            "instruction": info["task_prompt"],
+        }
         processed = self.preprocessor(self._raw_obs_dict(inputs))
         infer_result = self.network.infer(
             InferInput(
