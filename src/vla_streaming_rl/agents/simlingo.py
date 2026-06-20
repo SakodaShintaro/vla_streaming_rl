@@ -48,8 +48,8 @@ torch.backends.cudnn.allow_tf32 = True
 
 # Single-frame VLM input (seq_len=1) with a one-step bootstrap horizon, so the
 # replay buffer needs ``_SEQ_LEN + _HORIZON`` contiguous indices per sample to
-# form an off-policy transition (s_t, s_{t+1}) -- same convention as
-# ``off_policy.py`` (``seq_len=self.seq_len + self.horizon``).
+# form a transition (s_t, s_{t+1}) -- same convention as the standard agent
+# (``seq_len = self.seq_len + self.horizon``).
 _SEQ_LEN = 1
 _HORIZON = 1
 
@@ -84,6 +84,7 @@ class SimLingoAgent:
         self.observation_space = observation_space
         del action_space
 
+        self.learning_mode = learning_mode
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.exploration_noise = exploration_noise
@@ -130,11 +131,9 @@ class SimLingoAgent:
 
         feature_dim = network.feature_dim
 
-        # ``off_policy`` trains on random replay batches (single combined loss via
-        # ``compute_loss``); ``streaming`` trains online on the latest transition
-        # with TD(λ) eligibility traces on the critic (AdamET) via
-        # ``infer_and_compute_loss``. The actor uses AdamW in both modes.
-        self.learning_mode = learning_mode
+        # Actor / critic optimizer split (the VLM backbone is frozen). The critic
+        # uses AdamET (eligibility traces) in streaming mode, AdamW for off-policy;
+        # the actor heads always use AdamW.
         self.actor_optimizer = optim.AdamW(
             self.actor_heads.parameters(), lr=actor_lr, weight_decay=0.0
         )
@@ -144,11 +143,11 @@ class SimLingoAgent:
             else optim.AdamW(self.critic.parameters(), lr=critic_lr, weight_decay=0.0)
         )
 
-        # ``run_step`` caches each tick's per-query VLM features and the
-        # action it took; ``step`` stores them in the obs / action slots so
-        # ``network.compute_loss`` reads (features, action, reward, done)
-        # straight from the buffer and only re-applies the waypoint heads. The obs_z
-        # / rnn_state / log_prob / value / token slots stay unused
+        # The agent caches each tick's per-query VLM features and the action it
+        # took; ``_store_transition`` writes them into the obs / action slots so
+        # ``compute_loss`` / ``infer_and_compute_loss`` read (features, action,
+        # reward, done) straight from the buffer and only re-apply the waypoint
+        # heads. The obs_z / rnn_state / log_prob / value / token slots stay unused
         # (shape-(1,) / 0 / empty) so the buffer machinery still type-checks.
         self.rb = ReplayBuffer(
             size=buffer_size,
@@ -166,10 +165,10 @@ class SimLingoAgent:
         self._dummy_rnn_state = torch.zeros(1, device=self.device)
         self._dummy_obs_z = torch.zeros(1, device=self.device)
 
-        # ``run_step`` writes the just-computed features / action into these
-        # so the next ``step`` can store them at the buffer index for the
-        # current timestep (the project's convention puts the action that
-        # produced state t at ``actions[t]``).
+        # ``_preprocess`` / ``_act`` write the just-computed features / action into
+        # these so ``_store_transition`` can store them at the buffer index for the
+        # current timestep (the project's convention puts the action that produced
+        # state t at ``actions[t]``).
         self._current_state: torch.Tensor = torch.zeros(
             NUM_WP_QUERIES, feature_dim, device=self.device
         )
@@ -177,14 +176,17 @@ class SimLingoAgent:
 
         self._need_handover = True
         self._prev_action = torch.zeros(ACTION_DIM, device=self.device)
+        # Ego speed of the current tick, cached by ``_preprocess`` for the PID in
+        # ``_to_env_action``.
+        self._gt_velocity = torch.zeros(1, device=self.device)
 
-        # Latest executed trajectory + its critic value, cached by ``run_step``
-        # for the bird's-eye visualization panel built in ``_build_info``.
+        # Latest executed trajectory + its critic value, cached for the bird's-eye
+        # visualization panel built in ``_panels``.
         self._viz_route = np.zeros((ROUTE_LEN, WP_DIM), dtype=np.float32)
         self._viz_speed = np.zeros((SPEED_WPS_LEN, WP_DIM), dtype=np.float32)
         self._viz_q_value = 0.0
         # Critic value diagnostics for the executed action (incl. per-bin probs),
-        # cached by ``run_step`` and logged verbatim in ``_build_info``.
+        # cached each tick and logged verbatim in the step metrics.
         self._value_report: dict[str, float] = {"value": 0.0}
 
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
@@ -192,7 +194,7 @@ class SimLingoAgent:
         # are hard-clipped to keep the critic stable. See RewardProcessor.
         self.reward_processor = RewardProcessor("carla", 1.0)
 
-    # --- RL-agent protocol surface used by scripts/train.py -----------------
+    # --- agent surface -----------------------------------------------------
 
     @torch.no_grad()
     def select_action(
@@ -205,10 +207,8 @@ class SimLingoAgent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        self._maybe_handover_episode(info)
-        env_action = self._act(info["sensors"])
-        metrics, panels = self._build_info(env_action, reward)
-        return StepResult(action=env_action, metrics=metrics, panels=panels)
+        action, metrics = self._act(global_step, obs, task_prompt, info)
+        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     def step(
         self,
@@ -220,21 +220,138 @@ class SimLingoAgent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        self._maybe_handover_episode(info)
-        episode_done = terminated or truncated
-        env_action = self._act(info["sensors"])
-        metrics, panels = self._build_info(env_action, reward)
+        if self.learning_mode == "off_policy":
+            return self._step_offpolicy(
+                global_step, obs, reward, terminated, truncated, task_prompt, info
+            )
+        return self._step_streaming(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
+        )
 
-        # Store (features_t, action_{t-1}, reward, done). The per-query VLM
-        # features go into the obs slot (obs_z is unused);
-        # ``action_{t-1}`` mirrors off_policy.OffPolicyAgent.select_action's
-        # add semantics so later sampling and indexing match the project
-        # convention.
+    def _step_offpolicy(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> StepResult:
+        # Act (live VLM inference), store the transition, then train on a random
+        # replay batch — separate forwards, like the standard off-policy agent.
+        action, metrics = self._act(global_step, obs, task_prompt, info)
+        metrics.update(
+            self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
+        )
+        metrics.update(self._train_offpolicy(global_step))
+        self._prev_action = self._current_action_taken
+        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
+
+    def _step_streaming(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> StepResult:
+        del global_step
+        # One VLM forward extracts the current per-query features; store them as the
+        # latest transition. The executed action then comes from the *same* fused
+        # forward that computes the training loss (``infer_and_compute_loss`` returns
+        # μ(current state)), so the policy update matches the executed action.
+        infer_input = self._preprocess(obs, info, task_prompt)
+        with torch.no_grad():
+            live = self.network.infer(infer_input)
+        self._current_state = live.features.squeeze(0)
+        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
+
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        if curr_size < _SEQ_LEN + _HORIZON:
+            # Bootstrap tick: no complete transition yet — act greedily off the live
+            # inference, no training.
+            action_mean = live.action.squeeze(0)
+            self._value_report = live.value_report
+        else:
+            data = self.rb.get_latest(_SEQ_LEN + _HORIZON)
+            result = self.network.infer_and_compute_loss(data)
+            action_mean = result.infer_result.action.squeeze(0)
+            self._value_report = result.infer_result.value_report
+            metrics.update(
+                {f"losses/{key}": value for key, value in result.loss_result.info.items()}
+            )
+            # Backward both before any step (the actor graph must see the pre-update
+            # critic; AdamET mutates critic params in place). The network's
+            # critic-freeze keeps actor grads off the critic.
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            result.et_info.actor_entropy_loss.backward(retain_graph=True)
+            result.et_info.neg_value.backward()
+            nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
+            self.actor_optimizer.step()
+            self.critic_optimizer.step(delta=result.et_info.delta, reset=terminated or truncated)
+
+        action_taken = action_mean + torch.randn_like(action_mean) * self.exploration_noise
+        self._current_action_taken = action_taken
+        self._prev_action = action_taken
+        env_action = self._to_env_action(action_taken)
+        metrics["action_norm"] = float(np.linalg.norm(env_action))
+        metrics.update(self._value_report)
+        return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
+
+    def on_episode_end(self, score: float, feedback_text: str) -> dict:
+        del score, feedback_text
+        # Force handover (RoutePlanner rebuild) on the next tick, whose info carries
+        # the new episode's reset ``route_plan``.
+        self._need_handover = True
+        return {}
+
+    # --- training ----------------------------------------------------------
+
+    def _train_offpolicy(self, global_step: int) -> dict:
+        """Single combined-loss update on a random replay batch (AdamW + AdamW)."""
+        if global_step < self.learning_starts:
+            return {}
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        if curr_size <= _SEQ_LEN + _HORIZON:  # rb.sample needs curr_size > span
+            return {}
+
+        data = self.rb.sample(self.batch_size)
+        result = self.network.compute_loss(data)
+
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        result.loss.backward()
+        nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
+        self.actor_optimizer.step()
+        self.critic_optimizer.step()
+        return result.info
+
+    # --- per-tick machinery ------------------------------------------------
+
+    def _store_transition(
+        self,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> dict:
+        """Store ``(features_t, action_{t-1}, reward, done)`` into the replay
+        buffer and return the per-tick reward telemetry. The features come from the
+        VLM forward cached in ``self._current_state`` (``_act`` for off-policy,
+        ``_step_streaming`` inline); ``action_{t-1}`` is ``self._prev_action``, which
+        the caller advances to the executed action only after this returns."""
+        del obs, task_prompt, info
         self.rb.add(
             self._current_state,
             self._dummy_obs_z,
             reward,
-            episode_done,
+            terminated or truncated,
             self._dummy_rnn_state,
             self._prev_action,
             0.0,
@@ -242,216 +359,66 @@ class SimLingoAgent:
             [],
             [],
         )
-
-        metrics.update(self._train(global_step, episode_done))
-
-        # Advance: the action just selected becomes the prev for the
-        # next add. (off_policy carries it across episode boundaries
-        # too — the buffer's done flag handles bootstrap correctness.)
-        self._prev_action = self._current_action_taken
-
-        return StepResult(action=env_action, metrics=metrics, panels=panels)
-
-    def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        # Force handover (RoutePlanner rebuild) on the next select_action, which
-        # receives the new episode's reset info.
-        self._need_handover = True
-        return {}
-
-    def _build_info(self, env_action: np.ndarray, reward: float) -> tuple[dict, dict]:
-        """Return ``(metrics, panels)`` for this tick.
-
-        The waypoint policy predicts neither a goal nor a next frame. It does
-        not predict the reward either, so the reward panel shows the actual
-        reward only (``pred=None``). ``action_norm`` is a scalar telemetry hook.
-        ``processed_reward`` is the exact reward the critic trains on — the
-        "carla" transform is stateless, so logging it here matches the value
-        used at train time.
-        """
-        metrics = {
-            "action_norm": float(np.linalg.norm(env_action)),
-            # ``value`` (+ any per-bin probs) is the value head's read-out of the
-            # executed action's Q(s, a), matching off_policy / streaming telemetry
-            # so --calibration etc. stay agent-agnostic.
-            **self._value_report,
-            "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
-        }
-        panels = {
-            "reward": create_reward_image(None, reward),
-            "bev_value": self._render_bev_panel(),
-        }
-        return metrics, panels
-
-    def _render_bev_panel(self) -> np.ndarray:
-        """Top-down (ego-frame) view of SimLingo's two predicted trajectories,
-        annotated with the critic's value estimate Q(s, a).
-
-        SimLingo outputs two waypoint sets, both drawn here: the ``route``
-        (geometric path, cyan) and the ``speed`` waypoints (future positions
-        used for speed control, orange). Ego is the green marker near the
-        bottom; waypoint index 0 (``+x``) is forward → up, ``+y`` → right (the
-        PID's heading convention). Returns an RGB uint8 image for the strip.
-        """
-        size = 256
-        scale = 6.0  # pixels per meter
-        img = np.full((size, size, 3), 30, dtype=np.uint8)
-        ego_px = (size // 2, int(size * 0.8))
-
-        def to_px(forward: float, lateral: float) -> tuple[int, int]:
-            return (int(ego_px[0] + lateral * scale), int(ego_px[1] - forward * scale))
-
-        def draw_trajectory(waypoints: np.ndarray, color: tuple[int, int, int]) -> None:
-            pts = [to_px(float(wp[0]), float(wp[1])) for wp in waypoints]
-            for i in range(len(pts) - 1):
-                cv2.line(img, pts[i], pts[i + 1], color, 2)
-            for p in pts:
-                cv2.circle(img, p, 2, color, -1)
-
-        # range rings every 10 m for scale reference
-        for r_m in (10, 20, 30):
-            cv2.circle(img, ego_px, int(r_m * scale), (60, 60, 60), 1)
-
-        # the two SimLingo outputs
-        route_color = (0, 200, 255)
-        speed_color = (255, 165, 0)
-        draw_trajectory(self._viz_route, route_color)
-        draw_trajectory(self._viz_speed, speed_color)
-
-        # ego marker pointing forward (up)
-        cv2.drawMarker(img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2)
-
-        # value annotation (green if non-negative, red otherwise) + legend
-        q = self._viz_q_value
-        q_color = (0, 255, 0) if q >= 0.0 else (255, 80, 80)
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(img, f"Q: {q:.3f}", (8, 22), font, 0.6, q_color, 2)
-        cv2.putText(img, "route", (8, size - 24), font, 0.45, route_color, 1)
-        cv2.putText(img, "speed", (8, size - 8), font, 0.45, speed_color, 1)
-        return img
-
-    # --- Episode handover --------------------------------------------------
-
-    def _maybe_handover_episode(self, info: dict) -> None:
-        """On the first tick of a new episode, take the route plan from the
-        env's reset ``info`` and rebuild the RoutePlanner.
-
-        ``_need_handover`` is set on construction and by ``on_episode_end``; the
-        next ``select_action`` carries the new episode's reset info (which holds
-        ``route_plan``), so no reach into the env is needed.
-        """
-        if not self._need_handover:
-            return
-        # ``route_plan`` is the standard leaderboard handover — RouteScenario
-        # builds both the gps and world-coord route (see CARLALeaderboardEnv).
-        gps_route, world_route = info["route_plan"]
-        ds_ids = downsample_route(world_route, 50)
-        global_plan_world_coord = [(world_route[x][0], world_route[x][1]) for x in ds_ids]
-        global_plan = [gps_route[x] for x in ds_ids]
-        self._route_planner = RoutePlanner(
-            self.route_planner_min_distance,
-            self.route_planner_max_distance,
-            global_plan,
-            global_plan_world_coord,
-        )
-        self.ego_state_filter = EgoStateFilter(dt=1.0 / 20.0, state_log_maxlen=5)
-        self.control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
-        self._need_handover = False
-
-    # --- Per-tick inference ------------------------------------------------
+        return {"processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item()}
 
     @torch.no_grad()
-    def _act(self, sensors: dict) -> np.ndarray:
-        """One inference tick + 2-D env-action conversion.
+    def _act(
+        self, global_step: int, obs: np.ndarray, task_prompt: str, info: dict
+    ) -> tuple[np.ndarray, dict]:
+        """Live inference tick: VLM forward → policy μ(features) → executed action.
 
-        ``sensors`` is the env's ``info["sensors"]`` snapshot (the leaderboard
-        ``{id: (frame, payload)}`` shape from
-        :meth:`CARLALeaderboardEnv._build_sensors_dict`); we remap ``rgb`` →
-        ``rgb_<N>`` per SimLingo's ``config.num_cameras`` so ``_tick`` sees the
-        keys it expects.
-        """
-        # SimLingo's sensors() declares per-camera ids ``rgb_{N}`` where
-        # ``N`` iterates over ``config.num_cameras`` (typically just [0]).
-        # We only have a single env camera, so map it to whatever id the
-        # agent's first camera position uses.
+        Caches the per-query features and the (noised) action for
+        ``_store_transition``, and returns the env action plus its telemetry. Used
+        by ``select_action`` (eval) and the off-policy step."""
+        del global_step
+        infer_input = self._preprocess(obs, info, task_prompt)
+        infer_result = self.network.infer(infer_input)
+        action_mean = infer_result.action.squeeze(0)  # (ACTION_DIM,)
+        self._value_report = infer_result.value_report
+        self._current_state = infer_result.features.squeeze(0)
+
+        action_taken = action_mean + torch.randn_like(action_mean) * self.exploration_noise
+        self._current_action_taken = action_taken
+        env_action = self._to_env_action(action_taken)
+        metrics = {"action_norm": float(np.linalg.norm(env_action)), **self._value_report}
+        return env_action, metrics
+
+    @torch.no_grad()
+    def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> InferInput:
+        """Build the network input (``InferInput`` wrapping a ``DrivingInput``) from
+        the env's carla ``info["sensors"]`` snapshot, rebuilding the RoutePlanner on
+        the first tick of a new episode. Caches ``self._gt_velocity`` for the PID."""
+        del obs, task_prompt
+
+        # Episode handover: take the new episode's route plan from the reset info
+        # (the standard leaderboard handover — RouteScenario builds both the gps and
+        # world-coord route, see CARLALeaderboardEnv).
+        if self._need_handover:
+            gps_route, world_route = info["route_plan"]
+            ds_ids = downsample_route(world_route, 50)
+            global_plan_world_coord = [(world_route[x][0], world_route[x][1]) for x in ds_ids]
+            global_plan = [gps_route[x] for x in ds_ids]
+            self._route_planner = RoutePlanner(
+                self.route_planner_min_distance,
+                self.route_planner_max_distance,
+                global_plan,
+                global_plan_world_coord,
+            )
+            self.ego_state_filter = EgoStateFilter(dt=1.0 / 20.0, state_log_maxlen=5)
+            self.control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
+            self._need_handover = False
+
+        # SimLingo's sensors() declares per-camera ids ``rgb_{N}``; we have a single
+        # env camera, so map it to the agent's first camera position.
         first_cam_id = self.config.num_cameras[0]
         input_data = {
-            f"rgb_{first_cam_id}": sensors["rgb"],
-            "gps": sensors["gps"],
-            "imu": sensors["imu"],
-            "speed": sensors["speed"],
+            f"rgb_{first_cam_id}": info["sensors"]["rgb"],
+            "gps": info["sensors"]["gps"],
+            "imu": info["sensors"]["imu"],
+            "speed": info["sensors"]["speed"],
         }
         self._frame_step += 1
 
-        driving_input_kwargs = self._preprocess(input_data)
-
-        model_input = DrivingInput(**driving_input_kwargs)
-        # The network owns the VLM forward: ``infer`` runs it on the driving input
-        # and returns both the action and the per-query features to cache. SimLingo
-        # passes the DrivingInput as s_seq; the other InferInput fields are dummies.
-        infer_result = self.network.infer(
-            InferInput(
-                s_seq=model_input,
-                obs_z_seq=self._dummy_obs_z,
-                a_seq=self._prev_action,
-                r_seq=self._dummy_rnn_state,
-                rnn_state=self._dummy_rnn_state,
-                task_prompts=[],
-            )
-        )
-        action_mean = infer_result.action.squeeze(0)  # (ACTION_DIM,)
-        self._value_report = infer_result.value_report
-
-        noise = torch.randn_like(action_mean) * self.exploration_noise
-        action_taken = action_mean + noise
-        self._current_state = infer_result.features.squeeze(0)  # (30, hidden) for the buffer
-        self._current_action_taken = action_taken
-
-        # Feed the (noised) waypoints to the deterministic PID, and cache the
-        # executed trajectory + its critic value Q(s, a) for the bird's-eye panel.
-        pred_route, pred_speed_wps = _action_vec_to_waypoints(action_taken)
-        self._viz_q_value = self._value_report["value"]
-        self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
-        self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
-
-        gt_velocity = driving_input_kwargs["vehicle_speed"]
-
-        steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed_wps)
-
-        # # 0.1 is just an arbitrary low number to threshold when the car is stopped
-        if gt_velocity < 0.1:
-            self.stuck_detector += 1
-        else:
-            self.stuck_detector = 0
-
-        # Restart mechanism in case the car got stuck. Not used a lot anymore but doesn't hurt to keep it.
-        if self.stuck_detector > self.config.stuck_threshold:
-            self.force_move = self.config.creep_duration
-
-        if self.force_move > 0:
-            throttle = max(self.config.creep_throttle, throttle)
-            brake = False
-            self.force_move -= 1
-
-        control = carla.VehicleControl(
-            steer=float(steer), throttle=float(throttle), brake=float(brake)
-        )
-
-        # CARLA will not let the car drive in the initial frames.
-        # We set the action to brake so that the filter does not get confused.
-        if self._frame_step < self.config.initial_frames_delay:
-            self.control = carla.VehicleControl(0.0, 0.0, 1.0)
-        else:
-            self.control = control
-
-        steer = float(control.steer)
-        # 2-D env action: positive → throttle, negative → brake. SimLingo
-        # never sets both at once in practice, so this collapse is
-        # lossless for our purposes.
-        gas_or_brake = float(control.throttle) - float(control.brake)
-        return np.array([steer, gas_or_brake], dtype=np.float32)
-
-    @torch.no_grad()
-    def _preprocess(self, input_data) -> dict:
         rgb = []
         for camera_pos in self.config.num_cameras:
             rgb_cam = "rgb_" + str(camera_pos)
@@ -536,7 +503,7 @@ class SimLingoAgent:
             ego_next_target_point=ego_next_target_point,
         )
 
-        return {
+        driving_input_kwargs = {
             "camera_images": processed_image.to(self.device).bfloat16(),
             "image_sizes": None,
             "camera_intrinsics": (
@@ -558,60 +525,105 @@ class SimLingoAgent:
             "prompt": ll,
             "prompt_inference": ll,
         }
+        self._gt_velocity = driving_input_kwargs["vehicle_speed"]
 
-    # --- Training step ----------------------------------------------------
+        return InferInput(
+            s_seq=DrivingInput(**driving_input_kwargs),
+            obs_z_seq=self._dummy_obs_z,
+            a_seq=self._prev_action,
+            r_seq=self._dummy_rnn_state,
+            rnn_state=self._dummy_rnn_state,
+            task_prompts=[],
+        )
 
-    def _train(self, global_step: int, episode_done: bool) -> dict:
-        if self.learning_mode == "streaming":
-            return self._train_streaming(episode_done)
-        elif self.learning_mode == "off_policy":
-            if global_step < self.learning_starts:
-                return {}
-            return self._train_offpolicy()
+    def _to_env_action(self, net_action: torch.Tensor) -> np.ndarray:
+        """Convert the (noised) waypoint action into the 2-D env action via the
+        deterministic PID, caching the executed trajectory + its critic value for
+        the bird's-eye panel and running the stuck / creep recovery logic."""
+        pred_route, pred_speed_wps = _action_vec_to_waypoints(net_action)
+        self._viz_q_value = self._value_report["value"]
+        self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
+        self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
+
+        gt_velocity = self._gt_velocity
+        steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed_wps)
+
+        # 0.1 is an arbitrary low threshold for "stopped".
+        if gt_velocity < 0.1:
+            self.stuck_detector += 1
         else:
-            raise ValueError(f"Unknown learning_mode: {self.learning_mode}")
+            self.stuck_detector = 0
 
-    def _train_offpolicy(self) -> dict:
-        """Single combined-loss update on a random replay batch (AdamW + AdamW)."""
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        if curr_size <= _SEQ_LEN + _HORIZON:  # rb.sample needs curr_size > span
-            return {}
+        # Restart mechanism in case the car got stuck. Not used a lot anymore but
+        # doesn't hurt to keep it.
+        if self.stuck_detector > self.config.stuck_threshold:
+            self.force_move = self.config.creep_duration
 
-        data = self.rb.sample(self.batch_size)
-        result = self.network.compute_loss(data)
+        if self.force_move > 0:
+            throttle = max(self.config.creep_throttle, throttle)
+            brake = False
+            self.force_move -= 1
 
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        result.loss.backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        nn.utils.clip_grad_norm_(self.actor_heads.parameters(), self.max_grad_norm)
-        self.critic_optimizer.step()
-        self.actor_optimizer.step()
-        return result.info
+        control = carla.VehicleControl(
+            steer=float(steer), throttle=float(throttle), brake=float(brake)
+        )
 
-    def _train_streaming(self, episode_done: bool) -> dict:
-        """Online TD(λ) on the latest transition: AdamET eligibility trace on the
-        critic, AdamW on the waypoint heads. The network's ``infer_and_compute_loss``
-        returns the trace inputs (actor loss, -Q(s,a), TD delta) in ``et_info``.
-        """
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        if curr_size < _SEQ_LEN + _HORIZON:  # get_latest needs curr_size >= span
-            return {}
+        # CARLA will not let the car drive in the initial frames. We brake so the
+        # filter does not get confused.
+        if self._frame_step < self.config.initial_frames_delay:
+            self.control = carla.VehicleControl(0.0, 0.0, 1.0)
+        else:
+            self.control = control
 
-        data = self.rb.get_latest(_SEQ_LEN + _HORIZON)
-        result = self.network.infer_and_compute_loss(data)
+        steer = float(control.steer)
+        # 2-D env action: positive → throttle, negative → brake. SimLingo never sets
+        # both at once in practice, so this collapse is lossless for our purposes.
+        gas_or_brake = float(control.throttle) - float(control.brake)
+        return np.array([steer, gas_or_brake], dtype=np.float32)
 
-        # Backward both before any step (the actor graph must see the pre-update
-        # critic; AdamET mutates critic params in place). The network's
-        # critic-freeze keeps actor grads off the critic.
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        result.et_info.actor_entropy_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor_heads.parameters(), self.max_grad_norm)
+    def _panels(self, obs: np.ndarray, reward: float) -> dict:
+        """Reward panel (actual only — the waypoint policy predicts no reward) plus
+        the top-down (ego-frame) view of SimLingo's two predicted trajectories,
+        annotated with the critic's value estimate Q(s, a).
 
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        result.et_info.neg_value.backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+        SimLingo outputs two waypoint sets: the ``route`` (geometric path, cyan) and
+        the ``speed`` waypoints (orange). Ego is the green marker near the bottom;
+        waypoint index 0 (``+x``) is forward → up, ``+y`` → right (the PID's heading
+        convention)."""
+        del obs
+        size = 256
+        scale = 6.0  # pixels per meter
+        img = np.full((size, size, 3), 30, dtype=np.uint8)
+        ego_px = (size // 2, int(size * 0.8))
 
-        self.actor_optimizer.step()
-        self.critic_optimizer.step(delta=result.et_info.delta, reset=episode_done)
-        return result.loss_result.info
+        def to_px(forward: float, lateral: float) -> tuple[int, int]:
+            return (int(ego_px[0] + lateral * scale), int(ego_px[1] - forward * scale))
+
+        def draw_trajectory(waypoints: np.ndarray, color: tuple[int, int, int]) -> None:
+            pts = [to_px(float(wp[0]), float(wp[1])) for wp in waypoints]
+            for i in range(len(pts) - 1):
+                cv2.line(img, pts[i], pts[i + 1], color, 2)
+            for p in pts:
+                cv2.circle(img, p, 2, color, -1)
+
+        # range rings every 10 m for scale reference
+        for r_m in (10, 20, 30):
+            cv2.circle(img, ego_px, int(r_m * scale), (60, 60, 60), 1)
+
+        route_color = (0, 200, 255)
+        speed_color = (255, 165, 0)
+        draw_trajectory(self._viz_route, route_color)
+        draw_trajectory(self._viz_speed, speed_color)
+
+        # ego marker pointing forward (up)
+        cv2.drawMarker(img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2)
+
+        # value annotation (green if non-negative, red otherwise) + legend
+        q = self._viz_q_value
+        q_color = (0, 255, 0) if q >= 0.0 else (255, 80, 80)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(img, f"Q: {q:.3f}", (8, 22), font, 0.6, q_color, 2)
+        cv2.putText(img, "route", (8, size - 24), font, 0.45, route_color, 1)
+        cv2.putText(img, "speed", (8, size - 8), font, 0.45, speed_color, 1)
+
+        return {"reward": create_reward_image(None, reward), "bev_value": img}
