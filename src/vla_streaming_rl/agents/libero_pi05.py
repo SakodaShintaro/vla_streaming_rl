@@ -334,11 +334,6 @@ class LiberoPi05Agent:
         self.network.policy.train()
         result = self.network.compute_loss(data)
 
-        # Never let a non-finite loss reach an optimizer: a single NaN/Inf step
-        # silently corrupts the expert/critic and every subsequent rollout.
-        if not torch.isfinite(result.loss):
-            return {"losses/skipped_nonfinite": 1.0}
-
         # One backward over the combined critic+actor loss, then step each
         # optimizer (the DACER2 actor loss froze the critic during its Q forwards,
         # so the gradients land on disjoint params) — same pattern as
