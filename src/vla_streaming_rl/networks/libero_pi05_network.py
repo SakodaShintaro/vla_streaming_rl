@@ -257,15 +257,7 @@ class LiberoPi05Network(NetworkInterface):
 
     # --- pi0.5 internals (private) -----------------------------------------
 
-    def _prefix(self, batch: dict):
-        """Run pi0.5's frozen prefix (images + language) through PaliGemma.
-
-        Mirrors the prefix half of ``PI05Pytorch.sample_actions``: returns the
-        contextual prefix hidden states ``prefix_out`` (for the critic state),
-        the ``prefix_pad_masks`` and the ``past_key_values`` KV cache the
-        differentiable denoiser conditions on. Always no-grad — the backbone is
-        frozen, so the policy μ (expert) and the critic are the only learners.
-        """
+    def _encode_state(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, list]:
         model = self.policy.model
         images, img_masks = self.policy._preprocess_images(batch)
         tokens = batch[OBS_LANGUAGE_TOKENS]
@@ -287,17 +279,6 @@ class LiberoPi05Network(NetworkInterface):
             inputs_embeds=[prefix_embs, None],
             use_cache=True,
         )
-        return prefix_out, prefix_pad_masks, past_key_values
-
-    def _encode_state(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, list]:
-        """State embedding ``s`` for the critic + the denoiser's prefix handles.
-
-        ``s = mean_pool(prefix_out) ⊕ proprio`` (float32, ``(B, prefix_dim +
-        state_dim)``). Returns ``(s, prefix_pad_masks, past_key_values)`` so the
-        caller reuses the same (no-grad) prefix forward for both the critic state
-        and ``_sample_action_chunk`` / ``_flow_matching_velocity_loss``.
-        """
-        prefix_out, prefix_pad_masks, past_key_values = self._prefix(batch)
         mask = prefix_pad_masks.unsqueeze(-1).to(prefix_out.dtype)
         pooled = (prefix_out * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
         proprio = batch[OBS_STATE].to(self.device, torch.float32)
