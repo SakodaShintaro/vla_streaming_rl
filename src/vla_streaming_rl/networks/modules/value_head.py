@@ -161,17 +161,6 @@ class DistributionalValueHead(nn.Module):
         chunk_rewards: torch.Tensor,
         chunk_dones: torch.Tensor,
     ) -> torch.Tensor:
-        """n-step TD target for every gamma at once, shape ``(B, num_gammas)``.
-
-        Takes the next-state critic's raw ``output`` (logits) and reduces it to
-        the per-gamma bootstrap value internally (:meth:`to_values`), so callers
-        never have to collapse the distribution themselves — the value head owns
-        the distributional ⇄ scalar mapping end to end. Discounts ``chunk_rewards``
-        over the ``horizon``-step chunk per gamma, stops the accumulation/bootstrap
-        at the first ``done``, and bootstraps from that per-gamma value. Uses
-        ``self.horizon`` and the head's own ``gammas_tensor``, which the
-        action-value subclasses set in ``__init__``.
-        """
         next_q = self.to_values(next_output)  # (B, num_gammas)
         batch_size = chunk_rewards.size(0)
         gammas = self.gammas_tensor.to(chunk_rewards.device)  # (G,)

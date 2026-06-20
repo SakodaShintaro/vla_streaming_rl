@@ -24,7 +24,6 @@ class OffPolicyAgent:
         batch_size: int,
         max_grad_norm: float,
         use_done: bool,
-        accumulation_steps: int,
         seq_len: int,
         horizon: int,
         learning_rate: float,
@@ -53,8 +52,6 @@ class OffPolicyAgent:
         self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
         self.use_done = use_done
-        self.accumulation_steps = accumulation_steps
-        self._accumulation_count = 0
 
         # Sequence observation management
         self.seq_len = seq_len
@@ -289,14 +286,10 @@ class OffPolicyAgent:
         # add prefixes to info_dict keys
         info_dict = {f"losses/{key}": value for key, value in loss_result.info.items()}
 
-        # optimize the model with gradient accumulation
-        scaled_loss = loss_result.loss / self.accumulation_steps
-        scaled_loss.backward()
+        loss_result.loss.backward()
 
-        self._accumulation_count += 1
-        if self._accumulation_count % self.accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+        self.optimizer.step()
+        self.optimizer.zero_grad()
 
         return info_dict

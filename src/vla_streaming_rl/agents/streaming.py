@@ -23,7 +23,6 @@ class StreamingAgent:
         normalizing_by_return: bool,
         max_grad_norm: float,
         use_done: bool,
-        accumulation_steps: int,
         seq_len: int,
         horizon: int,
         use_eligibility_trace: bool,
@@ -52,8 +51,6 @@ class StreamingAgent:
 
         self.max_grad_norm = max_grad_norm
         self.use_done = use_done
-        self.accumulation_steps = accumulation_steps
-        self._accumulation_count = 0
 
         # Sequence observation management
         self.seq_len = seq_len
@@ -304,25 +301,23 @@ class StreamingAgent:
 
         if self.use_eligibility_trace:
             # Actor: backward actor-only loss → encoder + actor grads
-            actor_loss = result.et_info.actor_entropy_loss / self.accumulation_steps
+            actor_loss = result.et_info.actor_entropy_loss
             actor_loss.backward(retain_graph=True)
 
             # Critic: backward -V(s) → value_head grads only (detached from encoder)
-            neg_value = result.et_info.neg_value / self.accumulation_steps
+            neg_value = result.et_info.neg_value
             neg_value.backward()
         else:
-            scaled_loss = result.loss_result.loss / self.accumulation_steps
+            scaled_loss = result.loss_result.loss
             scaled_loss.backward()
 
-        self._accumulation_count += 1
-        if self._accumulation_count % self.accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
-            self.optimizer.step()
-            if self.use_eligibility_trace:
-                self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
-                self._episode_reset = False
-                self.critic_optimizer.zero_grad()
-            self.optimizer.zero_grad()
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+        self.optimizer.step()
+        if self.use_eligibility_trace:
+            self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
+            self._episode_reset = False
+            self.critic_optimizer.zero_grad()
+        self.optimizer.zero_grad()
 
         return StepResult(action=action, metrics=metrics, panels=panels)
 
