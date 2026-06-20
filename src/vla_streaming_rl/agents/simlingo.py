@@ -388,8 +388,7 @@ class SimLingoAgent:
         return np.array([steer, gas_or_brake], dtype=np.float32)
 
     @torch.no_grad()
-    def _tick(self, input_data) -> dict:
-        """Pre-process sensor data, run the UKF, return DrivingInput kwargs."""
+    def _preprocess(self, input_data) -> dict:
         rgb = []
         for camera_pos in self.config.num_cameras:
             rgb_cam = "rgb_" + str(camera_pos)
@@ -507,7 +506,7 @@ class SimLingoAgent:
         """
         self._frame_step += 1
 
-        driving_input_kwargs = self._tick(input_data)
+        driving_input_kwargs = self._preprocess(input_data)
 
         model_input = DrivingInput(**driving_input_kwargs)
         # The network owns the VLM forward: ``infer`` runs it on the driving input
