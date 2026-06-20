@@ -93,9 +93,9 @@ class LiberoPi05Agent:
 
         # Current-chunk execution state.
         self._queue: collections.deque[np.ndarray] = collections.deque()
-        self._cur_inputs: dict | None = None
-        self._cur_actions: list[np.ndarray] = []
-        self._cur_rewards: list[float] = []
+        self._curr_inputs: dict | None = None
+        self._curr_actions: list[np.ndarray] = []
+        self._curr_rewards: list[float] = []
         # Raw ``(inputs, actions, rewards)`` of chunks completed in the ongoing
         # episode; turned into linked ``_ChunkRecord`` transitions at episode end.
         self._episode_chunks: list[tuple[dict, np.ndarray, np.ndarray]] = []
@@ -158,16 +158,16 @@ class LiberoPi05Agent:
         chunk = chunk.squeeze(0).float().cpu().numpy()
         self._value_report = infer_result.value_report
 
-        self._cur_inputs = inputs
-        self._cur_actions = []
-        self._cur_rewards = []
+        self._curr_inputs = inputs
+        self._curr_actions = []
+        self._curr_rewards = []
         self._queue = collections.deque(chunk)
 
     def _next_action(self) -> np.ndarray:
         action = np.clip(self._queue.popleft(), self._action_low, self._action_high).astype(
             np.float32
         )
-        self._cur_actions.append(action)
+        self._curr_actions.append(action)
         return action
 
     def _finalize_chunk(self) -> None:
@@ -178,17 +178,20 @@ class LiberoPi05Agent:
         dropped so both the flow-matching target and the per-step reward vector
         span the full prediction horizon.
         """
-        if self._cur_inputs is None:
+        if self._curr_inputs is None:
             return
-        if len(self._cur_actions) == self.chunk_size and len(self._cur_rewards) == self.chunk_size:
+        if (
+            len(self._curr_actions) == self.chunk_size
+            and len(self._curr_rewards) == self.chunk_size
+        ):
             self._episode_chunks.append(
                 (
-                    self._cur_inputs,
-                    np.stack(self._cur_actions).astype(np.float32),
-                    np.asarray(self._cur_rewards, dtype=np.float32),
+                    self._curr_inputs,
+                    np.stack(self._curr_actions).astype(np.float32),
+                    np.asarray(self._curr_rewards, dtype=np.float32),
                 )
             )
-        self._cur_inputs = None
+        self._curr_inputs = None
 
     # --- RL-agent protocol used by scripts/train.py ------------------------
 
@@ -220,7 +223,7 @@ class LiberoPi05Agent:
         del task_prompt
         # This reward is the consequence of the action returned last call, so it
         # belongs to the current (not-yet-finalized) chunk.
-        self._cur_rewards.append(float(reward))
+        self._curr_rewards.append(float(reward))
 
         if terminated or truncated:
             self._finalize_chunk()
@@ -239,7 +242,7 @@ class LiberoPi05Agent:
         action = self._next_action()
         return StepResult(
             action=action,
-            metrics={"chunk_reward": float(np.sum(self._cur_rewards))},
+            metrics={"chunk_reward": float(np.sum(self._curr_rewards))},
             panels=self._panels(),
         )
 
