@@ -91,7 +91,6 @@ class SimLingoAgent:
 
         torch.cuda.empty_cache()
         self._frame_step = -1
-        self.initialized = False
         self.device = torch.device("cuda")
         self.config = GlobalConfig()
         self.bias = {
@@ -120,7 +119,6 @@ class SimLingoAgent:
         self.stuck_detector = 0
         self.force_move = 0
 
-        self.ego_state_filter = EgoStateFilter(dt=1.0 / 20.0, state_log_maxlen=5)
         self.prompt_builder = PromptBuilder(
             config=self.config,
             tokenizer=network.tokenizer,
@@ -177,9 +175,6 @@ class SimLingoAgent:
         )
         self._current_action_taken: torch.Tensor = torch.zeros(ACTION_DIM, device=self.device)
 
-        # Re-run ``_init`` (rebuild the RoutePlanner from the new episode's
-        # route plan) on the next tick. Set on construction and by
-        # ``on_episode_end``; consumed by ``_maybe_handover_episode``.
         self._need_handover = True
         self._prev_action = torch.zeros(ACTION_DIM, device=self.device)
 
@@ -358,7 +353,8 @@ class SimLingoAgent:
             global_plan,
             global_plan_world_coord,
         )
-        self.initialized = False
+        self.ego_state_filter = EgoStateFilter(dt=1.0 / 20.0, state_log_maxlen=5)
+        self.control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
         self._need_handover = False
 
     # --- Per-tick inference ------------------------------------------------
@@ -511,14 +507,6 @@ class SimLingoAgent:
         """
         self._frame_step += 1
 
-        if not self.initialized:
-            self.initialized = True
-            control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
-            self.control = control
-            self._tick(input_data)  # seed UKF; output discarded since we return brake
-            return control
-
-        # _tick runs every step for GPS filtering + DrivingInput refresh.
         driving_input_kwargs = self._tick(input_data)
 
         model_input = DrivingInput(**driving_input_kwargs)
