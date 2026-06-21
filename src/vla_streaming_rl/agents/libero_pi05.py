@@ -9,66 +9,114 @@ from torch import nn, optim
 from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.libero_pi05_network import (
-    ACTION_KEY,
     OBS_IMAGE_AGENTVIEW,
     OBS_IMAGE_WRIST,
     OBS_STATE,
     TASK_KEY,
     LiberoPi05Network,
 )
-from vla_streaming_rl.replay_buffer import ReplayBufferData
+from vla_streaming_rl.replay_buffer import ReplayBuffer, ReplayBufferData
 
 
-class _ChunkRecord:
-    """One executed action chunk + the observation that produced it, as a fully
-    formed RL transition: the current obs ``inputs``, the executed chunk, the
-    per-env-step rewards/dones over the chunk, and the next chunk's obs
-    (``next_inputs``) for the TD bootstrap. Built only once the episode ends, so
-    every field — including ``next_inputs`` and the terminal ``dones`` — is known
-    and passed explicitly (see ``_end_episode``)."""
+def _build_obs_schema(batch: dict) -> tuple[list, int]:
+    """Record the (key, per-sample shape, dtype) of every tensor in a preprocessed
+    pi0.5 batch (B == 1), plus the total flat length. Used to pack the multimodal
+    observation into the project's tensor ``ReplayBuffer`` and unpack it back."""
+    schema = []
+    for key in sorted(batch.keys()):
+        value = batch[key]
+        if isinstance(value, torch.Tensor):
+            schema.append((key, tuple(value.shape[1:]), value.dtype))
+    flat_dim = sum(int(np.prod(shape)) for _, shape, _ in schema)
+    return schema, flat_dim
 
-    def __init__(
-        self,
-        inputs: dict,
-        actions: np.ndarray,
-        rewards: np.ndarray,
-        dones: np.ndarray,
-        next_inputs: dict,
-    ) -> None:
-        self.inputs = inputs
-        self.actions = actions
-        self.rewards = rewards
-        self.dones = dones
-        self.next_inputs = next_inputs
+
+def _pack_obs(batch: dict, schema: list) -> torch.Tensor:
+    """Flatten a single (B == 1) preprocessed pi0.5 batch into one float vector."""
+    return torch.cat([batch[key].reshape(-1).to(torch.float32) for key, _, _ in schema])
+
+
+def _unpack_obs(flat: torch.Tensor, schema: list) -> dict:
+    """Inverse of :func:`_pack_obs` for a batch of packed rows ``(B, flat_dim)`` →
+    a preprocessed pi0.5 batch of ``(B, *shape)`` tensors (dtypes restored)."""
+    batch_size = flat.shape[0]
+    batch = {}
+    offset = 0
+    for key, shape, dtype in schema:
+        n = int(np.prod(shape))
+        batch[key] = flat[:, offset : offset + n].reshape(batch_size, *shape).to(dtype)
+        offset += n
+    return batch
+
+
+def _window_to_loss_input(data: ReplayBufferData, schema: list) -> ReplayBufferData:
+    """Reshape a sampled window ``(B, chunk_size + 1, ...)`` into the inputs the
+    pi0.5 network's loss reads: ``observations = [cur_batch, next_batch]`` (the
+    window's first / last observation, unpacked), ``actions`` the executed
+    normalized chunk ``a_t..a_{t+H-1}`` (rows 1..H), and ``rewards`` / ``dones``
+    the per-step chunk vectors over the same rows."""
+    cur_batch = _unpack_obs(data.observations[:, 0], schema)
+    next_batch = _unpack_obs(data.observations[:, -1], schema)
+    return ReplayBufferData(
+        observations=[cur_batch, next_batch],
+        actions=data.actions[:, 1:],
+        rewards=data.rewards[:, 1:, 0],
+        dones=data.dones[:, 1:, 0],
+        obs_z=data.obs_z,
+        rnn_state=data.rnn_state,
+        log_probs=data.log_probs,
+        values=data.values,
+        action_token_ids=data.action_token_ids,
+        task_prompt_token_ids=data.task_prompt_token_ids,
+    )
 
 
 class LiberoPi05Agent:
+    """pi0.5 flow-matching VLA agent, switchable between off-policy and streaming
+    learning via ``learning_mode`` — exposing the same agent surface as every
+    other agent (``select_action`` / ``step`` / ``_step_offpolicy`` /
+    ``_step_streaming`` / ``_train_offpolicy`` / ``_store_transition`` / ``_act`` /
+    ``_preprocess`` / ``_to_env_action`` / ``_panels`` / ``on_episode_end``).
+
+    pi0.5 plans a ``chunk_size`` action chunk from one observation and executes it
+    open-loop; the agent stores one transition per *env step* in the project's
+    tensor ``ReplayBuffer`` (the multimodal observation is packed into the obs slot
+    via :func:`_pack_obs`). Training samples a ``chunk_size + 1`` window — the
+    chunk transition ``(s_t, a_{t:t+H}, r_{t:t+H}, s_{t+H})`` — so any window is a
+    valid off-policy transition (no fixed chunk boundaries) and the mid-chunk
+    sparse success reward is never dropped.
+    """
+
     def __init__(
         self,
         *,
         observation_space: gym.spaces.Box,
         action_space: gym.spaces.Box,
         network: LiberoPi05Network,
+        learning_mode: str,
         buffer_size: int,
         batch_size: int,
         learning_starts: int,
         actor_lr: float,
         critic_lr: float,
         max_grad_norm: float,
+        et_lambda: float,
+        gamma: float,
     ) -> None:
-        # The wrist camera, proprio and instruction pi0.5 needs arrive through
-        # the env's ``info`` dict (LiberoEnv publishes them), so the agent never
-        # holds the env. ``_last_wrist`` backs the render panel; seed it with a
-        # zero frame of the observation shape so the panel has a constant shape
-        # before the first observation.
-        self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
+        if learning_mode not in ("off_policy", "streaming"):
+            raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
+        self.learning_mode = learning_mode
+
         self.network = network
         self.preprocessor = network.preprocessor
         self.postprocessor = network.postprocessor
         self.device = torch.device(network.cfg.device)
         self.chunk_size = network.chunk_size
         self.action_dim = network.action_dim
+        # A training transition spans the chunk plus the bootstrap state.
+        self._seq_len = self.chunk_size + 1
 
+        self.buffer_size = int(buffer_size)
         self.batch_size = int(batch_size)
         self.learning_starts = int(learning_starts)
         self.max_grad_norm = float(max_grad_norm)
@@ -77,109 +125,48 @@ class LiberoPi05Agent:
         self._action_high = action_space.high
 
         # Separate optimizers for the policy μ (action expert) and the injected
-        # critic, mirroring SimLingoAgent — the actor LR is tiny so fine-tuning
-        # the expert does not wash out the pretrained flow.
-        self.actor_optimizer = optim.AdamW(network.actor_parameters, lr=actor_lr, weight_decay=0.0)
-        self.critic_optimizer = optim.AdamW(
-            network.critic.parameters(), lr=critic_lr, weight_decay=0.0
-        )
+        # critic. The critic uses AdamET (eligibility traces) in streaming mode,
+        # AdamW for off-policy; the actor is always AdamW with a tiny LR so
+        # fine-tuning the expert does not wash out the pretrained flow.
+        from vla_streaming_rl.optimizers.adam_et import AdamET
 
-        # Dummy tensor for the InferInput / ReplayBufferData slots pi0.5 does not
-        # use (recurrent state, encoded obs, log-probs, token ids …): pi0.5's
-        # multimodal observation rides ``s_seq`` / ``observations`` instead.
+        self.actor_optimizer = optim.AdamW(network.actor_parameters, lr=actor_lr, weight_decay=0.0)
+        if learning_mode == "streaming":
+            self.critic_optimizer = AdamET(
+                network.critic.parameters(), lr=critic_lr, gamma=gamma, et_lambda=et_lambda
+            )
+        else:
+            self.critic_optimizer = optim.AdamW(
+                network.critic.parameters(), lr=critic_lr, weight_decay=0.0
+            )
+
+        # Dummy tensor for the InferInput / ReplayBuffer slots pi0.5 does not use
+        # (recurrent state, encoded obs, log-probs, token ids …): pi0.5's
+        # multimodal observation rides the packed obs slot instead.
         self._dummy = torch.zeros(1, device=self.device)
 
-        self._buffer: collections.deque[_ChunkRecord] = collections.deque(maxlen=int(buffer_size))
+        # The replay buffer is created lazily on the first store, once the packed
+        # observation width is known from a real preprocessed batch.
+        self.rb: ReplayBuffer | None = None
+        self._obs_schema: list | None = None
 
-        # Current-chunk execution state.
-        self._queue: collections.deque[np.ndarray] = collections.deque()
-        self._curr_inputs: dict | None = None
-        self._curr_actions: list[np.ndarray] = []
-        self._curr_rewards: list[float] = []
-        # Raw ``(inputs, actions, rewards)`` of chunks completed in the ongoing
-        # episode; turned into linked ``_ChunkRecord`` transitions at episode end.
-        self._episode_chunks: list[tuple[dict, np.ndarray, np.ndarray]] = []
-        # Latest critic read-out, for the render/telemetry path.
+        # Open-loop chunk execution: the env actions to play and the matching
+        # normalized actions to store, filled together when a chunk is planned.
+        self._env_queue: collections.deque = collections.deque()
+        self._norm_queue: collections.deque = collections.deque()
+        # ``action_{t-1}`` (normalized) stored with state t; advanced to the action
+        # executed this step after acting (project buffer convention).
+        self._prev_action = torch.zeros(self.action_dim, device=self.device)
+        self._current_action_taken = torch.zeros(self.action_dim, device=self.device)
+
+        # Latest preprocessed batch (cached by ``_preprocess`` for ``_act``) and
+        # the wrist frame backing the render panel.
+        self._current_batch: dict | None = None
+        self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
+        # Latest critic read-out, for the telemetry path.
         self._value_report: dict[str, float] = {"value": 0.0}
 
-    def _raw_obs_dict(self, inputs: dict) -> dict:
-        """Build the raw observation dict the pi0.5 preprocessor expects."""
-        agentview = torch.from_numpy(inputs["agentview_uint8"]).permute(2, 0, 1).float() / 255.0
-        wrist = torch.from_numpy(inputs["wrist_uint8"]).permute(2, 0, 1).float() / 255.0
-        return {
-            OBS_IMAGE_AGENTVIEW: agentview,
-            OBS_IMAGE_WRIST: wrist,
-            OBS_STATE: torch.from_numpy(inputs["proprio"]).float(),
-            TASK_KEY: inputs["instruction"],
-        }
-
-    def _plan_chunk(self, obs: np.ndarray, info: dict) -> None:
-        """Run pi0.5 inference, capture inputs, and fill the action queue.
-
-        ``network.infer`` returns the *normalized* action chunk plus the critic's
-        value report from a single prefix forward; the postprocessor un-normalizes
-        the chunk into the env's action space.
-        """
-        agentview_uint8 = (obs * 255.0).astype(np.uint8).transpose(1, 2, 0)
-        wrist_uint8 = info["wrist_image"].copy()
-        self._last_wrist = wrist_uint8
-        inputs = {
-            "agentview_uint8": agentview_uint8,
-            "wrist_uint8": wrist_uint8,
-            "proprio": info["proprio"].copy(),
-            "instruction": info["task_prompt"],
-        }
-        processed = self.preprocessor(self._raw_obs_dict(inputs))
-        infer_result = self.network.infer(
-            InferInput(
-                s_seq=processed,
-                obs_z_seq=self._dummy,
-                a_seq=self._dummy,
-                r_seq=self._dummy,
-                rnn_state=self._dummy,
-                task_prompts=[],
-            )
-        )
-        chunk = self.postprocessor(infer_result.action)  # (1, chunk_size, action_dim)
-        chunk = chunk.squeeze(0).float().cpu().numpy()
-        self._value_report = infer_result.value_report
-
-        self._curr_inputs = inputs
-        self._curr_actions = []
-        self._curr_rewards = []
-        self._queue = collections.deque(chunk)
-
-    def _next_action(self) -> np.ndarray:
-        action = np.clip(self._queue.popleft(), self._action_low, self._action_high).astype(
-            np.float32
-        )
-        self._curr_actions.append(action)
-        return action
-
-    def _finalize_chunk(self) -> None:
-        """Store the just-executed chunk as a pending episode record.
-
-        Only complete chunks (one executed action *and* one reward per predicted
-        step) become training targets; a partial trailing chunk at episode end is
-        dropped so both the flow-matching target and the per-step reward vector
-        span the full prediction horizon.
-        """
-        if self._curr_inputs is None:
-            return
-        if (
-            len(self._curr_actions) == self.chunk_size
-            and len(self._curr_rewards) == self.chunk_size
-        ):
-            self._episode_chunks.append(
-                (
-                    self._curr_inputs,
-                    np.stack(self._curr_actions).astype(np.float32),
-                    np.asarray(self._curr_rewards, dtype=np.float32),
-                )
-            )
-        self._curr_inputs = None
-
-    # --- RL-agent protocol used by scripts/train.py ------------------------
+    # --- agent surface -----------------------------------------------------
 
     def select_action(
         self,
@@ -191,10 +178,11 @@ class LiberoPi05Agent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        del global_step, reward, terminated, truncated, task_prompt
-        self._plan_chunk(obs, info)
-        action = self._next_action()
-        return StepResult(action=action, metrics={}, panels=self._panels())
+        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
+        action, act_metrics = self._act(global_step, obs, task_prompt, info)
+        metrics.update(act_metrics)
+        self._prev_action = self._current_action_taken
+        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     def step(
         self,
@@ -206,158 +194,196 @@ class LiberoPi05Agent:
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        del task_prompt
-        # This reward is the consequence of the action returned last call, so it
-        # belongs to the current (not-yet-finalized) chunk.
-        self._curr_rewards.append(float(reward))
-
-        if terminated or truncated:
-            self._finalize_chunk()
-            metrics = self._end_episode(global_step, terminated)
-            metrics.update(self._value_report)
-            return StepResult(
-                action=np.zeros(self.action_dim, dtype=np.float32),
-                metrics=metrics,
-                panels=self._panels(),
+        if self.learning_mode == "off_policy":
+            return self._step_offpolicy(
+                global_step, obs, reward, terminated, truncated, task_prompt, info
             )
-
-        if not self._queue:
-            self._finalize_chunk()
-            self._plan_chunk(obs, info)
-
-        action = self._next_action()
-        return StepResult(
-            action=action,
-            metrics={"chunk_reward": float(np.sum(self._curr_rewards))},
-            panels=self._panels(),
+        return self._step_streaming(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
         )
+
+    def _step_offpolicy(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> StepResult:
+        train_metrics = self._train_offpolicy(global_step)
+        result = self.select_action(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
+        )
+        result.metrics.update(train_metrics)
+        return result
+
+    def _step_streaming(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> StepResult:
+        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
+        action, act_metrics = self._act(global_step, obs, task_prompt, info)
+        metrics.update(act_metrics)
+        self._prev_action = self._current_action_taken
+
+        # Online TD(λ): train on the latest chunk-window once one exists.
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        if curr_size >= self._seq_len:
+            self.network.policy.train()
+            data = _window_to_loss_input(self.rb.get_latest(self._seq_len), self._obs_schema)
+            result = self.network.infer_and_compute_loss(data)
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            result.et_info.actor_entropy_loss.backward(retain_graph=True)
+            result.et_info.neg_value.backward()
+            nn.utils.clip_grad_norm_(self.network.actor_parameters, self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.max_grad_norm)
+            self.actor_optimizer.step()
+            self.critic_optimizer.step(delta=result.et_info.delta, reset=terminated or truncated)
+            metrics.update(result.loss_result.info)
+
+        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
+        # Drop any partially-executed chunk so the next episode plans fresh.
+        self._env_queue.clear()
+        self._norm_queue.clear()
         return {}
 
-    # --- transition linking + training -------------------------------------
+    # --- training ----------------------------------------------------------
 
-    def _end_episode(self, global_step: int, terminated: bool) -> dict:
-        """Link this episode's chunks into TD transitions, push to the buffer,
-        then run a training update.
-
-        Each chunk's ``next_inputs`` points at the next chunk's observation. The
-        final chunk has no successor: on a true ``terminated`` it is marked
-        terminal (last-step done = 1 → bootstrap masked); on truncation it
-        bootstraps from its own state (``next_inputs = inputs``), the standard
-        no-true-terminal approximation.
-        """
-        chunks = self._episode_chunks
-        for i, (inputs, actions, rewards) in enumerate(chunks):
-            dones = np.zeros(self.chunk_size, dtype=np.float32)
-            if i + 1 < len(chunks):
-                next_inputs = chunks[i + 1][0]
-            else:
-                next_inputs = inputs
-                if terminated:
-                    dones[-1] = 1.0
-            self._buffer.append(
-                _ChunkRecord(
-                    inputs=inputs,
-                    actions=actions,
-                    rewards=rewards,
-                    dones=dones,
-                    next_inputs=next_inputs,
-                )
-            )
-        self._episode_chunks = []
-        return self._train(global_step)
-
-    def _collate(self, records: list[_ChunkRecord]) -> ReplayBufferData:
-        """Preprocess each record's current + next observation into the
-        ``ReplayBufferData`` ``compute_loss`` consumes.
-
-        pi0.5's multimodal observation cannot live in a tensor buffer, so
-        ``observations`` is a length-2 ``[cur_batch, next_batch]`` list of
-        preprocessed pi0.5 batches. ``cur`` carries the executed (real-space)
-        action under ``ACTION_KEY`` so the preprocessor normalizes it into pi0.5's
-        action space — that normalized chunk (read back as ``actions``) is what
-        the critic and the DACER2 actor operate on. ``next`` is observation-only
-        (the bootstrap re-samples π(s')). The remaining slots are unused dummies.
-        """
-        curr_list, next_list = [], []
-        for r in records:
-            curr = self._raw_obs_dict(r.inputs)
-            curr[ACTION_KEY] = torch.from_numpy(r.actions).float().unsqueeze(0)
-            curr_list.append(self.preprocessor(curr))
-            next_list.append(self.preprocessor(self._raw_obs_dict(r.next_inputs)))
-
-        curr_batch = _stack_processed(curr_list)
-        next_batch = _stack_processed(next_list)
-        rewards = torch.tensor(
-            np.stack([r.rewards for r in records]), device=self.device, dtype=torch.float32
-        )
-        dones = torch.tensor(
-            np.stack([r.dones for r in records]), device=self.device, dtype=torch.float32
-        )
-        return ReplayBufferData(
-            observations=[curr_batch, next_batch],
-            actions=curr_batch[ACTION_KEY],
-            rewards=rewards,
-            dones=dones,
-            obs_z=self._dummy,
-            rnn_state=self._dummy,
-            log_probs=self._dummy,
-            values=self._dummy,
-            action_token_ids=self._dummy,
-            task_prompt_token_ids=self._dummy,
-        )
-
-    def _train(self, global_step: int) -> dict:
-        if global_step < self.learning_starts or len(self._buffer) < self.batch_size:
+    def _train_offpolicy(self, global_step: int) -> dict:
+        if self.rb is None or global_step < self.learning_starts:
+            return {}
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        if curr_size <= self._seq_len or curr_size < self.batch_size:
             return {}
 
-        idx = np.random.randint(0, len(self._buffer), size=self.batch_size)
-        records = [self._buffer[i] for i in idx]
-        data = self._collate(records)
-
         self.network.policy.train()
+        data = _window_to_loss_input(self.rb.sample(self.batch_size), self._obs_schema)
         result = self.network.compute_loss(data)
 
-        # One backward over the combined critic+actor loss, then step each
-        # optimizer (the DACER2 actor loss froze the critic during its Q forwards,
-        # so the gradients land on disjoint params) — same pattern as
-        # SimLingoAgent._train_offpolicy.
-        self.critic_optimizer.zero_grad(set_to_none=True)
         self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
         result.loss.backward()
-        critic_grad = nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.max_grad_norm)
         actor_grad = nn.utils.clip_grad_norm_(self.network.actor_parameters, self.max_grad_norm)
-        self.critic_optimizer.step()
+        critic_grad = nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.max_grad_norm)
         self.actor_optimizer.step()
-
+        self.critic_optimizer.step()
         return {
             **result.info,
-            "losses/critic_grad_norm": float(critic_grad),
             "losses/actor_grad_norm": float(actor_grad),
-            "losses/buffer_size": float(len(self._buffer)),
+            "losses/critic_grad_norm": float(critic_grad),
         }
 
-    # --- render ------------------------------------------------------------
+    # --- per-tick machinery ------------------------------------------------
 
-    def _panels(self) -> dict:
-        """Wrist-camera panel (constant shape across the run)."""
+    def _store_transition(
+        self,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> dict:
+        """Preprocess + pack the current observation and store one per-env-step
+        transition ``(s_t, a_{t-1}, r_t, done_t)``. Creates the replay buffer on
+        the first call, once the packed-observation width is known."""
+        del task_prompt
+        packed = self._preprocess(obs, info, task_prompt=info["task_prompt"])
+        if self.rb is None:
+            self._obs_schema, flat_dim = _build_obs_schema(self._current_batch)
+            self.rb = ReplayBuffer(
+                size=self.buffer_size,
+                seq_len=self._seq_len,
+                obs_shape=(flat_dim,),
+                obs_z_shape=(1,),
+                rnn_state_shape=(1,),
+                action_shape=(self.action_dim,),
+                output_device=self.device,
+                storage_device=torch.device("cpu"),
+                max_new_tokens=0,
+                max_prompt_tokens=0,
+                pad_token_id=0,
+            )
+        self.rb.add(
+            packed,
+            self._dummy,
+            reward,
+            terminated or truncated,
+            self._dummy,
+            self._prev_action,
+            0.0,
+            0.0,
+            [],
+            [],
+        )
+        return {}
+
+    @torch.no_grad()
+    def _act(
+        self, global_step: int, obs: np.ndarray, task_prompt: str, info: dict
+    ) -> tuple[np.ndarray, dict]:
+        """Open-loop chunk execution: plan a fresh chunk when the queue is empty
+        (pi0.5 inference → normalized chunk + un-normalized env chunk), then pop
+        the next action. Caches the executed *normalized* action for the buffer."""
+        del global_step, obs, task_prompt, info
+        if not self._env_queue:
+            infer_result = self.network.infer(
+                InferInput(
+                    s_seq=self._current_batch,
+                    obs_z_seq=self._dummy,
+                    a_seq=self._dummy,
+                    r_seq=self._dummy,
+                    rnn_state=self._dummy,
+                    task_prompts=[],
+                )
+            )
+            self._value_report = infer_result.value_report
+            norm_chunk = infer_result.action.squeeze(0)  # (chunk_size, action_dim), normalized
+            env_chunk = self.postprocessor(infer_result.action).squeeze(0).float().cpu().numpy()
+            self._env_queue.extend(env_chunk)
+            self._norm_queue.extend(norm_chunk)
+
+        self._current_action_taken = self._norm_queue.popleft()
+        env_action = self._to_env_action(self._env_queue.popleft())
+        return env_action, dict(self._value_report)
+
+    def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
+        """Clip an un-normalized pi0.5 action into the env's action space."""
+        return np.clip(net_action, self._action_low, self._action_high).astype(np.float32)
+
+    def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> torch.Tensor:
+        """Build pi0.5's raw multimodal observation, run the (normalizing,
+        tokenizing) preprocessor, cache the batch for ``_act`` and the wrist frame
+        for the panel, and return the packed obs vector for the replay buffer."""
+        agentview = torch.from_numpy((obs * 255.0).astype(np.uint8)).float() / 255.0
+        wrist_uint8 = info["wrist_image"].copy()
+        self._last_wrist = wrist_uint8
+        wrist = torch.from_numpy(wrist_uint8).permute(2, 0, 1).float() / 255.0
+        raw_obs = {
+            OBS_IMAGE_AGENTVIEW: agentview,
+            OBS_IMAGE_WRIST: wrist,
+            OBS_STATE: torch.from_numpy(info["proprio"]).float(),
+            TASK_KEY: task_prompt,
+        }
+        batch = self.preprocessor(raw_obs)
+        self._current_batch = batch
+        if self._obs_schema is None:
+            schema, _ = _build_obs_schema(batch)
+            return _pack_obs(batch, schema)
+        return _pack_obs(batch, self._obs_schema)
+
+    def _panels(self, obs: np.ndarray, reward: float) -> dict:
+        del obs, reward
         return {"wrist": self._last_wrist}
-
-
-def _stack_processed(processed_list: list[dict]) -> dict:
-    """Concatenate a list of single-sample preprocessed batches along dim 0."""
-    batch = {}
-    for key, value in processed_list[0].items():
-        if isinstance(value, torch.Tensor):
-            batch[key] = torch.cat([p[key] for p in processed_list], dim=0)
-        else:
-            batch[key] = [item for p in processed_list for item in _as_list(p[key])]
-    return batch
-
-
-def _as_list(value) -> list:
-    if isinstance(value, list):
-        return value
-    return [value]

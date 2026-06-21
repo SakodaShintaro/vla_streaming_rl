@@ -52,6 +52,7 @@ from torch.nn import functional as F
 
 from vla_streaming_rl.networks.interface import (
     ActivationFeatures,
+    EligibilityTraceInfo,
     InferInput,
     InferLossResult,
     InferResult,
@@ -246,14 +247,58 @@ class LiberoPi05Network(NetworkInterface):
         return LossResult(loss=self.critic_loss_weight * critic_loss + actor_loss, info=info)
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
-        # Streaming / eligibility-trace training is not supported for the pi0.5
-        # agent (it trains off-policy on random replay batches). The contract
-        # method exists so the network is a full NetworkInterface citizen.
-        del data
-        raise NotImplementedError(
-            "LiberoPi05Network supports off-policy compute_loss only, not the "
-            "streaming infer_and_compute_loss path."
+        """Streaming TD(λ) variant of ``compute_loss``: the same critic + DACER2
+        actor loss on the latest chunk window, plus the eligibility-trace inputs
+        the agent's AdamET critic needs — the actor loss, ``-Q(s, a)`` (the value
+        whose gradient feeds the trace), and the TD error δ."""
+        cur_batch, next_batch = data.observations
+        action_chunk = data.actions
+        chunk_rewards = data.rewards
+        chunk_dones = data.dones
+
+        state, prefix_pad_masks, past_key_values = self._encode_state(cur_batch)
+
+        with torch.no_grad():
+            next_state, next_ppm, next_pkv = self._encode_state(next_batch)
+            next_action = self._sample_action_chunk(next_ppm, next_pkv, self.actor_denoising_steps)
+            next_output = self.critic(next_state, next_action).output
+        target_value = self.critic.compute_target_value(next_output, chunk_rewards, chunk_dones)
+        critic_loss, critic_info = self.critic.compute_critic_loss(
+            state, action_chunk, target_value, self.detach_critic
         )
+
+        actor_loss, actor_info = self._dacer2_actor_loss(state, prefix_pad_masks, past_key_values)
+
+        # AdamET trace inputs: actor loss → expert, -Q(s, a) → critic, TD error.
+        neg_value = -self.critic.to_value(self.critic(state, action_chunk).output).view(-1).mean()
+        et_info = EligibilityTraceInfo(
+            actor_entropy_loss=actor_loss, neg_value=neg_value, delta=critic_info["delta"]
+        )
+        info = {
+            "losses/critic_loss": critic_info["critic_loss"],
+            "losses/q_value": critic_info["curr_critic_value"],
+            "losses/target_q": critic_info["target_value"],
+            "losses/value_range": critic_info["value_range"],
+            "losses/delta": critic_info["delta"],
+            **actor_info,
+        }
+        loss_result = LossResult(loss=self.critic_loss_weight * critic_loss + actor_loss, info=info)
+
+        with torch.no_grad():
+            value_report = self.critic.value_report(self.critic(state, action_chunk).output)
+        infer_result = InferResult(
+            action=action_chunk,
+            value_report=value_report,
+            rnn_state=torch.zeros(1),
+            next_image=np.zeros((1, 1, 3), dtype=np.uint8),
+            next_reward=0.0,
+            action_token_ids=[],
+            features=state,
+            activations=ActivationFeatures(
+                state=state, actor=action_chunk, critic=state, state_predictor=state
+            ),
+        )
+        return InferLossResult(infer_result=infer_result, loss_result=loss_result, et_info=et_info)
 
     # --- pi0.5 internals (private) -----------------------------------------
 

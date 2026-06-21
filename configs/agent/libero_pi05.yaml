@@ -24,6 +24,7 @@ defaults:
   - _self_
 
 agent_type: libero_pi05
+learning_mode: off_policy
 network_class: libero_pi05
 
 # Overrides consumed by LiberoPi05Agent / LiberoPi05Network.
@@ -33,8 +34,10 @@ batch_size: 16
 # Warmup before the first update; also ensures the buffer holds a few episodes
 # of chunk transitions before TD learning starts.
 learning_starts: 4000
-# Replay holds linked chunk transitions (agentview + wrist uint8 + proprio +
-# instruction + executed chunk + per-step rewards/dones + next obs).
+# Replay holds one packed transition PER ENV STEP (preprocessed pi0.5 batch +
+# executed normalized action + reward + done); training samples a chunk_size+1
+# sliding window, so any window is a valid chunk transition (no fixed
+# boundaries). Sized in steps — keep modest since each row packs two images.
 buffer_size: 8000
 
 # The critic scores the full pi0.5 action chunk, so the value-head horizon must
