@@ -1,6 +1,6 @@
 # @package _global_
 env_id: LIBERO-v0
-step_limit: 50_000
+step_limit: 100_000
 image_save_interval: 10
 
 env_factory:
@@ -17,7 +17,7 @@ env_factory:
   #   reset, to break the memorized init states that saturate the success rate.
   #   0.0 = stock behavior; 0.05 rad (~3°) is a mild starting point.
   task_suite_name: libero_spatial
-  task_id: -1
+  task_id: 0
   resolution: 256
   settle_steps: 10
   horizon: 300

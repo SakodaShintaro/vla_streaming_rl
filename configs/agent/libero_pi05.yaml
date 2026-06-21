@@ -30,10 +30,10 @@ network_class: libero_pi05
 # Overrides consumed by LiberoPi05Agent / LiberoPi05Network.
 image_save_interval: 50
 print_interval: 1
-batch_size: 16
+batch_size: 1
 # Warmup before the first update; also ensures the buffer holds a few episodes
 # of chunk transitions before TD learning starts.
-learning_starts: 4000
+learning_starts: 10000
 # Replay holds one packed transition PER ENV STEP (preprocessed pi0.5 batch +
 # executed normalized action + reward + done); training samples a chunk_size+1
 # sliding window, so any window is a valid chunk transition (no fixed
