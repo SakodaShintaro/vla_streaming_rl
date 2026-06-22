@@ -4,6 +4,7 @@ import collections
 import gymnasium as gym
 import numpy as np
 import torch
+from PIL import Image
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
@@ -15,6 +16,7 @@ from vla_streaming_rl.networks.libero_pi05_network import (
     TASK_KEY,
     LiberoPi05Network,
 )
+from vla_streaming_rl.networks.vlac import VlacRewardRelabeler
 from vla_streaming_rl.replay_buffer import ReplayBuffer, ReplayBufferData
 
 
@@ -102,6 +104,7 @@ class LiberoPi05Agent:
         max_grad_norm: float,
         et_lambda: float,
         gamma: float,
+        relabeler: VlacRewardRelabeler | None,
     ) -> None:
         if learning_mode not in ("off_policy", "streaming"):
             raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
@@ -165,6 +168,14 @@ class LiberoPi05Agent:
         self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
         # Latest critic read-out, for the telemetry path.
         self._value_report: dict[str, float] = {"value": 0.0}
+
+        # VLAC dense-reward relabeling: collect this episode's agentview frames and
+        # the replay-buffer row of its first transition, then add the PBRS dense
+        # reward into those rows at episode end (disabled when relabeler is None).
+        self._relabeler = relabeler
+        self._episode_frames: list[Image.Image] = []
+        self._episode_start_idx: int | None = None
+        self._episode_task: str = ""
 
     # --- agent surface -----------------------------------------------------
 
@@ -257,7 +268,30 @@ class LiberoPi05Agent:
         # Drop any partially-executed chunk so the next episode plans fresh.
         self._env_queue.clear()
         self._norm_queue.clear()
-        return {}
+        metrics = self._relabel_episode()
+        self._episode_frames = []
+        self._episode_start_idx = None
+        return metrics
+
+    def _relabel_episode(self) -> dict:
+        """Add VLAC PBRS dense reward into the just-finished episode's replay rows.
+
+        ``dense[t]`` shapes the transition ``s_t -> s_{t+1}``, so it is added to
+        the reward stored at the arrival row ``start + t + 1`` (the buffer's
+        per-step convention)."""
+        if self._relabeler is None or len(self._episode_frames) < 2:
+            return {}
+        dense = self._relabeler.dense_rewards(self._episode_frames, self._episode_task)
+        rewards = self.rb.rewards
+        size = self.rb.size
+        for offset, value in enumerate(dense):
+            row = (self._episode_start_idx + offset + 1) % size
+            rewards[row, 0] += float(value)
+        return {
+            "vlac/dense_reward_sum": float(dense.sum()),
+            "vlac/dense_reward_max": float(dense.max()),
+            "vlac/dense_reward_min": float(dense.min()),
+        }
 
     # --- training ----------------------------------------------------------
 
@@ -316,6 +350,11 @@ class LiberoPi05Agent:
                 max_prompt_tokens=0,
                 pad_token_id=0,
             )
+        if self._relabeler is not None:
+            if not self._episode_frames:
+                self._episode_start_idx = self.rb.idx
+                self._episode_task = info["task_prompt"]
+            self._episode_frames.append(Image.fromarray((obs * 255.0).astype(np.uint8)))
         self.rb.add(
             packed,
             self._dummy,

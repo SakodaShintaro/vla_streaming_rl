@@ -67,6 +67,7 @@ dependencies = [
     "pre-commit>=4.6.0",
     "lerobot[libero,pi]>=0.5.1",
     "libero>=0.1.1",
+    "ms-swift>=4.2",
 ]
 
 [build-system]
@@ -105,6 +106,10 @@ torchvision = { index = "pytorch-cu128" }
 [tool.ruff]
 line-length = 100
 src = ["src"]
+extend-exclude = [
+    "src/vla_streaming_rl/networks/vlac/evo_vlac",
+    "src/vla_streaming_rl/networks/vlac/model_patches",
+]
 
 [tool.ruff.lint]
 select = ["I", "F"]

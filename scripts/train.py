@@ -245,6 +245,26 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     elif args.agent_type == "libero_pi05":
         from vla_streaming_rl.agents.libero_pi05 import LiberoPi05Agent
 
+        relabeler = None
+        if args.vlac.enabled:
+            from vla_streaming_rl.networks.vlac import VlacRewardRelabeler, load_vlac_critic
+
+            critic = load_vlac_critic(
+                model_path=args.vlac.model_path,
+                device_map=args.vlac.device_map,
+                tag="critic",
+                temperature=args.vlac.temperature,
+                top_k=args.vlac.top_k,
+            )
+            relabeler = VlacRewardRelabeler(
+                critic=critic,
+                skip=args.vlac.skip,
+                alpha=args.vlac.alpha,
+                gamma=args.vlac.gamma,
+                value_scale=args.vlac.value_scale,
+                batch_num=args.vlac.batch_num,
+            )
+
         agent = LiberoPi05Agent(
             observation_space=env.observation_space,
             action_space=env.action_space,
@@ -258,6 +278,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             max_grad_norm=args.max_grad_norm,
             et_lambda=args.et_lambda,
             gamma=args.gamma,
+            relabeler=relabeler,
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
