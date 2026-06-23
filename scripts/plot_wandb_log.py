@@ -78,9 +78,7 @@ def load_history(wandb_file: Path) -> dict[str, np.ndarray]:
     return columns
 
 
-def episode_boundaries(
-    history: dict[str, np.ndarray], x_key: str, marker_key: str
-) -> np.ndarray:
+def episode_boundaries(history: dict[str, np.ndarray], x_key: str, marker_key: str) -> np.ndarray:
     """x positions where an episode ended.
 
     The trainer logs per-episode summaries (e.g. ``episodic_return``) in a
@@ -95,9 +93,7 @@ def episode_boundaries(
     return x[rows]
 
 
-def split_by_episode(
-    gs: np.ndarray, y: np.ndarray, boundaries: np.ndarray
-) -> list[np.ndarray]:
+def split_by_episode(gs: np.ndarray, y: np.ndarray, boundaries: np.ndarray) -> list[np.ndarray]:
     """Split the per-step series ``y`` (logged at global steps ``gs``) into one
     array per episode, using the episode-end global steps ``boundaries``.
 
@@ -305,7 +301,7 @@ def plot_calibration_per_gamma(
     out_dir = args.out_dir if args.out_dir is not None else args.run_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     for gamma, _ in gamma_keys:
-        per_step_key = f"value_g{gamma:.3f}"
+        per_step_key = f"value_g{gamma:.4f}"
         if per_step_key in history:
             q_key = per_step_key
         else:
@@ -315,8 +311,13 @@ def plot_calibration_per_gamma(
                 f"falling back to gamma-mean 'value' (Q not per-gamma)"
             )
         _render_calibration(
-            args, history, x, x_key, q_key=q_key, gamma=gamma,
-            output=out_dir / f"calibration_g{gamma:.3f}.png",
+            args,
+            history,
+            x,
+            x_key,
+            q_key=q_key,
+            gamma=gamma,
+            output=out_dir / f"calibration_g{gamma:.4f}.png",
         )
 
 
@@ -376,7 +377,12 @@ def _render_calibration(
     fig.colorbar(sm, ax=ax1, label="episode id")
 
     (gap_line,) = ax2.plot(
-        range(n), gaps, marker="o", markersize=3, linewidth=1.0, color="tab:blue",
+        range(n),
+        gaps,
+        marker="o",
+        markersize=3,
+        linewidth=1.0,
+        color="tab:blue",
         label="mean(Q - return)",
     )
     ax2.axhline(0.0, color="k", linewidth=0.8)
@@ -393,9 +399,7 @@ def _render_calibration(
         scores = marker[~np.isnan(marker)]
         if len(scores):
             ax2b = ax2.twinx()
-            ax2b.plot(
-                range(len(scores)), scores, color="tab:red", alpha=0.25, linewidth=0.8
-            )
+            ax2b.plot(range(len(scores)), scores, color="tab:red", alpha=0.25, linewidth=0.8)
             (score_line,) = ax2b.plot(
                 range(len(scores)),
                 smooth(scores, args.score_smooth),
@@ -408,9 +412,7 @@ def _render_calibration(
             handles.append(score_line)
     ax2.legend(handles=handles, loc="upper left")
 
-    fig.suptitle(
-        f"{args.run_dir.name} — Q calibration ({q_key}, γ={gamma:g}, {n} episodes)"
-    )
+    fig.suptitle(f"{args.run_dir.name} — Q calibration ({q_key}, γ={gamma:g}, {n} episodes)")
     fig.tight_layout()
     fig.savefig(output, dpi=120)
     print(f"Saved {output}")
@@ -488,8 +490,7 @@ def plot_per_gamma(
     if not gamma_keys:
         avail = sorted(k for k in history if "_g" in k)
         raise SystemExit(
-            f"No per-gamma series found for base '{args.per_gamma}'. "
-            f"Keys containing '_g': {avail}"
+            f"No per-gamma series found for base '{args.per_gamma}'. Keys containing '_g': {avail}"
         )
 
     cmap = plt.cm.viridis
@@ -505,7 +506,11 @@ def plot_per_gamma(
     if not args.no_episode_lines:
         for i, xb in enumerate(episode_boundaries(history, x_key, args.episode_key)):
             ax.axvline(
-                xb, color="gray", linestyle="--", linewidth=0.8, alpha=0.4,
+                xb,
+                color="gray",
+                linestyle="--",
+                linewidth=0.8,
+                alpha=0.4,
                 label="episode boundary" if i == 0 else None,
             )
 
