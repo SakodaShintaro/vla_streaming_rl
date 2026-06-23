@@ -231,11 +231,11 @@ def video_trajectory(
     # 尝试加载字体
     try:
         font = ImageFont.truetype("arial.ttf", 14)  # 稍微缩小字体
-        small_font = ImageFont.truetype("arial.ttf", 12)
+        ImageFont.truetype("arial.ttf", 12)
         ref_font = ImageFont.truetype("arial.ttf", 16)
     except IOError:
         font = ImageFont.load_default()
-        small_font = ImageFont.load_default()
+        ImageFont.load_default()
         ref_font = ImageFont.load_default()
 
     try:
@@ -603,13 +603,13 @@ def visualize_le(
 
     ### 尝试加载字体
     try:
-        font = ImageFont.truetype("arial.ttf", 14)  # 稍微缩小字体
-        small_font = ImageFont.truetype("arial.ttf", 12)
-        ref_font = ImageFont.truetype("arial.ttf", 16)
+        ImageFont.truetype("arial.ttf", 14)  # 稍微缩小字体
+        ImageFont.truetype("arial.ttf", 12)
+        ImageFont.truetype("arial.ttf", 16)
     except IOError:
-        font = ImageFont.load_default()
-        small_font = ImageFont.load_default()
-        ref_font = ImageFont.load_default()
+        ImageFont.load_default()
+        ImageFont.load_default()
+        ImageFont.load_default()
 
     try:
         # 对每一帧图片生成视频帧
@@ -617,7 +617,7 @@ def visualize_le(
             # 创建一个空白画布并粘贴画面
             frame = Image.new("RGB", (frame_width, frame_height), color="white")
             frame.paste(resized_images[i], (0, 0))
-            draw = ImageDraw.Draw(frame)
+            ImageDraw.Draw(frame)
 
             # 计算当前帧在value_list中的对应索引 - 关键修改点
             value_idx = i // skip - skip_step

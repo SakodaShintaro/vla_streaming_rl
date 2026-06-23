@@ -106,10 +106,6 @@ torchvision = { index = "pytorch-cu128" }
 [tool.ruff]
 line-length = 100
 src = ["src"]
-extend-exclude = [
-    "src/vla_streaming_rl/networks/vlac/evo_vlac",
-    "src/vla_streaming_rl/networks/vlac/model_patches",
-]
 
 [tool.ruff.lint]
 select = ["I", "F"]

@@ -222,7 +222,7 @@ def _rolling_window_detection(
         window_start = max(0, i - half_window)
         window_end = min(n, i + half_window + 1)
         window_data = data[window_start:window_end]
-        window_indices = np.arange(window_start, window_end)
+        np.arange(window_start, window_end)
 
         current_value = data[i]
         window_max = np.max(window_data)
@@ -861,7 +861,7 @@ def _optimize_local_extrema(points: List, data: np.ndarray) -> List:
             optimized.append(current)
             continue
 
-        search_range = range(search_start, search_end)
+        range(search_start, search_end)
         search_data = data[search_start:search_end]
 
         if current[1] == "peak":
@@ -925,7 +925,7 @@ def _optimize_local_extrema(points: List, data: np.ndarray) -> List:
             optimized.append(current)
             continue
 
-        search_range = range(search_start, search_end)
+        range(search_start, search_end)
         search_data = data[search_start:search_end]
 
         if current[1] == "peak":

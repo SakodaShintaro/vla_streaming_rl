@@ -320,10 +320,8 @@ class GAC_model:
         self, response_list, infer_requests, tokenizer, time_horizon=10, action_dim=7
     ):
         infer_requests = copy.deepcopy(infer_requests)
-        answers = []
         for i in range(len(response_list)):
             temp = []
-            text = []
             for one in response_list[i].choices[0].logprobs["content"][:-1]:
                 ids = tokenizer.encode(one["token"], add_special_tokens=False)
                 if 92537 - ids[0] <= 2048:
