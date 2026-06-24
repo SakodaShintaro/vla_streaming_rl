@@ -116,7 +116,7 @@ class DistributionalValueHead(nn.Module):
         report = {"value": per_gamma.mean().item()}
         if multi:
             for g, v in zip(gammas, per_gamma):
-                report[f"value_g{g:.3f}"] = v.item()
+                report[f"value_g{g:.4f}"] = v.item()
         if self.num_bins > 1:
             # ``centers`` live in the normalized [-1, 1] support; the real-unit
             # variance scales by each gamma's value_range². probs: (num_gammas, num_bins).
@@ -125,7 +125,7 @@ class DistributionalValueHead(nn.Module):
             mean = (probs * centers).sum(dim=-1, keepdim=True)
             variance = (probs * (centers - mean) ** 2).sum(dim=-1) * self.value_ranges**2
             for i, g in enumerate(gammas):
-                sfx = f"_g{g:.3f}" if multi else ""
+                sfx = f"_g{g:.4f}" if multi else ""
                 report[f"value_variance{sfx}"] = variance[i].item()
                 report[f"value_range{sfx}"] = self.value_ranges[i].item()
         return report
