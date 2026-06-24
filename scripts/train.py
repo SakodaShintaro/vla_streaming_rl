@@ -278,6 +278,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             et_lambda=args.et_lambda,
             gamma=args.gamma,
             relabeler=relabeler,
+            vlac_ref_num=args.vlac.ref_num,
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

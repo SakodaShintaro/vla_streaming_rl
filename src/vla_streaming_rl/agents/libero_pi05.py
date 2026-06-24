@@ -74,6 +74,12 @@ def _window_to_loss_input(data: ReplayBufferData, schema: list) -> ReplayBufferD
     )
 
 
+def _sample_evenly(frames: list, n: int) -> list:
+    """Sample ``n`` evenly-spaced frames (first + n-1 spaced), as VLAC's reference."""
+    delta = (len(frames) - 1) / (n - 1)
+    return [frames[0]] + [frames[int(i * delta)] for i in range(1, n)]
+
+
 def _vlac_reward_image(sparse_reward: float, dense_reward: float, progress: float) -> np.ndarray:
     """Fixed 200x200 panel: env sparse reward, VLAC dense (pseudo) reward, progress."""
     img = np.zeros((200, 200, 3), dtype=np.uint8)
@@ -116,6 +122,7 @@ class LiberoPi05Agent:
         et_lambda: float,
         gamma: float,
         relabeler: VlacRewardRelabeler | None,
+        vlac_ref_num: int,
     ) -> None:
         if learning_mode not in ("off_policy", "streaming"):
             raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
@@ -180,11 +187,18 @@ class LiberoPi05Agent:
         # Latest critic read-out, for the telemetry path.
         self._value_report: dict[str, float] = {"value": 0.0}
 
-        # VLAC online milestone dense reward: scored per env step against a key
-        # frame and added to that step's stored reward (disabled when None).
+        # VLAC online dense reward: scored per env step against a key frame with a
+        # one-shot in-context reference (the best episode so far, sampled to
+        # ``vlac_ref_num`` frames), added to that step's stored reward. Disabled
+        # when relabeler is None.
         self._relabeler = relabeler
+        self._vlac_ref_num = vlac_ref_num
         self._last_dense = 0.0
         self._last_progress = 0.0
+        self._cur_frames: list[Image.Image] = []
+        self._cur_task = ""
+        self._references: dict[str, list[Image.Image]] = {}
+        self._best: dict[str, tuple[float, int]] = {}
 
     # --- agent surface -----------------------------------------------------
 
@@ -273,11 +287,21 @@ class LiberoPi05Agent:
         return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        del score, feedback_text
+        del feedback_text
         # Drop any partially-executed chunk so the next episode plans fresh.
         self._env_queue.clear()
         self._norm_queue.clear()
         if self._relabeler is not None:
+            length = len(self._cur_frames)
+            best = self._best.get(self._cur_task)
+            if length >= self._vlac_ref_num and (
+                best is None or score > best[0] or (score == best[0] and length < best[1])
+            ):
+                self._best[self._cur_task] = (score, length)
+                self._references[self._cur_task] = _sample_evenly(
+                    self._cur_frames, self._vlac_ref_num
+                )
+            self._cur_frames = []
             self._relabeler.reset()
         return {}
 
@@ -341,6 +365,10 @@ class LiberoPi05Agent:
         metrics = {}
         if self._relabeler is not None:
             frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
+            if not self._cur_frames:
+                self._cur_task = info["task_prompt"]
+                self._relabeler.set_reference(self._references.get(self._cur_task))
+            self._cur_frames.append(frame)
             dense, metrics = self._relabeler.step(frame, info["task_prompt"])
             reward = reward + dense
             self._last_dense = dense

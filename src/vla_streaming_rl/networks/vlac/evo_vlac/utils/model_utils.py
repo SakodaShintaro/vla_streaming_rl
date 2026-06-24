@@ -161,11 +161,14 @@ class GAC_model:
         responses = [response.split(sep)[0].strip() for response in responses]
         return responses, time.time() - start_t
 
-    def score_pair(self, image_first, image_second, task):
-        prompt = self.get_score_prompt(task=task, trajectory_len=0, think=False)
-        infer_requests = self.get_infer_requests(
-            prompt=[prompt], images=[[image_first, image_second]]
-        )
+    def score_progress(self, reference, first, prev, current, task):
+        if reference:
+            prompt = self.get_score_prompt(task=task, trajectory_len=len(reference), think=False)
+            images = list(reference) + [first, prev, current]
+        else:
+            prompt = self.get_score_prompt(task=task, trajectory_len=0, think=False)
+            images = [prev, current]
+        infer_requests = self.get_infer_requests(prompt=[prompt], images=[images])
         responses, _ = self.chat(infer_requests)
         try:
             return float(responses[0].strip())
