@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 import collections
 
+import cv2
 import gymnasium as gym
 import numpy as np
 import torch
@@ -71,6 +72,16 @@ def _window_to_loss_input(data: ReplayBufferData, schema: list) -> ReplayBufferD
         action_token_ids=data.action_token_ids,
         task_prompt_token_ids=data.task_prompt_token_ids,
     )
+
+
+def _vlac_reward_image(sparse_reward: float, dense_reward: float, progress: float) -> np.ndarray:
+    """Fixed 200x200 panel: sparse env reward, VLAC dense (pseudo) reward, Phi."""
+    img = np.zeros((200, 200, 3), dtype=np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(img, f"Sparse: {sparse_reward:.3f}", (10, 40), font, 0.7, (255, 0, 0), 2)
+    cv2.putText(img, f"VLAC: {dense_reward:+.4f}", (10, 80), font, 0.7, (0, 200, 255), 2)
+    cv2.putText(img, f"Phi: {progress:.3f}", (10, 120), font, 0.7, (0, 255, 0), 2)
+    return img
 
 
 class LiberoPi05Agent:
@@ -172,6 +183,8 @@ class LiberoPi05Agent:
         # VLAC online milestone dense reward: scored per env step against a key
         # frame and added to that step's stored reward (disabled when None).
         self._relabeler = relabeler
+        self._last_dense = 0.0
+        self._last_progress = 0.0
 
     # --- agent surface -----------------------------------------------------
 
@@ -330,6 +343,8 @@ class LiberoPi05Agent:
             frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
             dense, metrics = self._relabeler.step(frame, info["task_prompt"])
             reward = reward + dense
+            self._last_dense = dense
+            self._last_progress = metrics["vlac/progress"]
         self.rb.add(
             packed,
             self._dummy,
@@ -399,5 +414,8 @@ class LiberoPi05Agent:
         return _pack_obs(batch, self._obs_schema)
 
     def _panels(self, obs: np.ndarray, reward: float) -> dict:
-        del obs, reward
-        return {"wrist": self._last_wrist}
+        del obs
+        panels = {"wrist": self._last_wrist}
+        if self._relabeler is not None:
+            panels["reward"] = _vlac_reward_image(reward, self._last_dense, self._last_progress)
+        return panels
