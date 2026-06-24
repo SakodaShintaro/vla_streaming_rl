@@ -257,11 +257,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             )
             relabeler = VlacRewardRelabeler(
                 critic=critic,
-                skip=args.vlac.skip,
+                milestone_interval=args.vlac.milestone_interval,
+                check_interval=args.vlac.check_interval,
                 alpha=args.vlac.alpha,
                 gamma=args.vlac.gamma,
                 value_scale=args.vlac.value_scale,
-                batch_num=args.vlac.batch_num,
             )
 
         agent = LiberoPi05Agent(

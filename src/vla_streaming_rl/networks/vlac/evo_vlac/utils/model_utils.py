@@ -161,12 +161,16 @@ class GAC_model:
         responses = [response.split(sep)[0].strip() for response in responses]
         return responses, time.time() - start_t
 
-    def results_format(self, response_list, infer_requests, rich=False):
-        if rich:
-            raise NotImplementedError(
-                "rich output relies on ms-swift logprobs, removed in this port"
-            )
-        return list(response_list), infer_requests
+    def score_pair(self, image_first, image_second, task):
+        prompt = self.get_score_prompt(task=task, trajectory_len=0, think=False)
+        infer_requests = self.get_infer_requests(
+            prompt=[prompt], images=[[image_first, image_second]]
+        )
+        responses, _ = self.chat(infer_requests)
+        try:
+            return float(responses[0].strip())
+        except ValueError:
+            return 0.0
 
     def set_system_prompt(self, system_prompt=None):
         if system_prompt is not None:
@@ -237,156 +241,6 @@ class GAC_model:
                 processed_images = [self._process_image_to_pil(images[i])]
             infer_requests.append({"prompt": prompt[i], "images": processed_images})
         return infer_requests
-
-    def get_trajectory_critic(
-        self,
-        task: str,
-        image_list: List[Image.Image],
-        ref_image_list: List[Image.Image] = None,
-        batch_num: int = 20,
-        ref_num=9,
-        think=False,
-        skip=1,
-        rich=False,
-        reverse_eval=False,
-        frame_skip=True,
-        addition_scale=1,
-        bias=0,
-        related_critic=False,
-        positive_clip=0,
-        negative_clip=0,
-        value_simple=True,
-    ):
-        """
-        输入一条trajectory的所有图片,输出每张图片的critic和processing value
-        可以给一条参考轨迹
-        """
-        batch_prompt = []
-        batch_image = []
-        critic_list = []
-        value_list = []
-        if ref_image_list is not None:
-            ref_images = [ref_image_list[0]]
-            delta = (len(ref_image_list) - 1) / (ref_num - 1)
-            for i in range(1, ref_num):
-                ref_images.append(ref_image_list[int(i * delta)])
-        else:
-            ref_num = 0
-        if frame_skip:
-            select_idx = range(skip, len(image_list), skip)
-        else:
-            select_idx = range(skip, len(image_list))
-        for i in select_idx:
-            one_prompt = self.get_score_prompt(task=task, trajectory_len=ref_num, think=think)
-            batch_prompt.append(one_prompt)
-            if ref_image_list is not None:
-                if reverse_eval:
-                    batch_image.append(
-                        ref_images + [image_list[0], image_list[i], image_list[i - skip]]
-                    )
-                else:
-                    batch_image.append(
-                        ref_images + [image_list[0], image_list[i - skip], image_list[i]]
-                    )
-            else:
-                if reverse_eval:
-                    batch_image.append([image_list[i], image_list[i - skip]])
-                else:
-                    batch_image.append([image_list[i - skip], image_list[i]])
-            if (len(batch_prompt)) % batch_num == 0 or len(critic_list) + len(batch_prompt) == len(
-                select_idx
-            ):
-                infer_requests = self.get_infer_requests(prompt=batch_prompt, images=batch_image)
-                response_list, infer_time = self.chat(infer_requests)
-                answers_list, complete_requests_list = self.results_format(
-                    response_list, infer_requests, rich=rich
-                )
-                critic_list.extend(answers_list)
-                batch_prompt = []
-                batch_image = []
-        if think:
-            think_pre_value_list = []
-            think_post_value_list = []
-            think_critic_list = []
-            for one in critic_list:
-                one_critic = one.split("</think>")[1]
-                one_pre_value = one.split("first image progressing: ")[1].split("%")[0]
-                one_post_value = one.split("second image progressing: ")[1].split("%")[0]
-                think_critic_list.append(one_critic)
-                think_pre_value_list.append(one_pre_value)
-                think_post_value_list.append(one_post_value)
-            if reverse_eval:
-                temp = think_pre_value_list
-                think_pre_value_list = think_post_value_list
-                think_post_value_list = temp
-                think_critic_list = [0 - float(one) for one in think_critic_list]
-            think_pre_value_list = think_pre_value_list + think_post_value_list[-skip:]
-            think_post_value_list = think_pre_value_list[:skip] + think_post_value_list
-            critic_list = think_critic_list
-            if frame_skip:
-                pass
-            else:
-                critic_list = [float(one) / skip for one in critic_list]
-            critic_list = [float(one) / addition_scale for one in critic_list]
-            value_list = self.critic_to_value_simple(critic_list, simple=value_simple)
-        else:
-            if reverse_eval:
-                critic_list = [0 - float(one) for one in critic_list]
-            if frame_skip:
-                pass
-            else:
-                critic_list = [float(one) / skip for one in critic_list]
-            critic_list = [float(one) / addition_scale for one in critic_list]
-            value_list = self.critic_to_value_simple(critic_list, simple=value_simple)
-        if related_critic:
-            critic_list = [value_list[i] - value_list[i - 1] for i in range(1, len(value_list))]
-        if bias != 0:
-            critic_list = [one + bias for one in critic_list]
-        if positive_clip != 0:
-            critic_list = [one if (one < 0 or one > positive_clip) else 0 for one in critic_list]
-        if negative_clip != 0:
-            critic_list = [one if (one > 0 or one < -negative_clip) else 0 for one in critic_list]
-        if related_critic:
-            value_list = [0]
-            for one in critic_list:
-                value_list.append(value_list[-1] + one)
-        else:
-            value_list = self.critic_to_value_simple(critic_list, simple=value_simple)
-        # 这里的value也是done，越接近100完成度越高
-        return critic_list, value_list
-
-    def critic_to_value_simple(self, critic_list, simple=True):
-        """
-        将critic计算为0-100的value,输入需是一条轨迹按顺序的critic
-        """
-        value_list = [0]
-        for i in range(len(critic_list)):
-            if float(critic_list[i]) > 0 or simple is True:
-                value_list.append(
-                    value_list[-1] + (100 - value_list[-1]) * float(critic_list[i]) / 100.0
-                )
-            else:
-                if simple == "mix_f":
-                    if value_list[-1] > 50:
-                        value_list.append(
-                            max(
-                                10,
-                                100
-                                - max((100 - value_list[-1]), 1.0)
-                                / (100 + float(critic_list[i]))
-                                * 100.0,
-                            )
-                        )
-                    else:
-                        value_list.append(
-                            value_list[-1] + value_list[-1] * float(critic_list[i]) / 100.0
-                        )
-                else:
-                    value_list.append(
-                        100
-                        - max((100 - value_list[-1]), 1.0) / (100 + float(critic_list[i])) * 100.0
-                    )
-        return value_list
 
 
 def import_external_file(file_path: str):

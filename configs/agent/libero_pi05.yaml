@@ -62,19 +62,20 @@ actor_denoising_steps: 1
 q_grad_eta: 0.05
 dacer_loss_weight: 0.05
 
-# VLAC dense-reward relabeling (src/vla_streaming_rl/networks/vlac). When enabled,
-# each finished episode's agentview frames are scored by the vendored VLAC critic
-# into a cumulative completion potential, and a PBRS dense reward
-# alpha*(gamma*Phi(s')-Phi(s)) is added on top of the sparse terminal reward in
-# the replay buffer. Weights live outside git; the loader pulls InternRobotics/VLAC
-# weights into the HF cache on first use (model code is vendored, no remote-code).
+# VLAC online milestone dense reward (src/vla_streaming_rl/networks/vlac). When
+# enabled, every check_interval env steps the vendored VLAC critic scores the
+# current agentview frame against the held key (milestone) frame; the diminishing-
+# returns progress becomes a potential Phi and a PBRS dense reward
+# alpha*(gamma*Phi_t-Phi_prev) is added to that step's reward in real time. The key
+# advances every milestone_interval steps. Weights live outside git; the loader
+# pulls InternRobotics/VLAC into the HF cache on first use (model code is vendored).
 vlac:
-  enabled: false
+  enabled: true
   device_map: cuda:0
   temperature: 0.5
   top_k: 1
-  skip: 8
+  milestone_interval: 64
+  check_interval: 8
   alpha: 1.0
   gamma: 0.99
   value_scale: 100.0
-  batch_num: 16

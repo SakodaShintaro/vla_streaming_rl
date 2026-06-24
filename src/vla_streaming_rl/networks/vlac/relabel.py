@@ -1,55 +1,72 @@
 # SPDX-License-Identifier: MIT
-"""Turn a VLAC trajectory critic into a dense per-step shaping reward.
+"""Online milestone-based VLAC dense reward (arXiv:2512.14666 style).
 
-VLAC scores an image trajectory into a cumulative completion ``value_list``
-(0..``value_scale``, monotone for a successful rollout). Treating the normalised
-value as a potential ``Phi``, potential-based reward shaping gives a dense
-per-step reward ``alpha * (gamma * Phi(s_{t+1}) - Phi(s_t))`` that is added on
-top of the existing sparse terminal reward without changing the optimal policy.
+A milestone (key) frame is held fixed for ``milestone_interval`` steps. Every
+``check_interval`` steps the critic scores the current frame against the key,
+``c in [-100, 100]`` = progress from the key to now. The absolute progress is
+``v = v_banked + (100 - v_banked) * c / 100`` (diminishing returns), and the
+potential is ``Phi = v / value_scale``. The per-step shaping reward is the PBRS
+term ``alpha * (gamma * Phi_t - Phi_prev)``. When a milestone is reached the
+progress is banked and the key advances to the current frame.
 """
-
-import numpy as np
 
 
 class VlacRewardRelabeler:
-    """Compute PBRS dense rewards for one episode's observation frames."""
+    """Stateful per-episode online VLAC reward shaper."""
 
     def __init__(
         self,
         critic,
-        skip: int,
+        milestone_interval: int,
+        check_interval: int,
         alpha: float,
         gamma: float,
         value_scale: float,
-        batch_num: int,
     ) -> None:
         self._critic = critic
-        self._skip = skip
+        self._milestone_interval = milestone_interval
+        self._check_interval = check_interval
         self._alpha = alpha
         self._gamma = gamma
         self._value_scale = value_scale
-        self._batch_num = batch_num
+        self.reset()
 
-    def potentials(self, frames: list, task: str) -> np.ndarray:
-        """Per-frame normalised potential ``Phi``, length ``len(frames)``.
+    def reset(self) -> None:
+        """Clear per-episode state; the next ``step`` re-anchors the key frame."""
+        self._key = None
+        self._t = 0
+        self._v_banked = 0.0
+        self._phi_prev = 0.0
+        self._last_c = 0.0
 
-        VLAC samples the value every ``skip`` frames; the sparse nodes are
-        linearly interpolated back up to one value per frame."""
-        _, value_list = self._critic.get_trajectory_critic(
-            task=task,
-            image_list=frames,
-            ref_image_list=None,
-            batch_num=self._batch_num,
-            ref_num=0,
-            skip=self._skip,
-        )
-        value = np.asarray([float(v) for v in value_list], dtype=np.float32) / self._value_scale
-        node_idx = np.arange(len(value), dtype=np.float32) * self._skip
-        node_idx = np.minimum(node_idx, len(frames) - 1)
-        all_idx = np.arange(len(frames), dtype=np.float32)
-        return np.interp(all_idx, node_idx, value).astype(np.float32)
+    def step(self, frame, task: str):
+        """Advance one env step, returning ``(dense_reward, metrics)``.
 
-    def dense_rewards(self, frames: list, task: str) -> np.ndarray:
-        """PBRS dense reward per env step, length ``len(frames) - 1``."""
-        phi = self.potentials(frames, task)
-        return self._alpha * (self._gamma * phi[1:] - phi[:-1])
+        The key is set on the first call; the critic only runs on
+        ``check_interval`` boundaries (dense reward is 0 in between)."""
+        if self._key is None:
+            self._key = frame
+            self._t = 0
+            self._phi_prev = 0.0
+            return 0.0, {"vlac/dense_reward": 0.0, "vlac/progress": 0.0, "vlac/critic_c": 0.0}
+
+        self._t += 1
+        if self._t % self._check_interval != 0:
+            return 0.0, {
+                "vlac/dense_reward": 0.0,
+                "vlac/progress": self._phi_prev,
+                "vlac/critic_c": self._last_c,
+            }
+
+        c = self._critic.score_pair(self._key, frame, task)
+        v = self._v_banked + (100.0 - self._v_banked) * c / 100.0
+        phi = v / self._value_scale
+        dense = self._alpha * (self._gamma * phi - self._phi_prev)
+        self._phi_prev = phi
+        self._last_c = c
+
+        if self._t % self._milestone_interval == 0:
+            self._v_banked = v
+            self._key = frame
+
+        return dense, {"vlac/dense_reward": dense, "vlac/progress": phi, "vlac/critic_c": c}
