@@ -196,13 +196,13 @@ class InternLM2RotaryEmbedding(nn.Module):
             self.cos_cached.numel() == 0
             or self.cos_cached.device != x.device
             or seq_len > self.max_seq_len_cached
-            or float(self.cos_cached.reshape(-1)[0]) == 0.0
+            or not abs(float(self.cos_cached.reshape(-1)[0]) - 1.0) < 1e-4
         )
         if cache_bad:
             if (
                 self.inv_freq.numel() == 0
                 or self.inv_freq.device != x.device
-                or float(self.inv_freq.reshape(-1)[0]) == 0.0
+                or not abs(float(self.inv_freq.reshape(-1)[0]) - 1.0) < 1e-4
             ):
                 self.inv_freq = 1.0 / (
                     self.base

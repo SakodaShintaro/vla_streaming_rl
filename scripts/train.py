@@ -250,7 +250,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             from vla_streaming_rl.networks.vlac import VlacRewardRelabeler, load_vlac_critic
 
             critic = load_vlac_critic(
-                model_path=args.vlac.model_path,
                 device_map=args.vlac.device_map,
                 tag="critic",
                 temperature=args.vlac.temperature,

@@ -5,19 +5,19 @@ import time
 from typing import Any, List, Mapping, Union
 
 import torch
+import torchvision.transforms as T
 from loguru import logger
 from PIL import Image
+from torchvision.transforms import InterpolationMode
 
-# ms-swift 4.2 API (migrated from 3.3): symbols moved to the top-level ``swift``
-# namespace / ``swift.model`` / ``swift.template``; ``get_model_tokenizer`` →
-# ``get_model_processor`` and ``PtEngine`` → ``TransformersEngine`` (handled below).
-from swift import InferRequest, RequestConfig, Swift, get_template
-from swift.model import get_model_processor as get_model_tokenizer
-from swift.utils import seed_everything
+from ..internvl_vlac import InternLM2Tokenizer, InternVLChatConfig, InternVLChatModel
+from ..internvl_vlac.conversation import get_conv_template
+
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import base64
-import math
 import re
 from io import BytesIO
 
@@ -191,19 +191,10 @@ class GAC_model:
         return full_prompt
 
     def set_config(self):
-        self.request_config = RequestConfig(
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            top_k=self.top_k,
-            logprobs=self.logprobs,
-            top_logprobs=self.top_logprobs,
-            # repetition_penalty=args.repetition_penalty,
-            # stop=args.stop_words,
-            # stream=True
-        )
-        self.model.generation_config.max_new_tokens = self.max_tokens
-        self.model.generation_config.do_sample = self.do_sample
-        self.model.generation_config.temperature = self.temperature
+        if getattr(self.model, "generation_config", None) is not None:
+            self.model.generation_config.max_new_tokens = self.max_tokens
+            self.model.generation_config.do_sample = self.do_sample
+            self.model.generation_config.temperature = self.temperature
 
     def _get_internvl2_per_token_logps(self, model, inputs):
         from trl.trainer.utils import selective_log_softmax
@@ -230,91 +221,79 @@ class GAC_model:
         input_ids = input_ids[:, -logits_to_keep:]
         return selective_log_softmax(logits, input_ids)
 
-    def init_model(
-        self,
-        model_path,
-        model_type="internvl_chat",
-        template_type="internvl2",
-        device_map: str = "auto",
-        torch_dtype=torch.bfloat16,
-        adapter: str = None,
-    ):
-        """
-        Args:
-            device_map: ['auto', 'cuda:0',...]
+    def init_model(self, model_path, device_map, torch_dtype=torch.bfloat16):
+        import glob
 
-        ms-swift 4.2 separates the model registration name (``model_type``, e.g.
-        ``internvl_chat`` for InternVLChatModel) from the chat ``template_type``
-        (e.g. ``internvl2``); swift 3.3 used one ``internvl2`` for both.
-        """
-        print(f"model_type: {model_type}, template_type: {template_type}")
-        # ms-swift 4.2: get_model_tokenizer→get_model_processor (returns the
-        # processor); get_template now takes (processor, *, template_type=...).
-        self.model, processor = get_model_tokenizer(
-            model_id_or_path=model_path,
-            model_type=model_type,
-            torch_dtype=torch_dtype,
-            device_map=device_map,
-            attn_impl="eager",
+        from safetensors.torch import load_file
+
+        config = InternVLChatConfig.from_pretrained(model_path)
+        model = InternVLChatModel(config, use_flash_attn=False).to(torch_dtype)
+        state = {}
+        for shard in sorted(glob.glob(os.path.join(model_path, "*.safetensors"))):
+            state.update(load_file(shard))
+        model.load_state_dict(state, strict=True)
+        self.model = model.eval().to(device_map)
+        self.tokenizer = InternLM2Tokenizer.from_pretrained(model_path, use_fast=False)
+        self.image_transform = T.Compose(
+            [
+                T.Resize((448, 448), interpolation=InterpolationMode.BICUBIC),
+                T.ToTensor(),
+                T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            ]
         )
-        self.template = get_template(processor, template_type=template_type)
-        if adapter:
-            self.model = Swift.from_pretrained(self.model, adapter, adapter_name=None)
-
-        # swift 4.2: PtEngine.from_model_template(...) → TransformersEngine(...)
-        from swift import InferStats, TransformersEngine
-
-        self.engine = TransformersEngine(self.model, template=self.template, max_batch_size=0)
-
-        self.infer_stats = InferStats()
-        # The bundled InternLM2 remote code predates the transformers>=5
-        # ``Cache`` API (it indexes ``past_key_values[0][0]``). Disabling the KV
-        # cache routes generation through the no-cache path, avoiding DynamicCache
-        # entirely. Critic/done outputs are short, so the cost is negligible.
-        self.model.config.use_cache = False
-        if getattr(self.model, "generation_config", None) is not None:
-            self.model.generation_config.use_cache = False
-        seed_everything(42)
+        torch.manual_seed(42)
         logger.success("model initialized successfully")
 
     def chat(self, infer_requests):
         start_t = time.time()
-        # swift 4.2: template is bound at engine construction; infer() no longer takes it.
-        response_list = self.engine.infer(
-            infer_requests, request_config=self.request_config, metrics=[self.infer_stats]
+        IMG_START_TOKEN = "<img>"
+        IMG_END_TOKEN = "</img>"
+        IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
+        self.model.img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        queries = []
+        pixel_list = []
+        sep = None
+        for req in infer_requests:
+            template = get_conv_template(self.model.template)
+            if self.system_prompt is not None:
+                template.system_message = self.system_prompt
+            template.append_message(template.roles[0], req["prompt"])
+            template.append_message(template.roles[1], None)
+            query = template.get_prompt()
+            for image in req["images"]:
+                pixel_list.append(self.image_transform(image).unsqueeze(0))
+                image_tokens = (
+                    IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.model.num_image_token + IMG_END_TOKEN
+                )
+                query = query.replace("<image>", image_tokens, 1)
+            queries.append(query)
+            sep = template.sep
+        self.tokenizer.padding_side = "left"
+        model_inputs = self.tokenizer(queries, return_tensors="pt", padding=True)
+        input_ids = model_inputs["input_ids"].to(self.model.device)
+        attention_mask = model_inputs["attention_mask"].to(self.model.device)
+        pixel_values = torch.cat(pixel_list).to(self.model.device, dtype=self.model.dtype)
+        eos_token_id = self.tokenizer.convert_tokens_to_ids(sep)
+        generation_output = self.model.generate(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            do_sample=self.do_sample,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            max_new_tokens=self.max_tokens,
+            eos_token_id=eos_token_id,
         )
-        end_t = time.time()
-        infer_time = end_t - start_t
-        return response_list, infer_time
+        responses = self.tokenizer.batch_decode(generation_output, skip_special_tokens=True)
+        responses = [response.split(sep)[0].strip() for response in responses]
+        return responses, time.time() - start_t
 
     def results_format(self, response_list, infer_requests, rich=False):
-        infer_requests = copy.deepcopy(infer_requests)
-        answers = []
-        for i in range(len(response_list)):
-            if rich:
-                rich_answer = ""
-                for one in response_list[i].choices[0].logprobs["content"][:-1]:
-                    if one["token"].isdigit():
-                        temp_num = 0
-                        temp_weight = 0
-                        top_prob = math.e ** one["top_logprobs"][0]["logprob"]
-                        for one_tops in one["top_logprobs"]:
-                            top_num = one_tops["token"]
-                            if top_num.isdigit():
-                                prob = math.e ** one_tops["logprob"]
-                                if prob > top_prob * 0.1:
-                                    temp_num += float(top_num) * prob
-                                    temp_weight += prob
-                        rich_answer += "{:.1f}".format(temp_num / temp_weight)
-                    else:
-                        rich_answer += one["token"]
-                answers.append(rich_answer)
-            else:
-                answers.append(response_list[i].choices[0].message.content)
-            infer_requests[i].messages.append(
-                {"role": "assistant", "content": response_list[i].choices[0].message.content}
+        if rich:
+            raise NotImplementedError(
+                "rich output relies on ms-swift logprobs, removed in this port"
             )
-        return answers, infer_requests
+        return list(response_list), infer_requests
 
     def fast_results_format(
         self, response_list, infer_requests, tokenizer, time_horizon=10, action_dim=7
@@ -398,31 +377,15 @@ class GAC_model:
             images = [images]
         infer_requests = []
         for i in range(len(prompt)):
-            one_input = []
-            if self.system_prompt:
-                one_input.append({"role": "system", "content": self.system_prompt})
-            one_input.append({"role": "user", "content": prompt[i]})
-            processed_images = None
-            if images[i] is not None:
-                if isinstance(images[i], list):
-                    processed_images = [
-                        self._process_image_to_pil(img) for img in images[i] if img is not None
-                    ]
-                else:
-                    processed_images = [self._process_image_to_pil(images[i])]
-
-            # swift 4.2: inference uses InferRequest(messages=, images=);
-            # TemplateInputs is now an RLHF (chosen/rejected) container.
-            infer_requests.append(
-                InferRequest(
-                    messages=one_input,
-                    images=processed_images,
-                )
-            )
-            # infer_requests.append(TemplateInputs(
-            #     messages=one_input,
-            #     images=images[i],
-            # ))
+            if images[i] is None:
+                processed_images = []
+            elif isinstance(images[i], list):
+                processed_images = [
+                    self._process_image_to_pil(img) for img in images[i] if img is not None
+                ]
+            else:
+                processed_images = [self._process_image_to_pil(images[i])]
+            infer_requests.append({"prompt": prompt[i], "images": processed_images})
         return infer_requests
 
     def get_logprobs(self, infer_requests, return_mask=False, digit=False):

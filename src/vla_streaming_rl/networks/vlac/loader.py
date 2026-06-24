@@ -1,46 +1,31 @@
 # SPDX-License-Identifier: MIT
 """Load the vendored VLAC critic (InternVL2-based) in this repository's
-environment (transformers>=5 / ms-swift>=4.2).
+environment (transformers>=5).
 
-The patched model remote-code lives under ``model_patches/<model_name>`` and is
-overlaid onto the downloaded weights directory before loading, so the
-transformers-5 port survives a fresh ``VLAC-2B`` download on any machine. The
-``evo_vlac`` package is vendored under this directory and imported as a
-subpackage, so no external install is required.
+The transformers-5 port of the InternVL2 / InternLM2 model code is vendored
+under ``evo_vlac/internvl_vlac`` and loaded directly (no ``trust_remote_code``,
+no remote-code overlay). Only the weights are pulled from the HF hub into the
+local cache on first use.
 """
 
-import glob
-import os
-import shutil
-
-_VLAC_DIR = os.path.dirname(os.path.abspath(__file__))
-_PATCH_ROOT = os.path.join(_VLAC_DIR, "model_patches")
-_MODULES_CACHE = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules")
+_VLAC_REPO_ID = "InternRobotics/VLAC"
 
 
-def _overlay_model_patches(model_path: str) -> None:
-    """Copy the repo's patched remote-code over the weights dir and drop the
-    stale transformers_modules cache so the patched code is re-imported."""
-    model_name = os.path.basename(os.path.normpath(model_path))
-    patch_dir = os.path.join(_PATCH_ROOT, model_name)
-    if not os.path.isdir(patch_dir):
-        raise FileNotFoundError(f"No bundled VLAC patches for {model_name!r} under {_PATCH_ROOT}")
-    for fname in os.listdir(patch_dir):
-        shutil.copy2(os.path.join(patch_dir, fname), os.path.join(model_path, fname))
-    for cached in glob.glob(os.path.join(_MODULES_CACHE, "*" + model_name.replace("-", "*") + "*")):
-        shutil.rmtree(cached, ignore_errors=True)
+def _resolve_model_path() -> str:
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id=_VLAC_REPO_ID)
 
 
 def load_vlac_critic(
-    model_path: str,
     device_map: str,
     tag: str,
     temperature: float,
     top_k: int,
 ):
-    """Overlay the patched remote-code, build the vendored ``GAC_model`` critic,
-    initialise it on ``device_map`` and return the ready-to-infer instance."""
-    _overlay_model_patches(model_path)
+    """Build the vendored ``GAC_model`` critic, initialise it on ``device_map``
+    and return the ready-to-infer instance."""
+    model_path = _resolve_model_path()
     from vla_streaming_rl.networks.vlac.evo_vlac import GAC_model
 
     critic = GAC_model(tag=tag)
