@@ -62,19 +62,21 @@ actor_denoising_steps: 1
 q_grad_eta: 0.05
 dacer_loss_weight: 0.05
 
-# VLAC online milestone dense reward (src/vla_streaming_rl/networks/vlac). When
-# enabled, every check_interval env steps the vendored VLAC critic scores the
-# current agentview frame against the held key (milestone) frame; the diminishing-
-# returns progress becomes a potential Phi and a PBRS dense reward
-# alpha*(gamma*Phi_t-Phi_prev) is added to that step's reward in real time. The key
-# advances every milestone_interval steps. Weights live outside git; the loader
-# pulls InternRobotics/VLAC into the HF cache on first use (model code is vendored).
+# VLAC online dense reward (src/vla_streaming_rl/networks/vlac). Every
+# check_interval env steps the vendored VLAC critic scores the current agentview
+# frame against the held key frame; the diminishing-returns progress becomes a
+# potential Phi and a PBRS dense reward alpha*(gamma*Phi_t-Phi_prev) is added to
+# that step's reward in real time. The key advances every milestone_interval steps.
+# NOTE: VLAC-2B only gives a usable signal on ADJACENT frames (large gaps score
+# ~0 on LIBERO), so keep milestone_interval == check_interval (consecutive
+# comparison). Weights live outside git; pulled from InternRobotics/VLAC to the HF
+# cache on first use (model code is vendored).
 vlac:
   enabled: true
   device_map: cuda:0
   temperature: 0.5
   top_k: 1
-  milestone_interval: 64
+  milestone_interval: 8
   check_interval: 8
   alpha: 1.0
   gamma: 0.99

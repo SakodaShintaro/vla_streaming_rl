@@ -75,12 +75,12 @@ def _window_to_loss_input(data: ReplayBufferData, schema: list) -> ReplayBufferD
 
 
 def _vlac_reward_image(sparse_reward: float, dense_reward: float, progress: float) -> np.ndarray:
-    """Fixed 200x200 panel: sparse env reward, VLAC dense (pseudo) reward, Phi."""
+    """Fixed 200x200 panel: env sparse reward, VLAC dense (pseudo) reward, progress."""
     img = np.zeros((200, 200, 3), dtype=np.uint8)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(img, f"Sparse: {sparse_reward:.3f}", (10, 40), font, 0.7, (255, 0, 0), 2)
-    cv2.putText(img, f"VLAC: {dense_reward:+.4f}", (10, 80), font, 0.7, (0, 200, 255), 2)
-    cv2.putText(img, f"Phi: {progress:.3f}", (10, 120), font, 0.7, (0, 255, 0), 2)
+    cv2.putText(img, f"Env rew:  {sparse_reward:.3f}", (8, 40), font, 0.6, (255, 0, 0), 2)
+    cv2.putText(img, f"VLAC rew: {dense_reward:+.4f}", (8, 80), font, 0.6, (0, 200, 255), 2)
+    cv2.putText(img, f"Progress: {progress:.3f}", (8, 120), font, 0.6, (0, 255, 0), 2)
     return img
 
 
