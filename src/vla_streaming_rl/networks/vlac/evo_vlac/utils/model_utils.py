@@ -20,7 +20,6 @@ import base64
 from io import BytesIO
 
 import requests
-import tqdm
 
 from .data_processing_vlm import DataProcessor, trojectory_example_prompt
 
@@ -277,7 +276,7 @@ class GAC_model:
             select_idx = range(skip, len(image_list), skip)
         else:
             select_idx = range(skip, len(image_list))
-        for i in tqdm.tqdm(select_idx, desc="critic processing"):
+        for i in select_idx:
             one_prompt = self.get_score_prompt(task=task, trajectory_len=ref_num, think=think)
             batch_prompt.append(one_prompt)
             if ref_image_list is not None:
@@ -302,8 +301,6 @@ class GAC_model:
                 answers_list, complete_requests_list = self.results_format(
                     response_list, infer_requests, rich=rich
                 )
-                print(f"infer_time:{infer_time}s")
-                print(f"answers_list:{answers_list}")
                 critic_list.extend(answers_list)
                 batch_prompt = []
                 batch_image = []

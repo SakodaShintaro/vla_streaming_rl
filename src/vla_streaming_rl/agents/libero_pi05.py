@@ -354,7 +354,8 @@ class LiberoPi05Agent:
             if not self._episode_frames:
                 self._episode_start_idx = self.rb.idx
                 self._episode_task = info["task_prompt"]
-            self._episode_frames.append(Image.fromarray((obs * 255.0).astype(np.uint8)))
+            frame = (np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8)
+            self._episode_frames.append(Image.fromarray(frame))
         self.rb.add(
             packed,
             self._dummy,
