@@ -8,7 +8,7 @@ __description__ = "internEVO Critic and VLA"
 from . import utils
 
 # 修复导入路径
-from .utils import data_processing_vlm, model_utils, video_tool
+from .utils import data_processing_vlm, model_utils
 from .utils.model_utils import GAC_model
 
 
@@ -19,4 +19,4 @@ def get_version():
 
 
 # 定义包的公开接口
-__all__ = ["utils", "model_utils", "data_processing_vlm", "get_version", "GAC_model", "video_tool"]
+__all__ = ["utils", "model_utils", "data_processing_vlm", "get_version", "GAC_model"]

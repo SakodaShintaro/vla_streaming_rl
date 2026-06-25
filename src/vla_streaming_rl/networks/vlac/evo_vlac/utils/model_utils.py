@@ -1,7 +1,7 @@
 import os
 import sys
 import time
-from typing import Any, List, Mapping, Union
+from typing import List, Union
 
 import torch
 import torchvision.transforms as T
@@ -22,36 +22,6 @@ from io import BytesIO
 import requests
 
 from .data_processing_vlm import DataProcessor, trojectory_example_prompt
-
-
-def clip_one(image):
-    width, height = image.size
-
-    if width > height:
-        left = (width - height) // 2
-        right = left + height
-        top = 0
-        bottom = height
-    else:
-        top = (height - width) // 2
-        bottom = top + width
-        left = 0
-        right = width
-    square_image = image.crop((left, top, right, bottom))
-    image = square_image
-    return image
-
-
-def to_device(data: Any, device: Union[str, torch.device, int]) -> Any:
-    """Move inputs to a device"""
-    if isinstance(data, Mapping):
-        return type(data)({k: to_device(v, device) for k, v in data.items()})
-    elif isinstance(data, (tuple, list)):
-        return type(data)(to_device(v, device) for v in data)
-    elif isinstance(data, torch.Tensor):
-        return data.to(device=device)
-    else:
-        return data
 
 
 class GAC_model:
@@ -244,13 +214,3 @@ class GAC_model:
                 processed_images = [self._process_image_to_pil(images[i])]
             infer_requests.append({"prompt": prompt[i], "images": processed_images})
         return infer_requests
-
-
-def import_external_file(file_path: str):
-    import importlib
-
-    file_path = os.path.abspath(os.path.expanduser(file_path))
-    py_dir, py_file = os.path.split(file_path)
-    assert os.path.isdir(py_dir), f"py_dir: {py_dir}"
-    sys.path.insert(0, py_dir)
-    return importlib.import_module(py_file.split(".", 1)[0])
