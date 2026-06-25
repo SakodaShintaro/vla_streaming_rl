@@ -68,6 +68,7 @@ dependencies = [
     "lerobot[libero,pi]>=0.5.1",
     "libero>=0.1.1",
     "ms-swift>=4.2",
+    "loguru",
 ]
 
 [build-system]
