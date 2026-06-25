@@ -65,11 +65,7 @@ class Agent(ABC):
         train_metrics = {}
         if global_step == self.learning_starts:
             print(f"Start training at global step {global_step}.")
-        if (
-            global_step >= self.learning_starts
-            and self.rb is not None
-            and len(self.rb) >= self.batch_size
-        ):
+        if global_step >= self.learning_starts and self.rb is not None and self.rb.is_full():
             data = self.rb.sample(self.batch_size)
             data.rewards = self.reward_processor.normalize(data.rewards)
             result = self.network.compute_loss(data)
