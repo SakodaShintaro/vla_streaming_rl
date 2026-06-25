@@ -247,10 +247,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         relabeler = None
         if args.vlac.enabled:
-            from vla_streaming_rl.networks.vlac import VlacRewardRelabeler, load_vlac_critic
+            from vla_streaming_rl.networks.vlac import VlacRewardRelabeler
+            from vla_streaming_rl.networks.vlac.evo_vlac import GAC_model
 
-            critic = load_vlac_critic(
+            critic = GAC_model(
                 tag="critic",
+                device_map=torch.device("cuda"),
                 temperature=args.vlac.temperature,
                 top_k=args.vlac.top_k,
             )

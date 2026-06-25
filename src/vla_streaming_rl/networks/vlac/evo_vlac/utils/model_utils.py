@@ -25,14 +25,14 @@ from .data_processing_vlm import DataProcessor, trojectory_example_prompt
 
 
 class GAC_model:
-    def __init__(self, tag="critic"):
+    def __init__(self, tag, device_map, temperature, top_k):
         self.tag = tag
-        self.temperature = 1
+        self.temperature = temperature
+        self.top_k = top_k
         self.max_tokens = 10240
         self.do_sample = True
         self.top_logprobs = 10
         self.logprobs = True
-        self.top_k = None
         self.system_prompt = None
         self.action_data = {}
         self.critic_data = {}
@@ -44,6 +44,9 @@ class GAC_model:
         self.dataclient.prompt_templete["v3_think"] = (
             "0% <image>\nThis image is the trajectory beginning of the following two images\nImage-1: <image>\nImage-2: <image>\nCompare two images and evaluate whether the second image is closer to achieving task objectives compared to the first image. + score means the second image is closer, - score means the first image is closer\nResponse the relative progressing of target task follow <score>. The target task is: <task> {} </task> <score>"
         )
+        self.init_model(device_map)
+        self.set_config()
+        self.set_system_prompt()
 
     def get_score_prompt(self, task, trajectory_len=0, think=False):
         "two or len+3 image"
@@ -64,13 +67,15 @@ class GAC_model:
             self.model.generation_config.do_sample = self.do_sample
             self.model.generation_config.temperature = self.temperature
 
-    def init_model(self, model_path, device_map, torch_dtype=torch.bfloat16):
+    def init_model(self, device_map):
         import glob
 
+        from huggingface_hub import snapshot_download
         from safetensors.torch import load_file
 
+        model_path = snapshot_download(repo_id="InternRobotics/VLAC")
         config = InternVLChatConfig.from_pretrained(model_path)
-        model = InternVLChatModel(config, use_flash_attn=False).to(torch_dtype)
+        model = InternVLChatModel(config, use_flash_attn=False).to(torch.bfloat16)
         state = {}
         for shard in sorted(glob.glob(os.path.join(model_path, "*.safetensors"))):
             state.update(load_file(shard))
