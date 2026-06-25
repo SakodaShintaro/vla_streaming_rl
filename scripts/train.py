@@ -258,7 +258,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 critic=critic,
                 milestone_interval=args.vlac.milestone_interval,
                 check_interval=args.vlac.check_interval,
-                alpha=args.vlac.alpha,
                 gamma=args.gamma,
             )
 

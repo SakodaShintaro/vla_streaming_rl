@@ -62,16 +62,6 @@ actor_denoising_steps: 1
 q_grad_eta: 0.05
 dacer_loss_weight: 0.05
 
-# VLAC online dense reward (src/vla_streaming_rl/networks/vlac). Every
-# check_interval env steps the vendored VLAC critic scores the current agentview
-# frame against the held key frame, USING a one-shot in-context reference: the
-# best episode seen so far (highest score, ties->shortest), sampled to ref_num
-# frames. The diminishing-returns progress becomes a potential Phi and a PBRS dense
-# reward alpha*(gamma*Phi_t-Phi_prev) is added to that step's reward in real time.
-# The reference is essential: zero-shot (no reference) scores ~0 on LIBERO; with it
-# a success gives a smooth rising Phi. Before any episode succeeds there is no
-# reference and the dense reward is 0. Weights live outside git; pulled from
-# InternRobotics/VLAC to the HF cache on first use (model code is vendored).
 vlac:
   enabled: true
   temperature: 0.5
@@ -79,4 +69,3 @@ vlac:
   milestone_interval: 8
   check_interval: 8
   ref_num: 9
-  alpha: 1.0

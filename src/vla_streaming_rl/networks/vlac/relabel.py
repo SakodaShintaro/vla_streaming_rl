@@ -9,13 +9,12 @@ class VlacRewardRelabeler:
         critic,
         milestone_interval: int,
         check_interval: int,
-        alpha: float,
         gamma: float,
     ) -> None:
         self._critic = critic
         self._milestone_interval = milestone_interval
         self._check_interval = check_interval
-        self._alpha = alpha
+        self._alpha = 1.0
         self._gamma = gamma
         self._value_scale = 100.0
         self._reference = None
