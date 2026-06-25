@@ -50,7 +50,7 @@ class Agent(ABC):
         info: dict,
     ) -> StepResult: ...
 
-    @abstractmethod
+    @final
     def _step_offpolicy(
         self,
         global_step: int,
@@ -60,7 +60,13 @@ class Agent(ABC):
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> StepResult: ...
+    ) -> StepResult:
+        train_metrics = self._train_offpolicy(global_step)
+        result = self.select_action(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
+        )
+        result.metrics.update(train_metrics)
+        return result
 
     @abstractmethod
     def _step_streaming(

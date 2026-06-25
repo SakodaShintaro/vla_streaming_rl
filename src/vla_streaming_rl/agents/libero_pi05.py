@@ -186,23 +186,6 @@ class LiberoPi05Agent(Agent):
 
     # --- agent surface -----------------------------------------------------
 
-    def _step_offpolicy(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult:
-        train_metrics = self._train_offpolicy(global_step)
-        result = self.select_action(
-            global_step, obs, reward, terminated, truncated, task_prompt, info
-        )
-        result.metrics.update(train_metrics)
-        return result
-
     def _step_streaming(
         self,
         global_step: int,
