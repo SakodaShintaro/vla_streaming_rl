@@ -323,6 +323,7 @@ class LiberoPi05Network(NetworkInterface):
             next_state, next_ppm, next_pkv = self._encode_state(next_batch)
             next_action = self._sample_action_chunk(next_ppm, next_pkv, self.actor_denoising_steps)
             next_output = self.critic(next_state, next_action).output
+            exec_action = self._sample_action_chunk(next_ppm, next_pkv, self.num_inference_steps)
         target_value = self.critic.compute_target_value(next_output, chunk_rewards, chunk_dones)
         critic_loss, critic_info = self.critic.compute_critic_loss(
             state, action_chunk, target_value, self.detach_critic
@@ -346,9 +347,9 @@ class LiberoPi05Network(NetworkInterface):
         loss_result = LossResult(loss=self.critic_loss_weight * critic_loss + actor_loss, info=info)
 
         with torch.no_grad():
-            value_report = self.critic.value_report(self.critic(state, action_chunk).output)
+            value_report = self.critic.value_report(self.critic(next_state, exec_action).output)
         infer_result = InferResult(
-            action=action_chunk,
+            action=exec_action,
             value_report=value_report,
             rnn_state=torch.zeros(1),
             next_image=np.zeros((1, 1, 3), dtype=np.uint8),

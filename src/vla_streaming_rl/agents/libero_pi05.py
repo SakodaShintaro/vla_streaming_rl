@@ -112,6 +112,7 @@ class LiberoPi05Agent(Agent):
         # executed this step after acting (project buffer convention).
         self._prev_action = torch.zeros(self.action_dim, device=self.device)
         self._current_action_taken = torch.zeros(self.action_dim, device=self.device)
+        self._episode_reset = False
 
         # Latest preprocessed batch (cached by ``_preprocess`` for ``select_action``) and
         # the wrist frame backing the render panel.
@@ -145,26 +146,88 @@ class LiberoPi05Agent(Agent):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        step_result = self.select_action(
-            global_step, obs, reward, terminated, truncated, task_prompt, info
+        del global_step, task_prompt
+        packed = self._preprocess(obs, info, task_prompt=info["task_prompt"])
+        if self.rb is None:
+            self.rb = ReplayBuffer(
+                size=self.buffer_size,
+                seq_len=self._seq_len,
+                obs_shape=(self.network.obs_flat_dim,),
+                obs_z_shape=(1,),
+                rnn_state_shape=(1,),
+                action_shape=(self.action_dim,),
+                output_device=self.device,
+                storage_device=torch.device("cpu"),
+                max_new_tokens=0,
+                max_prompt_tokens=0,
+                pad_token_id=0,
+            )
+        metrics = {}
+        if self._relabeler is not None:
+            frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
+            if not self._cur_frames:
+                self._cur_task = info["task_prompt"]
+                self._relabeler.set_reference(self._references.get(self._cur_task))
+            self._cur_frames.append(frame)
+            dense, metrics = self._relabeler.step(frame, info["task_prompt"])
+            reward = reward + dense
+            self._last_dense = dense
+            self._last_progress = metrics["vlac/progress"]
+        self.rb.add(
+            packed,
+            self._dummy,
+            reward,
+            terminated or truncated,
+            self._dummy,
+            self._prev_action,
+            0.0,
+            0.0,
+            [],
+            [],
         )
+        if terminated or truncated:
+            self._episode_reset = True
+        panels = self._panels(obs, reward)
 
-        # Online TD(λ): train on the latest chunk-window once one exists.
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        if curr_size >= self._seq_len:
-            data = self.rb.get_latest(self._seq_len)
-            data.rewards = self.reward_processor.normalize(data.rewards)
-            result = self.network.infer_and_compute_loss(data)
-            self.actor_optimizer.zero_grad(set_to_none=True)
-            self.critic_optimizer.zero_grad(set_to_none=True)
-            result.et_info.actor_entropy_loss.backward(retain_graph=True)
-            result.et_info.neg_value.backward()
-            nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
-            self.actor_optimizer.step()
-            self.critic_optimizer.step(delta=result.et_info.delta, reset=terminated or truncated)
-            step_result.metrics.update(result.loss_result.info)
+        if not self._env_queue:
+            curr_size = self.rb.size if self.rb.full else self.rb.idx
+            if curr_size >= self._seq_len:
+                data = self.rb.get_latest(self._seq_len)
+                data.rewards = self.reward_processor.normalize(data.rewards)
+                result = self.network.infer_and_compute_loss(data)
+                self.actor_optimizer.zero_grad(set_to_none=True)
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                result.et_info.actor_entropy_loss.backward(retain_graph=True)
+                result.et_info.neg_value.backward()
+                nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
+                self.actor_optimizer.step()
+                self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
+                self._episode_reset = False
+                metrics.update(result.loss_result.info)
+                infer_result = result.infer_result
+            else:
+                with torch.no_grad():
+                    infer_result = self.network.infer(
+                        InferInput(
+                            s_seq=self._current_batch,
+                            obs_z_seq=self._dummy,
+                            a_seq=self._dummy,
+                            r_seq=self._dummy,
+                            rnn_state=self._dummy,
+                            task_prompts=[],
+                        )
+                    )
+            self._value_report = infer_result.value_report
+            norm_chunk = infer_result.action.squeeze(0)
+            env_chunk = self.postprocessor(infer_result.action).squeeze(0).float().cpu().numpy()
+            self._env_queue.extend(env_chunk)
+            self._norm_queue.extend(norm_chunk)
 
-        return step_result
+        self._current_action_taken = self._norm_queue.popleft()
+        env_action = self._to_env_action(self._env_queue.popleft())
+        self._prev_action = self._current_action_taken
+        metrics.update(self._value_report)
+        return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del feedback_text
