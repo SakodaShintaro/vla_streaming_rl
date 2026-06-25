@@ -62,31 +62,25 @@ class Agent(ABC):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        if global_step < self.learning_starts:
-            return {}
-        elif global_step == self.learning_starts:
+        train_metrics = {}
+        if global_step == self.learning_starts:
             print(f"Start training at global step {global_step}.")
-        if self.rb is None:
-            return {}
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        if curr_size <= self.rb.seq_len or curr_size < self.batch_size:
-            return {}
-        data = self.rb.sample(self.batch_size)
-        data.rewards = self.reward_processor.normalize(data.rewards)
-        result = self.network.compute_loss(data)
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        result.loss.backward()
-        nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
-        self.actor_optimizer.step()
-        self.critic_optimizer.step()
-
-        train_metrics = result.info
-        result = self.select_action(
+        if global_step >= self.learning_starts and self.rb is not None:
+            data = self.rb.sample(self.batch_size)
+            data.rewards = self.reward_processor.normalize(data.rewards)
+            result = self.network.compute_loss(data)
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            result.loss.backward()
+            nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
+            self.actor_optimizer.step()
+            self.critic_optimizer.step()
+            train_metrics = result.info
+        step_result = self.select_action(
             global_step, obs, reward, terminated, truncated, task_prompt, info
         )
-        result.metrics.update(train_metrics)
-        return result
+        step_result.metrics.update(train_metrics)
+        return step_result
 
     @abstractmethod
     def _step_streaming(
