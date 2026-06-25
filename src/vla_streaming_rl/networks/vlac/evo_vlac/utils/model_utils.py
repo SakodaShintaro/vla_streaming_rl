@@ -25,10 +25,10 @@ from .data_processing_vlm import DataProcessor, trojectory_example_prompt
 
 
 class GAC_model:
-    def __init__(self, tag, device_map, temperature, top_k):
+    def __init__(self, tag, device_map):
         self.tag = tag
-        self.temperature = temperature
-        self.top_k = top_k
+        self.temperature = 0.5
+        self.top_k = 1
         self.max_tokens = 10240
         self.do_sample = True
         self.top_logprobs = 10

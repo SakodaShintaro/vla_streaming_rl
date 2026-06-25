@@ -64,8 +64,6 @@ dacer_loss_weight: 0.05
 
 vlac:
   enabled: true
-  temperature: 0.5
-  top_k: 1
   milestone_interval: 8
   check_interval: 8
   ref_num: 9

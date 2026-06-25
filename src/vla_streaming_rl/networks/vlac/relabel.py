@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: MIT
+import torch
+
+from vla_streaming_rl.networks.vlac.evo_vlac import GAC_model
 
 
 class VlacRewardRelabeler:
@@ -6,12 +9,11 @@ class VlacRewardRelabeler:
 
     def __init__(
         self,
-        critic,
         milestone_interval: int,
         check_interval: int,
         gamma: float,
     ) -> None:
-        self._critic = critic
+        self._critic = GAC_model(tag="critic", device_map=torch.device("cuda"))
         self._milestone_interval = milestone_interval
         self._check_interval = check_interval
         self._alpha = 1.0
