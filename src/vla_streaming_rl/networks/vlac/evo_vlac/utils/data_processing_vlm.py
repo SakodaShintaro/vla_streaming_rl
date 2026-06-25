@@ -195,7 +195,7 @@ def format_songling_simple(action, state=False, data_type=None):
         return "End-Effector hide units in mm and degrees within () format"
 
 
-def trojectory_example_prompt(images, task):
+def trajectory_example_prompt(images, task):
     prompt = f"<trajectory> <task> {task} </task>:"
     t_len = len(images) - 1
     for i, one in enumerate(range(len(images))):

@@ -21,7 +21,7 @@ from io import BytesIO
 
 import requests
 
-from .data_processing_vlm import DataProcessor, trojectory_example_prompt
+from .data_processing_vlm import DataProcessor, trajectory_example_prompt
 
 
 class GAC_model:
@@ -51,7 +51,7 @@ class GAC_model:
     def get_score_prompt(self, task, trajectory_len=0, think=False):
         "two or len+3 image"
         if trajectory_len > 0:
-            trajectory_prompt = trojectory_example_prompt(list(range(trajectory_len)), task=task)
+            trajectory_prompt = trajectory_example_prompt(list(range(trajectory_len)), task=task)
             full_prompt = trajectory_prompt + self.dataclient.prompt_template["v3_think"].format(
                 task
             )
