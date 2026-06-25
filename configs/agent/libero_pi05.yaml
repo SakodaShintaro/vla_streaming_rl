@@ -33,7 +33,7 @@ print_interval: 1
 batch_size: 1
 # Warmup before the first update; also ensures the buffer holds a few episodes
 # of chunk transitions before TD learning starts.
-learning_starts: 10000
+learning_starts: 1
 # Replay holds one packed transition PER ENV STEP (preprocessed pi0.5 batch +
 # executed normalized action + reward + done); training samples a chunk_size+1
 # sliding window, so any window is a valid chunk transition (no fixed
@@ -46,8 +46,8 @@ horizon: 50
 
 # Fine-tuning LRs: tiny actor LR so the expert is nudged, not overwritten;
 # the critic learns faster.
-actor_lr: 5e-6
-critic_lr: 5e-6
+actor_lr: 0.0
+critic_lr: 5e-5
 
 # DACER2 actor knobs.
 # actor_denoising_steps : Euler steps when sampling π(s) for the (differentiable)
@@ -61,3 +61,25 @@ critic_lr: 5e-6
 actor_denoising_steps: 1
 q_grad_eta: 0.05
 dacer_loss_weight: 0.05
+
+# VLAC online dense reward (src/vla_streaming_rl/networks/vlac). Every
+# check_interval env steps the vendored VLAC critic scores the current agentview
+# frame against the held key frame, USING a one-shot in-context reference: the
+# best episode seen so far (highest score, ties->shortest), sampled to ref_num
+# frames. The diminishing-returns progress becomes a potential Phi and a PBRS dense
+# reward alpha*(gamma*Phi_t-Phi_prev) is added to that step's reward in real time.
+# The reference is essential: zero-shot (no reference) scores ~0 on LIBERO; with it
+# a success gives a smooth rising Phi. Before any episode succeeds there is no
+# reference and the dense reward is 0. Weights live outside git; pulled from
+# InternRobotics/VLAC to the HF cache on first use (model code is vendored).
+vlac:
+  enabled: true
+  device_map: cuda:0
+  temperature: 0.5
+  top_k: 1
+  milestone_interval: 8
+  check_interval: 8
+  ref_num: 9
+  alpha: 1.0
+  gamma: 0.99
+  value_scale: 100.0

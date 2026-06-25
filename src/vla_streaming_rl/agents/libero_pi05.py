@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 import collections
 
+import cv2
 import gymnasium as gym
 import numpy as np
 import torch
+from PIL import Image
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
@@ -15,6 +17,7 @@ from vla_streaming_rl.networks.libero_pi05_network import (
     TASK_KEY,
     LiberoPi05Network,
 )
+from vla_streaming_rl.networks.vlac import VlacRewardRelabeler
 from vla_streaming_rl.replay_buffer import ReplayBuffer, ReplayBufferData
 
 
@@ -71,6 +74,22 @@ def _window_to_loss_input(data: ReplayBufferData, schema: list) -> ReplayBufferD
     )
 
 
+def _sample_evenly(frames: list, n: int) -> list:
+    """Sample ``n`` evenly-spaced frames (first + n-1 spaced), as VLAC's reference."""
+    delta = (len(frames) - 1) / (n - 1)
+    return [frames[0]] + [frames[int(i * delta)] for i in range(1, n)]
+
+
+def _vlac_reward_image(sparse_reward: float, dense_reward: float, progress: float) -> np.ndarray:
+    """Fixed 200x200 panel: env sparse reward, VLAC dense (pseudo) reward, progress."""
+    img = np.zeros((200, 200, 3), dtype=np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(img, f"Env rew:  {sparse_reward:.3f}", (8, 40), font, 0.6, (255, 0, 0), 2)
+    cv2.putText(img, f"VLAC rew: {dense_reward:+.4f}", (8, 80), font, 0.6, (0, 200, 255), 2)
+    cv2.putText(img, f"Progress: {progress:.3f}", (8, 120), font, 0.6, (0, 255, 0), 2)
+    return img
+
+
 class LiberoPi05Agent:
     """pi0.5 flow-matching VLA agent, switchable between off-policy and streaming
     learning via ``learning_mode`` — exposing the same agent surface as every
@@ -102,6 +121,8 @@ class LiberoPi05Agent:
         max_grad_norm: float,
         et_lambda: float,
         gamma: float,
+        relabeler: VlacRewardRelabeler | None,
+        vlac_ref_num: int,
     ) -> None:
         if learning_mode not in ("off_policy", "streaming"):
             raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
@@ -165,6 +186,19 @@ class LiberoPi05Agent:
         self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
         # Latest critic read-out, for the telemetry path.
         self._value_report: dict[str, float] = {"value": 0.0}
+
+        # VLAC online dense reward: scored per env step against a key frame with a
+        # one-shot in-context reference (the best episode so far, sampled to
+        # ``vlac_ref_num`` frames), added to that step's stored reward. Disabled
+        # when relabeler is None.
+        self._relabeler = relabeler
+        self._vlac_ref_num = vlac_ref_num
+        self._last_dense = 0.0
+        self._last_progress = 0.0
+        self._cur_frames: list[Image.Image] = []
+        self._cur_task = ""
+        self._references: dict[str, list[Image.Image]] = {}
+        self._best: dict[str, tuple[float, int]] = {}
 
     # --- agent surface -----------------------------------------------------
 
@@ -253,10 +287,22 @@ class LiberoPi05Agent:
         return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        del score, feedback_text
+        del feedback_text
         # Drop any partially-executed chunk so the next episode plans fresh.
         self._env_queue.clear()
         self._norm_queue.clear()
+        if self._relabeler is not None:
+            length = len(self._cur_frames)
+            best = self._best.get(self._cur_task)
+            if length >= self._vlac_ref_num and (
+                best is None or score > best[0] or (score == best[0] and length < best[1])
+            ):
+                self._best[self._cur_task] = (score, length)
+                self._references[self._cur_task] = _sample_evenly(
+                    self._cur_frames, self._vlac_ref_num
+                )
+            self._cur_frames = []
+            self._relabeler.reset()
         return {}
 
     # --- training ----------------------------------------------------------
@@ -316,6 +362,17 @@ class LiberoPi05Agent:
                 max_prompt_tokens=0,
                 pad_token_id=0,
             )
+        metrics = {}
+        if self._relabeler is not None:
+            frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
+            if not self._cur_frames:
+                self._cur_task = info["task_prompt"]
+                self._relabeler.set_reference(self._references.get(self._cur_task))
+            self._cur_frames.append(frame)
+            dense, metrics = self._relabeler.step(frame, info["task_prompt"])
+            reward = reward + dense
+            self._last_dense = dense
+            self._last_progress = metrics["vlac/progress"]
         self.rb.add(
             packed,
             self._dummy,
@@ -328,7 +385,7 @@ class LiberoPi05Agent:
             [],
             [],
         )
-        return {}
+        return metrics
 
     @torch.no_grad()
     def _act(
@@ -385,5 +442,8 @@ class LiberoPi05Agent:
         return _pack_obs(batch, self._obs_schema)
 
     def _panels(self, obs: np.ndarray, reward: float) -> dict:
-        del obs, reward
-        return {"wrist": self._last_wrist}
+        del obs
+        panels = {"wrist": self._last_wrist}
+        if self._relabeler is not None:
+            panels["reward"] = _vlac_reward_image(reward, self._last_dense, self._last_progress)
+        return panels
