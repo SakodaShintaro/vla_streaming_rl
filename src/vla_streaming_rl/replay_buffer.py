@@ -90,6 +90,9 @@ class ReplayBuffer:
     def is_full(self) -> bool:
         return self.full
 
+    def num_stored(self) -> int:
+        return self.size if self.full else self.idx
+
     def reset(self) -> None:
         self.idx = 0
         self.full = False
