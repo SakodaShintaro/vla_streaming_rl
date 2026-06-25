@@ -233,9 +233,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
         info_dict = {
-            **critic_info,
-            **actor_info,
-            **seq_info,
+            f"losses/{key}": value
+            for key, value in {**critic_info, **actor_info, **seq_info}.items()
         }
 
         return LossResult(loss=total_loss, info=info_dict)
@@ -327,9 +326,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
 
         info_dict = {
-            **critic_info,
-            **actor_info,
-            **seq_info,
+            f"losses/{key}": value
+            for key, value in {**critic_info, **actor_info, **seq_info}.items()
         }
 
         et_info = EligibilityTraceInfo(

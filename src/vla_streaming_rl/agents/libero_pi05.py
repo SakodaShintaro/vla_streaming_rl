@@ -19,61 +19,8 @@ from vla_streaming_rl.networks.libero_pi05_network import (
     LiberoPi05Network,
 )
 from vla_streaming_rl.networks.vlac import VlacRewardRelabeler
-from vla_streaming_rl.replay_buffer import ReplayBuffer, ReplayBufferData
+from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
-
-
-def _build_obs_schema(batch: dict) -> tuple[list, int]:
-    """Record the (key, per-sample shape, dtype) of every tensor in a preprocessed
-    pi0.5 batch (B == 1), plus the total flat length. Used to pack the multimodal
-    observation into the project's tensor ``ReplayBuffer`` and unpack it back."""
-    schema = []
-    for key in sorted(batch.keys()):
-        value = batch[key]
-        if isinstance(value, torch.Tensor):
-            schema.append((key, tuple(value.shape[1:]), value.dtype))
-    flat_dim = sum(int(np.prod(shape)) for _, shape, _ in schema)
-    return schema, flat_dim
-
-
-def _pack_obs(batch: dict, schema: list) -> torch.Tensor:
-    """Flatten a single (B == 1) preprocessed pi0.5 batch into one float vector."""
-    return torch.cat([batch[key].reshape(-1).to(torch.float32) for key, _, _ in schema])
-
-
-def _unpack_obs(flat: torch.Tensor, schema: list) -> dict:
-    """Inverse of :func:`_pack_obs` for a batch of packed rows ``(B, flat_dim)`` →
-    a preprocessed pi0.5 batch of ``(B, *shape)`` tensors (dtypes restored)."""
-    batch_size = flat.shape[0]
-    batch = {}
-    offset = 0
-    for key, shape, dtype in schema:
-        n = int(np.prod(shape))
-        batch[key] = flat[:, offset : offset + n].reshape(batch_size, *shape).to(dtype)
-        offset += n
-    return batch
-
-
-def _window_to_loss_input(data: ReplayBufferData, schema: list) -> ReplayBufferData:
-    """Reshape a sampled window ``(B, chunk_size + 1, ...)`` into the inputs the
-    pi0.5 network's loss reads: ``observations = [cur_batch, next_batch]`` (the
-    window's first / last observation, unpacked), ``actions`` the executed
-    normalized chunk ``a_t..a_{t+H-1}`` (rows 1..H), and ``rewards`` / ``dones``
-    the per-step chunk vectors over the same rows."""
-    cur_batch = _unpack_obs(data.observations[:, 0], schema)
-    next_batch = _unpack_obs(data.observations[:, -1], schema)
-    return ReplayBufferData(
-        observations=[cur_batch, next_batch],
-        actions=data.actions[:, 1:],
-        rewards=data.rewards[:, 1:, 0],
-        dones=data.dones[:, 1:, 0],
-        obs_z=data.obs_z,
-        rnn_state=data.rnn_state,
-        log_probs=data.log_probs,
-        values=data.values,
-        action_token_ids=data.action_token_ids,
-        task_prompt_token_ids=data.task_prompt_token_ids,
-    )
 
 
 def _sample_evenly(frames: list, n: int) -> list:
@@ -153,9 +100,9 @@ class LiberoPi05Agent(Agent):
         self._dummy = torch.zeros(1, device=self.device)
 
         # The replay buffer is created lazily on the first store, once the packed
-        # observation width is known from a real preprocessed batch.
+        # observation width is known from a real preprocessed batch (the network
+        # owns the pack/unpack schema, exposed as ``network.obs_flat_dim``).
         self.rb: ReplayBuffer | None = None
-        self._obs_schema: list | None = None
 
         # Open-loop chunk execution: the env actions to play and the matching
         # normalized actions to store, filled together when a chunk is planned.
@@ -205,16 +152,14 @@ class LiberoPi05Agent(Agent):
         # Online TD(λ): train on the latest chunk-window once one exists.
         curr_size = self.rb.size if self.rb.full else self.rb.idx
         if curr_size >= self._seq_len:
-            self.network.policy.train()
-            data = _window_to_loss_input(self.rb.get_latest(self._seq_len), self._obs_schema)
+            data = self.rb.get_latest(self._seq_len)
             data.rewards = self.reward_processor.normalize(data.rewards)
             result = self.network.infer_and_compute_loss(data)
             self.actor_optimizer.zero_grad(set_to_none=True)
             self.critic_optimizer.zero_grad(set_to_none=True)
             result.et_info.actor_entropy_loss.backward(retain_graph=True)
             result.et_info.neg_value.backward()
-            nn.utils.clip_grad_norm_(self.network.actor_parameters, self.max_grad_norm)
-            nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
             self.critic_optimizer.step(delta=result.et_info.delta, reset=terminated or truncated)
             step_result.metrics.update(result.loss_result.info)
@@ -240,33 +185,6 @@ class LiberoPi05Agent(Agent):
             self._relabeler.reset()
         return {}
 
-    # --- training ----------------------------------------------------------
-
-    def _train_offpolicy(self, global_step: int) -> dict:
-        if self.rb is None or global_step < self.learning_starts:
-            return {}
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        if curr_size <= self._seq_len or curr_size < self.batch_size:
-            return {}
-
-        self.network.policy.train()
-        data = _window_to_loss_input(self.rb.sample(self.batch_size), self._obs_schema)
-        data.rewards = self.reward_processor.normalize(data.rewards)
-        result = self.network.compute_loss(data)
-
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        result.loss.backward()
-        actor_grad = nn.utils.clip_grad_norm_(self.network.actor_parameters, self.max_grad_norm)
-        critic_grad = nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.max_grad_norm)
-        self.actor_optimizer.step()
-        self.critic_optimizer.step()
-        return {
-            **result.info,
-            "losses/actor_grad_norm": float(actor_grad),
-            "losses/critic_grad_norm": float(critic_grad),
-        }
-
     # --- per-tick machinery ------------------------------------------------
 
     @torch.no_grad()
@@ -283,11 +201,10 @@ class LiberoPi05Agent(Agent):
         del global_step, task_prompt
         packed = self._preprocess(obs, info, task_prompt=info["task_prompt"])
         if self.rb is None:
-            self._obs_schema, flat_dim = _build_obs_schema(self._current_batch)
             self.rb = ReplayBuffer(
                 size=self.buffer_size,
                 seq_len=self._seq_len,
-                obs_shape=(flat_dim,),
+                obs_shape=(self.network.obs_flat_dim,),
                 obs_z_shape=(1,),
                 rnn_state_shape=(1,),
                 action_shape=(self.action_dim,),
@@ -360,10 +277,7 @@ class LiberoPi05Agent(Agent):
         }
         batch = self.preprocessor(raw_obs)
         self._current_batch = batch
-        if self._obs_schema is None:
-            schema, _ = _build_obs_schema(batch)
-            return _pack_obs(batch, schema)
-        return _pack_obs(batch, self._obs_schema)
+        return self.network.pack_obs(batch)
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         """Clip an un-normalized pi0.5 action into the env's action space."""

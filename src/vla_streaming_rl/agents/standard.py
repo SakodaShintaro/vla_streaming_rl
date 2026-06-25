@@ -212,7 +212,7 @@ class StandardAgent(Agent):
         self._fresh_pred_image = infer_result.next_image
         self._last_pred_reward = infer_result.next_reward
         self._fresh_pred_reward = infer_result.next_reward
-        metrics.update({f"losses/{key}": value for key, value in result.loss_result.info.items()})
+        metrics.update(result.loss_result.info)
 
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
@@ -247,27 +247,6 @@ class StandardAgent(Agent):
         self._fresh_pred_reward = None
         self.goal_predictor.reset()
         return {}
-
-    # --- training ----------------------------------------------------------
-
-    def _train_offpolicy(self, global_step: int) -> dict:
-        if global_step < self.learning_starts:
-            return {}
-        elif global_step == self.learning_starts:
-            print(f"Start training at global step {global_step}.")
-
-        data = self.rb.sample(self.batch_size)
-        data.rewards = self.reward_processor.normalize(data.rewards)
-        loss_result = self.network.compute_loss(data)
-        info_dict = {f"losses/{key}": value for key, value in loss_result.info.items()}
-
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        loss_result.loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
-        self.actor_optimizer.step()
-        self.critic_optimizer.step()
-        return info_dict
 
     # --- per-tick machinery ------------------------------------------------
 

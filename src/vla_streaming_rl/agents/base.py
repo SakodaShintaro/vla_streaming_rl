@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from typing import final
 
 import numpy as np
+from torch import nn
 
 from vla_streaming_rl.agents.step_result import StepResult
 
@@ -83,8 +84,27 @@ class Agent(ABC):
     @abstractmethod
     def on_episode_end(self, score: float, feedback_text: str) -> dict: ...
 
-    @abstractmethod
-    def _train_offpolicy(self, global_step: int) -> dict: ...
+    @final
+    def _train_offpolicy(self, global_step: int) -> dict:
+        if global_step < self.learning_starts:
+            return {}
+        elif global_step == self.learning_starts:
+            print(f"Start training at global step {global_step}.")
+        if self.rb is None:
+            return {}
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        if curr_size <= self.rb.seq_len or curr_size < self.batch_size:
+            return {}
+        data = self.rb.sample(self.batch_size)
+        data.rewards = self.reward_processor.normalize(data.rewards)
+        result = self.network.compute_loss(data)
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        result.loss.backward()
+        nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
+        self.actor_optimizer.step()
+        self.critic_optimizer.step()
+        return result.info
 
     @abstractmethod
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str): ...

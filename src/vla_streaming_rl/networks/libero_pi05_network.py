@@ -143,6 +143,13 @@ class LiberoPi05Network(NetworkInterface):
         # policy μ) the actor optimizer owns.
         self.actor_parameters = [p for p in self.policy.parameters() if p.requires_grad]
 
+        # Replay-buffer (de)serialization of pi0.5's multimodal observation. The
+        # schema (per-key shape/dtype) is learned from the first packed batch; the
+        # agent stores ``pack_obs(batch)`` flat vectors and the loss methods below
+        # unpack a sampled window back into ``[cur_batch, next_batch]``.
+        self._obs_schema: list | None = None
+        self._obs_flat_dim: int | None = None
+
         # Inject the critic. The state it scores is the mean-pooled VLM prefix
         # (vision + language context) concatenated with the raw proprio — visual
         # context plus the kinematic state pi0.5 routes through its suffix. The
@@ -204,6 +211,56 @@ class LiberoPi05Network(NetworkInterface):
             features=state,
         )
 
+    def pack_obs(self, batch: dict) -> torch.Tensor:
+        """Flatten a single (B == 1) preprocessed pi0.5 batch into one float vector
+        for the tensor replay buffer, learning the (key, shape, dtype) schema on
+        the first call."""
+        if self._obs_schema is None:
+            schema = []
+            for key in sorted(batch.keys()):
+                value = batch[key]
+                if isinstance(value, torch.Tensor):
+                    schema.append((key, tuple(value.shape[1:]), value.dtype))
+            self._obs_schema = schema
+            self._obs_flat_dim = sum(int(np.prod(shape)) for _, shape, _ in schema)
+        return torch.cat(
+            [batch[key].reshape(-1).to(torch.float32) for key, _, _ in self._obs_schema]
+        )
+
+    @property
+    def obs_flat_dim(self) -> int:
+        return self._obs_flat_dim
+
+    def _unpack_obs(self, flat: torch.Tensor) -> dict:
+        batch_size = flat.shape[0]
+        batch = {}
+        offset = 0
+        for key, shape, dtype in self._obs_schema:
+            n = int(np.prod(shape))
+            batch[key] = flat[:, offset : offset + n].reshape(batch_size, *shape).to(dtype)
+            offset += n
+        return batch
+
+    def _unpack_window(self, data: ReplayBufferData) -> ReplayBufferData:
+        """Reshape a sampled window ``(B, chunk_size + 1, ...)`` into the inputs the
+        loss reads: ``observations = [cur_batch, next_batch]`` (first / last
+        observation, unpacked), the executed normalized chunk, and the per-step
+        chunk reward / done vectors."""
+        cur_batch = self._unpack_obs(data.observations[:, 0])
+        next_batch = self._unpack_obs(data.observations[:, -1])
+        return ReplayBufferData(
+            observations=[cur_batch, next_batch],
+            actions=data.actions[:, 1:],
+            rewards=data.rewards[:, 1:, 0],
+            dones=data.dones[:, 1:, 0],
+            obs_z=data.obs_z,
+            rnn_state=data.rnn_state,
+            log_probs=data.log_probs,
+            values=data.values,
+            action_token_ids=data.action_token_ids,
+            task_prompt_token_ids=data.task_prompt_token_ids,
+        )
+
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         """TD-critic + DACER2-actor loss for one replay batch.
 
@@ -217,6 +274,8 @@ class LiberoPi05Network(NetworkInterface):
         the actor loss froze the critic during its Q forwards, so one backward
         leaves the two on disjoint params and the agent steps each optimizer.
         """
+        self.policy.train()
+        data = self._unpack_window(data)
         cur_batch, next_batch = data.observations
         action_chunk = data.actions
         chunk_rewards = data.rewards
@@ -251,6 +310,8 @@ class LiberoPi05Network(NetworkInterface):
         actor loss on the latest chunk window, plus the eligibility-trace inputs
         the agent's AdamET critic needs — the actor loss, ``-Q(s, a)`` (the value
         whose gradient feeds the trace), and the TD error δ."""
+        self.policy.train()
+        data = self._unpack_window(data)
         cur_batch, next_batch = data.observations
         action_chunk = data.actions
         chunk_rewards = data.rewards
