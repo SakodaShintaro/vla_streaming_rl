@@ -81,4 +81,3 @@ vlac:
   ref_num: 9
   alpha: 1.0
   gamma: 0.99
-  value_scale: 100.0

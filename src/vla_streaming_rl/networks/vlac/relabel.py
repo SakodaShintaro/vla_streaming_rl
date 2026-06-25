@@ -1,15 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""Online VLAC dense reward with a one-shot in-context reference.
-
-Every ``check_interval`` steps the critic scores the current frame against the
-held key frame, conditioned on a reference trajectory (the best episode so far,
-sampled to ``ref_num`` frames). ``c in [-100, 100]`` = progress; the absolute
-progress is ``v = v_banked + (100 - v_banked) * c / 100`` (diminishing returns),
-the potential is ``Phi = v / value_scale`` and the per-step shaping reward is the
-PBRS term ``alpha * (gamma * Phi_t - Phi_prev)``. When a milestone is reached the
-progress is banked and the key advances. Without a reference the dense reward is 0
-(zero-shot scores ~0 on LIBERO).
-"""
 
 
 class VlacRewardRelabeler:
@@ -22,14 +11,13 @@ class VlacRewardRelabeler:
         check_interval: int,
         alpha: float,
         gamma: float,
-        value_scale: float,
     ) -> None:
         self._critic = critic
         self._milestone_interval = milestone_interval
         self._check_interval = check_interval
         self._alpha = alpha
         self._gamma = gamma
-        self._value_scale = value_scale
+        self._value_scale = 100.0
         self._reference = None
         self.reset()
 

@@ -260,7 +260,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 check_interval=args.vlac.check_interval,
                 alpha=args.vlac.alpha,
                 gamma=args.vlac.gamma,
-                value_scale=args.vlac.value_scale,
             )
 
         agent = LiberoPi05Agent(
