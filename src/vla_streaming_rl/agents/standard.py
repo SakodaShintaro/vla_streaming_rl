@@ -166,13 +166,48 @@ class StandardAgent(Agent):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
+        metrics = {}
+        episode_done = terminated or truncated
+        if episode_done:
+            self.action_chunk = None
+            self.chunk_step = 0
+            self.prev_action_token_ids = []
+            self._episode_reset = self.use_done
+        action_norm = np.linalg.norm(self.prev_action)
+        if not self.normalizing_by_return:
+            self.reward_processor.update(reward)
+        metrics["action_norm"] = action_norm
+        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+        obs_hwc = obs.transpose(1, 2, 0)
+        if self._fresh_pred_image is not None:
+            metrics["losses/pred_image_loss"] = float(
+                np.mean(np.abs(self._fresh_pred_image - obs_hwc))
+            )
+            self._fresh_pred_image = None
+        if self._fresh_pred_reward is not None:
+            metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
+            self._fresh_pred_reward = None
+        obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info, task_prompt)
+        normalized_action = (self.prev_action - self.action_bias) / self.action_scale
+        self.rb.add(
+            obs_tensor,
+            obs_z,
+            reward,
+            episode_done if self.use_done else False,
+            self.rnn_state.squeeze(0),
+            torch.from_numpy(normalized_action).to(self.device),
+            0.0,
+            0.0,
+            self.prev_action_token_ids,
+            task_prompt_token_ids,
+        )
         panels = self._panels(obs, reward)
 
-        # cached chunk: no inference, no training
         if self.action_chunk is not None and self.chunk_step < self.horizon:
-            action, act_metrics = self._act(global_step, obs, task_prompt, info)
-            metrics.update(act_metrics)
+            action = self._to_env_action(self.action_chunk[self.chunk_step])
+            self.prev_action = action
+            self.chunk_step += 1
+            metrics["chunk_step"] = self.chunk_step
             return StepResult(action=action, metrics=metrics, panels=panels)
 
         # new chunk: a single grad-enabled forward yields both the action chunk
@@ -223,8 +258,8 @@ class StandardAgent(Agent):
         # processing: the next-frame / reward predictions (stashed during the
         # terminal step, dropped here so they are never validated against the next
         # episode's first frame) and the world-model goal predictor. The chunk /
-        # eligibility-trace reset is done in ``_store_transition`` instead, since
-        # it must take effect *before* the terminal step trains.
+        # eligibility-trace reset is done at the top of ``_act`` / ``_step_streaming``
+        # instead, since it must take effect *before* the terminal step trains.
         self._last_pred_image = None
         self._fresh_pred_image = None
         self._last_pred_reward = None
@@ -255,23 +290,17 @@ class StandardAgent(Agent):
 
     # --- per-tick machinery ------------------------------------------------
 
-    def _store_transition(
+    @torch.no_grad()
+    def _act(
         self,
+        global_step: int,
         obs: np.ndarray,
         reward: float,
         terminated: bool,
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> dict:
-        """Record the current timestep into the replay buffer and return the
-        per-tick telemetry it produces (processed reward, action norm, and the
-        previous prediction's validation losses).
-
-        On an episode boundary it also clears the chunk and arms the
-        eligibility-trace reset — both must take effect before the terminal step
-        trains (a cleared chunk forces the terminal transition through the
-        training path instead of the cached-action fast path)."""
+    ) -> tuple[np.ndarray, dict]:
         metrics = {}
         episode_done = terminated or truncated
         if episode_done:
@@ -279,16 +308,11 @@ class StandardAgent(Agent):
             self.chunk_step = 0
             self.prev_action_token_ids = []
             self._episode_reset = self.use_done
-
         action_norm = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["action_norm"] = action_norm
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-
-        # Validate the previous inference's next-frame / reward prediction against
-        # this observation. Logged only while the prediction is fresh (one step
-        # old); the panels persist the latest prediction across cached steps.
         obs_hwc = obs.transpose(1, 2, 0)
         if self._fresh_pred_image is not None:
             metrics["losses/pred_image_loss"] = float(
@@ -298,7 +322,6 @@ class StandardAgent(Agent):
         if self._fresh_pred_reward is not None:
             metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
             self._fresh_pred_reward = None
-
         obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info, task_prompt)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
@@ -313,18 +336,7 @@ class StandardAgent(Agent):
             self.prev_action_token_ids,
             task_prompt_token_ids,
         )
-        return metrics
 
-    def _act(
-        self, global_step: int, obs: np.ndarray, task_prompt: str, info: dict
-    ) -> tuple[np.ndarray, dict]:
-        """Produce the env action for this tick: replay a cached chunk action
-        when one is available, otherwise run inference for a fresh chunk. During
-        the off-policy warmup (``global_step < learning_starts``) the action is a
-        random sample, but inference still runs so the recurrent state and the
-        prediction panels keep advancing."""
-        del obs, info  # the obs-driven standard agent acts off the replay buffer
-        metrics = {}
         warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
 
         if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:

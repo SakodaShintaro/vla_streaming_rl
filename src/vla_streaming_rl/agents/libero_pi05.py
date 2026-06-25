@@ -213,9 +213,9 @@ class LiberoPi05Agent(Agent):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
-        action, act_metrics = self._act(global_step, obs, task_prompt, info)
-        metrics.update(act_metrics)
+        action, metrics = self._act(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
+        )
 
         # Online TD(λ): train on the latest chunk-window once one exists.
         curr_size = self.rb.size if self.rb.full else self.rb.idx
@@ -282,19 +282,18 @@ class LiberoPi05Agent(Agent):
 
     # --- per-tick machinery ------------------------------------------------
 
-    def _store_transition(
+    @torch.no_grad()
+    def _act(
         self,
+        global_step: int,
         obs: np.ndarray,
         reward: float,
         terminated: bool,
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> dict:
-        """Preprocess + pack the current observation and store one per-env-step
-        transition ``(s_t, a_{t-1}, r_t, done_t)``. Creates the replay buffer on
-        the first call, once the packed-observation width is known."""
-        del task_prompt
+    ) -> tuple[np.ndarray, dict]:
+        del global_step, task_prompt
         packed = self._preprocess(obs, info, task_prompt=info["task_prompt"])
         if self.rb is None:
             self._obs_schema, flat_dim = _build_obs_schema(self._current_batch)
@@ -334,16 +333,7 @@ class LiberoPi05Agent(Agent):
             [],
             [],
         )
-        return metrics
 
-    @torch.no_grad()
-    def _act(
-        self, global_step: int, obs: np.ndarray, task_prompt: str, info: dict
-    ) -> tuple[np.ndarray, dict]:
-        """Open-loop chunk execution: plan a fresh chunk when the queue is empty
-        (pi0.5 inference → normalized chunk + un-normalized env chunk), then pop
-        the next action. Caches the executed *normalized* action for the buffer."""
-        del global_step, obs, task_prompt, info
         if not self._env_queue:
             infer_result = self.network.infer(
                 InferInput(
@@ -356,7 +346,7 @@ class LiberoPi05Agent(Agent):
                 )
             )
             self._value_report = infer_result.value_report
-            norm_chunk = infer_result.action.squeeze(0)  # (chunk_size, action_dim), normalized
+            norm_chunk = infer_result.action.squeeze(0)
             env_chunk = self.postprocessor(infer_result.action).squeeze(0).float().cpu().numpy()
             self._env_queue.extend(env_chunk)
             self._norm_queue.extend(norm_chunk)
@@ -364,7 +354,8 @@ class LiberoPi05Agent(Agent):
         self._current_action_taken = self._norm_queue.popleft()
         env_action = self._to_env_action(self._env_queue.popleft())
         self._prev_action = self._current_action_taken
-        return env_action, dict(self._value_report)
+        metrics.update(self._value_report)
+        return env_action, metrics
 
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> torch.Tensor:
         """Build pi0.5's raw multimodal observation, run the (normalizing,

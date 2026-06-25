@@ -39,6 +39,7 @@ class Agent(ABC):
             global_step, obs, reward, terminated, truncated, task_prompt, info
         )
 
+    @final
     @torch.no_grad()
     def select_action(
         self,
@@ -50,9 +51,9 @@ class Agent(ABC):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
-        action, act_metrics = self._act(global_step, obs, task_prompt, info)
-        metrics.update(act_metrics)
+        action, metrics = self._act(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
+        )
         return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     @abstractmethod
@@ -86,19 +87,15 @@ class Agent(ABC):
     def _train_offpolicy(self, global_step: int) -> dict: ...
 
     @abstractmethod
-    def _store_transition(
+    def _act(
         self,
+        global_step: int,
         obs: np.ndarray,
         reward: float,
         terminated: bool,
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> dict: ...
-
-    @abstractmethod
-    def _act(
-        self, global_step: int, obs: np.ndarray, task_prompt: str, info: dict
     ) -> tuple[np.ndarray, dict]: ...
 
     @abstractmethod

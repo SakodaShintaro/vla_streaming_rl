@@ -144,10 +144,9 @@ class SimLingoAgent(Agent):
             else optim.AdamW(self.critic.parameters(), lr=critic_lr, weight_decay=0.0)
         )
 
-        # The agent caches each tick's per-query VLM features and the action it
-        # took; ``_store_transition`` writes them into the obs / action slots so
-        # ``compute_loss`` / ``infer_and_compute_loss`` read (features, action,
-        # reward, done) straight from the buffer and only re-apply the waypoint
+        # ``_act`` writes each tick's per-query VLM features and the action it took
+        # straight into the buffer so ``compute_loss`` / ``infer_and_compute_loss``
+        # read (features, action, reward, done) back and only re-apply the waypoint
         # heads. The obs_z / rnn_state / log_prob / value / token slots stay unused
         # (shape-(1,) / 0 / empty) so the buffer machinery still type-checks.
         self.rb = ReplayBuffer(
@@ -166,10 +165,9 @@ class SimLingoAgent(Agent):
         self._dummy_rnn_state = torch.zeros(1, device=self.device)
         self._dummy_obs_z = torch.zeros(1, device=self.device)
 
-        # ``_preprocess`` / ``_act`` write the just-computed features / action into
-        # these so ``_store_transition`` can store them at the buffer index for the
-        # current timestep (the project's convention puts the action that produced
-        # state t at ``actions[t]``).
+        # ``_act`` writes the just-computed features / action into these and into
+        # the buffer for the current timestep (the project's convention puts the
+        # action that produced state t at ``actions[t]``).
         self._current_state: torch.Tensor = torch.zeros(
             NUM_WP_QUERIES, feature_dim, device=self.device
         )
@@ -197,20 +195,6 @@ class SimLingoAgent(Agent):
 
     # --- agent surface -----------------------------------------------------
 
-    @torch.no_grad()
-    def select_action(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult:
-        action, metrics = self._act(global_step, obs, task_prompt, info)
-        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
-
     def _step_offpolicy(
         self,
         global_step: int,
@@ -221,14 +205,10 @@ class SimLingoAgent(Agent):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        # Act (live VLM inference), store the transition, then train on a random
-        # replay batch — separate forwards, like the standard off-policy agent.
-        action, metrics = self._act(global_step, obs, task_prompt, info)
-        metrics.update(
-            self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
+        action, metrics = self._act(
+            global_step, obs, reward, terminated, truncated, task_prompt, info
         )
         metrics.update(self._train_offpolicy(global_step))
-        self._prev_action = self._current_action_taken
         return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     def _step_streaming(
@@ -242,20 +222,26 @@ class SimLingoAgent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step
-        # One VLM forward extracts the current per-query features; store them as the
-        # latest transition. The executed action then comes from the *same* fused
-        # forward that computes the training loss (``infer_and_compute_loss`` returns
-        # μ(current state)), so the policy update matches the executed action.
         infer_input = self._preprocess(obs, info, task_prompt)
         with torch.no_grad():
             live = self.network.infer(infer_input)
         self._current_state = live.features.squeeze(0)
-        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
+        self.rb.add(
+            self._current_state,
+            self._dummy_obs_z,
+            reward,
+            terminated or truncated,
+            self._dummy_rnn_state,
+            self._prev_action,
+            0.0,
+            0.0,
+            [],
+            [],
+        )
+        metrics = {"processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item()}
 
         curr_size = self.rb.size if self.rb.full else self.rb.idx
         if curr_size < _SEQ_LEN + _HORIZON:
-            # Bootstrap tick: no complete transition yet — act greedily off the live
-            # inference, no training.
             action_mean = live.action.squeeze(0)
             self._value_report = live.value_report
         else:
@@ -315,21 +301,22 @@ class SimLingoAgent(Agent):
 
     # --- per-tick machinery ------------------------------------------------
 
-    def _store_transition(
+    @torch.no_grad()
+    def _act(
         self,
+        global_step: int,
         obs: np.ndarray,
         reward: float,
         terminated: bool,
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> dict:
-        """Store ``(features_t, action_{t-1}, reward, done)`` into the replay
-        buffer and return the per-tick reward telemetry. The features come from the
-        VLM forward cached in ``self._current_state`` (``_act`` for off-policy,
-        ``_step_streaming`` inline); ``action_{t-1}`` is ``self._prev_action``, which
-        the caller advances to the executed action only after this returns."""
-        del obs, task_prompt, info
+    ) -> tuple[np.ndarray, dict]:
+        del global_step
+        infer_input = self._preprocess(obs, info, task_prompt)
+        infer_result = self.network.infer(infer_input)
+        self._current_state = infer_result.features.squeeze(0)
+        self._value_report = infer_result.value_report
         self.rb.add(
             self._current_state,
             self._dummy_obs_z,
@@ -342,28 +329,16 @@ class SimLingoAgent(Agent):
             [],
             [],
         )
-        return {"processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item()}
-
-    @torch.no_grad()
-    def _act(
-        self, global_step: int, obs: np.ndarray, task_prompt: str, info: dict
-    ) -> tuple[np.ndarray, dict]:
-        """Live inference tick: VLM forward → policy μ(features) → executed action.
-
-        Caches the per-query features and the (noised) action for
-        ``_store_transition``, and returns the env action plus its telemetry. Used
-        by ``select_action`` (eval) and the off-policy step."""
-        del global_step
-        infer_input = self._preprocess(obs, info, task_prompt)
-        infer_result = self.network.infer(infer_input)
-        action_mean = infer_result.action.squeeze(0)  # (ACTION_DIM,)
-        self._value_report = infer_result.value_report
-        self._current_state = infer_result.features.squeeze(0)
-
+        action_mean = infer_result.action.squeeze(0)
         action_taken = action_mean + torch.randn_like(action_mean) * self.exploration_noise
         self._current_action_taken = action_taken
+        self._prev_action = action_taken
         env_action = self._to_env_action(action_taken)
-        metrics = {"action_norm": float(np.linalg.norm(env_action)), **self._value_report}
+        metrics = {
+            "action_norm": float(np.linalg.norm(env_action)),
+            "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
+            **self._value_report,
+        }
         return env_action, metrics
 
     @torch.no_grad()
