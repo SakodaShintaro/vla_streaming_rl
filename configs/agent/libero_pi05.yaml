@@ -80,4 +80,3 @@ vlac:
   check_interval: 8
   ref_num: 9
   alpha: 1.0
-  gamma: 0.99
