@@ -20,6 +20,7 @@ from vla_streaming_rl.networks.libero_pi05_network import (
 )
 from vla_streaming_rl.networks.vlac import VlacRewardRelabeler
 from vla_streaming_rl.replay_buffer import ReplayBuffer, ReplayBufferData
+from vla_streaming_rl.reward_processor import RewardProcessor
 
 
 def _build_obs_schema(batch: dict) -> tuple[list, int]:
@@ -125,6 +126,7 @@ class LiberoPi05Agent(Agent):
         self.batch_size = int(batch_size)
         self.learning_starts = int(learning_starts)
         self.max_grad_norm = float(max_grad_norm)
+        self.reward_processor = RewardProcessor("none", 1.0)
 
         self._action_low = action_space.low
         self._action_high = action_space.high
@@ -205,6 +207,7 @@ class LiberoPi05Agent(Agent):
         if curr_size >= self._seq_len:
             self.network.policy.train()
             data = _window_to_loss_input(self.rb.get_latest(self._seq_len), self._obs_schema)
+            data.rewards = self.reward_processor.normalize(data.rewards)
             result = self.network.infer_and_compute_loss(data)
             self.actor_optimizer.zero_grad(set_to_none=True)
             self.critic_optimizer.zero_grad(set_to_none=True)
@@ -248,6 +251,7 @@ class LiberoPi05Agent(Agent):
 
         self.network.policy.train()
         data = _window_to_loss_input(self.rb.sample(self.batch_size), self._obs_schema)
+        data.rewards = self.reward_processor.normalize(data.rewards)
         result = self.network.compute_loss(data)
 
         self.actor_optimizer.zero_grad(set_to_none=True)

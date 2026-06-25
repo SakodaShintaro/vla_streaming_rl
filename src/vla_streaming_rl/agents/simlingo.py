@@ -230,6 +230,7 @@ class SimLingoAgent(Agent):
             self._value_report = live.value_report
         else:
             data = self.rb.get_latest(_SEQ_LEN + _HORIZON)
+            data.rewards = self.reward_processor.normalize(data.rewards)
             result = self.network.infer_and_compute_loss(data)
             action_mean = result.infer_result.action.squeeze(0)
             self._value_report = result.infer_result.value_report
@@ -273,6 +274,7 @@ class SimLingoAgent(Agent):
             return {}
 
         data = self.rb.sample(self.batch_size)
+        data.rewards = self.reward_processor.normalize(data.rewards)
         result = self.network.compute_loss(data)
 
         self.actor_optimizer.zero_grad(set_to_none=True)
