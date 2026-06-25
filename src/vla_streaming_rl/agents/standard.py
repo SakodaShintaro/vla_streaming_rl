@@ -403,18 +403,6 @@ class StandardAgent:
             metrics["chunk_step"] = self.chunk_step
         return action, metrics
 
-    def _panels(self, obs: np.ndarray, reward: float) -> dict:
-        panels = {}
-        panels["prediction"] = (
-            self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
-        )
-        pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
-        panels["reward"] = create_reward_image(pred_reward, reward)
-        goal_image = self.goal_predictor.step(obs)
-        if self.goal_predictor.enabled:
-            panels["goal"] = goal_image
-        return panels
-
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
         the raw obs tensor, its encoded latent ``obs_z``, and the tokenized task
@@ -431,3 +419,15 @@ class StandardAgent:
         return np.clip(
             net_action * self.action_scale + self.action_bias, self.action_low, self.action_high
         )
+
+    def _panels(self, obs: np.ndarray, reward: float) -> dict:
+        panels = {}
+        panels["prediction"] = (
+            self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
+        )
+        pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
+        panels["reward"] = create_reward_image(pred_reward, reward)
+        goal_image = self.goal_predictor.step(obs)
+        if self.goal_predictor.enabled:
+            panels["goal"] = goal_image
+        return panels

@@ -91,21 +91,6 @@ def _vlac_reward_image(sparse_reward: float, dense_reward: float, progress: floa
 
 
 class LiberoPi05Agent:
-    """pi0.5 flow-matching VLA agent, switchable between off-policy and streaming
-    learning via ``learning_mode`` — exposing the same agent surface as every
-    other agent (``select_action`` / ``step`` / ``_step_offpolicy`` /
-    ``_step_streaming`` / ``_train_offpolicy`` / ``_store_transition`` / ``_act`` /
-    ``_preprocess`` / ``_to_env_action`` / ``_panels`` / ``on_episode_end``).
-
-    pi0.5 plans a ``chunk_size`` action chunk from one observation and executes it
-    open-loop; the agent stores one transition per *env step* in the project's
-    tensor ``ReplayBuffer`` (the multimodal observation is packed into the obs slot
-    via :func:`_pack_obs`). Training samples a ``chunk_size + 1`` window — the
-    chunk transition ``(s_t, a_{t:t+H}, r_{t:t+H}, s_{t+H})`` — so any window is a
-    valid off-policy transition (no fixed chunk boundaries) and the mid-chunk
-    sparse success reward is never dropped.
-    """
-
     def __init__(
         self,
         *,
@@ -416,10 +401,6 @@ class LiberoPi05Agent:
         env_action = self._to_env_action(self._env_queue.popleft())
         return env_action, dict(self._value_report)
 
-    def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
-        """Clip an un-normalized pi0.5 action into the env's action space."""
-        return np.clip(net_action, self._action_low, self._action_high).astype(np.float32)
-
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> torch.Tensor:
         """Build pi0.5's raw multimodal observation, run the (normalizing,
         tokenizing) preprocessor, cache the batch for ``_act`` and the wrist frame
@@ -440,6 +421,10 @@ class LiberoPi05Agent:
             schema, _ = _build_obs_schema(batch)
             return _pack_obs(batch, schema)
         return _pack_obs(batch, self._obs_schema)
+
+    def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
+        """Clip an un-normalized pi0.5 action into the env's action space."""
+        return np.clip(net_action, self._action_low, self._action_high).astype(np.float32)
 
     def _panels(self, obs: np.ndarray, reward: float) -> dict:
         del obs
