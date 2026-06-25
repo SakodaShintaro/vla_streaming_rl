@@ -577,13 +577,13 @@ class DataProcessor:
             "default": default_position_process,
         }
 
-        self.image_prompt_templete = {
+        self.image_prompt_template = {
             1: "<image>\n",
             2: "Image-1: <image>\nImage-2: <image>\n",
             3: "Image-1: <image>\nImage-2: <image>\nImage-3: <image>\n",
         }
         self.system_prompt = "You are a visual-language assistant designed to interpret spatial and task-related information from images and text. Provide precise, context-aware responses and actionable guidance to assist in achieving task objectives."
-        self.prompt_templete = {
+        self.prompt_template = {
             "v3": "Image-1: <image>\nImage-2: <image>\nCompare two images and evaluate whether the second image is closer to achieving task objectives compared to the first image.\nPlease directly rate score following below rules:\nPositive Score: If the second image is closer to achieving task objectives than the first image, assign a positive score based on the significance of the improvement.\nNegative Score: If the second image deviates further from the task objectives compared to the first image, assign a negative score based on the degree of deterioration.\nZero Score: If both images demonstrate the same level of task completion, assign a score of 0.\nThe task needs to accomplish is: <task> {} </task> <score>",
             "v3_think": "0% <image>\nThis image is the trajectory beginning of the following two images\nImage-1: <image>\nImage-2: <image>\nCompare two images and evaluate whether the second image is closer to achieving task objectives compared to the first image.\nPlease directly rate score following below rules:\nPositive Score: If the second image is closer to achieving task objectives than the first image, assign a positive score based on the significance of the improvement.\nNegative Score: If the second image deviates further from the task objectives compared to the first image, assign a negative score based on the degree of deterioration.\nZero Score: If both images demonstrate the same level of task completion, assign a score of 0.\nThe task needs to accomplish is: <task> {} </task> <score>",
             "think": " Please give reasoning process enclosed within <think> reasoning process here </think>.",
@@ -601,7 +601,7 @@ class DataProcessor:
             "task_action_score": "The current position state of the robotic arm's end gripper in the image is as follows: <state> {} </state>. The action robot take now: <action> {} </action>. Please rate score of the action for achieving task: <task> {} </task> <score>",
             "action": "{{x: {}mm, y: {}mm, z: {}mm, roll: {} degrees, pitch: {} degrees, yaw: {} degrees, open: {}}}",
         }
-        self.answer_templete = {
+        self.answer_template = {
             "v3": "{}",
             "vqa": "{}",
             "task_vqa": "{}",

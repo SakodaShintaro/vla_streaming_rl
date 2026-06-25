@@ -38,10 +38,10 @@ class GAC_model:
         self.critic_data = {}
         self.sft_dataset = None
         self.dataclient = DataProcessor()
-        self.dataclient.prompt_templete["v3"] = (
+        self.dataclient.prompt_template["v3"] = (
             "Image-1: <image>\nImage-2: <image>\nCompare two images and evaluate whether the second image is closer to achieving task objectives compared to the first image. + score means the second image is closer, - score means the first image is closer\nResponse the relative progressing of target task follow <score>. The target task is: <task> {} </task> <score>"
         )
-        self.dataclient.prompt_templete["v3_think"] = (
+        self.dataclient.prompt_template["v3_think"] = (
             "0% <image>\nThis image is the trajectory beginning of the following two images\nImage-1: <image>\nImage-2: <image>\nCompare two images and evaluate whether the second image is closer to achieving task objectives compared to the first image. + score means the second image is closer, - score means the first image is closer\nResponse the relative progressing of target task follow <score>. The target task is: <task> {} </task> <score>"
         )
         self.init_model(device_map)
@@ -52,13 +52,13 @@ class GAC_model:
         "two or len+3 image"
         if trajectory_len > 0:
             trajectory_prompt = trojectory_example_prompt(list(range(trajectory_len)), task=task)
-            full_prompt = trajectory_prompt + self.dataclient.prompt_templete["v3_think"].format(
+            full_prompt = trajectory_prompt + self.dataclient.prompt_template["v3_think"].format(
                 task
             )
         else:
-            full_prompt = self.dataclient.prompt_templete["v3"].format(task)
+            full_prompt = self.dataclient.prompt_template["v3"].format(task)
         if think:
-            full_prompt += self.dataclient.prompt_templete["think"]
+            full_prompt += self.dataclient.prompt_template["think"]
         return full_prompt
 
     def set_config(self):
