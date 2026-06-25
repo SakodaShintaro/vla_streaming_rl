@@ -20,6 +20,18 @@ class Agent(ABC):
             raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
         self.learning_mode = learning_mode
 
+    @abstractmethod
+    def select_action(
+        self,
+        global_step: int,
+        obs: np.ndarray,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        task_prompt: str,
+        info: dict,
+    ) -> StepResult: ...
+
     @final
     def step(
         self,
@@ -39,18 +51,6 @@ class Agent(ABC):
             global_step, obs, reward, terminated, truncated, task_prompt, info
         )
 
-    @abstractmethod
-    def select_action(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult: ...
-
     @final
     def _step_offpolicy(
         self,
@@ -62,7 +62,26 @@ class Agent(ABC):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        train_metrics = self._train_offpolicy(global_step)
+        if global_step < self.learning_starts:
+            return {}
+        elif global_step == self.learning_starts:
+            print(f"Start training at global step {global_step}.")
+        if self.rb is None:
+            return {}
+        curr_size = self.rb.size if self.rb.full else self.rb.idx
+        if curr_size <= self.rb.seq_len or curr_size < self.batch_size:
+            return {}
+        data = self.rb.sample(self.batch_size)
+        data.rewards = self.reward_processor.normalize(data.rewards)
+        result = self.network.compute_loss(data)
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        result.loss.backward()
+        nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
+        self.actor_optimizer.step()
+        self.critic_optimizer.step()
+
+        train_metrics = result.info
         result = self.select_action(
             global_step, obs, reward, terminated, truncated, task_prompt, info
         )
@@ -83,28 +102,6 @@ class Agent(ABC):
 
     @abstractmethod
     def on_episode_end(self, score: float, feedback_text: str) -> dict: ...
-
-    @final
-    def _train_offpolicy(self, global_step: int) -> dict:
-        if global_step < self.learning_starts:
-            return {}
-        elif global_step == self.learning_starts:
-            print(f"Start training at global step {global_step}.")
-        if self.rb is None:
-            return {}
-        curr_size = self.rb.size if self.rb.full else self.rb.idx
-        if curr_size <= self.rb.seq_len or curr_size < self.batch_size:
-            return {}
-        data = self.rb.sample(self.batch_size)
-        data.rewards = self.reward_processor.normalize(data.rewards)
-        result = self.network.compute_loss(data)
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        result.loss.backward()
-        nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
-        self.actor_optimizer.step()
-        self.critic_optimizer.step()
-        return result.info
 
     @abstractmethod
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str): ...
