@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch import nn, optim
 
+from vla_streaming_rl.agents.base import Agent
 from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
@@ -13,7 +14,7 @@ from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
 from vla_streaming_rl.utils import create_reward_image
 
 
-class StandardAgent:
+class StandardAgent(Agent):
     def __init__(
         self,
         *,
@@ -40,9 +41,7 @@ class StandardAgent:
         pad_token_id: int,
         goal_predictor: WorldModelGoalPredictor,
     ) -> None:
-        if learning_mode not in ("off_policy", "streaming"):
-            raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
-        self.learning_mode = learning_mode
+        super().__init__(learning_mode=learning_mode)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
@@ -137,40 +136,6 @@ class StandardAgent:
         self.goal_predictor = goal_predictor
 
     # --- agent surface -----------------------------------------------------
-
-    @torch.inference_mode()
-    def select_action(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult:
-        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
-        action, act_metrics = self._act(global_step, obs, task_prompt, info)
-        metrics.update(act_metrics)
-        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
-
-    def step(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult:
-        if self.learning_mode == "off_policy":
-            return self._step_offpolicy(
-                global_step, obs, reward, terminated, truncated, task_prompt, info
-            )
-        return self._step_streaming(
-            global_step, obs, reward, terminated, truncated, task_prompt, info
-        )
 
     def _step_offpolicy(
         self,

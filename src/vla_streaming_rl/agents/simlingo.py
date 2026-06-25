@@ -8,6 +8,7 @@ from leaderboard.utils.route_manipulation import downsample_route  # type: ignor
 from PIL import Image
 from torch import nn, optim
 
+from vla_streaming_rl.agents.base import Agent
 from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.simlingo_network import (
@@ -63,7 +64,7 @@ def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     )
 
 
-class SimLingoAgent:
+class SimLingoAgent(Agent):
     def __init__(
         self,
         *,
@@ -81,10 +82,10 @@ class SimLingoAgent:
         learning_mode: str,
         et_lambda: float,
     ) -> None:
+        super().__init__(learning_mode=learning_mode)
         self.observation_space = observation_space
         del action_space
 
-        self.learning_mode = learning_mode
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.exploration_noise = exploration_noise
@@ -209,24 +210,6 @@ class SimLingoAgent:
     ) -> StepResult:
         action, metrics = self._act(global_step, obs, task_prompt, info)
         return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
-
-    def step(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult:
-        if self.learning_mode == "off_policy":
-            return self._step_offpolicy(
-                global_step, obs, reward, terminated, truncated, task_prompt, info
-            )
-        return self._step_streaming(
-            global_step, obs, reward, terminated, truncated, task_prompt, info
-        )
 
     def _step_offpolicy(
         self,

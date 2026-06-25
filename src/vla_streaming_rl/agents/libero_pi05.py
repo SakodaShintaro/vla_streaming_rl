@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 from torch import nn, optim
 
+from vla_streaming_rl.agents.base import Agent
 from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.libero_pi05_network import (
@@ -90,7 +91,7 @@ def _vlac_reward_image(sparse_reward: float, dense_reward: float, progress: floa
     return img
 
 
-class LiberoPi05Agent:
+class LiberoPi05Agent(Agent):
     def __init__(
         self,
         *,
@@ -109,9 +110,7 @@ class LiberoPi05Agent:
         relabeler: VlacRewardRelabeler | None,
         vlac_ref_num: int,
     ) -> None:
-        if learning_mode not in ("off_policy", "streaming"):
-            raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
-        self.learning_mode = learning_mode
+        super().__init__(learning_mode=learning_mode)
 
         self.network = network
         self.preprocessor = network.preprocessor
@@ -187,40 +186,6 @@ class LiberoPi05Agent:
 
     # --- agent surface -----------------------------------------------------
 
-    def select_action(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult:
-        metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
-        action, act_metrics = self._act(global_step, obs, task_prompt, info)
-        metrics.update(act_metrics)
-        self._prev_action = self._current_action_taken
-        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
-
-    def step(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> StepResult:
-        if self.learning_mode == "off_policy":
-            return self._step_offpolicy(
-                global_step, obs, reward, terminated, truncated, task_prompt, info
-            )
-        return self._step_streaming(
-            global_step, obs, reward, terminated, truncated, task_prompt, info
-        )
-
     def _step_offpolicy(
         self,
         global_step: int,
@@ -251,7 +216,6 @@ class LiberoPi05Agent:
         metrics = self._store_transition(obs, reward, terminated, truncated, task_prompt, info)
         action, act_metrics = self._act(global_step, obs, task_prompt, info)
         metrics.update(act_metrics)
-        self._prev_action = self._current_action_taken
 
         # Online TD(λ): train on the latest chunk-window once one exists.
         curr_size = self.rb.size if self.rb.full else self.rb.idx
@@ -399,6 +363,7 @@ class LiberoPi05Agent:
 
         self._current_action_taken = self._norm_queue.popleft()
         env_action = self._to_env_action(self._env_queue.popleft())
+        self._prev_action = self._current_action_taken
         return env_action, dict(self._value_report)
 
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> torch.Tensor:
