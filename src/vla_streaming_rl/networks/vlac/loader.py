@@ -8,6 +8,8 @@ no remote-code overlay). Only the weights are pulled from the HF hub into the
 local cache on first use.
 """
 
+import torch
+
 _VLAC_REPO_ID = "InternRobotics/VLAC"
 
 
@@ -18,7 +20,6 @@ def _resolve_model_path() -> str:
 
 
 def load_vlac_critic(
-    device_map: str,
     tag: str,
     temperature: float,
     top_k: int,
@@ -29,7 +30,7 @@ def load_vlac_critic(
     from vla_streaming_rl.networks.vlac.evo_vlac import GAC_model
 
     critic = GAC_model(tag=tag)
-    critic.init_model(model_path=model_path, device_map=device_map)
+    critic.init_model(model_path=model_path, device_map=torch.device("cuda"))
     critic.temperature = temperature
     critic.top_k = top_k
     critic.set_config()
