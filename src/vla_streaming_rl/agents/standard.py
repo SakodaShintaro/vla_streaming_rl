@@ -258,7 +258,7 @@ class StandardAgent(Agent):
         # processing: the next-frame / reward predictions (stashed during the
         # terminal step, dropped here so they are never validated against the next
         # episode's first frame) and the world-model goal predictor. The chunk /
-        # eligibility-trace reset is done at the top of ``_act`` / ``_step_streaming``
+        # eligibility-trace reset is done at the top of ``select_action`` / ``_step_streaming``
         # instead, since it must take effect *before* the terminal step trains.
         self._last_pred_image = None
         self._fresh_pred_image = None
@@ -291,7 +291,7 @@ class StandardAgent(Agent):
     # --- per-tick machinery ------------------------------------------------
 
     @torch.no_grad()
-    def _act(
+    def select_action(
         self,
         global_step: int,
         obs: np.ndarray,
@@ -300,7 +300,7 @@ class StandardAgent(Agent):
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> tuple[np.ndarray, dict]:
+    ) -> StepResult:
         metrics = {}
         episode_done = terminated or truncated
         if episode_done:
@@ -344,7 +344,7 @@ class StandardAgent(Agent):
             self.prev_action = action
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
-            return action, metrics
+            return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
@@ -378,7 +378,7 @@ class StandardAgent(Agent):
             self.chunk_step = 0
             self.prev_action = action
             metrics["chunk_step"] = self.chunk_step
-        return action, metrics
+        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
 
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

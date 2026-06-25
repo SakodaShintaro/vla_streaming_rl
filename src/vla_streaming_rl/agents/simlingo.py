@@ -144,7 +144,7 @@ class SimLingoAgent(Agent):
             else optim.AdamW(self.critic.parameters(), lr=critic_lr, weight_decay=0.0)
         )
 
-        # ``_act`` writes each tick's per-query VLM features and the action it took
+        # ``select_action`` writes each tick's per-query VLM features and the action it took
         # straight into the buffer so ``compute_loss`` / ``infer_and_compute_loss``
         # read (features, action, reward, done) back and only re-apply the waypoint
         # heads. The obs_z / rnn_state / log_prob / value / token slots stay unused
@@ -165,7 +165,7 @@ class SimLingoAgent(Agent):
         self._dummy_rnn_state = torch.zeros(1, device=self.device)
         self._dummy_obs_z = torch.zeros(1, device=self.device)
 
-        # ``_act`` writes the just-computed features / action into these and into
+        # ``select_action`` writes the just-computed features / action into these and into
         # the buffer for the current timestep (the project's convention puts the
         # action that produced state t at ``actions[t]``).
         self._current_state: torch.Tensor = torch.zeros(
@@ -205,11 +205,11 @@ class SimLingoAgent(Agent):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        action, metrics = self._act(
+        result = self.select_action(
             global_step, obs, reward, terminated, truncated, task_prompt, info
         )
-        metrics.update(self._train_offpolicy(global_step))
-        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
+        result.metrics.update(self._train_offpolicy(global_step))
+        return result
 
     def _step_streaming(
         self,
@@ -302,7 +302,7 @@ class SimLingoAgent(Agent):
     # --- per-tick machinery ------------------------------------------------
 
     @torch.no_grad()
-    def _act(
+    def select_action(
         self,
         global_step: int,
         obs: np.ndarray,
@@ -311,7 +311,7 @@ class SimLingoAgent(Agent):
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> tuple[np.ndarray, dict]:
+    ) -> StepResult:
         del global_step
         infer_input = self._preprocess(obs, info, task_prompt)
         infer_result = self.network.infer(infer_input)
@@ -339,7 +339,7 @@ class SimLingoAgent(Agent):
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
             **self._value_report,
         }
-        return env_action, metrics
+        return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
 
     @torch.no_grad()
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> InferInput:

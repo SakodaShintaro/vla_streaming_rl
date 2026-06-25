@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from typing import final
 
 import numpy as np
-import torch
 
 from vla_streaming_rl.agents.step_result import StepResult
 
@@ -39,8 +38,7 @@ class Agent(ABC):
             global_step, obs, reward, terminated, truncated, task_prompt, info
         )
 
-    @final
-    @torch.no_grad()
+    @abstractmethod
     def select_action(
         self,
         global_step: int,
@@ -50,11 +48,7 @@ class Agent(ABC):
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> StepResult:
-        action, metrics = self._act(
-            global_step, obs, reward, terminated, truncated, task_prompt, info
-        )
-        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
+    ) -> StepResult: ...
 
     @abstractmethod
     def _step_offpolicy(
@@ -85,18 +79,6 @@ class Agent(ABC):
 
     @abstractmethod
     def _train_offpolicy(self, global_step: int) -> dict: ...
-
-    @abstractmethod
-    def _act(
-        self,
-        global_step: int,
-        obs: np.ndarray,
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        task_prompt: str,
-        info: dict,
-    ) -> tuple[np.ndarray, dict]: ...
 
     @abstractmethod
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str): ...

@@ -164,7 +164,7 @@ class LiberoPi05Agent(Agent):
         self._prev_action = torch.zeros(self.action_dim, device=self.device)
         self._current_action_taken = torch.zeros(self.action_dim, device=self.device)
 
-        # Latest preprocessed batch (cached by ``_preprocess`` for ``_act``) and
+        # Latest preprocessed batch (cached by ``_preprocess`` for ``select_action``) and
         # the wrist frame backing the render panel.
         self._current_batch: dict | None = None
         self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
@@ -213,7 +213,7 @@ class LiberoPi05Agent(Agent):
         task_prompt: str,
         info: dict,
     ) -> StepResult:
-        action, metrics = self._act(
+        step_result = self.select_action(
             global_step, obs, reward, terminated, truncated, task_prompt, info
         )
 
@@ -231,9 +231,9 @@ class LiberoPi05Agent(Agent):
             nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
             self.critic_optimizer.step(delta=result.et_info.delta, reset=terminated or truncated)
-            metrics.update(result.loss_result.info)
+            step_result.metrics.update(result.loss_result.info)
 
-        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
+        return step_result
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del feedback_text
@@ -283,7 +283,7 @@ class LiberoPi05Agent(Agent):
     # --- per-tick machinery ------------------------------------------------
 
     @torch.no_grad()
-    def _act(
+    def select_action(
         self,
         global_step: int,
         obs: np.ndarray,
@@ -292,7 +292,7 @@ class LiberoPi05Agent(Agent):
         truncated: bool,
         task_prompt: str,
         info: dict,
-    ) -> tuple[np.ndarray, dict]:
+    ) -> StepResult:
         del global_step, task_prompt
         packed = self._preprocess(obs, info, task_prompt=info["task_prompt"])
         if self.rb is None:
@@ -355,11 +355,11 @@ class LiberoPi05Agent(Agent):
         env_action = self._to_env_action(self._env_queue.popleft())
         self._prev_action = self._current_action_taken
         metrics.update(self._value_report)
-        return env_action, metrics
+        return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
 
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> torch.Tensor:
         """Build pi0.5's raw multimodal observation, run the (normalizing,
-        tokenizing) preprocessor, cache the batch for ``_act`` and the wrist frame
+        tokenizing) preprocessor, cache the batch for ``select_action`` and the wrist frame
         for the panel, and return the packed obs vector for the replay buffer."""
         agentview = torch.from_numpy((obs * 255.0).astype(np.uint8)).float() / 255.0
         wrist_uint8 = info["wrist_image"].copy()
