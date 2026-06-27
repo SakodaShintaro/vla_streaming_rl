@@ -8,8 +8,7 @@ from leaderboard.utils.route_manipulation import downsample_route  # type: ignor
 from PIL import Image
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import Agent
-from vla_streaming_rl.agents.step_result import StepResult
+from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.simlingo_network import (
     ACTION_DIM,

@@ -4,8 +4,7 @@ import numpy as np
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import Agent
-from vla_streaming_rl.agents.step_result import StepResult
+from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
