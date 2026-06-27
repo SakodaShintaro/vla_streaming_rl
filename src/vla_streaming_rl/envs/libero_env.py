@@ -11,7 +11,7 @@ this repo only handle a single RGB frame ``(H, W, 3)``, so ``step`` / ``reset``
 return the agentview camera image as the observation. Everything a richer VLA
 policy (e.g. pi0.5) needs — the wrist camera, proprioceptive state and the
 language instruction — is smuggled through the ``info`` dict under fixed keys.
-This is deliberately a stop-gap until the observation pipeline is generalised to
+This is deliberately a stop-gap until the observation pipeline is generalized to
 carry multi-modal observations natively.
 """
 
