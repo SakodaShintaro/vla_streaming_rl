@@ -24,7 +24,7 @@ defaults:
   - _self_
 
 agent_type: libero_pi05
-learning_mode: off_policy
+learning_mode: streaming
 network_class: libero_pi05
 
 # Overrides consumed by LiberoPi05Agent / LiberoPi05Network.
@@ -46,8 +46,8 @@ horizon: 50
 
 # Fine-tuning LRs: tiny actor LR so the expert is nudged, not overwritten;
 # the critic learns faster.
-actor_lr: 0.0
-critic_lr: 5e-5
+actor_lr: 2e-7
+critic_lr: 5e-7
 
 # DACER2 actor knobs.
 # actor_denoising_steps : Euler steps when sampling π(s) for the (differentiable)
