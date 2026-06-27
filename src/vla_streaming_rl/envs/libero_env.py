@@ -171,10 +171,16 @@ class LiberoEnv(gym.Env):
     def _build_env_for_task(self, task_id: int) -> None:
         task = self._task_suite.get_task(task_id)
         bddl_file = f"{self._libero_bddl_root}/{task.problem_folder}/{task.bddl_file}"
+        # robosuite self-terminates at its own internal horizon (default 1000),
+        # but LIBERO's step() overrides the returned ``done`` to success-only, so
+        # that internal termination is invisible to us and the next step raises
+        # "executing action in terminated episode". Disable it and let this
+        # wrapper's ``_horizon`` be the single source of truncation.
         env_args = {
             "bddl_file_name": bddl_file,
             "camera_heights": self._resolution,
             "camera_widths": self._resolution,
+            "ignore_done": True,
         }
         if self._env is not None:
             self._env.close()
