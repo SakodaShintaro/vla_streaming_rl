@@ -19,6 +19,7 @@ from vla_streaming_rl.networks.libero_pi05_network import (
     LiberoPi05Network,
 )
 from vla_streaming_rl.networks.vlac import VlacRewardRelabeler
+from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 
@@ -77,12 +78,6 @@ class LiberoPi05Agent(Agent):
 
         self._action_low = action_space.low
         self._action_high = action_space.high
-
-        # Separate optimizers for the policy μ (action expert) and the injected
-        # critic. The critic uses AdamET (eligibility traces) in streaming mode,
-        # AdamW for off-policy; the actor is always AdamW with a tiny LR so
-        # fine-tuning the expert does not wash out the pretrained flow.
-        from vla_streaming_rl.optimizers.adam_et import AdamET
 
         self.actor_optimizer = optim.AdamW(network.actor_parameters, lr=actor_lr, weight_decay=0.0)
         if learning_mode == "streaming":
