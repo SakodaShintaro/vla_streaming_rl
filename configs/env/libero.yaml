@@ -21,4 +21,4 @@ env_factory:
   resolution: 256
   settle_steps: 10
   horizon: 300
-  perturb_robot_joint_std: 0.15
+  perturb_robot_joint_std: 0.20
