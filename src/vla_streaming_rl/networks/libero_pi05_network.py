@@ -1,47 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""The learnable network behind :class:`LiberoPi05Agent`.
-
-Wraps LeRobot's pi0.5 (``PI05Policy``) flow-matching VLA together with its
-pretrained pre/post-processor pipelines (which carry the LIBERO dataset
-normalization statistics) in a single :class:`NetworkInterface`, and injects an
-action-value critic so the frozen-backbone action expert can be fine-tuned by
-RL — mirroring how ``SimLingoNetwork``/``ActorCriticWithActionValue`` bundle a
-policy with a ``value_head`` critic. Like every other network it exposes exactly
-the five ``NetworkInterface`` methods; everything else is a private helper.
-
-The PaliGemma vision/LLM backbone is frozen; only the action expert and its
-projections stay trainable (the policy μ), plus the injected critic. Learning
-follows the project's flow-matching policy-RL recipe:
-
-  * **Critic** — TD bootstrap on action chunks (``DistributionalValueHead``):
-    ``target = Σ γ^i r_i + γ^H (1-done) Q(s', π(s'))``. The bootstrap action
-    ``π(s')`` is sampled from pi0.5 itself (no grad).
-  * **Actor** — DACER2 (arXiv:2505.23426), the flow-matching policy's RL loss,
-    exactly as ``DiffusionPolicy.compute_actor_loss``: an advantage-maximizing
-    term ``-E[Q(s, π(s))]`` (gradient flows through pi0.5's *differentiable*
-    denoiser into the expert) plus a Q-gradient-guided flow-matching term that
-    regresses the expert's velocity prediction toward a Q-improved action,
-    keeping μ a valid flow while steering it toward higher Q.
-
-``compute_loss`` returns the single combined ``critic + actor`` loss (the actor
-loss freezes the critic during its Q forwards, so one backward keeps the two on
-disjoint parameters); the agent steps a separate optimizer per param group, just
-like ``SimLingoAgent._train_offpolicy``.
-
-Everything the critic / actor losses touch lives in pi0.5's *normalized* action
-space: the differentiable denoiser emits normalized actions, the executed chunk
-is read normalized straight off the preprocessor (``batch[ACTION]``), and the
-flow-matching target is built in the same space — so no (un)normalization is
-needed at train time. The postprocessor is only used on the rollout path.
-
-Because pi0.5's observation is a multimodal dict (two camera images + proprio +
-tokenized language), it cannot ride the project's tensor ``ReplayBuffer``; the
-agent keeps its own chunk buffer and passes preprocessed pi0.5 batches through
-``infer`` (in ``InferInput.s_seq``, as ``SimLingoAgent`` passes its
-``DrivingInput``) and ``compute_loss`` (in ``ReplayBufferData.observations`` as
-a length-2 ``[cur, next]`` list of batches).
-"""
-
 import numpy as np
 import torch
 from lerobot.configs.policies import PreTrainedConfig
@@ -71,22 +28,6 @@ ACTION_KEY = "action"
 
 
 class LiberoPi05Network(NetworkInterface):
-    """pi0.5 policy (frozen backbone + trainable action expert) + Q critic.
-
-    Exposed attributes used by ``LiberoPi05Agent``:
-      - ``policy`` — the ``PI05Policy`` (pre/post-processors live on it too).
-      - ``preprocessor`` / ``postprocessor`` — pipelines that normalize/tokenize
-        a raw observation dict and un-normalize predicted actions.
-      - ``critic`` — the injected ``DistributionalValueHead`` Q(s, a-chunk).
-      - ``actor_parameters`` — the action-expert params (policy μ) the agent's
-        actor optimizer owns; ``critic.parameters()`` is the critic optimizer's.
-      - ``state_dim`` / ``action_dim`` / ``chunk_size`` — shapes the agent needs.
-
-    The public surface is the five ``NetworkInterface`` methods; the pi0.5
-    internals (prefix forward, differentiable denoiser, flow-matching loss) are
-    private helpers.
-    """
-
     def __init__(
         self,
         *,
