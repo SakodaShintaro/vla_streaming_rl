@@ -31,6 +31,7 @@ class StandardAgent(Agent):
         use_eligibility_trace: bool,
         actor_lr: float,
         critic_lr: float,
+        weight_decay: float,
         gamma: float,
         et_lambda: float,
         buffer_size: int,
@@ -73,11 +74,8 @@ class StandardAgent(Agent):
 
         # Actor / critic optimizer split (critic == value head). The critic uses
         # AdamET (eligibility traces) only in streaming-trace mode, AdamW
-        # otherwise; the actor is always AdamW. Off-policy uses no weight decay,
-        # streaming uses 0.1 — preserving the per-mode behavior of the original
-        # OffPolicyAgent / StreamingAgent.
+        # otherwise; the actor is always AdamW.
         self.use_eligibility_trace = bool(use_eligibility_trace)
-        weight_decay = 0.0 if learning_mode == "off_policy" else 0.1
         critic_params = list(self.network.value_head.parameters())
         critic_param_ids = {id(p) for p in critic_params}
         actor_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]

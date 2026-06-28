@@ -77,6 +77,7 @@ class SimLingoAgent(Agent):
         exploration_noise: float,
         actor_lr: float,
         critic_lr: float,
+        weight_decay: float,
         max_grad_norm: float,
         learning_mode: str,
         et_lambda: float,
@@ -135,12 +136,12 @@ class SimLingoAgent(Agent):
         # uses AdamET (eligibility traces) in streaming mode, AdamW for off-policy;
         # the actor heads always use AdamW.
         self.actor_optimizer = optim.AdamW(
-            self.actor_heads.parameters(), lr=actor_lr, weight_decay=0.0
+            self.actor_heads.parameters(), lr=actor_lr, weight_decay=weight_decay
         )
         self.critic_optimizer = (
             AdamET(self.critic.parameters(), lr=critic_lr, gamma=gamma, et_lambda=et_lambda)
             if learning_mode == "streaming"
-            else optim.AdamW(self.critic.parameters(), lr=critic_lr, weight_decay=0.0)
+            else optim.AdamW(self.critic.parameters(), lr=critic_lr, weight_decay=weight_decay)
         )
 
         # ``select_action`` writes each tick's per-query VLM features and the action it took

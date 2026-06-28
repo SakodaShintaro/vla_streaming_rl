@@ -52,6 +52,7 @@ class LiberoPi05Agent(Agent):
         learning_starts: int,
         actor_lr: float,
         critic_lr: float,
+        weight_decay: float,
         max_grad_norm: float,
         et_lambda: float,
         gamma: float,
@@ -78,14 +79,16 @@ class LiberoPi05Agent(Agent):
         self._action_low = action_space.low
         self._action_high = action_space.high
 
-        self.actor_optimizer = optim.AdamW(network.actor_parameters, lr=actor_lr, weight_decay=0.0)
+        self.actor_optimizer = optim.AdamW(
+            network.actor_parameters, lr=actor_lr, weight_decay=weight_decay
+        )
         if learning_mode == "streaming":
             self.critic_optimizer = AdamET(
                 network.critic.parameters(), lr=critic_lr, gamma=gamma, et_lambda=et_lambda
             )
         else:
             self.critic_optimizer = optim.AdamW(
-                network.critic.parameters(), lr=critic_lr, weight_decay=0.0
+                network.critic.parameters(), lr=critic_lr, weight_decay=weight_decay
             )
 
         # Dummy tensor for the InferInput / ReplayBuffer slots pi0.5 does not use
