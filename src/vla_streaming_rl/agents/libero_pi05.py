@@ -114,8 +114,6 @@ class LiberoPi05Agent(Agent):
         # the wrist frame backing the render panel.
         self._current_batch: dict | None = None
         self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
-        # Latest critic read-out, for the telemetry path.
-        self._value_report: dict[str, float] = {"value": 0.0}
 
         # VLAC online dense reward: scored per env step against a key frame with a
         # one-shot in-context reference (the best episode so far, sampled to
@@ -213,7 +211,7 @@ class LiberoPi05Agent(Agent):
                             task_prompts=[],
                         )
                     )
-            self._value_report = infer_result.value_report
+            metrics.update(infer_result.value_report)
             raw_chunk = infer_result.action.squeeze(0)
             env_chunk = self.postprocessor(infer_result.action).squeeze(0).float().cpu().numpy()
             self._env_action_queue.extend(env_chunk)
@@ -221,7 +219,6 @@ class LiberoPi05Agent(Agent):
 
         self._prev_action = self._raw_action_queue.popleft()
         env_action = self._to_env_action(self._env_action_queue.popleft())
-        metrics.update(self._value_report)
         return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
@@ -307,7 +304,7 @@ class LiberoPi05Agent(Agent):
                     task_prompts=[],
                 )
             )
-            self._value_report = infer_result.value_report
+            metrics.update(infer_result.value_report)
             raw_chunk = infer_result.action.squeeze(0)
             env_chunk = self.postprocessor(infer_result.action).squeeze(0).float().cpu().numpy()
             self._env_action_queue.extend(env_chunk)
@@ -315,7 +312,6 @@ class LiberoPi05Agent(Agent):
 
         self._prev_action = self._raw_action_queue.popleft()
         env_action = self._to_env_action(self._env_action_queue.popleft())
-        metrics.update(self._value_report)
         return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
 
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> torch.Tensor:
