@@ -103,8 +103,8 @@ class LiberoPi05Agent(Agent):
 
         # Open-loop chunk execution: the env actions to play and the matching
         # normalized actions to store, filled together when a chunk is planned.
-        self._env_queue: collections.deque = collections.deque()
-        self._norm_queue: collections.deque = collections.deque()
+        self._env_action_queue: collections.deque = collections.deque()
+        self._raw_action_queue: collections.deque = collections.deque()
         # ``action_{t-1}`` (normalized) stored with state t; advanced to the action
         # executed this step after acting (project buffer convention).
         self._prev_action = torch.zeros(self.action_dim, device=self.device)
@@ -186,7 +186,7 @@ class LiberoPi05Agent(Agent):
             self._episode_reset = True
         panels = self._panels(obs, reward)
 
-        if not self._env_queue:
+        if not self._env_action_queue:
             curr_size = self.rb.size if self.rb.full else self.rb.idx
             if curr_size >= self._seq_len:
                 data = self.rb.get_latest(self._seq_len)
@@ -215,13 +215,13 @@ class LiberoPi05Agent(Agent):
                         )
                     )
             self._value_report = infer_result.value_report
-            norm_chunk = infer_result.action.squeeze(0)
+            raw_chunk = infer_result.action.squeeze(0)
             env_chunk = self.postprocessor(infer_result.action).squeeze(0).float().cpu().numpy()
-            self._env_queue.extend(env_chunk)
-            self._norm_queue.extend(norm_chunk)
+            self._env_action_queue.extend(env_chunk)
+            self._raw_action_queue.extend(raw_chunk)
 
-        self._current_action_taken = self._norm_queue.popleft()
-        env_action = self._to_env_action(self._env_queue.popleft())
+        self._current_action_taken = self._raw_action_queue.popleft()
+        env_action = self._to_env_action(self._env_action_queue.popleft())
         self._prev_action = self._current_action_taken
         metrics.update(self._value_report)
         return StepResult(action=env_action, metrics=metrics, panels=panels)
@@ -229,8 +229,8 @@ class LiberoPi05Agent(Agent):
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del feedback_text
         # Drop any partially-executed chunk so the next episode plans fresh.
-        self._env_queue.clear()
-        self._norm_queue.clear()
+        self._env_action_queue.clear()
+        self._raw_action_queue.clear()
         if self._relabeler is not None:
             length = len(self._cur_frames)
             best = self._best.get(self._cur_task)
@@ -298,7 +298,7 @@ class LiberoPi05Agent(Agent):
             [],
         )
 
-        if not self._env_queue:
+        if not self._env_action_queue:
             infer_result = self.network.infer(
                 InferInput(
                     s_seq=self._current_batch,
@@ -310,13 +310,13 @@ class LiberoPi05Agent(Agent):
                 )
             )
             self._value_report = infer_result.value_report
-            norm_chunk = infer_result.action.squeeze(0)
+            raw_chunk = infer_result.action.squeeze(0)
             env_chunk = self.postprocessor(infer_result.action).squeeze(0).float().cpu().numpy()
-            self._env_queue.extend(env_chunk)
-            self._norm_queue.extend(norm_chunk)
+            self._env_action_queue.extend(env_chunk)
+            self._raw_action_queue.extend(raw_chunk)
 
-        self._current_action_taken = self._norm_queue.popleft()
-        env_action = self._to_env_action(self._env_queue.popleft())
+        self._current_action_taken = self._raw_action_queue.popleft()
+        env_action = self._to_env_action(self._env_action_queue.popleft())
         self._prev_action = self._current_action_taken
         metrics.update(self._value_report)
         return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
