@@ -171,8 +171,6 @@ class SimLingoAgent(Agent):
         self._current_state: torch.Tensor = torch.zeros(
             NUM_WP_QUERIES, feature_dim, device=self.device
         )
-        self._current_action_taken: torch.Tensor = torch.zeros(ACTION_DIM, device=self.device)
-
         self._need_handover = True
         self._prev_action = torch.zeros(ACTION_DIM, device=self.device)
         # Ego speed of the current tick, cached by ``_preprocess`` for the PID in
@@ -249,7 +247,6 @@ class SimLingoAgent(Agent):
             self.critic_optimizer.step(delta=result.et_info.delta, reset=terminated or truncated)
 
         action_taken = action_mean + torch.randn_like(action_mean) * self.exploration_noise
-        self._current_action_taken = action_taken
         self._prev_action = action_taken
         env_action = self._to_env_action(action_taken)
         metrics["action_norm"] = float(np.linalg.norm(env_action))
@@ -295,7 +292,6 @@ class SimLingoAgent(Agent):
         )
         action_mean = infer_result.action.squeeze(0)
         action_taken = action_mean + torch.randn_like(action_mean) * self.exploration_noise
-        self._current_action_taken = action_taken
         self._prev_action = action_taken
         env_action = self._to_env_action(action_taken)
         metrics = {

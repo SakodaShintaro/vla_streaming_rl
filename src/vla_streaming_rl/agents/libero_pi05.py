@@ -108,7 +108,6 @@ class LiberoPi05Agent(Agent):
         # ``action_{t-1}`` (normalized) stored with state t; advanced to the action
         # executed this step after acting (project buffer convention).
         self._prev_action = torch.zeros(self.action_dim, device=self.device)
-        self._current_action_taken = torch.zeros(self.action_dim, device=self.device)
         self._episode_reset = False
 
         # Latest preprocessed batch (cached by ``_preprocess`` for ``select_action``) and
@@ -220,9 +219,8 @@ class LiberoPi05Agent(Agent):
             self._env_action_queue.extend(env_chunk)
             self._raw_action_queue.extend(raw_chunk)
 
-        self._current_action_taken = self._raw_action_queue.popleft()
+        self._prev_action = self._raw_action_queue.popleft()
         env_action = self._to_env_action(self._env_action_queue.popleft())
-        self._prev_action = self._current_action_taken
         metrics.update(self._value_report)
         return StepResult(action=env_action, metrics=metrics, panels=panels)
 
@@ -315,9 +313,8 @@ class LiberoPi05Agent(Agent):
             self._env_action_queue.extend(env_chunk)
             self._raw_action_queue.extend(raw_chunk)
 
-        self._current_action_taken = self._raw_action_queue.popleft()
+        self._prev_action = self._raw_action_queue.popleft()
         env_action = self._to_env_action(self._env_action_queue.popleft())
-        self._prev_action = self._current_action_taken
         metrics.update(self._value_report)
         return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
 
