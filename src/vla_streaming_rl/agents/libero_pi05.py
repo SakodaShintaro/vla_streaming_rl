@@ -110,10 +110,7 @@ class LiberoPi05Agent(Agent):
         self._prev_action = torch.zeros(self.action_dim, device=self.device)
         self._episode_reset = False
 
-        # Latest preprocessed batch (cached by ``_preprocess`` for ``select_action``) and
-        # the wrist frame backing the render panel.
-        self._current_batch: dict | None = None
-        self._last_wrist = np.zeros(observation_space.shape, dtype=np.uint8)
+        del observation_space
 
         # VLAC online dense reward: scored per env step against a key frame with a
         # one-shot in-context reference (the best episode so far, sampled to
@@ -121,8 +118,6 @@ class LiberoPi05Agent(Agent):
         # when relabeler is None.
         self._relabeler = relabeler
         self._vlac_ref_num = vlac_ref_num
-        self._last_dense = 0.0
-        self._last_progress = 0.0
         self._cur_frames: list[Image.Image] = []
         self._cur_task = ""
         self._references: dict[str, list[Image.Image]] = {}
@@ -141,7 +136,7 @@ class LiberoPi05Agent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step, task_prompt
-        packed = self._preprocess(obs, info, task_prompt=info["task_prompt"])
+        packed, batch, wrist = self._preprocess(obs, info, task_prompt=info["task_prompt"])
         if self.rb is None:
             self.rb = ReplayBuffer(
                 size=self.buffer_size,
@@ -157,6 +152,8 @@ class LiberoPi05Agent(Agent):
                 pad_token_id=0,
             )
         metrics = {}
+        dense = 0.0
+        progress = 0.0
         if self._relabeler is not None:
             frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
             if not self._cur_frames:
@@ -165,8 +162,7 @@ class LiberoPi05Agent(Agent):
             self._cur_frames.append(frame)
             dense, metrics = self._relabeler.step(frame, info["task_prompt"])
             reward = reward + dense
-            self._last_dense = dense
-            self._last_progress = metrics["vlac/progress"]
+            progress = metrics["vlac/progress"]
         self.rb.add(
             packed,
             self._dummy,
@@ -181,7 +177,7 @@ class LiberoPi05Agent(Agent):
         )
         if terminated or truncated:
             self._episode_reset = True
-        panels = self._panels(obs, reward)
+        panels = self._panels(reward, wrist, dense, progress)
 
         if not self._env_action_queue:
             curr_size = self.rb.size if self.rb.full else self.rb.idx
@@ -203,7 +199,7 @@ class LiberoPi05Agent(Agent):
                 with torch.no_grad():
                     infer_result = self.network.infer(
                         InferInput(
-                            s_seq=self._current_batch,
+                            s_seq=batch,
                             obs_z_seq=self._dummy,
                             a_seq=self._dummy,
                             r_seq=self._dummy,
@@ -254,7 +250,7 @@ class LiberoPi05Agent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step, task_prompt
-        packed = self._preprocess(obs, info, task_prompt=info["task_prompt"])
+        packed, batch, wrist = self._preprocess(obs, info, task_prompt=info["task_prompt"])
         if self.rb is None:
             self.rb = ReplayBuffer(
                 size=self.buffer_size,
@@ -270,6 +266,8 @@ class LiberoPi05Agent(Agent):
                 pad_token_id=0,
             )
         metrics = {}
+        dense = 0.0
+        progress = 0.0
         if self._relabeler is not None:
             frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
             if not self._cur_frames:
@@ -278,8 +276,7 @@ class LiberoPi05Agent(Agent):
             self._cur_frames.append(frame)
             dense, metrics = self._relabeler.step(frame, info["task_prompt"])
             reward = reward + dense
-            self._last_dense = dense
-            self._last_progress = metrics["vlac/progress"]
+            progress = metrics["vlac/progress"]
         self.rb.add(
             packed,
             self._dummy,
@@ -296,7 +293,7 @@ class LiberoPi05Agent(Agent):
         if not self._env_action_queue:
             infer_result = self.network.infer(
                 InferInput(
-                    s_seq=self._current_batch,
+                    s_seq=batch,
                     obs_z_seq=self._dummy,
                     a_seq=self._dummy,
                     r_seq=self._dummy,
@@ -312,15 +309,21 @@ class LiberoPi05Agent(Agent):
 
         self._prev_action = self._raw_action_queue.popleft()
         env_action = self._to_env_action(self._env_action_queue.popleft())
-        return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
+        return StepResult(
+            action=env_action,
+            metrics=metrics,
+            panels=self._panels(reward, wrist, dense, progress),
+        )
 
-    def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> torch.Tensor:
+    def _preprocess(
+        self, obs: np.ndarray, info: dict, task_prompt: str
+    ) -> tuple[torch.Tensor, dict, np.ndarray]:
         """Build pi0.5's raw multimodal observation, run the (normalizing,
-        tokenizing) preprocessor, cache the batch for ``select_action`` and the wrist frame
-        for the panel, and return the packed obs vector for the replay buffer."""
+        tokenizing) preprocessor, and return the packed obs vector for the replay
+        buffer together with the preprocessed batch (for inference) and the wrist
+        frame (for the render panel)."""
         agentview = torch.from_numpy((obs * 255.0).astype(np.uint8)).float() / 255.0
         wrist_uint8 = info["wrist_image"].copy()
-        self._last_wrist = wrist_uint8
         wrist = torch.from_numpy(wrist_uint8).permute(2, 0, 1).float() / 255.0
         raw_obs = {
             OBS_IMAGE_AGENTVIEW: agentview,
@@ -329,16 +332,14 @@ class LiberoPi05Agent(Agent):
             TASK_KEY: task_prompt,
         }
         batch = self.preprocessor(raw_obs)
-        self._current_batch = batch
-        return self.network.pack_obs(batch)
+        return self.network.pack_obs(batch), batch, wrist_uint8
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         """Clip an un-normalized pi0.5 action into the env's action space."""
         return np.clip(net_action, self._action_low, self._action_high).astype(np.float32)
 
-    def _panels(self, obs: np.ndarray, reward: float) -> dict:
-        del obs
-        panels = {"wrist": self._last_wrist}
+    def _panels(self, reward: float, wrist: np.ndarray, dense: float, progress: float) -> dict:
+        panels = {"wrist": wrist}
         if self._relabeler is not None:
-            panels["reward"] = _vlac_reward_image(reward, self._last_dense, self._last_progress)
+            panels["reward"] = _vlac_reward_image(reward, dense, progress)
         return panels

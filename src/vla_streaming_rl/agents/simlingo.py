@@ -165,26 +165,11 @@ class SimLingoAgent(Agent):
         self._dummy_rnn_state = torch.zeros(1, device=self.device)
         self._dummy_obs_z = torch.zeros(1, device=self.device)
 
-        # ``select_action`` writes the just-computed features / action into these and into
-        # the buffer for the current timestep (the project's convention puts the
-        # action that produced state t at ``actions[t]``).
-        self._current_state: torch.Tensor = torch.zeros(
-            NUM_WP_QUERIES, feature_dim, device=self.device
-        )
+        # ``action_{t-1}`` stored with state t (the project's convention puts the
+        # action that produced state t at ``actions[t]``); the only genuine
+        # cross-tick state the per-tick pipeline carries.
         self._need_handover = True
         self._prev_action = torch.zeros(ACTION_DIM, device=self.device)
-        # Ego speed of the current tick, cached by ``_preprocess`` for the PID in
-        # ``_to_env_action``.
-        self._gt_velocity = torch.zeros(1, device=self.device)
-
-        # Latest executed trajectory + its critic value, cached for the bird's-eye
-        # visualization panel built in ``_panels``.
-        self._viz_route = np.zeros((ROUTE_LEN, WP_DIM), dtype=np.float32)
-        self._viz_speed = np.zeros((SPEED_WPS_LEN, WP_DIM), dtype=np.float32)
-        self._viz_q_value = 0.0
-        # Critic value diagnostics for the executed action (incl. per-bin probs),
-        # cached each tick and logged verbatim in the step metrics.
-        self._value_report: dict[str, float] = {"value": 0.0}
 
         # "carla" shapes the per-step Bench2Drive score delta: exact-zero
         # rewards (stuck) get a small negative push and collision spikes
@@ -204,12 +189,12 @@ class SimLingoAgent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step
-        infer_input = self._preprocess(obs, info, task_prompt)
+        infer_input, gt_velocity = self._preprocess(obs, info, task_prompt)
         with torch.no_grad():
             live = self.network.infer(infer_input)
-        self._current_state = live.features.squeeze(0)
+        state = live.features.squeeze(0)
         self.rb.add(
-            self._current_state,
+            state,
             self._dummy_obs_z,
             reward,
             terminated or truncated,
@@ -225,13 +210,13 @@ class SimLingoAgent(Agent):
         curr_size = self.rb.size if self.rb.full else self.rb.idx
         if curr_size < _SEQ_LEN + _HORIZON:
             action_mean = live.action.squeeze(0)
-            self._value_report = live.value_report
+            value_report = live.value_report
         else:
             data = self.rb.get_latest(_SEQ_LEN + _HORIZON)
             data.rewards = self.reward_processor.normalize(data.rewards)
             result = self.network.infer_and_compute_loss(data)
             action_mean = result.infer_result.action.squeeze(0)
-            self._value_report = result.infer_result.value_report
+            value_report = result.infer_result.value_report
             metrics.update(
                 {f"losses/{key}": value for key, value in result.loss_result.info.items()}
             )
@@ -248,10 +233,10 @@ class SimLingoAgent(Agent):
 
         action_taken = action_mean + torch.randn_like(action_mean) * self.exploration_noise
         self._prev_action = action_taken
-        env_action = self._to_env_action(action_taken)
+        env_action, viz = self._to_env_action(action_taken, gt_velocity, value_report["value"])
         metrics["action_norm"] = float(np.linalg.norm(env_action))
-        metrics.update(self._value_report)
-        return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
+        metrics.update(value_report)
+        return StepResult(action=env_action, metrics=metrics, panels=self._panels(reward, viz))
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
@@ -274,12 +259,12 @@ class SimLingoAgent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step
-        infer_input = self._preprocess(obs, info, task_prompt)
+        infer_input, gt_velocity = self._preprocess(obs, info, task_prompt)
         infer_result = self.network.infer(infer_input)
-        self._current_state = infer_result.features.squeeze(0)
-        self._value_report = infer_result.value_report
+        state = infer_result.features.squeeze(0)
+        value_report = infer_result.value_report
         self.rb.add(
-            self._current_state,
+            state,
             self._dummy_obs_z,
             reward,
             terminated or truncated,
@@ -293,19 +278,22 @@ class SimLingoAgent(Agent):
         action_mean = infer_result.action.squeeze(0)
         action_taken = action_mean + torch.randn_like(action_mean) * self.exploration_noise
         self._prev_action = action_taken
-        env_action = self._to_env_action(action_taken)
+        env_action, viz = self._to_env_action(action_taken, gt_velocity, value_report["value"])
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
-            **self._value_report,
+            **value_report,
         }
-        return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
+        return StepResult(action=env_action, metrics=metrics, panels=self._panels(reward, viz))
 
     @torch.no_grad()
-    def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> InferInput:
+    def _preprocess(
+        self, obs: np.ndarray, info: dict, task_prompt: str
+    ) -> tuple[InferInput, torch.Tensor]:
         """Build the network input (``InferInput`` wrapping a ``DrivingInput``) from
         the env's carla ``info["sensors"]`` snapshot, rebuilding the RoutePlanner on
-        the first tick of a new episode. Caches ``self._gt_velocity`` for the PID."""
+        the first tick of a new episode. Returns the input together with this tick's
+        ego velocity, which ``_to_env_action`` feeds to the PID."""
         del obs, task_prompt
 
         # Episode handover: take the new episode's route plan from the reset info
@@ -443,9 +431,9 @@ class SimLingoAgent(Agent):
             "prompt": ll,
             "prompt_inference": ll,
         }
-        self._gt_velocity = driving_input_kwargs["vehicle_speed"]
+        gt_velocity = driving_input_kwargs["vehicle_speed"]
 
-        return InferInput(
+        infer_input = InferInput(
             s_seq=DrivingInput(**driving_input_kwargs),
             obs_z_seq=self._dummy_obs_z,
             a_seq=self._prev_action,
@@ -453,18 +441,23 @@ class SimLingoAgent(Agent):
             rnn_state=self._dummy_rnn_state,
             task_prompts=[],
         )
+        return infer_input, gt_velocity
 
-    def _to_env_action(self, net_action: torch.Tensor) -> np.ndarray:
+    def _to_env_action(
+        self, net_action: torch.Tensor, gt_velocity: torch.Tensor, q_value: float
+    ) -> tuple[np.ndarray, dict]:
         """Convert the (noised) waypoint action into the 2-D env action via the
-        deterministic PID, caching the executed trajectory + its critic value for
-        the bird's-eye panel and running the stuck / creep recovery logic."""
-        pred_route, pred_speed_wps = _action_vec_to_waypoints(net_action)
-        self._viz_q_value = self._value_report["value"]
-        self._viz_route = pred_route.squeeze(0).detach().cpu().numpy()
-        self._viz_speed = pred_speed_wps.squeeze(0).detach().cpu().numpy()
+        deterministic PID, running the stuck / creep recovery logic. Returns the env
+        action together with the bird's-eye ``viz`` bundle (executed trajectory + its
+        critic value) consumed by ``_panels``."""
+        pred_route, pred_speed = _action_vec_to_waypoints(net_action)
+        viz = {
+            "q": q_value,
+            "route": pred_route.squeeze(0).detach().cpu().numpy(),
+            "speed": pred_speed.squeeze(0).detach().cpu().numpy(),
+        }
 
-        gt_velocity = self._gt_velocity
-        steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed_wps)
+        steer, throttle, brake = self.trajectory_to_control(pred_route, gt_velocity, pred_speed)
 
         # 0.1 is an arbitrary low threshold for "stopped".
         if gt_velocity < 0.1:
@@ -497,9 +490,9 @@ class SimLingoAgent(Agent):
         # 2-D env action: positive → throttle, negative → brake. SimLingo never sets
         # both at once in practice, so this collapse is lossless for our purposes.
         gas_or_brake = float(control.throttle) - float(control.brake)
-        return np.array([steer, gas_or_brake], dtype=np.float32)
+        return np.array([steer, gas_or_brake], dtype=np.float32), viz
 
-    def _panels(self, obs: np.ndarray, reward: float) -> dict:
+    def _panels(self, reward: float, viz: dict) -> dict:
         """Reward panel (actual only — the waypoint policy predicts no reward) plus
         the top-down (ego-frame) view of SimLingo's two predicted trajectories,
         annotated with the critic's value estimate Q(s, a).
@@ -508,7 +501,6 @@ class SimLingoAgent(Agent):
         the ``speed`` waypoints (orange). Ego is the green marker near the bottom;
         waypoint index 0 (``+x``) is forward → up, ``+y`` → right (the PID's heading
         convention)."""
-        del obs
         size = 256
         scale = 6.0  # pixels per meter
         img = np.full((size, size, 3), 30, dtype=np.uint8)
@@ -530,14 +522,14 @@ class SimLingoAgent(Agent):
 
         route_color = (0, 200, 255)
         speed_color = (255, 165, 0)
-        draw_trajectory(self._viz_route, route_color)
-        draw_trajectory(self._viz_speed, speed_color)
+        draw_trajectory(viz["route"], route_color)
+        draw_trajectory(viz["speed"], speed_color)
 
         # ego marker pointing forward (up)
         cv2.drawMarker(img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2)
 
         # value annotation (green if non-negative, red otherwise) + legend
-        q = self._viz_q_value
+        q = viz["q"]
         q_color = (0, 255, 0) if q >= 0.0 else (255, 80, 80)
         font = cv2.FONT_HERSHEY_SIMPLEX
         cv2.putText(img, f"Q: {q:.3f}", (8, 22), font, 0.6, q_color, 2)
