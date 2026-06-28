@@ -1,6 +1,6 @@
 # @package _global_
 env_id: LIBERO-v0
-step_limit: 100_000
+step_limit: 200_000
 image_save_interval: 10
 
 env_factory:
@@ -21,4 +21,4 @@ env_factory:
   resolution: 256
   settle_steps: 10
   horizon: 300
-  perturb_robot_joint_std: 0.20
+  perturb_robot_joint_std: 0.30
