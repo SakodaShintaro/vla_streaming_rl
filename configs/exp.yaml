@@ -3,10 +3,10 @@ method: grid
 parameters:
   env:
     value: placeholder
-  agent:
-    values: [cnn_off_policy_bs16, vlm_off_policy_bs16, vlm_off_policy_bs1, vlm_streaming]
+  learning_mode:
+    values: [streaming, off_policy]
   seed:
-    values: [0]
+    values: [0, 1, 2]
 command:
   - ${env}
   - uv
