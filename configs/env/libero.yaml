@@ -12,11 +12,8 @@ env_factory:
   # - resolution: square camera height/width (kept divisible by the VAE stride).
   # - settle_steps: zero-action steps after set_init_state to settle physics.
   # - horizon: max controllable steps before truncation.
-  # - perturb_robot_joint_std: LIBERO-PRO-style initial-state perturbation —
-  #   per-arm-joint Gaussian jitter (radians) on the robot's starting pose at
-  #   reset, to break the memorized init states that saturate the success rate.
-  #   0.0 = stock behavior; 0.05 rad (~3°) is a mild starting point.
-  task_suite_name: libero_spatial
+  # - perturb_robot_joint_std: LIBERO-PRO-style initial-state perturbation
+  task_suite_name: libero_object
   task_id: 0
   resolution: 256
   settle_steps: 10
