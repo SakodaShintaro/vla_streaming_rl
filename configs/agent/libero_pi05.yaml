@@ -63,7 +63,7 @@ q_grad_eta: 0.05
 dacer_loss_weight: 0.05
 
 vlac:
-  enabled: true
+  enabled: false
   milestone_interval: 8
   check_interval: 8
   ref_num: 9
