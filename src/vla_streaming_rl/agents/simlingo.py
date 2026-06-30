@@ -13,7 +13,7 @@ from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.simlingo_network import (
     ACTION_DIM,
     NUM_WP_QUERIES,
-    ROUTE_LEN,
+    ROUTE_WPS_LEN,
     SPEED_WPS_LEN,
     WP_DIM,
     SimLingoNetwork,
@@ -55,10 +55,10 @@ _HORIZON = 1
 
 
 def _action_vec_to_waypoints(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    route_flat = a[: ROUTE_LEN * WP_DIM]
-    speed_flat = a[ROUTE_LEN * WP_DIM :]
+    route_flat = a[: ROUTE_WPS_LEN * WP_DIM]
+    speed_flat = a[ROUTE_WPS_LEN * WP_DIM :]
     return (
-        route_flat.view(1, ROUTE_LEN, WP_DIM),
+        route_flat.view(1, ROUTE_WPS_LEN, WP_DIM),
         speed_flat.view(1, SPEED_WPS_LEN, WP_DIM),
     )
 

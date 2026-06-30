@@ -40,12 +40,12 @@ from vla_streaming_rl.simlingo.utils.internvl2_utils import (
 
 # SimLingo's driving adaptor emits route waypoints + speed waypoints, each 2-D —
 # see DrivingAdaptor in simlingo_training/models/adaptors.py.
-ROUTE_LEN = 20
+ROUTE_WPS_LEN = 20
 SPEED_WPS_LEN = 10
 WP_DIM = 2
 # Number of waypoint-query positions in ``driving_features`` (route then speed).
 # The DrivingAdaptor heads consume one feature vector per query.
-NUM_WP_QUERIES = ROUTE_LEN + SPEED_WPS_LEN
+NUM_WP_QUERIES = ROUTE_WPS_LEN + SPEED_WPS_LEN
 ACTION_DIM = NUM_WP_QUERIES * WP_DIM
 
 
