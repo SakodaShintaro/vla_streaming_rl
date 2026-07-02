@@ -65,7 +65,7 @@ dacer_loss_weight: 0.05
 # Coefficient on the env's unscaled reach/place shaping signal (published in
 # info by LiberoEnv). The scaled term is folded into the stored learning reward;
 # the env's returned reward stays stock sparse-success. 0.0 disables shaping.
-reach_reward_scale: 1.0
+reach_reward_scale: 100.0
 
 vlac:
   enabled: false
