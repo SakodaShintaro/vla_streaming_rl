@@ -147,7 +147,7 @@ class SimLingoAgent(Agent):
         # ``select_action`` writes each tick's per-query VLM features and the action it took
         # straight into the buffer so ``compute_loss`` / ``infer_and_compute_loss``
         # read (features, action, reward, done) back and only re-apply the waypoint
-        # heads. The obs_z / rnn_state / log_prob / value / token slots stay unused
+        # heads. The obs_z / rnn_state / token slots stay unused
         # (shape-(1,) / 0 / empty) so the buffer machinery still type-checks.
         self.rb = ReplayBuffer(
             size=buffer_size,
@@ -200,8 +200,6 @@ class SimLingoAgent(Agent):
             terminated or truncated,
             self._dummy_rnn_state,
             self._prev_action,
-            0.0,
-            0.0,
             [],
             [],
         )
@@ -270,8 +268,6 @@ class SimLingoAgent(Agent):
             terminated or truncated,
             self._dummy_rnn_state,
             self._prev_action,
-            0.0,
-            0.0,
             [],
             [],
         )

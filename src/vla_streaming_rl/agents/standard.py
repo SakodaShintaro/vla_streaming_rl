@@ -169,8 +169,6 @@ class StandardAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            0.0,
-            0.0,
             self.prev_action_token_ids,
             task_prompt_token_ids,
         )
@@ -281,8 +279,6 @@ class StandardAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            0.0,
-            0.0,
             self.prev_action_token_ids,
             task_prompt_token_ids,
         )

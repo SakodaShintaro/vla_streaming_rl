@@ -196,8 +196,6 @@ class LiberoPi05Network(NetworkInterface):
             dones=data.dones[:, 1:, 0],
             obs_z=data.obs_z,
             rnn_state=data.rnn_state,
-            log_probs=data.log_probs,
-            values=data.values,
             action_token_ids=data.action_token_ids,
             task_prompt_token_ids=data.task_prompt_token_ids,
         )

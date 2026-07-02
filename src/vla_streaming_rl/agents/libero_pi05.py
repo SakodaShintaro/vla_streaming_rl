@@ -188,8 +188,6 @@ class LiberoPi05Agent(Agent):
             terminated or truncated,
             self._dummy,
             self._prev_action,
-            0.0,
-            0.0,
             [],
             [],
         )
@@ -308,8 +306,6 @@ class LiberoPi05Agent(Agent):
             terminated or truncated,
             self._dummy,
             self._prev_action,
-            0.0,
-            0.0,
             [],
             [],
         )

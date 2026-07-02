@@ -11,7 +11,7 @@ In this code, index t stores information visible to the agent just before
 selecting an action at timestep t. Specifically:
 - obs, reward, done are obtained from the environment at timestep t as inputs
 - rnn_state is the RNN hidden state at timestep t
-- action, log_prob, value are the action selected at timestep t-1 and its log probability and value
+- action is the action selected at timestep t-1
 """
 
 
@@ -24,8 +24,6 @@ class ReplayBufferData:
     # rnn_state shape (SpatialTemporalEncoder): (B, T, space_len, state_size, n_layer)
     rnn_state: torch.Tensor
     actions: torch.Tensor  # (B, T, action_shape)
-    log_probs: torch.Tensor  # (B, T)
-    values: torch.Tensor  # (B, T)
     action_token_ids: torch.Tensor  # (B, T, max_new_tokens)
     task_prompt_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
 
@@ -69,8 +67,6 @@ class ReplayBuffer:
         self.dones = init_tensor((size, 1))
         self.rnn_states = init_tensor((size, *rnn_state_shape))
         self.actions = init_tensor((size, *action_shape))
-        self.log_probs = init_tensor((size, 1))
-        self.values = init_tensor((size, 1))
         self.action_token_ids = torch.full(
             (size, max_new_tokens),
             pad_token_id,
@@ -107,8 +103,6 @@ class ReplayBuffer:
             self.dones[:curr_size].to(self.output_device, non_blocking=True),
             self.rnn_states[:curr_size].to(self.output_device, non_blocking=True),
             self.actions[:curr_size].to(self.output_device, non_blocking=True),
-            self.log_probs[:curr_size].to(self.output_device, non_blocking=True),
-            self.values[:curr_size].to(self.output_device, non_blocking=True),
             self.action_token_ids[:curr_size].to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[:curr_size].to(self.output_device, non_blocking=True),
         )
@@ -121,8 +115,6 @@ class ReplayBuffer:
         done: bool,
         rnn_state: torch.Tensor,
         action: torch.Tensor,
-        log_prob: float,
-        value: float,
         action_token_ids: list[int],
         task_prompt_token_ids: list[int],
     ) -> None:
@@ -133,8 +125,6 @@ class ReplayBuffer:
         self.dones[self.idx].fill_(done)
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
-        self.log_probs[self.idx].fill_(log_prob)
-        self.values[self.idx].fill_(value)
 
         self.action_token_ids[self.idx].fill_(self.pad_token_id)
         token_len = min(len(action_token_ids), self.max_new_tokens)
@@ -177,8 +167,6 @@ class ReplayBuffer:
             self.dones[seq_indices].to(self.output_device, non_blocking=True),
             self.rnn_states[seq_indices].to(self.output_device, non_blocking=True),
             self.actions[seq_indices].to(self.output_device, non_blocking=True),
-            self.log_probs[seq_indices].to(self.output_device, non_blocking=True),
-            self.values[seq_indices].to(self.output_device, non_blocking=True),
             self.action_token_ids[seq_indices].to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[seq_indices].to(self.output_device, non_blocking=True),
         )
@@ -197,8 +185,6 @@ class ReplayBuffer:
             self.dones[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.rnn_states[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.actions[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.log_probs[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.values[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.action_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[indices]
             .unsqueeze(0)
