@@ -151,10 +151,9 @@ class StandardAgent(Agent):
             self.chunk_step = 0
             self.prev_action_token_ids = []
             self._episode_reset = self.use_done
-        action_norm = np.linalg.norm(self.prev_action)
+        metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
-        metrics["action_norm"] = action_norm
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
         obs_hwc = obs.transpose(1, 2, 0)
         if self._fresh_pred_image is not None:
@@ -265,10 +264,9 @@ class StandardAgent(Agent):
             self.chunk_step = 0
             self.prev_action_token_ids = []
             self._episode_reset = self.use_done
-        action_norm = np.linalg.norm(self.prev_action)
+        metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
-        metrics["action_norm"] = action_norm
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
         obs_hwc = obs.transpose(1, 2, 0)
         if self._fresh_pred_image is not None:
