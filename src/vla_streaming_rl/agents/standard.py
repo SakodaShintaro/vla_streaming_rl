@@ -345,9 +345,12 @@ class StandardAgent(Agent):
 
     def _panels(self, reward: float) -> dict:
         panels = {}
-        panels["prediction"] = (
-            self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
-        )
+        if not self.network.disable_state_predictor:
+            panels["prediction"] = (
+                self._last_pred_image
+                if self._last_pred_image is not None
+                else self._pred_placeholder
+            )
         pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
         panels["reward"] = create_reward_image(pred_reward, reward)
         return panels
