@@ -22,6 +22,7 @@ wandb_group: default_group
 
 # training
 episode_limit: 1_000_000_000
+time_limit_hour: 1_000_000_000
 max_grad_norm: 5.0
 sparsity: 0.0
 gamma: 0.99

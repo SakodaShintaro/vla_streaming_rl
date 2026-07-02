@@ -180,6 +180,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     # bench2drive sequential cursor and confused the eval writer).
     step_limit = args.step_limit
     episode_limit = args.episode_limit
+    time_limit_sec = args.time_limit_hour * 3600
     checkpoint_interval = max(1, step_limit // 10)
 
     network = build_network(
@@ -300,7 +301,13 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             if global_step >= step_limit:
                 break
 
+            if time.time() - start_time >= time_limit_sec:
+                break
+
         if global_step >= step_limit:
+            break
+
+        if time.time() - start_time >= time_limit_sec:
             break
 
         score = env_info["episode"]["r"]
