@@ -25,7 +25,7 @@ episode_limit: 1_000_000_000
 max_grad_norm: 5.0
 sparsity: 0.0
 gamma: 0.99
-multi_gammas: [0.1, 0.9, 0.95, 0.97]
+multi_gammas: []
 seq_len: 1
 horizon: 1
 buffer_device: cuda
