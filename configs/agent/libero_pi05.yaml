@@ -23,30 +23,21 @@ defaults:
   - _self_
 
 agent_type: libero_pi05
-learning_mode: streaming
 network_class: libero_pi05
+learning_mode: streaming
+batch_size: 1
+actor_lr: 2e-7
+critic_lr: 5e-7
 
-# Overrides consumed by LiberoPi05Agent / LiberoPi05Network.
+# Basic parameters
 image_save_interval: 50
 print_interval: 1
-batch_size: 1
-# Warmup before the first update; also ensures the buffer holds a few episodes
-# of chunk transitions before TD learning starts.
 learning_starts: 1
-# Replay holds one packed transition PER ENV STEP (preprocessed pi0.5 batch +
-# executed normalized action + reward + done); training samples a chunk_size+1
-# sliding window, so any window is a valid chunk transition (no fixed
-# boundaries). Sized in steps — keep modest since each row packs two images.
 buffer_size: 8000
 
 # The critic scores the full pi0.5 action chunk, so the value-head horizon must
 # equal the policy's chunk_size (asserted in the network).
 horizon: 50
-
-# Fine-tuning LRs: tiny actor LR so the expert is nudged, not overwritten;
-# the critic learns faster.
-actor_lr: 2e-7
-critic_lr: 5e-7
 
 # DACER2 actor knobs.
 # actor_denoising_steps : Euler steps when sampling π(s) for the (differentiable)

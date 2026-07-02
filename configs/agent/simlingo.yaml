@@ -22,19 +22,16 @@ defaults:
   - _self_
 
 agent_type: simlingo
-# The SimLingo VLM + waypoint heads (policy μ) + Q critic, built by
-# ``build_network`` (networks/simlingo_network.py) and passed to SimLingoAgent.
 network_class: simlingo
+learning_mode: off_policy
+batch_size: 1
+actor_lr: 2e-7
+critic_lr: 5e-7
 
-# Overrides of base_*/default values consumed by SimLingoAgent.
+# Basic parameters
 image_save_interval: 50
 print_interval: 1
-batch_size: 1
 learning_starts: 800
-# Each replay slot holds the per-query VLM features (30 × hidden) + the
-# action for that step, so a slot is larger than before but the frozen
-# VLM is never re-forwarded at training time; only the waypoint heads are
-# re-applied to the cached features.
 buffer_size: 8192
 
 # SimLingo-specific keys (no equivalent in base_* / default).
@@ -42,16 +39,6 @@ buffer_size: 8192
 # waypoint action μ(s) at rollout time (per waypoint coord, in meters).
 # Set to 0 for greedy evaluation.
 exploration_noise: 0.0
-actor_lr: 2e-7
-critic_lr: 5e-7
-
-# How the agent samples transitions + updates the critic (the agent-level
-# axis; the actor loss is chosen separately by ``actor_loss_type``):
-#   off_policy : random replay batches, critic via AdamW.
-#   streaming  : online TD(λ) on the latest transition every step, critic
-#                via AdamET eligibility traces (uses ``et_lambda`` from
-#                base_streaming).
-learning_mode: off_policy
 
 # Which actor loss trains the waypoint heads (owned by the network, so the
 # agent does not branch on it):
