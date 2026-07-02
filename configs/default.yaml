@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - agent: cnn_off_policy_bs16
+  - agent: standard
   - env: car_racing
 
 hydra:

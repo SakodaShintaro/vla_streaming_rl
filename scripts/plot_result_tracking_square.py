@@ -26,10 +26,11 @@ def parse_args():
 
 _TAB10 = plt.cm.tab10.colors
 
-# (wandb agent key, display label, color).
+# (wandb exp_name key, display label, color).
+# Runs now share agent=standard and are distinguished by exp_name (see train_all.sh).
 # Same order and color mapping as plot_result.py's METHODS.
 METHODS = [
-    ("cnn_off_policy_bs16", "Off-policy bs16 (No VLM)", _TAB10[0]),
+    ("no_vlm_off_policy_bs16", "Off-policy bs16 (No VLM)", _TAB10[0]),
     ("vlm_off_policy_bs16", "Off-policy bs16 (VLM)", _TAB10[2]),
     ("vlm_streaming", "Streaming (VLM)", _TAB10[3]),
     ("vlm_off_policy_bs1", "Off-policy bs1 (VLM)", _TAB10[1]),
@@ -54,7 +55,7 @@ def main():
     label_positions = []  # (x_end, y_end, label, color)
 
     for key, label, color in METHODS:
-        mean_col = f"agent: {key} - recent_average_score"
+        mean_col = f"exp_name: {key} - recent_average_score"
         lo_col = f"{mean_col}__MIN"
         hi_col = f"{mean_col}__MAX"
         if mean_col not in df.columns:

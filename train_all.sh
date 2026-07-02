@@ -21,7 +21,7 @@ git diff > $RESULT_DIR/git_diff.txt
 
 # Streaming, with eligibility trace, learning rate 5e-6
 uv run python scripts/train.py \
-  agent=vlm_streaming \
+  agent=standard \
   env=car_racing \
   exp_name=vlm_streaming$suffix \
   learning_rate=5e-6 \
@@ -30,15 +30,23 @@ uv run python scripts/train.py \
 
 # Off-policy, batch size 16, learning rate 1e-5
 uv run python scripts/train.py \
-  agent=vlm_off_policy_bs16 \
+  agent=standard \
+  learning_mode=off_policy \
+  batch_size=16 \
+  actor_lr=1e-5 \
+  critic_lr=1e-5 \
   env=car_racing \
   exp_name=vlm_off_policy_bs16$suffix \
   result_dir=$RESULT_DIR \
   wandb_group=$WANDB_GROUP
 
-# Off-policy, batch size 1, learning rate 5e-6
+# Off-policy, batch size 1, learning rate 2e-6
 uv run python scripts/train.py \
-  agent=vlm_off_policy_bs1 \
+  agent=standard \
+  learning_mode=off_policy \
+  batch_size=1 \
+  actor_lr=2e-6 \
+  critic_lr=2e-6 \
   env=car_racing \
   exp_name=vlm_off_policy_bs1$suffix \
   result_dir=$RESULT_DIR \
@@ -46,7 +54,12 @@ uv run python scripts/train.py \
 
 # Comparison
 uv run python scripts/train.py \
-  agent=cnn_off_policy_bs16 \
+  agent=standard \
+  network_class=actor_critic_with_action_value \
+  learning_mode=off_policy \
+  batch_size=16 \
+  actor_lr=1e-5 \
+  critic_lr=1e-5 \
   env=car_racing \
   exp_name=no_vlm_off_policy_bs16$suffix \
   result_dir=$RESULT_DIR \

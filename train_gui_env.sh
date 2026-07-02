@@ -5,6 +5,6 @@ suffix=${1:-""}
 cd $(dirname $0)
 
 uv run python scripts/train.py \
-  agent=vlm_streaming \
+  agent=standard \
   env=gui \
   exp_name=baseline$suffix
