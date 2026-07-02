@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 
-from vla_streaming_rl.self_forcing.utils.wan_wrapper import WanVAEWrapper
+from vla_streaming_rl.wan import WanVAEWrapper
 
 
 class ImageProcessor(nn.Module):

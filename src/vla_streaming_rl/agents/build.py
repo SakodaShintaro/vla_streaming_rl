@@ -7,15 +7,6 @@ from omegaconf import DictConfig
 def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
     if args.agent_type == "standard":
         from vla_streaming_rl.agents.standard import StandardAgent
-        from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
-
-        goal_predictor = WorldModelGoalPredictor(
-            enabled=bool(args.self_forcing.enabled),
-            config_path=args.self_forcing.config_path,
-            checkpoint_path=args.self_forcing.checkpoint_path,
-            device=torch.device("cuda"),
-            num_context_blocks=int(args.self_forcing.num_context_blocks),
-        )
 
         agent = StandardAgent(
             observation_space=env.observation_space,
@@ -40,7 +31,6 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             max_new_tokens=args.max_new_tokens,
             max_prompt_tokens=args.max_prompt_tokens,
             pad_token_id=args.pad_token_id,
-            goal_predictor=goal_predictor,
         )
 
     elif args.agent_type == "simlingo":

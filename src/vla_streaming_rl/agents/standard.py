@@ -9,7 +9,6 @@ from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
-from vla_streaming_rl.self_forcing.goal_predictor import WorldModelGoalPredictor
 from vla_streaming_rl.utils import create_reward_image
 
 
@@ -39,7 +38,6 @@ class StandardAgent(Agent):
         max_new_tokens: int,
         max_prompt_tokens: int,
         pad_token_id: int,
-        goal_predictor: WorldModelGoalPredictor,
     ) -> None:
         super().__init__(learning_mode=learning_mode)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -130,8 +128,6 @@ class StandardAgent(Agent):
         self._last_pred_reward: float | None = None
         self._fresh_pred_reward: float | None = None
 
-        self.goal_predictor = goal_predictor
-
     # --- agent surface -----------------------------------------------------
 
     def _step_streaming(
@@ -178,7 +174,7 @@ class StandardAgent(Agent):
             self.prev_action_token_ids,
             task_prompt_token_ids,
         )
-        panels = self._panels(obs, reward)
+        panels = self._panels(reward)
 
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -234,14 +230,13 @@ class StandardAgent(Agent):
         # Between-episode cleanup of state that outlives the terminal step's own
         # processing: the next-frame / reward predictions (stashed during the
         # terminal step, dropped here so they are never validated against the next
-        # episode's first frame) and the world-model goal predictor. The chunk /
-        # eligibility-trace reset is done at the top of ``select_action`` / ``_step_streaming``
-        # instead, since it must take effect *before* the terminal step trains.
+        # episode's first frame). The chunk / eligibility-trace reset is done at the
+        # top of ``select_action`` / ``_step_streaming`` instead, since it must take
+        # effect *before* the terminal step trains.
         self._last_pred_image = None
         self._fresh_pred_image = None
         self._last_pred_reward = None
         self._fresh_pred_reward = None
-        self.goal_predictor.reset()
         return {}
 
     # --- per-tick machinery ------------------------------------------------
@@ -299,7 +294,7 @@ class StandardAgent(Agent):
             self.prev_action = action
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
-            return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
+            return StepResult(action=action, metrics=metrics, panels=self._panels(reward))
 
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
@@ -333,7 +328,7 @@ class StandardAgent(Agent):
             self.chunk_step = 0
             self.prev_action = action
             metrics["chunk_step"] = self.chunk_step
-        return StepResult(action=action, metrics=metrics, panels=self._panels(obs, reward))
+        return StepResult(action=action, metrics=metrics, panels=self._panels(reward))
 
     def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
@@ -352,14 +347,11 @@ class StandardAgent(Agent):
             net_action * self.action_scale + self.action_bias, self.action_low, self.action_high
         )
 
-    def _panels(self, obs: np.ndarray, reward: float) -> dict:
+    def _panels(self, reward: float) -> dict:
         panels = {}
         panels["prediction"] = (
             self._last_pred_image if self._last_pred_image is not None else self._pred_placeholder
         )
         pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
         panels["reward"] = create_reward_image(pred_reward, reward)
-        goal_image = self.goal_predictor.step(obs)
-        if self.goal_predictor.enabled:
-            panels["goal"] = goal_image
         return panels

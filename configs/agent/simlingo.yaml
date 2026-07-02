@@ -7,9 +7,9 @@
 # the leaderboard SensorInterface + CallBack wiring isn't needed.
 #
 # The trainer still builds an RL ``network`` (consumes the env's
-# observation_space) and a goal_predictor unconditionally — SimLingo
-# ignores both. We inherit cnn_streaming's bases so build_network has
-# the keys it needs; the resulting CNN sits idle.
+# observation_space) unconditionally — SimLingo ignores it. We inherit
+# the base agent configs so build_network has the keys it needs; the
+# resulting CNN sits idle.
 #
 # The SimLingo VLM checkpoint is always pulled from huggingface
 # (RenzKa/simlingo) into the local HF cache via snapshot_download —

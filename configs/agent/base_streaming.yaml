@@ -10,9 +10,3 @@ weight_decay: 0.1
 use_eligibility_trace: 1
 et_lambda: 0.5
 denoising_time: 0.7
-
-self_forcing:
-  enabled: false
-  config_path: configs/self_forcing/b2d_finetune.yaml
-  checkpoint_path: null
-  num_context_blocks: 1
