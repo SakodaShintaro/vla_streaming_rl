@@ -32,7 +32,7 @@ critic_lr: 5e-7
 image_save_interval: 50
 print_interval: 1
 learning_starts: 800
-buffer_size: 8192
+buffer_size: 8000
 
 # SimLingo-specific keys (no equivalent in base_* / default).
 # Std of the Gaussian exploration noise added to the deterministic

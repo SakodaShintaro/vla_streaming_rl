@@ -32,7 +32,7 @@ critic_lr: 5e-7
 # Basic parameters
 image_save_interval: 50
 print_interval: 1
-learning_starts: 1
+learning_starts: 800
 buffer_size: 8000
 
 # The critic scores the full pi0.5 action chunk, so the value-head horizon must
