@@ -1,6 +1,6 @@
 # @package _global_
 env_id: LIBERO-v0
-step_limit: 200_000
+step_limit: 100_000
 image_save_interval: 10
 
 env_factory:
