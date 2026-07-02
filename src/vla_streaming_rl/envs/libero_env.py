@@ -141,6 +141,21 @@ class LiberoEnv(gym.Env):
         # robot's starting pose breaks that memorization and gives RL headroom.
         # 0.0 reproduces the stock (unperturbed) behavior. See ``_perturb_robot``.
         self._perturb_robot_joint_std = float(perturb_robot_joint_std)
+        # Raw (unscaled) potential-based reach/place shaping signal for the "pick
+        # object, put it in the container" task, published in ``info`` for the
+        # agent to scale and fold into the learning reward. The potential covers
+        # both phases:
+        #   Phi(s) = -(||eef - object|| + ||object - container||)
+        # so before grasping the eef-to-object term drives reaching, and once the
+        # object is grasped (that term saturates near zero) the object-to-
+        # container term drives carrying it home. The per-step shaping reported is
+        # ``Phi(s') - Phi(s)`` (the reduction in distance); the scaling coefficient
+        # lives on the agent. The returned reward stays the stock sparse success.
+        self._object_to_eef_key = ""
+        self._object_pos_key = ""
+        self._container_pos_key = ""
+        self._prev_reach_dist = 0.0
+        self._prev_place_dist = 0.0
 
         self._np_random = np.random.default_rng(seed)
 
@@ -238,8 +253,21 @@ class LiberoEnv(gym.Env):
         for _ in range(self._settle_steps):
             obs, _, _, _ = self._env.step(zero_action)
 
+        # ``obj_of_interest`` is ``[pick_object, container]``; object sensors are
+        # published as ``<name>_pos`` (world) and ``<name>_to_robot0_eef_pos``.
+        obj, container = self._env.obj_of_interest[0], self._env.obj_of_interest[1]
+        self._object_to_eef_key = f"{obj}_to_robot0_eef_pos"
+        self._object_pos_key = f"{obj}_pos"
+        self._container_pos_key = f"{container}_pos"
+        self._prev_reach_dist, self._prev_place_dist = self._shaping_distance(obs)
+
         self._step_count = 0
         return self._extract(obs)
+
+    def _shaping_distance(self, obs: dict[str, Any]) -> tuple[float, float]:
+        reach = float(np.linalg.norm(obs[self._object_to_eef_key]))
+        place = float(np.linalg.norm(obs[self._object_pos_key] - obs[self._container_pos_key]))
+        return reach, place
 
     def _perturb_robot(self) -> None:
         """Add Gaussian jitter to the robot's initial arm-joint positions.
@@ -264,13 +292,23 @@ class LiberoEnv(gym.Env):
         obs, reward, done, _ = self._env.step(np.asarray(action, dtype=np.float32))
 
         # LIBERO reward is sparse success (reward_shaping disabled): a positive
-        # reward means the task goal was satisfied this step.
+        # reward means the task goal was satisfied this step. This stays the
+        # official returned reward; shaping is only advertised through ``info``.
         success = reward > 0.0
         terminated = bool(success)
         truncated = (not terminated) and (bool(done) or self._step_count >= self._horizon)
 
+        reach, place = self._shaping_distance(obs)
+        info_reach_shaping = self._prev_reach_dist - reach
+        info_place_shaping = self._prev_place_dist - place
+        self._prev_reach_dist, self._prev_place_dist = reach, place
+
         observation, info = self._extract(obs)
         info["is_success"] = float(success)
+        info["reach_shaping"] = info_reach_shaping
+        info["place_shaping"] = info_place_shaping
+        info["reach_dist"] = reach
+        info["place_dist"] = place
         return observation, float(reward), terminated, truncated, info
 
     def render(self) -> np.ndarray:

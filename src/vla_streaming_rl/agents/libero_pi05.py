@@ -29,13 +29,24 @@ def _sample_evenly(frames: list, n: int) -> list:
     return [frames[0]] + [frames[int(i * delta)] for i in range(1, n)]
 
 
-def _vlac_reward_image(sparse_reward: float, dense_reward: float, progress: float) -> np.ndarray:
-    """Fixed 200x200 panel: env sparse reward, VLAC dense (pseudo) reward, progress."""
+def _reward_image(
+    total: float,
+    sparse: float,
+    reach_shaping: float,
+    place_shaping: float,
+    dense: float,
+    progress: float,
+) -> np.ndarray:
+    """Fixed 200x200 panel breaking down the reward components (VLAC lines read
+    0.0 when VLAC is disabled)."""
     img = np.zeros((200, 200, 3), dtype=np.uint8)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(img, f"Env rew:  {sparse_reward:.3f}", (8, 40), font, 0.6, (255, 0, 0), 2)
-    cv2.putText(img, f"VLAC rew: {dense_reward:+.4f}", (8, 80), font, 0.6, (0, 200, 255), 2)
-    cv2.putText(img, f"Progress: {progress:.3f}", (8, 120), font, 0.6, (0, 255, 0), 2)
+    cv2.putText(img, f"Total: {total:+.3f}", (8, 28), font, 0.5, (255, 255, 255), 2)
+    cv2.putText(img, f"Sparse:{sparse:.3f}", (8, 56), font, 0.5, (255, 0, 0), 2)
+    cv2.putText(img, f"Reach: {reach_shaping:+.4f}", (8, 84), font, 0.5, (0, 200, 255), 2)
+    cv2.putText(img, f"Place: {place_shaping:+.4f}", (8, 112), font, 0.5, (0, 255, 0), 2)
+    cv2.putText(img, f"VLAC:  {dense:+.4f}", (8, 140), font, 0.5, (255, 0, 255), 2)
+    cv2.putText(img, f"Prog:  {progress:.3f}", (8, 168), font, 0.5, (200, 200, 0), 2)
     return img
 
 
@@ -58,6 +69,7 @@ class LiberoPi05Agent(Agent):
         gamma: float,
         relabeler: VlacRewardRelabeler | None,
         vlac_ref_num: int,
+        reach_reward_scale: float,
     ) -> None:
         super().__init__(learning_mode=learning_mode)
 
@@ -74,6 +86,9 @@ class LiberoPi05Agent(Agent):
         self.batch_size = int(batch_size)
         self.learning_starts = int(learning_starts)
         self.max_grad_norm = float(max_grad_norm)
+        # Coefficient on the env's unscaled reach/place shaping signal (from
+        # info); the scaled term is folded into the stored learning reward.
+        self._reach_reward_scale = float(reach_reward_scale)
         self.reward_processor = RewardProcessor("none", 1.0)
 
         self._action_low = action_space.low
@@ -154,6 +169,7 @@ class LiberoPi05Agent(Agent):
         metrics = {}
         dense = 0.0
         progress = 0.0
+        sparse = float(reward)
         if self._relabeler is not None:
             frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
             if not self._cur_frames:
@@ -161,8 +177,10 @@ class LiberoPi05Agent(Agent):
                 self._relabeler.set_reference(self._references.get(self._cur_task))
             self._cur_frames.append(frame)
             dense, metrics = self._relabeler.step(frame, info["task_prompt"])
-            reward = reward + dense
             progress = metrics["vlac/progress"]
+        reach_shaping = self._reach_reward_scale * info.get("reach_shaping", 0.0)
+        place_shaping = self._reach_reward_scale * info.get("place_shaping", 0.0)
+        reward = sparse + dense + reach_shaping + place_shaping
         self.rb.add(
             packed,
             self._dummy,
@@ -177,7 +195,10 @@ class LiberoPi05Agent(Agent):
         )
         if terminated or truncated:
             self._episode_reset = True
-        panels = self._panels(reward, wrist, dense, progress)
+        metrics.update(
+            self._reward_metrics(reward, sparse, reach_shaping, place_shaping, dense, info)
+        )
+        panels = self._panels(reward, wrist, sparse, reach_shaping, place_shaping, dense, progress)
 
         if not self._env_action_queue:
             curr_size = self.rb.size if self.rb.full else self.rb.idx
@@ -268,6 +289,7 @@ class LiberoPi05Agent(Agent):
         metrics = {}
         dense = 0.0
         progress = 0.0
+        sparse = float(reward)
         if self._relabeler is not None:
             frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
             if not self._cur_frames:
@@ -275,8 +297,10 @@ class LiberoPi05Agent(Agent):
                 self._relabeler.set_reference(self._references.get(self._cur_task))
             self._cur_frames.append(frame)
             dense, metrics = self._relabeler.step(frame, info["task_prompt"])
-            reward = reward + dense
             progress = metrics["vlac/progress"]
+        reach_shaping = self._reach_reward_scale * info.get("reach_shaping", 0.0)
+        place_shaping = self._reach_reward_scale * info.get("place_shaping", 0.0)
+        reward = sparse + dense + reach_shaping + place_shaping
         self.rb.add(
             packed,
             self._dummy,
@@ -309,10 +333,15 @@ class LiberoPi05Agent(Agent):
 
         self._prev_action = self._raw_action_queue.popleft()
         env_action = self._to_env_action(self._env_action_queue.popleft())
+        metrics.update(
+            self._reward_metrics(reward, sparse, reach_shaping, place_shaping, dense, info)
+        )
         return StepResult(
             action=env_action,
             metrics=metrics,
-            panels=self._panels(reward, wrist, dense, progress),
+            panels=self._panels(
+                reward, wrist, sparse, reach_shaping, place_shaping, dense, progress
+            ),
         )
 
     def _preprocess(
@@ -338,8 +367,34 @@ class LiberoPi05Agent(Agent):
         """Clip an un-normalized pi0.5 action into the env's action space."""
         return np.clip(net_action, self._action_low, self._action_high).astype(np.float32)
 
-    def _panels(self, reward: float, wrist: np.ndarray, dense: float, progress: float) -> dict:
-        panels = {"wrist": wrist}
-        if self._relabeler is not None:
-            panels["reward"] = _vlac_reward_image(reward, dense, progress)
-        return panels
+    def _reward_metrics(
+        self,
+        total: float,
+        sparse: float,
+        reach_shaping: float,
+        place_shaping: float,
+        dense: float,
+        info: dict,
+    ) -> dict:
+        return {
+            "reward/total": float(total),
+            "reward/sparse": float(sparse),
+            "reward/reach_shaping": float(reach_shaping),
+            "reward/place_shaping": float(place_shaping),
+            "reward/vlac_dense": float(dense),
+            "reach_dist": info.get("reach_dist", 0.0),
+            "place_dist": info.get("place_dist", 0.0),
+        }
+
+    def _panels(
+        self,
+        total: float,
+        wrist: np.ndarray,
+        sparse: float,
+        reach_shaping: float,
+        place_shaping: float,
+        dense: float,
+        progress: float,
+    ) -> dict:
+        reward_img = _reward_image(total, sparse, reach_shaping, place_shaping, dense, progress)
+        return {"wrist": wrist, "reward": reward_img}

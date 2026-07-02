@@ -92,6 +92,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             gamma=args.gamma,
             relabeler=relabeler,
             vlac_ref_num=args.vlac.ref_num,
+            reach_reward_scale=args.reach_reward_scale,
         )
 
     else:
