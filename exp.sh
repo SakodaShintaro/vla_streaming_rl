@@ -26,6 +26,8 @@ OFF1_LR="actor_lr=1e-6 critic_lr=1e-6"
 
 # ==== Run the 3 learning-mode variants ================================
 
+result_dir=~/data/$(date +%Y%m%d_%H%M%S)_${AGENT}_${ENV}${suffix}
+
 # Streaming
 uv run python scripts/train.py \
   agent=$AGENT \
@@ -33,7 +35,8 @@ uv run python scripts/train.py \
   learning_mode=streaming \
   batch_size=1 \
   $STREAM_LR \
-  exp_name=${AGENT}_streaming$suffix
+  result_dir=$result_dir \
+  exp_name=streaming
 
 # OffPolicy batch_size 16
 uv run python scripts/train.py \
@@ -42,7 +45,8 @@ uv run python scripts/train.py \
   learning_mode=off_policy \
   batch_size=16 \
   $OFF16_LR \
-  exp_name=${AGENT}_off_policy_bs16$suffix
+  result_dir=$result_dir \
+  exp_name=off_policy_bs16
 
 # OffPolicy batch_size 1
 uv run python scripts/train.py \
@@ -51,4 +55,5 @@ uv run python scripts/train.py \
   learning_mode=off_policy \
   batch_size=1 \
   $OFF1_LR \
-  exp_name=${AGENT}_off_policy_bs1$suffix
+  result_dir=$result_dir \
+  exp_name=off_policy_bs1
