@@ -1,7 +1,7 @@
 # @package _global_
 env_id: CARLA-Leaderboard-v0
-episode_limit: 100
-step_limit: 500_000
+episode_limit: 200
+step_limit: 1_000_000
 render_scale: 0.33
 time_limit_hour: 2.0
 
