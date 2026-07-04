@@ -303,6 +303,7 @@ class LiberoPi05Network(NetworkInterface):
 
     # --- pi0.5 internals (private) -----------------------------------------
 
+    @torch.no_grad()
     def _encode_state(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, list]:
         model = self.policy.model
         images, img_masks = self.policy._preprocess_images(batch)
