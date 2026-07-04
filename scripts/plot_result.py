@@ -1,20 +1,24 @@
-"""Plot CarRacing results for the JCSS revision (single-run layout).
+"""Plot results (single-run layout) for one environment.
 
 Given the parent directory produced by ``exp.sh`` (one subdirectory per
 learning-mode variant, each holding ``log_episode.tsv`` and a local wandb
-run), this renders three figures side by side in the paper:
+run), this renders three figures for the paper:
 
-* ``car_racing_moving_average.pdf`` -- trailing-average score vs global step.
-* ``car_racing_fps.pdf``            -- throughput (final SPS) per method.
-* ``car_racing_gpu_memory.pdf``     -- peak GPU memory allocated per method.
+* ``<prefix>_score.pdf``      -- trailing-average score / success rate vs time.
+* ``<prefix>_fps.pdf``        -- throughput (final SPS) per method.
+* ``<prefix>_gpu_memory.pdf`` -- peak GPU memory allocated per method.
 
-The score curve comes from ``log_episode.tsv``; the throughput is the final
-cumulative ``SPS`` logged there; the GPU memory is read from the wandb system
-metric ``gpu.0.memoryAllocatedBytes`` recorded in the local ``*.wandb`` file.
+The score curve comes from ``log_episode.tsv`` (``recent_average_score``); the
+throughput is the final cumulative ``SPS`` logged there; the GPU memory is read
+from the wandb system metric ``gpu.0.memoryAllocatedBytes`` in the local
+``*.wandb`` file. Per-environment labels and output filenames are selected via
+the ``env`` argument; add a new entry to ``ENVS`` to support another task.
 
-Example:
-    uv run python scripts/plot_car_racing_revise.py \\
+Examples:
+    uv run python scripts/plot_result.py car_racing \\
         ~/data/JCSS_Revise/20260703_065522_standard_car_racing
+    uv run python scripts/plot_result.py libero \\
+        ~/data/JCSS_Revise/20260704_064041_libero_pi05_libero
 """
 
 import argparse
@@ -31,12 +35,29 @@ _TAB10 = plt.cm.tab10.colors
 
 # (exp_name suffix, display label, color). Order = display order.
 # Colors are kept consistent across the three figures. The suffix is matched
-# against the end of each subdirectory name (e.g. ``..._standard_streaming``).
+# against the end of each subdirectory name (e.g. ``..._pi05_streaming``).
 METHODS = [
     ("streaming", "Streaming", _TAB10[3]),
     ("off_policy_bs1", "Off-policy bs1", _TAB10[1]),
     ("off_policy_bs16", "Off-policy bs16", _TAB10[2]),
 ]
+
+# Per-environment presets: the score curve's y-axis label, the output filename
+# for that curve, and an optional fixed y-limit (e.g. LIBERO success rate).
+ENVS = {
+    "car_racing": {
+        "score_ylabel": "Moving Average Score",
+        "score_fname": "car_racing_moving_average.pdf",
+        "score_ymax": None,
+        "prefix": "car_racing",
+    },
+    "libero": {
+        "score_ylabel": "Success Rate",
+        "score_fname": "libero_success_rate.pdf",
+        "score_ymax": 1.0,
+        "prefix": "libero",
+    },
+}
 
 
 def find_method_dir(data_dir: Path, suffix: str) -> Path | None:
@@ -80,6 +101,7 @@ def peak_gpu_memory_gb(method_dir: Path) -> float | None:
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("env", choices=sorted(ENVS))
     parser.add_argument("data_dir", type=Path)
     return parser.parse_args()
 
@@ -95,7 +117,7 @@ def _apply_rcparams():
     )
 
 
-def plot_moving_average(data_dir: Path, resolved: list[tuple[Path, str, tuple]]):
+def plot_score_curve(data_dir, resolved, ylabel, fname, ymax):
     fig, ax = plt.subplots(figsize=(12, 7.5))
     label_positions = []  # (x_end, y_end, label, color)
     x_max = 0
@@ -112,7 +134,9 @@ def plot_moving_average(data_dir: Path, resolved: list[tuple[Path, str, tuple]])
         x_max = max(x_max, times[-1])
 
     ax.set_xlabel("Elapsed Time (hours)")
-    ax.set_ylabel("Moving Average Score")
+    ax.set_ylabel(ylabel)
+    if ymax is not None:
+        ax.set_ylim(0, ymax)
     ax.grid(True, alpha=0.3)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -141,7 +165,7 @@ def plot_moving_average(data_dir: Path, resolved: list[tuple[Path, str, tuple]])
         )
     fig.subplots_adjust(right=0.75)
 
-    output = data_dir / "car_racing_moving_average.pdf"
+    output = data_dir / fname
     fig.savefig(output, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved: {output}")
@@ -172,6 +196,8 @@ def _barh(data_dir, resolved, values, xlabel, fname, fmt):
 
 def main():
     args = parse_args()
+    cfg = ENVS[args.env]
+    prefix = cfg["prefix"]
     _apply_rcparams()
 
     resolved = []
@@ -185,12 +211,14 @@ def main():
     if not resolved:
         raise SystemExit(f"No method directories found under {args.data_dir}")
 
-    plot_moving_average(args.data_dir, resolved)
+    plot_score_curve(
+        args.data_dir, resolved, cfg["score_ylabel"], cfg["score_fname"], cfg["score_ymax"]
+    )
 
     fps = [
         pd.read_csv(d / "log_episode.tsv", sep="\t")["SPS"].to_numpy()[-1] for d, _, _ in resolved
     ]
-    _barh(args.data_dir, resolved, fps, "Frames per Second (FPS)", "car_racing_fps.pdf", " {:.1f}")
+    _barh(args.data_dir, resolved, fps, "Frames per Second (FPS)", f"{prefix}_fps.pdf", " {:.1f}")
 
     mem = [peak_gpu_memory_gb(d) for d, _, _ in resolved]
     if all(m is not None for m in mem):
@@ -199,7 +227,7 @@ def main():
             resolved,
             mem,
             "Peak GPU Memory (GB)",
-            "car_racing_gpu_memory.pdf",
+            f"{prefix}_gpu_memory.pdf",
             " {:.1f}",
         )
 
