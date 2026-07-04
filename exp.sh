@@ -1,32 +1,41 @@
 #!/bin/bash
 set -eux
 
-suffix=${1:-""}
 cd $(dirname $0)
 
-# ==== Select ONE setup (uncomment its block) ==========================
+# ==== Select setup via argument =======================================
+# Usage: ./exp.sh {car_racing|carla|libero}
 
-# --- CarRacing-Qwen ---
-AGENT=standard; ENV=car_racing
-STREAM_LR="actor_lr=1e-6 critic_lr=1e-6"
-OFF16_LR="actor_lr=1e-5 critic_lr=1e-5"
-OFF1_LR="actor_lr=1e-6 critic_lr=1e-6"
+SETUP=${1:-}
 
-# --- CARLA-SimLingo ---
-# AGENT=simlingo; ENV=carla_special_case
-# STREAM_LR="actor_lr=2e-7 critic_lr=5e-7"
-# OFF16_LR="actor_lr=2e-6 critic_lr=5e-6"
-# OFF1_LR="actor_lr=2e-7 critic_lr=5e-7"
-
-# --- LIBERO-pi0.5 ---
-# AGENT=libero_pi05; ENV=libero
-# STREAM_LR="actor_lr=2e-7 critic_lr=5e-7"
-# OFF16_LR="actor_lr=2e-6 critic_lr=5e-6"
-# OFF1_LR="actor_lr=2e-7 critic_lr=5e-7"
+case "$SETUP" in
+  car_racing)
+    AGENT=standard; ENV=car_racing
+    STREAM_LR="actor_lr=1e-6 critic_lr=1e-6"
+    OFF16_LR="actor_lr=1e-5 critic_lr=1e-5"
+    OFF1_LR="actor_lr=1e-6 critic_lr=1e-6"
+    ;;
+  carla)
+    AGENT=simlingo; ENV=carla_special_case
+    STREAM_LR="actor_lr=2e-7 critic_lr=5e-7"
+    OFF16_LR="actor_lr=2e-6 critic_lr=5e-6"
+    OFF1_LR="actor_lr=2e-7 critic_lr=5e-7"
+    ;;
+  libero)
+    AGENT=libero_pi05; ENV=libero
+    STREAM_LR="actor_lr=2e-7 critic_lr=5e-7"
+    OFF16_LR="actor_lr=2e-6 critic_lr=5e-6"
+    OFF1_LR="actor_lr=2e-7 critic_lr=5e-7"
+    ;;
+  *)
+    echo "Usage: $0 {car_racing|carla|libero}" >&2
+    exit 1
+    ;;
+esac
 
 # ==== Run the 3 learning-mode variants ================================
 
-result_dir=~/data/$(date +%Y%m%d_%H%M%S)_${AGENT}_${ENV}${suffix}
+result_dir=~/data/$(date +%Y%m%d_%H%M%S)_${AGENT}_${ENV}
 
 # Streaming
 uv run python scripts/train.py \
