@@ -13,12 +13,6 @@ throughput is the final cumulative ``SPS`` logged there; the GPU memory is read
 from the wandb system metric ``gpu.0.memoryAllocatedBytes`` in the local
 ``*.wandb`` file. Per-environment labels and output filenames are selected via
 the ``env`` argument; add a new entry to ``ENVS`` to support another task.
-
-Examples:
-    uv run python scripts/plot_result.py car_racing \\
-        ~/data/JCSS_Revise/20260703_065522_standard_car_racing
-    uv run python scripts/plot_result.py libero \\
-        ~/data/JCSS_Revise/20260704_064041_libero_pi05_libero
 """
 
 import argparse
