@@ -50,6 +50,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             weight_decay=args.weight_decay,
             max_grad_norm=args.max_grad_norm,
             learning_mode=args.learning_mode,
+            horizon=args.horizon,
             et_lambda=args.et_lambda,
         )
 
@@ -71,6 +72,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             action_space=env.action_space,
             network=network,
             learning_mode=args.learning_mode,
+            horizon=args.horizon,
             buffer_size=args.buffer_size,
             batch_size=args.batch_size,
             learning_starts=args.learning_starts,

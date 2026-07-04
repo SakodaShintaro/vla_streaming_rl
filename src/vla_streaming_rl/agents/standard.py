@@ -39,7 +39,7 @@ class StandardAgent(Agent):
         max_prompt_tokens: int,
         pad_token_id: int,
     ) -> None:
-        super().__init__(learning_mode=learning_mode)
+        super().__init__(learning_mode=learning_mode, horizon=horizon)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
@@ -61,7 +61,6 @@ class StandardAgent(Agent):
 
         # Sequence observation management
         self.seq_len = seq_len
-        self.horizon = horizon
 
         # Action chunking state
         self.action_chunk = None  # (horizon, action_dim) - current action chunk

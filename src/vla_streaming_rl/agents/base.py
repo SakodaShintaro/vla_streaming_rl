@@ -39,10 +39,11 @@ class Agent(ABC):
             if getattr(member, "__final__", False) and name in cls.__dict__:
                 raise TypeError(f"{cls.__name__} may not override final method {name!r} of Agent")
 
-    def __init__(self, learning_mode: str) -> None:
+    def __init__(self, learning_mode: str, horizon: int) -> None:
         if learning_mode not in ("off_policy", "streaming"):
             raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
         self.learning_mode = learning_mode
+        self.horizon = int(horizon)
 
     @abstractmethod
     def select_action(
@@ -91,6 +92,7 @@ class Agent(ABC):
             print(f"Start training at global step {global_step}.")
         if (
             global_step >= self.learning_starts
+            and global_step % self.horizon == 0
             and self.rb is not None
             and self.rb.num_stored() >= self.batch_size + self.rb.seq_len
         ):

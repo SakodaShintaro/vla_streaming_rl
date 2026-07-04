@@ -58,6 +58,7 @@ class LiberoPi05Agent(Agent):
         action_space: gym.spaces.Box,
         network: LiberoPi05Network,
         learning_mode: str,
+        horizon: int,
         buffer_size: int,
         batch_size: int,
         learning_starts: int,
@@ -71,7 +72,7 @@ class LiberoPi05Agent(Agent):
         vlac_ref_num: int,
         reach_reward_scale: float,
     ) -> None:
-        super().__init__(learning_mode=learning_mode)
+        super().__init__(learning_mode=learning_mode, horizon=horizon)
 
         self.network = network
         self.preprocessor = network.preprocessor

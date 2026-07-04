@@ -80,9 +80,10 @@ class SimLingoAgent(Agent):
         weight_decay: float,
         max_grad_norm: float,
         learning_mode: str,
+        horizon: int,
         et_lambda: float,
     ) -> None:
-        super().__init__(learning_mode=learning_mode)
+        super().__init__(learning_mode=learning_mode, horizon=horizon)
         self.observation_space = observation_space
         del action_space
 
