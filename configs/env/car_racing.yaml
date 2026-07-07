@@ -1,4 +1,4 @@
 # @package _global_
 env_id: CarRacing-v3
-step_limit: 200_000
-time_limit_hour: 2.0
+step_limit: 400_000
+time_limit_hour: 6.0
