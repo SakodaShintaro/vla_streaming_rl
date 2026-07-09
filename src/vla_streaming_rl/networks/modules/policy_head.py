@@ -100,6 +100,8 @@ class DiffusionPolicy(nn.Module):
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.fc_out = nn.Linear(hidden_dim, total_action_dim)
+        nn.init.zeros_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
         self.action_dim = action_dim
         self.denoising_steps = denoising_steps
         self.denoising_time = denoising_time
@@ -246,6 +248,8 @@ class CFGDiffusionPolicy(nn.Module):
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.fc_out = nn.Linear(hidden_dim, total_action_dim)
+        nn.init.zeros_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
         self.action_dim = action_dim
         self.denoising_steps = denoising_steps
         self.denoising_time = denoising_time
@@ -389,6 +393,8 @@ class MeanFlowPolicy(nn.Module):
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.fc_out = nn.Linear(hidden_dim, total_action_dim)
+        nn.init.zeros_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
         self.t_embedder = TimestepEmbedder(time_embedding_size)
         # Gap (t - r) embedding; at r=t it is r_embedder(0), recovering FM.
         self.r_embedder = TimestepEmbedder(time_embedding_size)
