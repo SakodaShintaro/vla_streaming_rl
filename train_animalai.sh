@@ -20,11 +20,11 @@ fi
 : "${DISPLAY:=:0}"
 export DISPLAY
 
-# cnn off-policy bs16. For cnn streaming: learning_mode=streaming (drop batch_size/lr).
-OVERRIDES="network_class=actor_critic_with_action_value learning_mode=off_policy batch_size=16 actor_lr=1e-5 critic_lr=1e-5"
-
 uv run python scripts/train.py \
   agent=standard \
-  ${OVERRIDES} \
+  network_class=actor_critic_with_action_value \
+  learning_mode=streaming \
+  actor_lr=1e-7 \
+  critic_lr=1e-7 \
   env=animalai \
   exp_name=animalai${suffix}
