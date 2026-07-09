@@ -72,7 +72,6 @@ def make_animalai_env() -> gym.Env:
     # resolution must be divisible by 8 (Wan VAE encode/decode is stride-8).
     return AnimalAIEnv(
         resolution=96,
-        max_episode_steps=500,
         seed=0,
         base_port=5005,
     )

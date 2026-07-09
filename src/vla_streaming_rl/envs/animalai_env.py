@@ -139,7 +139,6 @@ class AnimalAIEnv(gym.Env):
     def __init__(
         self,
         resolution: int,
-        max_episode_steps: int,
         seed: int,
         base_port: int,
     ):
@@ -164,7 +163,6 @@ class AnimalAIEnv(gym.Env):
 
         self.binary_path = str(Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64")
         self.resolution = resolution
-        self.max_episode_steps = max_episode_steps
         self.seed_value = seed
         # Add jitter so parallel envs don't fight over the same socket.
         self.base_port = base_port + random.randint(0, 1000)
@@ -224,6 +222,7 @@ class AnimalAIEnv(gym.Env):
             useCamera=True,
             resolution=self.resolution,
             useRayCasts=False,
+            decisionPeriod=5,
             # `--no-graphics-monitor` enables off-screen rendering on a host
             # without a window manager. `no_graphics=True` (the alternative
             # for headless) disables the renderer entirely and produces a
@@ -368,19 +367,24 @@ class AnimalAIEnv(gym.Env):
         self._aai.step()
 
         decision_steps, terminal_steps = self._aai.get_steps(self._behavior_name)
-        terminated = len(terminal_steps) > 0
-        if terminated:
+        episode_over = len(terminal_steps) > 0
+        if episode_over:
+            # `interrupted` is AAI's max-step (arena `t`) timeout, i.e. a time
+            # limit rather than a real terminal (goal reached / death zone).
+            interrupted = bool(terminal_steps.interrupted[0])
             reward = float(terminal_steps.reward[0])
             self._latest_image = self._decode_obs(terminal_steps.obs[0][0])
             self._agent_xz = self._extract_agent_xz(terminal_steps.obs, 0)
         else:
+            interrupted = False
             reward = float(decision_steps.reward[0])
             self._latest_image = self._decode_obs(decision_steps.obs[0][0])
             self._agent_xz = self._extract_agent_xz(decision_steps.obs, 0)
 
         self.episode_step += 1
         self._episode_return += reward
-        truncated = self.episode_step >= self.max_episode_steps
+        terminated = episode_over and not interrupted
+        truncated = episode_over and interrupted
 
         info = {
             "task_prompt": self.prompt,
@@ -422,7 +426,6 @@ if __name__ == "__main__":
         competition_dir=str(competition),
         prompt="Find and reach the green goal sphere; avoid red zones and yellow goals.",
         resolution=96,
-        max_episode_steps=100,
         seed=0,
         base_port=5005,
     )
