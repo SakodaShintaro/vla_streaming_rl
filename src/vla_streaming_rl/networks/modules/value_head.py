@@ -254,6 +254,11 @@ class ActionValueHead(DistributionalValueHead):
 
         self.apply(weights_init_)
 
+        nn.init.zeros_(self.v_fc_out.weight)
+        nn.init.zeros_(self.v_fc_out.bias)
+        nn.init.zeros_(self.a_fc_out.weight)
+        nn.init.zeros_(self.a_fc_out.bias)
+
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
