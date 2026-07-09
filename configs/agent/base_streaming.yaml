@@ -5,8 +5,8 @@ temporal_model_type: gru
 policy_type: diffusion
 batch_size: 1
 actor_lr: 1e-6
-critic_lr: 1e-6
+critic_lr: 1e-5
 weight_decay: 0.1
+denoising_time: 0.7
 use_eligibility_trace: 1
 et_lambda: 0.5
-denoising_time: 0.7
