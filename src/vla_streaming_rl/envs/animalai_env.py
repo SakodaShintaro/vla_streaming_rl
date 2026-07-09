@@ -138,22 +138,19 @@ class AnimalAIEnv(gym.Env):
 
     def __init__(
         self,
-        binary_path: str,
-        competition_dir: str,
-        prompt: str,
         resolution: int,
         max_episode_steps: int,
         seed: int,
         base_port: int,
     ):
         super().__init__()
-        self.competition_dir = Path(competition_dir)
+        self.competition_dir = Path("./external/animal-ai/configs/competition")
         self.arena_sets = _discover_arena_sets(self.competition_dir)
         if self.arena_sets.size == 0:
-            raise ValueError(f"no XX-YY-ZZ.yaml files found under {competition_dir}")
+            raise ValueError(f"no XX-YY-ZZ.yaml files found under {self.competition_dir}")
         # Flat sorted list of every yaml stem; progression walks this in order.
         self._all_arenas: list[str] = sorted(self.arena_sets.flatten().tolist())
-        self.prompt = prompt
+        self.prompt = "Find and reach the green goal sphere; avoid red zones and yellow goals."
 
         # Curriculum state. Pointer walks `_all_arenas` from low index. On
         # success the current yaml is added to `_cleared_arenas` and the pointer
@@ -165,7 +162,7 @@ class AnimalAIEnv(gym.Env):
         self._cleared_arenas: set[str] = set()
         self._is_revisit = False
 
-        self.binary_path = binary_path
+        self.binary_path = str(Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64")
         self.resolution = resolution
         self.max_episode_steps = max_episode_steps
         self.seed_value = seed

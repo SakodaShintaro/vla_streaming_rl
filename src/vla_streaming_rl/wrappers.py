@@ -61,9 +61,6 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     return action_array, len(matches) > 0
 
 
-_ANIMALAI_PROMPT = "Find and reach the green goal sphere; avoid red zones and yellow goals."
-
-
 def make_animalai_env() -> gym.Env:
     """Hydra `_target_` factory for the raw AnimalAI env (no wrappers).
 
@@ -72,13 +69,8 @@ def make_animalai_env() -> gym.Env:
     """
     from vla_streaming_rl.envs.animalai_env import AnimalAIEnv
 
-    binary_path = Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64"
-    competition_dir = "./external/animal-ai/configs/competition"
     # resolution must be divisible by 8 (Wan VAE encode/decode is stride-8).
     return AnimalAIEnv(
-        binary_path=str(binary_path),
-        competition_dir=competition_dir,
-        prompt=_ANIMALAI_PROMPT,
         resolution=96,
         max_episode_steps=500,
         seed=0,
