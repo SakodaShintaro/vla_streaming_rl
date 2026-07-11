@@ -11,27 +11,19 @@ observation contract as ``LiberoEnv``:
 The language instruction is published in ``info`` under ``task_prompt`` and
 lifted into ``obs["language"]`` downstream by ``LanguageObsWrapper``.
 
-The package lives under ``external/MIKASA-Robo`` and is put on ``sys.path`` here
-rather than installed as a dependency: its own ``pyproject`` pins
-``mani_skill==3.0.0b15`` / ``gymnasium==0.29.1``, which would conflict with the
-resolved ``mani-skill>=3.0.1`` / ``gymnasium 1.x`` stack. Only the source is
-reused; the pins are ignored.
+``mikasa-robo-suite`` is installed editable from the ``external/MIKASA-Robo``
+submodule (whose ``pyproject`` was relaxed to ``mani-skill>=3.0.1`` /
+``gymnasium>=0.29.1`` so it resolves against this repo's stack). Importing
+``memory_envs`` registers the VLA env ids.
 """
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import cv2
 import gymnasium as gym
+import mikasa_robo_suite.vla.memory_envs  # noqa: F401
 import numpy as np
 import torch
-
-_MIKASA_ROOT = Path(__file__).resolve().parents[3] / "external" / "MIKASA-Robo"
-if str(_MIKASA_ROOT) not in sys.path:
-    sys.path.insert(0, str(_MIKASA_ROOT))
-
-import mikasa_robo_suite.vla.memory_envs  # noqa: E402,F401
 
 INFO_KEY_TASK_PROMPT = "task_prompt"
 INFO_KEY_SUCCESS = "success"

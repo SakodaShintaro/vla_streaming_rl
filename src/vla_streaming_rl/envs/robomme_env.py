@@ -13,11 +13,11 @@ contract as ``LiberoEnv``: ``{"image", "wrist_image", "proprio"}``.
 The language instruction is published in ``info`` under ``task_prompt`` and
 lifted into ``obs["language"]`` downstream by ``LanguageObsWrapper``.
 
-The package lives under ``external/robomme_benchmark`` and is put on ``sys.path``
-here rather than installed as a dependency: its own ``pyproject`` pins a ManiSkill
-fork / ``gymnasium==0.29.1`` / ``numpy<2``, which would conflict with the resolved
-``mani-skill>=3.0.1`` / ``gymnasium 1.x`` stack. Only the source is reused (its
-tasks register cleanly against the official ManiSkill); the pins are ignored.
+``robomme`` is installed editable from the ``external/robomme_benchmark``
+submodule (whose ``pyproject`` was relaxed off the ManiSkill fork / ``torch==2.9.1``
+pins to ``mani-skill>=3.0.1`` / ``torch>=2.7`` so it resolves against this repo's
+stack; its tasks register cleanly against the official ManiSkill). Importing
+``robomme.robomme_env`` registers the RoboMME task envs.
 
 RoboMME's ``compute_dense_reward`` is intentionally zeroed (the benchmark scores
 success rate, not reward), so the learning reward here is the sparse task-success
@@ -25,21 +25,14 @@ signal from ``evaluate`` (published in ``info["success"]``); richer shaping is
 left to the agent, mirroring ``LiberoEnv``.
 """
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
-import mani_skill.envs  # noqa: F401  (registers the base ManiSkill envs)
+import mani_skill.envs  # noqa: F401
 import numpy as np
+import robomme.robomme_env  # noqa: F401
 import torch
-
-_ROBOMME_ROOT = Path(__file__).resolve().parents[3] / "external" / "robomme_benchmark" / "src"
-if str(_ROBOMME_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROBOMME_ROOT))
-
-import robomme.robomme_env  # noqa: E402,F401  (registers the RoboMME task envs)
-from robomme.robomme_env.utils import task_goal  # noqa: E402
+from robomme.robomme_env.utils import task_goal
 
 # Keys under which the language instruction is published in the info dict.
 INFO_KEY_TASK_PROMPT = "task_prompt"
