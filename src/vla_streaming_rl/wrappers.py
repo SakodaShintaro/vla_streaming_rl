@@ -9,13 +9,6 @@ import numpy as np
 
 REPEAT = 4
 
-# bench2drive220 is the fixed route set for the CARLA env; random-route mode is
-# no longer used, so the route XML is wired in here instead of via config/CLI.
-# Absolute path resolved against the repo root (three levels up from this file).
-CARLA_ROUTE_XML = str(
-    Path(__file__).parents[2] / "external/Bench2Drive/leaderboard/data/bench2drive220.xml"
-)
-
 
 CAR_RACING_PROMPT = (
     "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible. "
@@ -92,6 +85,10 @@ def make_carla_env(
     setup_carla_paths()
 
     from vla_streaming_rl.envs.carla_leaderboard_env import CARLALeaderboardEnv
+
+    CARLA_ROUTE_XML = str(
+        Path(__file__).parents[2] / "external/Bench2Drive/leaderboard/data/bench2drive220.xml"
+    )
 
     return CARLALeaderboardEnv(
         route_xml=CARLA_ROUTE_XML,
