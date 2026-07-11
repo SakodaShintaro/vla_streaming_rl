@@ -10,3 +10,6 @@
 [submodule "external/robomme_benchmark"]
 	path = external/robomme_benchmark
 	url = https://github.com/SakodaShintaro/robomme_benchmark.git
+[submodule "external/RoboMemArena"]
+	path = external/RoboMemArena
+	url = https://github.com/SakodaShintaro/RoboMemArena.git

@@ -1,0 +1,12 @@
+# @package _global_
+env_id: RoboMemArena-v0
+step_limit: 400_000
+image_save_interval: 10
+time_limit_hour: 2.0
+
+env_factory:
+  _target_: vla_streaming_rl.wrappers.make_robomemarena_env
+  task_id: 1
+  resolution: 256
+  horizon: 520
+  settle_steps: 10
