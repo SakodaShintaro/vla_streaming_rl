@@ -1,4 +1,0 @@
-# @package _global_
-env_id: BabyAI-GoToLocal-v0
-step_limit: 100_000
-batch_size: 16
