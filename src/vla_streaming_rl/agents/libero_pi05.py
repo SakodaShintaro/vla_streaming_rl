@@ -352,13 +352,14 @@ class LiberoPi05Agent(Agent):
         tokenizing) preprocessor, and return the packed obs vector for the replay
         buffer together with the preprocessed batch (for inference) and the wrist
         frame (for the render panel)."""
+        del info
         agentview = torch.from_numpy((obs["image"] * 255.0).astype(np.uint8)).float() / 255.0
-        wrist_uint8 = info["wrist_image"].copy()
+        wrist_uint8 = obs["wrist_image"].copy()
         wrist = torch.from_numpy(wrist_uint8).permute(2, 0, 1).float() / 255.0
         raw_obs = {
             OBS_IMAGE_AGENTVIEW: agentview,
             OBS_IMAGE_WRIST: wrist,
-            OBS_STATE: torch.from_numpy(info["proprio"]).float(),
+            OBS_STATE: torch.from_numpy(obs["proprio"]).float(),
             TASK_KEY: task_prompt,
         }
         batch = self.preprocessor(raw_obs)

@@ -239,8 +239,8 @@ class SimLingoAgent(Agent):
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
-        # Force handover (RoutePlanner rebuild) on the next tick, whose info carries
-        # the new episode's reset ``route_plan``.
+        # Force handover (RoutePlanner rebuild) on the next tick, whose observation
+        # carries the new episode's reset ``route_plan``.
         self._need_handover = True
         return {}
 
@@ -288,16 +288,16 @@ class SimLingoAgent(Agent):
         self, obs: dict[str, np.ndarray], info: dict, task_prompt: str
     ) -> tuple[InferInput, torch.Tensor]:
         """Build the network input (``InferInput`` wrapping a ``DrivingInput``) from
-        the env's carla ``info["sensors"]`` snapshot, rebuilding the RoutePlanner on
+        the env's carla ``obs["sensors"]`` snapshot, rebuilding the RoutePlanner on
         the first tick of a new episode. Returns the input together with this tick's
         ego velocity, which ``_to_env_action`` feeds to the PID."""
-        del obs, task_prompt
+        del info, task_prompt
 
-        # Episode handover: take the new episode's route plan from the reset info
-        # (the standard leaderboard handover — RouteScenario builds both the gps and
-        # world-coord route, see CARLALeaderboardEnv).
+        # Episode handover: take the new episode's route plan from the reset
+        # observation (the standard leaderboard handover — RouteScenario builds both
+        # the gps and world-coord route, see CARLALeaderboardEnv).
         if self._need_handover:
-            gps_route, world_route = info["route_plan"]
+            gps_route, world_route = obs["route_plan"]
             ds_ids = downsample_route(world_route, 50)
             global_plan_world_coord = [(world_route[x][0], world_route[x][1]) for x in ds_ids]
             global_plan = [gps_route[x] for x in ds_ids]
@@ -315,10 +315,10 @@ class SimLingoAgent(Agent):
         # env camera, so map it to the agent's first camera position.
         first_cam_id = self.config.num_cameras[0]
         input_data = {
-            f"rgb_{first_cam_id}": info["sensors"]["rgb"],
-            "gps": info["sensors"]["gps"],
-            "imu": info["sensors"]["imu"],
-            "speed": info["sensors"]["speed"],
+            f"rgb_{first_cam_id}": obs["sensors"]["rgb"],
+            "gps": obs["sensors"]["gps"],
+            "imu": obs["sensors"]["imu"],
+            "speed": obs["sensors"]["speed"],
         }
         self._frame_step += 1
 

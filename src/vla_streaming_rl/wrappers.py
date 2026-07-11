@@ -118,10 +118,10 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = ActionRepeatWrapper(env, repeat=REPEAT)
         env = AverageRewardEarlyStopWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)
         env = ZeroObsOnDoneWrapper(env)
         env = PromptWrapper(env, CAR_RACING_PROMPT)
-        env = DictObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
         return env
@@ -133,15 +133,14 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         eval_output_dir = str(result_dir / "eval") if result_dir is not None else None
         env = hydra.utils.instantiate(env_factory, eval_output_dir=eval_output_dir)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = DictObsWrapper(env)
         env.unwrapped.eval_range = 220
         return env
 
     elif env_id == "AnimalAI-v0":
         env = hydra.utils.instantiate(env_factory)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
         env = DictObsWrapper(env)
+        env = TransposeAndNormalizeObs(env)
         env.unwrapped.eval_range = 20
         return env
 
@@ -152,7 +151,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = TransposeAndNormalizeObs(env)
         env = ZeroObsOnDoneWrapper(env)
-        env = DictObsWrapper(env)
         env.unwrapped.eval_range = 100
         return env
 
@@ -211,16 +209,15 @@ class AverageRewardEarlyStopWrapper(gym.Wrapper):
 class TransposeAndNormalizeObs(gym.ObservationWrapper):
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
-        h, w = env.observation_space.shape[0:2]
-        self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(3, h, w), dtype=np.float32
-        )
+        h, w = env.observation_space["image"].shape[0:2]
+        spaces = dict(env.observation_space.spaces)
+        spaces["image"] = gym.spaces.Box(low=0.0, high=1.0, shape=(3, h, w), dtype=np.float32)
+        self.observation_space = gym.spaces.Dict(spaces)
 
-    def observation(self, obs: np.ndarray) -> np.ndarray:
-        o = obs.astype(np.float32) / 255.0
-        # Convert from (H, W, C) to (C, H, W)
+    def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        o = obs["image"].astype(np.float32) / 255.0
         o = np.transpose(o, (2, 0, 1))
-        return o
+        return {**obs, "image": o}
 
 
 class DictObsWrapper(gym.ObservationWrapper):
@@ -298,7 +295,7 @@ class ZeroObsOnDoneWrapper(gym.ObservationWrapper):
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
 
-    def observation(self, obs: np.ndarray) -> np.ndarray:
+    def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         return obs
 
     def step(self, action: np.ndarray) -> tuple:
@@ -306,7 +303,7 @@ class ZeroObsOnDoneWrapper(gym.ObservationWrapper):
 
         # Zero out observation if episode is done
         if terminated or truncated:
-            obs = np.zeros_like(obs)
+            obs = {key: np.zeros_like(value) for key, value in obs.items()}
 
         return obs, reward, terminated, truncated, info
 

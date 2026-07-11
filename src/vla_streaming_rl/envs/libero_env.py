@@ -26,8 +26,6 @@ import yaml
 # Keys under which the extra (non-image-observation) modalities are published in
 # the info dict. A policy that needs them reads these explicitly.
 INFO_KEY_TASK_PROMPT = "task_prompt"
-INFO_KEY_WRIST_IMAGE = "wrist_image"
-INFO_KEY_PROPRIO = "proprio"
 
 # The LIBERO pi0.5 checkpoint was trained with the HuggingFace-LIBERO camera
 # convention: every camera frame is rotated 180° (both height and width flipped).
@@ -169,8 +167,16 @@ class LiberoEnv(gym.Env):
         self.last_proprio = np.zeros(8, dtype=np.float32)
         self.last_instruction = ""
 
-        self.observation_space = gym.spaces.Box(
-            low=0, high=255, shape=(resolution, resolution, 3), dtype=np.uint8
+        self.observation_space = gym.spaces.Dict(
+            {
+                "image": gym.spaces.Box(
+                    low=0, high=255, shape=(resolution, resolution, 3), dtype=np.uint8
+                ),
+                "wrist_image": gym.spaces.Box(
+                    low=0, high=255, shape=(resolution, resolution, 3), dtype=np.uint8
+                ),
+                "proprio": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32),
+            }
         )
         self.action_space = gym.spaces.Box(
             low=-1.0, high=1.0, shape=(_ACTION_DIM,), dtype=np.float32
@@ -203,7 +209,7 @@ class LiberoEnv(gym.Env):
         self._task_prompt = task.language
         self._loaded_task_id = task_id
 
-    def _extract(self, obs: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+    def _extract(self, obs: dict[str, Any]) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         agentview = np.ascontiguousarray(obs[_OBS_AGENTVIEW][_ROT180])
         wrist = np.ascontiguousarray(obs[_OBS_WRIST][_ROT180])
         # 8-D proprio matching the LIBERO pi0.5 checkpoint's state feature:
@@ -222,16 +228,17 @@ class LiberoEnv(gym.Env):
         self.last_wrist_image = wrist
         self.last_proprio = proprio
         self.last_instruction = self._task_prompt
-        info = {
-            INFO_KEY_TASK_PROMPT: self._task_prompt,
-            INFO_KEY_WRIST_IMAGE: wrist,
-            INFO_KEY_PROPRIO: proprio,
+        observation = {
+            "image": agentview,
+            "wrist_image": wrist,
+            "proprio": proprio,
         }
-        return agentview, info
+        info = {INFO_KEY_TASK_PROMPT: self._task_prompt}
+        return observation, info
 
     def reset(
         self, seed: int | None = None, options: dict[str, Any] | None = None
-    ) -> tuple[np.ndarray, dict[str, Any]]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         if seed is not None:
             self._np_random = np.random.default_rng(seed)
 
@@ -287,7 +294,9 @@ class LiberoEnv(gym.Env):
         sim.data.qvel[robot._ref_joint_vel_indexes] = 0.0
         sim.forward()
 
-    def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    def step(
+        self, action: np.ndarray
+    ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         self._step_count += 1
         obs, reward, done, _ = self._env.step(np.asarray(action, dtype=np.float32))
 

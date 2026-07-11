@@ -209,7 +209,7 @@ class CARLALeaderboardEnv(gym.Env):
         self.render_mode = "rgb_array"
         self.fps = 20  # Simulation FPS
 
-        self.observation_space = make_obs_space(self.obs_cfg)
+        self.observation_space = gym.spaces.Dict({"image": make_obs_space(self.obs_cfg)})
         self.action_space = make_action_space()
 
         # Process-wide singleton client (created once, reused by every env
@@ -364,7 +364,7 @@ class CARLALeaderboardEnv(gym.Env):
         self,
         seed: int | None,
         options: dict[str, any] | None,
-    ) -> tuple[np.ndarray, dict[str, any]]:
+    ) -> tuple[dict[str, any], dict[str, any]]:
         super().reset(seed=seed)
 
         # Destroy our sensors before clearing the scenario — once their parent
@@ -521,17 +521,17 @@ class CARLALeaderboardEnv(gym.Env):
 
         self._update_spectator()
 
-        reset_info = {"task_prompt": self.prompt, "sensors": self._build_sensors_dict()}
+        observation = {"image": self.current_image.copy(), "sensors": self._build_sensors_dict()}
         # The (gps, world-coord) global plan for VLA agents that build their own
         # route planner (e.g. SimLingo). Only the Bench2Drive runtime has a
-        # RouteScenario; reset info carries it once per episode so the agent
-        # never reaches into the env to fetch it.
+        # RouteScenario; the reset observation carries it once per episode so the
+        # agent never reaches into the env to fetch it.
         if self.runtime is not None and self.runtime.route_scenario is not None:
-            reset_info["route_plan"] = (
+            observation["route_plan"] = (
                 self.runtime.route_scenario.gps_route,
                 self.runtime.route_scenario.route,
             )
-        return self.current_image.copy(), self._build_scenario_info(reset_info)
+        return observation, self._build_scenario_info({"task_prompt": self.prompt})
 
     # ``final_eval_summary`` is populated by ``close()`` (auto-merge of the
     # 220-route sweep). Trainer reads it after env.close() for wandb
@@ -552,7 +552,7 @@ class CARLALeaderboardEnv(gym.Env):
         base["scenarios_total"] = self.runtime.total_scenarios
         return base
 
-    def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, any]]:
+    def step(self, action: np.ndarray) -> tuple[dict[str, any], float, bool, bool, dict[str, any]]:
         # Apply action: action[0]=steer, action[1]=gas_or_brake (same as CarRacing)
         self.current_action = np.array(action, dtype=np.float32)
         steer, throttle, brake = action_to_vehicle_control(self.current_action)
@@ -663,7 +663,8 @@ class CARLALeaderboardEnv(gym.Env):
         camera_hwc_uint8 = (self.current_image.transpose(1, 2, 0) * 255).astype(np.uint8)
         vehicle_yaw_rad = np.radians(self.vehicle.get_transform().rotation.yaw)
         overlay = self.route_tracker.render_overlay(self.vehicle.get_location(), vehicle_yaw_rad)
-        obs = compose_obs(camera_hwc_uint8, overlay, self.obs_cfg)
+        image = compose_obs(camera_hwc_uint8, overlay, self.obs_cfg)
+        observation = {"image": image, "sensors": self._build_sensors_dict()}
 
         # Record history
         self.physics_history.append(copy.deepcopy(self.vehicle_physics))
@@ -673,7 +674,6 @@ class CARLALeaderboardEnv(gym.Env):
         info = self._build_scenario_info(
             {
                 "task_prompt": self.prompt,
-                "sensors": self._build_sensors_dict(),
                 "route_completion": self.route_tracker.route_completion,
                 "driving_score": self._latest_driving_score,
                 "score_route": self._latest_score_route,
@@ -698,7 +698,7 @@ class CARLALeaderboardEnv(gym.Env):
         if (terminated or truncated) and self.eval_writer is not None:
             info["eval_summary"] = self.eval_writer.end_episode()
 
-        return obs, reward, terminated, truncated, info
+        return observation, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
         """Return third-person camera image with time-series graphs overlay."""
