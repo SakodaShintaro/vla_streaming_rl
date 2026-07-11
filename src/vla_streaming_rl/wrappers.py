@@ -10,7 +10,6 @@ import hydra
 import minigrid
 import numpy as np
 
-from vla_streaming_rl.envs.letter_tracing_env import LetterTracingEnv
 from vla_streaming_rl.envs.stl10_panel_env import STL10PanelEnv
 
 REPEAT = 4
@@ -201,13 +200,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
 
     elif env_id == "AnimalAI-v0":
         env = hydra.utils.instantiate(env_factory)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
-        env.unwrapped.eval_range = 20
-        return env
-
-    elif env_id == "LetterTracing-v0":
-        env = LetterTracingEnv(render_mode="rgb_array")
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = TransposeAndNormalizeObs(env)
         env.unwrapped.eval_range = 20
