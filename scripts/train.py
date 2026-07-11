@@ -212,10 +212,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         # initialize episode (seed only the first call so the gym RNG is
         # set once; subsequent resets keep advancing it).
         obs, reset_info = env.reset(seed=seed) if episode_id == 0 else env.reset()
-        task_prompt = reset_info["task_prompt"] if args.use_prompt else ""
+        if not args.use_prompt:
+            obs["language"] = ""
 
         # initial action
-        result = agent.select_action(global_step, obs, 0.0, False, False, task_prompt, reset_info)
+        result = agent.select_action(global_step, obs, 0.0, False, False, reset_info)
         action = result.action
 
         # initial render. The trainer only owns the environment / observation
@@ -223,7 +224,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         obs_for_render = obs["image"].copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
         panels = {
-            "environment": overlay_caption(env.render(), task_prompt),
+            "environment": overlay_caption(env.render(), obs["language"]),
             "observation": obs_viz,
             **result.panels,
         }
@@ -242,7 +243,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             env_step_start = time.time()
             obs, reward, terminated, truncated, env_info = env.step(action)
             env_step_time_msec = (time.time() - env_step_start) * 1000
-            task_prompt = env_info["task_prompt"] if args.use_prompt else ""
+            if not args.use_prompt:
+                obs["language"] = ""
 
             # save action, reward, and observation
             action_list.append(action.copy())
@@ -250,9 +252,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             obs_list.append(obs["image"].copy())
 
             agent_step_start = time.time()
-            result = agent.step(
-                global_step, obs, reward, terminated, truncated, task_prompt, env_info
-            )
+            result = agent.step(global_step, obs, reward, terminated, truncated, env_info)
             action = result.action
             agent_step_time_msec = (time.time() - agent_step_start) * 1000
 
@@ -275,7 +275,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
             obs_viz = _viz_resize(obs_for_render, args.render_scale)
             panels = {
-                "environment": overlay_caption(env.render(), task_prompt),
+                "environment": overlay_caption(env.render(), obs["language"]),
                 "observation": obs_viz,
                 **result.panels,
             }

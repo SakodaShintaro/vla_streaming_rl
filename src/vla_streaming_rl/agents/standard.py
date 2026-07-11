@@ -137,7 +137,6 @@ class StandardAgent(Agent):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult:
         metrics = {}
@@ -160,7 +159,7 @@ class StandardAgent(Agent):
         if self._fresh_pred_reward is not None:
             metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
             self._fresh_pred_reward = None
-        obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info, task_prompt)
+        obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             obs_tensor,
@@ -247,7 +246,6 @@ class StandardAgent(Agent):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult:
         metrics = {}
@@ -270,7 +268,7 @@ class StandardAgent(Agent):
         if self._fresh_pred_reward is not None:
             metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
             self._fresh_pred_reward = None
-        obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info, task_prompt)
+        obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             obs_tensor,
@@ -300,7 +298,7 @@ class StandardAgent(Agent):
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
-                task_prompts=[task_prompt],
+                task_prompts=[obs["language"]],
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -326,7 +324,7 @@ class StandardAgent(Agent):
             metrics["chunk_step"] = self.chunk_step
         return StepResult(action=action, metrics=metrics, panels=self._panels(reward))
 
-    def _preprocess(self, obs: dict[str, np.ndarray], info: dict, task_prompt: str) -> tuple:
+    def _preprocess(self, obs: dict[str, np.ndarray], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
         the raw obs tensor, its encoded latent ``obs_z``, and the tokenized task
         prompt. ``info`` is unused by the obs-driven standard agent."""
@@ -334,7 +332,7 @@ class StandardAgent(Agent):
         obs_tensor = torch.from_numpy(obs["image"]).to(self.device)
         with torch.inference_mode():
             obs_z = self.network.image_processor.encode(obs_tensor.unsqueeze(0)).squeeze(0)
-        task_prompt_token_ids = self.network.tokenize_task_prompt(task_prompt)
+        task_prompt_token_ids = self.network.tokenize_task_prompt(obs["language"])
         return obs_tensor, obs_z, task_prompt_token_ids
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:

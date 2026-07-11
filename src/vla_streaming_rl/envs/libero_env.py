@@ -6,13 +6,11 @@ LIBERO ships a robosuite (MuJoCo) simulator that uses the legacy gym API
 ``done`` flag). This wrapper exposes it through the Gymnasium API the trainer
 expects.
 
-Observation contract (transitional): the trainer / replay buffer / renderer in
-this repo only handle a single RGB frame ``(H, W, 3)``, so ``step`` / ``reset``
-return the agentview camera image as the observation. Everything a richer VLA
-policy (e.g. pi0.5) needs — the wrist camera, proprioceptive state and the
-language instruction — is smuggled through the ``info`` dict under fixed keys.
-This is deliberately a stop-gap until the observation pipeline is generalized to
-carry multi-modal observations natively.
+Observation contract: ``step`` / ``reset`` return a multi-modal observation dict
+``{"image": agentview, "wrist_image": wrist, "proprio": state}`` that a richer VLA
+policy (e.g. pi0.5) consumes directly. The language instruction is published in
+``info`` under ``task_prompt`` and lifted into ``obs["language"]`` downstream by
+``LanguageObsWrapper``.
 """
 
 import importlib.util
@@ -23,8 +21,8 @@ import gymnasium as gym
 import numpy as np
 import yaml
 
-# Keys under which the extra (non-image-observation) modalities are published in
-# the info dict. A policy that needs them reads these explicitly.
+# The language instruction is published in info; LanguageObsWrapper lifts it into
+# obs["language"] downstream.
 INFO_KEY_TASK_PROMPT = "task_prompt"
 
 # The LIBERO pi0.5 checkpoint was trained with the HuggingFace-LIBERO camera

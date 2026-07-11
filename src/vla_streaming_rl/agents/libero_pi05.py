@@ -148,11 +148,10 @@ class LiberoPi05Agent(Agent):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult:
-        del global_step, task_prompt
-        packed, batch, wrist = self._preprocess(obs, info, task_prompt=info["task_prompt"])
+        del global_step
+        packed, batch, wrist = self._preprocess(obs, info)
         if self.rb is None:
             self.rb = ReplayBuffer(
                 size=self.buffer_size,
@@ -176,10 +175,10 @@ class LiberoPi05Agent(Agent):
                 (np.transpose(obs["image"], (1, 2, 0)) * 255.0).astype(np.uint8)
             )
             if not self._cur_frames:
-                self._cur_task = info["task_prompt"]
+                self._cur_task = obs["language"]
                 self._relabeler.set_reference(self._references.get(self._cur_task))
             self._cur_frames.append(frame)
-            dense, metrics = self._relabeler.step(frame, info["task_prompt"])
+            dense, metrics = self._relabeler.step(frame, obs["language"])
             progress = metrics["vlac/progress"]
         reach_shaping = self._reach_reward_scale * info.get("reach_shaping", 0.0)
         place_shaping = self._reach_reward_scale * info.get("place_shaping", 0.0)
@@ -268,11 +267,10 @@ class LiberoPi05Agent(Agent):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult:
-        del global_step, task_prompt
-        packed, batch, wrist = self._preprocess(obs, info, task_prompt=info["task_prompt"])
+        del global_step
+        packed, batch, wrist = self._preprocess(obs, info)
         if self.rb is None:
             self.rb = ReplayBuffer(
                 size=self.buffer_size,
@@ -296,10 +294,10 @@ class LiberoPi05Agent(Agent):
                 (np.transpose(obs["image"], (1, 2, 0)) * 255.0).astype(np.uint8)
             )
             if not self._cur_frames:
-                self._cur_task = info["task_prompt"]
+                self._cur_task = obs["language"]
                 self._relabeler.set_reference(self._references.get(self._cur_task))
             self._cur_frames.append(frame)
-            dense, metrics = self._relabeler.step(frame, info["task_prompt"])
+            dense, metrics = self._relabeler.step(frame, obs["language"])
             progress = metrics["vlac/progress"]
         reach_shaping = self._reach_reward_scale * info.get("reach_shaping", 0.0)
         place_shaping = self._reach_reward_scale * info.get("place_shaping", 0.0)
@@ -346,7 +344,7 @@ class LiberoPi05Agent(Agent):
         )
 
     def _preprocess(
-        self, obs: dict[str, np.ndarray], info: dict, task_prompt: str
+        self, obs: dict[str, np.ndarray], info: dict
     ) -> tuple[torch.Tensor, dict, np.ndarray]:
         """Build pi0.5's raw multimodal observation, run the (normalizing,
         tokenizing) preprocessor, and return the packed obs vector for the replay
@@ -360,7 +358,7 @@ class LiberoPi05Agent(Agent):
             OBS_IMAGE_AGENTVIEW: agentview,
             OBS_IMAGE_WRIST: wrist,
             OBS_STATE: torch.from_numpy(obs["proprio"]).float(),
-            TASK_KEY: task_prompt,
+            TASK_KEY: obs["language"],
         }
         batch = self.preprocessor(raw_obs)
         return self.network.pack_obs(batch), batch, wrist_uint8

@@ -186,11 +186,10 @@ class SimLingoAgent(Agent):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult:
         del global_step
-        infer_input, gt_velocity = self._preprocess(obs, info, task_prompt)
+        infer_input, gt_velocity = self._preprocess(obs, info)
         with torch.no_grad():
             live = self.network.infer(infer_input)
         state = live.features.squeeze(0)
@@ -254,11 +253,10 @@ class SimLingoAgent(Agent):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult:
         del global_step
-        infer_input, gt_velocity = self._preprocess(obs, info, task_prompt)
+        infer_input, gt_velocity = self._preprocess(obs, info)
         infer_result = self.network.infer(infer_input)
         state = infer_result.features.squeeze(0)
         value_report = infer_result.value_report
@@ -285,13 +283,13 @@ class SimLingoAgent(Agent):
 
     @torch.no_grad()
     def _preprocess(
-        self, obs: dict[str, np.ndarray], info: dict, task_prompt: str
+        self, obs: dict[str, np.ndarray], info: dict
     ) -> tuple[InferInput, torch.Tensor]:
         """Build the network input (``InferInput`` wrapping a ``DrivingInput``) from
         the env's carla ``obs["sensors"]`` snapshot, rebuilding the RoutePlanner on
         the first tick of a new episode. Returns the input together with this tick's
         ego velocity, which ``_to_env_action`` feeds to the PID."""
-        del info, task_prompt
+        del info
 
         # Episode handover: take the new episode's route plan from the reset
         # observation (the standard leaderboard handover — RouteScenario builds both

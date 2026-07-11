@@ -53,7 +53,6 @@ class Agent(ABC):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult: ...
 
@@ -65,16 +64,11 @@ class Agent(ABC):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult:
         if self.learning_mode == "off_policy":
-            return self._step_offpolicy(
-                global_step, obs, reward, terminated, truncated, task_prompt, info
-            )
-        return self._step_streaming(
-            global_step, obs, reward, terminated, truncated, task_prompt, info
-        )
+            return self._step_offpolicy(global_step, obs, reward, terminated, truncated, info)
+        return self._step_streaming(global_step, obs, reward, terminated, truncated, info)
 
     @final
     def _step_offpolicy(
@@ -84,7 +78,6 @@ class Agent(ABC):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult:
         train_metrics = {}
@@ -106,9 +99,7 @@ class Agent(ABC):
             self.actor_optimizer.step()
             self.critic_optimizer.step()
             train_metrics = result.info
-        step_result = self.select_action(
-            global_step, obs, reward, terminated, truncated, task_prompt, info
-        )
+        step_result = self.select_action(global_step, obs, reward, terminated, truncated, info)
         step_result.metrics.update(train_metrics)
         return step_result
 
@@ -120,7 +111,6 @@ class Agent(ABC):
         reward: float,
         terminated: bool,
         truncated: bool,
-        task_prompt: str,
         info: dict,
     ) -> StepResult: ...
 
@@ -128,7 +118,7 @@ class Agent(ABC):
     def on_episode_end(self, score: float, feedback_text: str) -> dict: ...
 
     @abstractmethod
-    def _preprocess(self, obs: dict[str, np.ndarray], info: dict, task_prompt: str): ...
+    def _preprocess(self, obs: dict[str, np.ndarray], info: dict): ...
 
     @abstractmethod
     def _to_env_action(self, net_action): ...

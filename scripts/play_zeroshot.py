@@ -79,7 +79,7 @@ class RandomAgent:
 
 def run_episode(env, agent, render: bool):
     obs, reset_info = env.reset()
-    agent.reset(reset_info.get("task_prompt", ""))
+    agent.reset(obs["language"])
 
     total_reward = 0.0
     step_count = 0
@@ -150,7 +150,7 @@ if __name__ == "__main__":
 
     # Prime the env once so we can construct the agent with the initial task prompt.
     obs, reset_info = env.reset(seed=seed)
-    initial_task_prompt = reset_info.get("task_prompt", "")
+    initial_task_prompt = obs["language"]
 
     # agent setup
     action_dim = int(np.prod(env.action_space.shape))
