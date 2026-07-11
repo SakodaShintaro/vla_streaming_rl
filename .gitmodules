@@ -7,3 +7,6 @@
 [submodule "external/MIKASA-Robo"]
 	path = external/MIKASA-Robo
 	url = https://github.com/SakodaShintaro/MIKASA-Robo.git
+[submodule "external/robomme_benchmark"]
+	path = external/robomme_benchmark
+	url = https://github.com/SakodaShintaro/robomme_benchmark.git

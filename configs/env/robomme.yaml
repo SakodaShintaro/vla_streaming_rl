@@ -1,0 +1,20 @@
+# @package _global_
+env_id: RoboMME-v0
+step_limit: 400_000
+image_save_interval: 10
+time_limit_hour: 2.0
+
+env_factory:
+  _target_: vla_streaming_rl.wrappers.make_robomme_env
+  # - task_id: RoboMME task name (Counting: BinFill / PickXtimes / SwingXtimes /
+  #   StopCube; Permanence: VideoUnmask / VideoUnmaskSwap / ButtonUnmask /
+  #   ButtonUnmaskSwap; Reference: PickHighlight / VideoRepick / VideoPlaceButton /
+  #   VideoPlaceOrder; Imitation: MoveCube / InsertPeg / PatternLock / RouteStick).
+  # - resolution: square camera height/width for the front / wrist RGB.
+  # - horizon: max controllable steps before truncation.
+  # - seed: fixes the task variant (RoboMME derives difficulty and the number of
+  #   pick-and-place repetitions from it); object poses still re-randomize on reset.
+  task_id: PickXtimes
+  resolution: 256
+  horizon: 300
+  seed: 0
