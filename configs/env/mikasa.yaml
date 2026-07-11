@@ -1,0 +1,12 @@
+# @package _global_
+env_id: MIKASA-v0
+step_limit: 400_000
+image_save_interval: 10
+time_limit_hour: 2.0
+
+env_factory:
+  _target_: vla_streaming_rl.wrappers.make_mikasa_env
+  env_id: RememberColor3-VLA-v0
+  resolution: 256
+  control_mode: pd_ee_delta_pose
+  reward_mode: normalized_dense
