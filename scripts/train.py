@@ -185,7 +185,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
     network = build_network(
         args,
-        observation_space_shape=env.observation_space.shape,
+        observation_space_shape=env.observation_space["image"].shape,
         action_space_shape=env.action_space.shape,
         parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
         device=torch.device("cuda"),
@@ -220,7 +220,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         # initial render. The trainer only owns the environment / observation
         # panels; prediction, reward, goal, bev, ... arrive via result.panels.
-        obs_for_render = obs.copy().transpose(1, 2, 0)
+        obs_for_render = obs["image"].copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
         panels = {
             "environment": overlay_caption(env.render(), task_prompt),
@@ -233,7 +233,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         # action and reward history for this episode
         action_list = []
         reward_list = []
-        obs_list = [obs.copy()]
+        obs_list = [obs["image"].copy()]
 
         while True:
             global_step += 1
@@ -247,7 +247,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             # save action, reward, and observation
             action_list.append(action.copy())
             reward_list.append(reward)
-            obs_list.append(obs.copy())
+            obs_list.append(obs["image"].copy())
 
             agent_step_start = time.time()
             result = agent.step(
@@ -257,7 +257,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             agent_step_time_msec = (time.time() - agent_step_start) * 1000
 
             # render
-            obs_for_render = obs.copy().transpose(1, 2, 0)
+            obs_for_render = obs["image"].copy().transpose(1, 2, 0)
 
             # log: metrics are already scalar telemetry (images live in panels)
             elapsed_time_sec = time.time() - start_time

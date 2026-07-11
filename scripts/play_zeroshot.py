@@ -85,7 +85,7 @@ def run_episode(env, agent, render: bool):
     step_count = 0
     bgr_image_list = []
 
-    obs_for_render = convert_to_uint8(obs.copy().transpose(1, 2, 0))
+    obs_for_render = convert_to_uint8(obs["image"].copy().transpose(1, 2, 0))
     bgr_image_list.append(concat_images([env.render(), obs_for_render]))
     prev_reward = 0.0
 
@@ -102,7 +102,7 @@ def run_episode(env, agent, render: bool):
             parse_used = agent_info.get("parse_used", "strict")
             print(f"  [step {step_count:4d}] reward={reward:+.3f} parse={parse_used} text={text!r}")
 
-        obs_for_render = convert_to_uint8(obs.copy().transpose(1, 2, 0))
+        obs_for_render = convert_to_uint8(obs["image"].copy().transpose(1, 2, 0))
         bgr_image = concat_images([env.render(), obs_for_render])
         bgr_image_list.append(bgr_image)
 

@@ -54,7 +54,7 @@ class LiberoPi05Agent(Agent):
     def __init__(
         self,
         *,
-        observation_space: gym.spaces.Box,
+        observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: LiberoPi05Network,
         learning_mode: str,
@@ -144,7 +144,7 @@ class LiberoPi05Agent(Agent):
     def _step_streaming(
         self,
         global_step: int,
-        obs: np.ndarray,
+        obs: dict[str, np.ndarray],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -172,7 +172,9 @@ class LiberoPi05Agent(Agent):
         progress = 0.0
         sparse = float(reward)
         if self._relabeler is not None:
-            frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
+            frame = Image.fromarray(
+                (np.transpose(obs["image"], (1, 2, 0)) * 255.0).astype(np.uint8)
+            )
             if not self._cur_frames:
                 self._cur_task = info["task_prompt"]
                 self._relabeler.set_reference(self._references.get(self._cur_task))
@@ -262,7 +264,7 @@ class LiberoPi05Agent(Agent):
     def select_action(
         self,
         global_step: int,
-        obs: np.ndarray,
+        obs: dict[str, np.ndarray],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -290,7 +292,9 @@ class LiberoPi05Agent(Agent):
         progress = 0.0
         sparse = float(reward)
         if self._relabeler is not None:
-            frame = Image.fromarray((np.transpose(obs, (1, 2, 0)) * 255.0).astype(np.uint8))
+            frame = Image.fromarray(
+                (np.transpose(obs["image"], (1, 2, 0)) * 255.0).astype(np.uint8)
+            )
             if not self._cur_frames:
                 self._cur_task = info["task_prompt"]
                 self._relabeler.set_reference(self._references.get(self._cur_task))
@@ -342,13 +346,13 @@ class LiberoPi05Agent(Agent):
         )
 
     def _preprocess(
-        self, obs: np.ndarray, info: dict, task_prompt: str
+        self, obs: dict[str, np.ndarray], info: dict, task_prompt: str
     ) -> tuple[torch.Tensor, dict, np.ndarray]:
         """Build pi0.5's raw multimodal observation, run the (normalizing,
         tokenizing) preprocessor, and return the packed obs vector for the replay
         buffer together with the preprocessed batch (for inference) and the wrist
         frame (for the render panel)."""
-        agentview = torch.from_numpy((obs * 255.0).astype(np.uint8)).float() / 255.0
+        agentview = torch.from_numpy((obs["image"] * 255.0).astype(np.uint8)).float() / 255.0
         wrist_uint8 = info["wrist_image"].copy()
         wrist = torch.from_numpy(wrist_uint8).permute(2, 0, 1).float() / 255.0
         raw_obs = {

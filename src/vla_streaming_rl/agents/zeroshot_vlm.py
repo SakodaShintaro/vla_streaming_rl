@@ -113,13 +113,15 @@ class ZeroShotVLMAgent:
         self._action_count = 0
 
     @torch.inference_mode()
-    def select_action(self, obs: np.ndarray, prev_reward: float) -> tuple[np.ndarray, dict]:
+    def select_action(
+        self, obs: dict[str, np.ndarray], prev_reward: float
+    ) -> tuple[np.ndarray, dict]:
         has_prev_reward = self._action_count > 0
         if has_prev_reward and self.history:
             past_image, past_response, _ = self.history[-1]
             self.history[-1] = (past_image, past_response, prev_reward)
 
-        current_image = self._obs_to_pil(obs)
+        current_image = self._obs_to_pil(obs["image"])
         messages = self._build_messages(
             current_image,
             current_reward=prev_reward if has_prev_reward else None,

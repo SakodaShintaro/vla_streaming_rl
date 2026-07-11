@@ -16,7 +16,7 @@ class StandardAgent(Agent):
     def __init__(
         self,
         *,
-        observation_space: gym.spaces.Box,
+        observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: nn.Module,
         learning_mode: str,
@@ -43,6 +43,7 @@ class StandardAgent(Agent):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
+        image_space = observation_space["image"]
 
         # action properties
         self.action_space = action_space
@@ -93,7 +94,7 @@ class StandardAgent(Agent):
         self.rb = ReplayBuffer(
             size=buffer_capacity,
             seq_len=self.seq_len + self.horizon,
-            obs_shape=observation_space.shape,
+            obs_shape=image_space.shape,
             obs_z_shape=obs_z_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
@@ -117,7 +118,7 @@ class StandardAgent(Agent):
         # compared against the observation it predicted). The placeholder keeps
         # the panel a fixed shape before the first prediction exists, honoring
         # the stable-panel contract.
-        obs_c, obs_h, obs_w = observation_space.shape
+        obs_c, obs_h, obs_w = image_space.shape
         self._pred_placeholder = np.zeros((obs_h, obs_w, obs_c), dtype=np.float32)
         self._last_pred_image: np.ndarray | None = None
         self._fresh_pred_image: np.ndarray | None = None
@@ -132,7 +133,7 @@ class StandardAgent(Agent):
     def _step_streaming(
         self,
         global_step: int,
-        obs: np.ndarray,
+        obs: dict[str, np.ndarray],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -150,7 +151,7 @@ class StandardAgent(Agent):
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        obs_hwc = obs.transpose(1, 2, 0)
+        obs_hwc = obs["image"].transpose(1, 2, 0)
         if self._fresh_pred_image is not None:
             metrics["losses/pred_image_loss"] = float(
                 np.mean(np.abs(self._fresh_pred_image - obs_hwc))
@@ -242,7 +243,7 @@ class StandardAgent(Agent):
     def select_action(
         self,
         global_step: int,
-        obs: np.ndarray,
+        obs: dict[str, np.ndarray],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -260,7 +261,7 @@ class StandardAgent(Agent):
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        obs_hwc = obs.transpose(1, 2, 0)
+        obs_hwc = obs["image"].transpose(1, 2, 0)
         if self._fresh_pred_image is not None:
             metrics["losses/pred_image_loss"] = float(
                 np.mean(np.abs(self._fresh_pred_image - obs_hwc))
@@ -325,12 +326,12 @@ class StandardAgent(Agent):
             metrics["chunk_step"] = self.chunk_step
         return StepResult(action=action, metrics=metrics, panels=self._panels(reward))
 
-    def _preprocess(self, obs: np.ndarray, info: dict, task_prompt: str) -> tuple:
+    def _preprocess(self, obs: dict[str, np.ndarray], info: dict, task_prompt: str) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
         the raw obs tensor, its encoded latent ``obs_z``, and the tokenized task
         prompt. ``info`` is unused by the obs-driven standard agent."""
         del info
-        obs_tensor = torch.from_numpy(obs).to(self.device)
+        obs_tensor = torch.from_numpy(obs["image"]).to(self.device)
         with torch.inference_mode():
             obs_z = self.network.image_processor.encode(obs_tensor.unsqueeze(0)).squeeze(0)
         task_prompt_token_ids = self.network.tokenize_task_prompt(task_prompt)

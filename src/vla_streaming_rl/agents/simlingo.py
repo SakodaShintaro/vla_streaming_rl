@@ -67,7 +67,7 @@ class SimLingoAgent(Agent):
     def __init__(
         self,
         *,
-        observation_space: gym.spaces.Box,
+        observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: SimLingoNetwork,
         gamma: float,
@@ -182,7 +182,7 @@ class SimLingoAgent(Agent):
     def _step_streaming(
         self,
         global_step: int,
-        obs: np.ndarray,
+        obs: dict[str, np.ndarray],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -250,7 +250,7 @@ class SimLingoAgent(Agent):
     def select_action(
         self,
         global_step: int,
-        obs: np.ndarray,
+        obs: dict[str, np.ndarray],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -285,7 +285,7 @@ class SimLingoAgent(Agent):
 
     @torch.no_grad()
     def _preprocess(
-        self, obs: np.ndarray, info: dict, task_prompt: str
+        self, obs: dict[str, np.ndarray], info: dict, task_prompt: str
     ) -> tuple[InferInput, torch.Tensor]:
         """Build the network input (``InferInput`` wrapping a ``DrivingInput``) from
         the env's carla ``info["sensors"]`` snapshot, rebuilding the RoutePlanner on
