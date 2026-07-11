@@ -10,8 +10,6 @@ import hydra
 import minigrid
 import numpy as np
 
-from vla_streaming_rl.envs.stl10_panel_env import STL10PanelEnv
-
 REPEAT = 4
 
 # bench2drive220 is the fixed route set for the CARLA env; random-route mode is
@@ -34,17 +32,6 @@ BABYAI_GOTO_LOCAL_PROMPT_PREFIX = (
 )
 
 HOPPER_PROMPT = "Control a 2D one-legged hopper. Keep it balanced and hopping forward as fast as possible without falling."
-
-
-def _color_panel_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    pattern = r"(?:t\d+:\s*)?dx=([+-]?\d*\.?\d+),\s*dy=([+-]?\d*\.?\d+),\s*button=([+-]?\d*\.?\d+)"
-    matches = re.findall(pattern, action_text)
-    action_array = np.zeros((len(matches), 3), dtype=np.float32)
-    for i in range(len(matches)):
-        action_array[i, 0] = np.clip(float(matches[i][0]), -1.0, 1.0)
-        action_array[i, 1] = np.clip(float(matches[i][1]), -1.0, 1.0)
-        action_array[i, 2] = np.clip(float(matches[i][2]), -1.0, 1.0)
-    return action_array, len(matches) > 0
 
 
 def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
@@ -203,15 +190,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = TransposeAndNormalizeObs(env)
         env.unwrapped.eval_range = 20
-        return env
-
-    elif env_id == "STL10Panel-v0":
-        data_dir = Path.home() / "data/stl-10/train"
-        env = STL10PanelEnv(render_mode="rgb_array", data_dir=data_dir)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
-        env.unwrapped.eval_range = 20
-        env.unwrapped.parse_action_text = _color_panel_parse_action
         return env
 
     elif env_id == "LIBERO-v0":

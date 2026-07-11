@@ -197,7 +197,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # VLMInputCache caches everything that depends
         # only on image dimensions (image_grid_thw, chat template format) but
         # tokenizes the prompt fresh every step so envs that vary their
-        # task prompt (STL10Panel, future CoT, ...) keep working.
+        # task prompt (LIBERO, future CoT, ...) keep working.
         self._input_cache = VLMInputCache(
             processor=self.processor,
             observation_shape=observation_space_shape,
