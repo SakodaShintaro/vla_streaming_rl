@@ -12,7 +12,6 @@ import numpy as np
 
 from vla_streaming_rl.envs.letter_tracing_env import LetterTracingEnv
 from vla_streaming_rl.envs.stl10_panel_env import STL10PanelEnv
-from vla_streaming_rl.envs.tracking_square_env import TrackingSquareEnv
 
 REPEAT = 4
 
@@ -220,14 +219,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = TransposeAndNormalizeObs(env)
         env.unwrapped.eval_range = 20
-        env.unwrapped.parse_action_text = _color_panel_parse_action
-        return env
-
-    elif env_id == "TrackingSquare-v0":
-        env = TrackingSquareEnv(render_mode="rgb_array")
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
-        env.unwrapped.eval_range = 40
         env.unwrapped.parse_action_text = _color_panel_parse_action
         return env
 

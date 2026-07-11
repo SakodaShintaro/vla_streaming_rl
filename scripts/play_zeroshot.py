@@ -27,7 +27,6 @@ PANEL_ACTION_SPEC = (
 CONTINUOUS_ACTION_SPECS = {
     "CarRacing-v3": CAR_RACING_ACTION_SPEC,
     "STL10Panel-v0": PANEL_ACTION_SPEC,
-    "TrackingSquare-v0": PANEL_ACTION_SPEC,
 }
 
 
@@ -49,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         "--env_id",
         type=str,
         default="CarRacing-v3",
-        choices=["CarRacing-v3", "STL10Panel-v0", "TrackingSquare-v0"],
+        choices=["CarRacing-v3", "STL10Panel-v0"],
     )
     parser.add_argument("--agent_type", type=str, choices=["random", "vlm"], required=True)
     parser.add_argument("--seed", type=int, default=-1)
