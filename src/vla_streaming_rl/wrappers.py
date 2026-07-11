@@ -5,7 +5,6 @@ from pathlib import Path
 import cv2
 import gymnasium as gym
 import hydra
-import minigrid
 import numpy as np
 
 REPEAT = 4
@@ -22,8 +21,6 @@ CAR_RACING_PROMPT = (
     "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible. "
     "Action space: steer [-1, +1] where -1 is full left and +1 is full right; accel [-1, +1] where positive is gas and negative is brake. "
 )
-
-MINIGRID_PROMPT = "Navigate the MiniGrid memory corridor. Remember the object seen at the start and choose the matching one at the end. "
 
 HOPPER_PROMPT = "Control a 2D one-legged hopper. Keep it balanced and hopping forward as fast as possible without falling."
 
@@ -117,20 +114,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
     is used to derive ``eval_output_dir = result_dir / "eval"`` for the
     Bench2Drive eval artifacts.
     """
-    if env_id == "MiniGrid-MemoryS9-v0":
-        env = gym.make(env_id, agent_view_size=3, render_mode="rgb_array")
-        env = minigrid.wrappers.RGBImgPartialObsWrapper(env, tile_size=32)
-        env = minigrid.wrappers.ImgObsWrapper(env)
-        env = ReduceActionSpaceWrapper(env, n_actions=3)
-        env = DiscreteToContinuousWrapper(env)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
-        env = ZeroObsOnDoneWrapper(env)
-        env = PromptWrapper(env, MINIGRID_PROMPT)
-        env.unwrapped.eval_range = 100
-        return env
-
-    elif env_id == "CarRacing-v3":
+    if env_id == "CarRacing-v3":
         env = gym.make(env_id, render_mode="rgb_array")
         env = env.env  # Unwrap the original TimeLimit wrapper
         env = gym.wrappers.TimeLimit(env, max_episode_steps=1000 * REPEAT)
@@ -185,43 +169,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
 
     else:
         raise ValueError(f"Unsupported environment: {env_id}")
-
-
-class DiscreteToContinuousWrapper(gym.Wrapper):
-    """
-    Convert discrete action space to continuous.
-    Example: Discrete(4) -> Box(-1.0, 1.0, (4,))
-    The max action is selected.
-    """
-
-    def __init__(self, env: gym.Env) -> None:
-        super().__init__(env)
-        self.action_space = gym.spaces.Box(
-            low=-1.0, high=1.0, shape=(env.action_space.n,), dtype=np.float32
-        )
-
-    def step(self, action: np.ndarray) -> tuple:
-        # Convert continuous action to discrete by selecting the max action
-        discrete_action = np.argmax(action)
-        return self.env.step(discrete_action)
-
-
-class ReduceActionSpaceWrapper(gym.Wrapper):
-    """
-    Reduce discrete action space to only relevant actions.
-    For MiniGrid Memory environments, reduce to 3 actions: turn left, turn right, move forward.
-    """
-
-    def __init__(self, env: gym.Env, n_actions: int) -> None:
-        super().__init__(env)
-        self.n_actions = n_actions
-        self.action_space = gym.spaces.Discrete(n_actions)
-
-    def step(self, action: np.ndarray | int) -> tuple:
-        # Convert action if it's an array
-        if isinstance(action, np.ndarray):
-            action = action[0] if len(action) > 0 else action
-        return self.env.step(action)
 
 
 class ActionRepeatWrapper(gym.Wrapper):
