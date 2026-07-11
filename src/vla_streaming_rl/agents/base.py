@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import final
+from typing import Any, final
 
 import numpy as np
 from torch import nn
@@ -49,7 +49,7 @@ class Agent(ABC):
     def select_action(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -60,7 +60,7 @@ class Agent(ABC):
     def step(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -74,7 +74,7 @@ class Agent(ABC):
     def _step_offpolicy(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -107,7 +107,7 @@ class Agent(ABC):
     def _step_streaming(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -118,7 +118,7 @@ class Agent(ABC):
     def on_episode_end(self, score: float, feedback_text: str) -> dict: ...
 
     @abstractmethod
-    def _preprocess(self, obs: dict[str, np.ndarray], info: dict): ...
+    def _preprocess(self, obs: dict[str, Any], info: dict): ...
 
     @abstractmethod
     def _to_env_action(self, net_action): ...

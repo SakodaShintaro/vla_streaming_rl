@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: MIT
+from typing import Any
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -133,7 +135,7 @@ class StandardAgent(Agent):
     def _step_streaming(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -242,7 +244,7 @@ class StandardAgent(Agent):
     def select_action(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -324,7 +326,7 @@ class StandardAgent(Agent):
             metrics["chunk_step"] = self.chunk_step
         return StepResult(action=action, metrics=metrics, panels=self._panels(reward))
 
-    def _preprocess(self, obs: dict[str, np.ndarray], info: dict) -> tuple:
+    def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
         the raw obs tensor, its encoded latent ``obs_z``, and the tokenized task
         prompt. ``info`` is unused by the obs-driven standard agent."""

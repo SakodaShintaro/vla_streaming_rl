@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: MIT
+from typing import Any
+
 import carla
 import cv2
 import gymnasium as gym
@@ -182,7 +184,7 @@ class SimLingoAgent(Agent):
     def _step_streaming(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -249,7 +251,7 @@ class SimLingoAgent(Agent):
     def select_action(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -282,9 +284,7 @@ class SimLingoAgent(Agent):
         return StepResult(action=env_action, metrics=metrics, panels=self._panels(reward, viz))
 
     @torch.no_grad()
-    def _preprocess(
-        self, obs: dict[str, np.ndarray], info: dict
-    ) -> tuple[InferInput, torch.Tensor]:
+    def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple[InferInput, torch.Tensor]:
         """Build the network input (``InferInput`` wrapping a ``DrivingInput``) from
         the env's carla ``obs["sensors"]`` snapshot, rebuilding the RoutePlanner on
         the first tick of a new episode. Returns the input together with this tick's

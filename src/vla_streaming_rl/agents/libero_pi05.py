@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 import collections
+from typing import Any
 
 import cv2
 import gymnasium as gym
@@ -144,7 +145,7 @@ class LiberoPi05Agent(Agent):
     def _step_streaming(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -263,7 +264,7 @@ class LiberoPi05Agent(Agent):
     def select_action(
         self,
         global_step: int,
-        obs: dict[str, np.ndarray],
+        obs: dict[str, Any],
         reward: float,
         terminated: bool,
         truncated: bool,
@@ -343,9 +344,7 @@ class LiberoPi05Agent(Agent):
             ),
         )
 
-    def _preprocess(
-        self, obs: dict[str, np.ndarray], info: dict
-    ) -> tuple[torch.Tensor, dict, np.ndarray]:
+    def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple[torch.Tensor, dict, np.ndarray]:
         """Build pi0.5's raw multimodal observation, run the (normalizing,
         tokenizing) preprocessor, and return the packed obs vector for the replay
         buffer together with the preprocessed batch (for inference) and the wrist

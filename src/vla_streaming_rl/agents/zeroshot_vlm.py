@@ -2,6 +2,7 @@
 import re
 from collections import deque
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import torch
@@ -113,9 +114,7 @@ class ZeroShotVLMAgent:
         self._action_count = 0
 
     @torch.inference_mode()
-    def select_action(
-        self, obs: dict[str, np.ndarray], prev_reward: float
-    ) -> tuple[np.ndarray, dict]:
+    def select_action(self, obs: dict[str, Any], prev_reward: float) -> tuple[np.ndarray, dict]:
         has_prev_reward = self._action_count > 0
         if has_prev_reward and self.history:
             past_image, past_response, _ = self.history[-1]
