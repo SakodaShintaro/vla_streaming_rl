@@ -35,19 +35,14 @@ def _reward_image(
     sparse: float,
     reach_shaping: float,
     place_shaping: float,
-    dense: float,
-    progress: float,
 ) -> np.ndarray:
-    """Fixed 200x200 panel breaking down the reward components (VLAC lines read
-    0.0 when VLAC is disabled)."""
+    """Fixed 200x200 panel breaking down the reward components."""
     img = np.zeros((200, 200, 3), dtype=np.uint8)
     font = cv2.FONT_HERSHEY_SIMPLEX
     cv2.putText(img, f"Total: {total:+.3f}", (8, 28), font, 0.5, (255, 255, 255), 2)
     cv2.putText(img, f"Sparse:{sparse:.3f}", (8, 56), font, 0.5, (255, 0, 0), 2)
     cv2.putText(img, f"Reach: {reach_shaping:+.4f}", (8, 84), font, 0.5, (0, 200, 255), 2)
     cv2.putText(img, f"Place: {place_shaping:+.4f}", (8, 112), font, 0.5, (0, 255, 0), 2)
-    cv2.putText(img, f"VLAC:  {dense:+.4f}", (8, 140), font, 0.5, (255, 0, 255), 2)
-    cv2.putText(img, f"Prog:  {progress:.3f}", (8, 168), font, 0.5, (200, 200, 0), 2)
     return img
 
 
@@ -169,7 +164,6 @@ class LiberoPi05Agent(Agent):
             )
         metrics = {}
         dense = 0.0
-        progress = 0.0
         sparse = float(reward)
         if self._relabeler is not None:
             frame = Image.fromarray(
@@ -180,7 +174,6 @@ class LiberoPi05Agent(Agent):
                 self._relabeler.set_reference(self._references.get(self._cur_task))
             self._cur_frames.append(frame)
             dense, metrics = self._relabeler.step(frame, obs["language"])
-            progress = metrics["vlac/progress"]
         reach_shaping = self._reach_reward_scale * info.get("reach_shaping", 0.0)
         place_shaping = self._reach_reward_scale * info.get("place_shaping", 0.0)
         reward = sparse + dense + reach_shaping + place_shaping
@@ -199,7 +192,7 @@ class LiberoPi05Agent(Agent):
         metrics.update(
             self._reward_metrics(reward, sparse, reach_shaping, place_shaping, dense, info)
         )
-        panels = self._panels(reward, wrist, sparse, reach_shaping, place_shaping, dense, progress)
+        panels = self._panels(reward, wrist, sparse, reach_shaping, place_shaping)
 
         if not self._env_action_queue:
             curr_size = self.rb.size if self.rb.full else self.rb.idx
@@ -288,7 +281,6 @@ class LiberoPi05Agent(Agent):
             )
         metrics = {}
         dense = 0.0
-        progress = 0.0
         sparse = float(reward)
         if self._relabeler is not None:
             frame = Image.fromarray(
@@ -299,7 +291,6 @@ class LiberoPi05Agent(Agent):
                 self._relabeler.set_reference(self._references.get(self._cur_task))
             self._cur_frames.append(frame)
             dense, metrics = self._relabeler.step(frame, obs["language"])
-            progress = metrics["vlac/progress"]
         reach_shaping = self._reach_reward_scale * info.get("reach_shaping", 0.0)
         place_shaping = self._reach_reward_scale * info.get("place_shaping", 0.0)
         reward = sparse + dense + reach_shaping + place_shaping
@@ -339,9 +330,7 @@ class LiberoPi05Agent(Agent):
         return StepResult(
             action=env_action,
             metrics=metrics,
-            panels=self._panels(
-                reward, wrist, sparse, reach_shaping, place_shaping, dense, progress
-            ),
+            panels=self._panels(reward, wrist, sparse, reach_shaping, place_shaping),
         )
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple[torch.Tensor, dict, np.ndarray]:
@@ -392,8 +381,6 @@ class LiberoPi05Agent(Agent):
         sparse: float,
         reach_shaping: float,
         place_shaping: float,
-        dense: float,
-        progress: float,
     ) -> dict:
-        reward_img = _reward_image(total, sparse, reach_shaping, place_shaping, dense, progress)
+        reward_img = _reward_image(total, sparse, reach_shaping, place_shaping)
         return {"wrist": wrist, "reward": reward_img}
