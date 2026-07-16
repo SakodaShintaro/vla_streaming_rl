@@ -23,8 +23,9 @@ export DISPLAY
 uv run python scripts/train.py \
   agent=standard \
   network_class=actor_critic_with_action_value \
-  learning_mode=streaming \
-  actor_lr=1e-7 \
-  critic_lr=1e-7 \
+  learning_mode=off_policy \
+  batch_size=16 \
+  actor_lr=1e-5 \
+  critic_lr=1e-5 \
   env=animalai \
   exp_name=animalai${suffix}
