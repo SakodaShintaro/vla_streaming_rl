@@ -175,6 +175,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     score_sum_all = 0.0
     episode_count = 0
     best_score = -float("inf")
+    best_score_per_arena: dict[str, float] = {}
     # Don't reset the env here — the first iteration of the episode loop
     # does that with seed=seed (was: double-reset wasted route 0 in the
     # bench2drive sequential cursor and confused the eval writer).
@@ -379,22 +380,44 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         episode_end_info = agent.on_episode_end(score, feedback_text)
         wandb.log(episode_end_info)
 
-        is_best = score > best_score
+        arena_name = env_info["arena_name"] if "arena_name" in env_info else ""
 
-        if is_best and result_dir is not None:
-            with open(result_dir / "best_score.txt", "w") as f:
-                f.write(f"{episode_id + 1}\t{score:.2f}")
-            best_score = score
-            save_episode_data(
-                video_dir,
-                image_dir,
-                obs_dir,
-                "best_episode",
-                bgr_image_list,
-                action_list,
-                reward_list,
-                obs_list,
+        if arena_name:
+            arena_is_best = (
+                arena_name not in best_score_per_arena or score > best_score_per_arena[arena_name]
             )
+            if arena_is_best and result_dir is not None:
+                best_score_per_arena[arena_name] = score
+                save_episode_data(
+                    video_dir,
+                    image_dir,
+                    obs_dir,
+                    f"best_{arena_name}",
+                    bgr_image_list,
+                    action_list,
+                    reward_list,
+                    obs_list,
+                )
+                with open(result_dir / "best_score_per_arena.tsv", "w") as f:
+                    f.write("arena\tbest_score\n")
+                    for name in sorted(best_score_per_arena):
+                        f.write(f"{name}\t{best_score_per_arena[name]:.6f}\n")
+        else:
+            is_best = score > best_score
+            if is_best and result_dir is not None:
+                with open(result_dir / "best_score.txt", "w") as f:
+                    f.write(f"{episode_id + 1}\t{score:.2f}")
+                best_score = score
+                save_episode_data(
+                    video_dir,
+                    image_dir,
+                    obs_dir,
+                    "best_episode",
+                    bgr_image_list,
+                    action_list,
+                    reward_list,
+                    obs_list,
+                )
 
         if (
             episode_id == 0 or (episode_id + 1) % args.image_save_interval == 0
