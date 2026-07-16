@@ -59,27 +59,6 @@ def make_libero_env(
     )
 
 
-def make_robomemarena_env(
-    task_id: str, resolution: int, horizon: int, settle_steps: int
-) -> gym.Env:
-    """Hydra `_target_` factory for the raw RoboMemArena env (no wrappers).
-
-    ``task_id`` selects one of the 26 BDDL memory tasks (int / ``"taskN"`` / a
-    ``.bddl`` path). The wrist camera, proprioceptive state and language
-    instruction are published by ``RoboMemArenaEnv`` in the same layout as
-    ``LiberoEnv``, so ``make_env`` reuses the shared pixel-observation wrapper
-    stack.
-    """
-    from vla_streaming_rl.envs.robomemarena_env import RoboMemArenaEnv
-
-    return RoboMemArenaEnv(
-        task_id=task_id,
-        resolution=resolution,
-        horizon=horizon,
-        settle_steps=settle_steps,
-    )
-
-
 def make_carla_env(
     route_id: str | None,
     sequence_mode: str,
@@ -175,15 +154,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = ZeroObsOnDoneWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 100
-        return env
-
-    elif env_id == "RoboMemArena-v0":
-        env = hydra.utils.instantiate(env_factory)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
-        env = ZeroObsOnDoneWrapper(env)
-        env = LanguageObsWrapper(env)
-        env.unwrapped.eval_range = 50
         return env
 
     else:

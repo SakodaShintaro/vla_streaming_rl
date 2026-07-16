@@ -63,7 +63,6 @@ dependencies = [
     "libero>=0.1.1",
     "ms-swift>=4.2",
     "loguru",
-    "mani-skill>=3.0.1",
 ]
 
 [build-system]
