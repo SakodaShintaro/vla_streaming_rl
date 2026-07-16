@@ -82,21 +82,6 @@ def make_mikasa_env(
     )
 
 
-def make_robomme_env(task_id: str, resolution: int, horizon: int, seed: int) -> gym.Env:
-    """Hydra `_target_` factory for the raw RoboMME env (no wrappers).
-
-    RoboMME's ``BenchmarkEnvBuilder`` stacks demonstration/oracle wrappers for
-    imitation learning; those replay scripted trajectories and are bypassed here
-    so only the raw ManiSkill task env is driven. The wrist camera, proprioceptive
-    state and language instruction are published by ``RobommeEnv`` in the same
-    layout as ``LiberoEnv``, so ``make_env`` reuses the shared pixel-observation
-    wrapper stack.
-    """
-    from vla_streaming_rl.envs.robomme_env import RobommeEnv
-
-    return RobommeEnv(task_id=task_id, resolution=resolution, horizon=horizon, seed=seed)
-
-
 def make_robomemarena_env(
     task_id: str, resolution: int, horizon: int, settle_steps: int
 ) -> gym.Env:
@@ -222,15 +207,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = ZeroObsOnDoneWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 100
-        return env
-
-    elif env_id == "RoboMME-v0":
-        env = hydra.utils.instantiate(env_factory)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
-        env = ZeroObsOnDoneWrapper(env)
-        env = LanguageObsWrapper(env)
-        env.unwrapped.eval_range = 50
         return env
 
     elif env_id == "RoboMemArena-v0":

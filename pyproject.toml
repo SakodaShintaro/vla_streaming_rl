@@ -65,7 +65,6 @@ dependencies = [
     "loguru",
     "mani-skill>=3.0.1",
     "mikasa-robo-suite",
-    "robomme",
 ]
 
 [build-system]
@@ -100,7 +99,6 @@ mamba-ssm = { url = "https://github.com/state-spaces/mamba/releases/download/v2.
 carla = { path = "../../CARLA_0.9.16/PythonAPI/carla/dist/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl" }
 torch = { index = "pytorch-cu128" }
 mikasa-robo-suite = { path = "external/MIKASA-Robo", editable = true }
-robomme = { path = "external/robomme_benchmark", editable = true }
 torchvision = { index = "pytorch-cu128" }
 
 [tool.ruff]
