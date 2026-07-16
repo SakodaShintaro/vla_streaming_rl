@@ -159,6 +159,7 @@ class SimLingoAgent(Agent):
             obs_z_shape=(1,),
             rnn_state_shape=(1,),
             action_shape=(ACTION_DIM,),
+            velocity_shape=(1,),
             output_device=self.device,
             storage_device=torch.device("cpu"),
             max_new_tokens=0,
@@ -204,6 +205,7 @@ class SimLingoAgent(Agent):
             self._prev_action,
             [],
             [],
+            self._dummy_rnn_state,
         )
         metrics = {"processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item()}
 
@@ -271,6 +273,7 @@ class SimLingoAgent(Agent):
             self._prev_action,
             [],
             [],
+            self._dummy_rnn_state,
         )
         action_mean = infer_result.action.squeeze(0)
         action_taken = action_mean + torch.randn_like(action_mean) * self.exploration_noise
@@ -435,6 +438,7 @@ class SimLingoAgent(Agent):
             r_seq=self._dummy_rnn_state,
             rnn_state=self._dummy_rnn_state,
             task_prompts=[],
+            velocity_seq=self._dummy_rnn_state,
         )
         return infer_input, gt_velocity
 

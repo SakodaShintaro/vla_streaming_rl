@@ -68,12 +68,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
+        self.velocity_dim = 3
         self.encoder = SpatialTemporalEncoder(
             image_processor=self.image_processor,
             reward_processor=self.reward_processor,
             seq_len=self.seq_len,
             n_layer=encoder_block_num,
             action_dim=self.action_dim,
+            velocity_dim=self.velocity_dim,
             temporal_model_type=temporal_model_type,
             use_image_only=True,
         )
@@ -145,7 +147,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
 
         x, rnn_state = self.encoder(
-            data.s_seq, data.obs_z_seq, data.a_seq, data.r_seq, data.rnn_state
+            data.s_seq, data.obs_z_seq, data.a_seq, data.r_seq, data.rnn_state, data.velocity_seq
         )  # (B, hidden_dim)
 
         # Get action chunk from policy_head
@@ -191,6 +193,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.actions[:, self.horizon :],
                 data.rewards[:, self.horizon :],
                 data.rnn_state[:, self.horizon],
+                data.velocities[:, self.horizon :],
             )
             next_action, _ = self.policy_head.get_action(next_state)
             next_output = self.value_head(next_state, next_action).output
@@ -204,9 +207,10 @@ class ActorCriticWithActionValue(NetworkInterface):
         curr_actions = data.actions[:, : -self.horizon]
         curr_rewards = data.rewards[:, : -self.horizon]
         curr_rnn_state = data.rnn_state[:, 0]  # (B, ...)
+        curr_velocities = data.velocities[:, : -self.horizon]
 
         curr_state, _ = self.encoder.forward(
-            curr_obs, curr_obs_z, curr_actions, curr_rewards, curr_rnn_state
+            curr_obs, curr_obs_z, curr_actions, curr_rewards, curr_rnn_state, curr_velocities
         )  # (B, state_dim)
 
         # Action chunk: (B, horizon, action_dim)
@@ -250,6 +254,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.actions[:, self.horizon :],
                 data.rewards[:, self.horizon :],
                 data.rnn_state[:, self.horizon],
+                data.velocities[:, self.horizon :],
             )
             next_action, actor_activation = self.policy_head.get_action(next_state)
             next_q_out = self.value_head(next_state, next_action)
@@ -265,9 +270,10 @@ class ActorCriticWithActionValue(NetworkInterface):
         prev_actions = data.actions[:, : -self.horizon]
         prev_rewards = data.rewards[:, : -self.horizon]
         prev_rnn_state = data.rnn_state[:, 0]
+        prev_velocities = data.velocities[:, : -self.horizon]
 
         prev_state, _ = self.encoder.forward(
-            prev_obs, prev_obs_z, prev_actions, prev_rewards, prev_rnn_state
+            prev_obs, prev_obs_z, prev_actions, prev_rewards, prev_rnn_state, prev_velocities
         )
 
         action_chunk = data.actions[:, -self.horizon :]

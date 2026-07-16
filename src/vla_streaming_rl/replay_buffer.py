@@ -26,6 +26,7 @@ class ReplayBufferData:
     actions: torch.Tensor  # (B, T, action_shape)
     action_token_ids: torch.Tensor  # (B, T, max_new_tokens)
     task_prompt_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
+    velocities: torch.Tensor  # (B, T, velocity_shape)
 
 
 class ReplayBuffer:
@@ -37,6 +38,7 @@ class ReplayBuffer:
         obs_z_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
+        velocity_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
         max_new_tokens: int,
@@ -67,6 +69,7 @@ class ReplayBuffer:
         self.dones = init_tensor((size, 1))
         self.rnn_states = init_tensor((size, *rnn_state_shape))
         self.actions = init_tensor((size, *action_shape))
+        self.velocities = init_tensor((size, *velocity_shape))
         self.action_token_ids = torch.full(
             (size, max_new_tokens),
             pad_token_id,
@@ -105,6 +108,7 @@ class ReplayBuffer:
             self.actions[:curr_size].to(self.output_device, non_blocking=True),
             self.action_token_ids[:curr_size].to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[:curr_size].to(self.output_device, non_blocking=True),
+            self.velocities[:curr_size].to(self.output_device, non_blocking=True),
         )
 
     def add(
@@ -117,6 +121,7 @@ class ReplayBuffer:
         action: torch.Tensor,
         action_token_ids: list[int],
         task_prompt_token_ids: list[int],
+        velocity: torch.Tensor,
     ) -> None:
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
@@ -125,6 +130,7 @@ class ReplayBuffer:
         self.dones[self.idx].fill_(done)
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
+        self.velocities[self.idx].copy_(velocity.reshape(self.velocities[self.idx].shape))
 
         self.action_token_ids[self.idx].fill_(self.pad_token_id)
         token_len = min(len(action_token_ids), self.max_new_tokens)
@@ -169,6 +175,7 @@ class ReplayBuffer:
             self.actions[seq_indices].to(self.output_device, non_blocking=True),
             self.action_token_ids[seq_indices].to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[seq_indices].to(self.output_device, non_blocking=True),
+            self.velocities[seq_indices].to(self.output_device, non_blocking=True),
         )
 
     def get_latest(self, seq_len: int) -> ReplayBufferData:
@@ -189,4 +196,5 @@ class ReplayBuffer:
             self.task_prompt_token_ids[indices]
             .unsqueeze(0)
             .to(self.output_device, non_blocking=True),
+            self.velocities[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
         )

@@ -198,6 +198,7 @@ class LiberoPi05Network(NetworkInterface):
             rnn_state=data.rnn_state,
             action_token_ids=data.action_token_ids,
             task_prompt_token_ids=data.task_prompt_token_ids,
+            velocities=data.velocities,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:

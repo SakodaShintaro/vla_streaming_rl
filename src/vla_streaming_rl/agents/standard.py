@@ -10,7 +10,7 @@ from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
-from vla_streaming_rl.reward_processor import RewardProcessor
+from vla_streaming_rl.reward_processor import RewardProcessor, VelocityProcessor
 from vla_streaming_rl.utils import create_reward_image
 
 
@@ -55,6 +55,8 @@ class StandardAgent(Agent):
         self.action_scale = (action_space.high - action_space.low) / 2.0
         self.action_bias = (action_space.high + action_space.low) / 2.0
         self.reward_processor = RewardProcessor("scaling", 1.0)
+        self.velocity_shape = observation_space["velocity"].shape
+        self.velocity_processor = VelocityProcessor(self.velocity_shape[0])
         self.normalizing_by_return = normalizing_by_return
 
         self.learning_starts = learning_starts
@@ -100,6 +102,7 @@ class StandardAgent(Agent):
             obs_z_shape=obs_z_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
+            velocity_shape=self.velocity_shape,
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             max_new_tokens=max_new_tokens,
@@ -162,6 +165,9 @@ class StandardAgent(Agent):
             metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
             self._fresh_pred_reward = None
         obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info)
+        velocity_np = obs["velocity"]
+        self.velocity_processor.update(velocity_np)
+        velocity_tensor = torch.from_numpy(velocity_np).to(self.device)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             obs_tensor,
@@ -172,6 +178,7 @@ class StandardAgent(Agent):
             torch.from_numpy(normalized_action).to(self.device),
             self.prev_action_token_ids,
             task_prompt_token_ids,
+            velocity_tensor,
         )
         panels = self._panels(reward)
 
@@ -186,6 +193,7 @@ class StandardAgent(Agent):
         # and the training loss (fused inference + training).
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_processor.normalize(data.rewards)
+        data.velocities = self.velocity_processor.normalize(data.velocities)
         result = self.network.infer_and_compute_loss(data)
 
         infer_result = result.infer_result
@@ -271,6 +279,9 @@ class StandardAgent(Agent):
             metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
             self._fresh_pred_reward = None
         obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info)
+        velocity_np = obs["velocity"]
+        self.velocity_processor.update(velocity_np)
+        velocity_tensor = torch.from_numpy(velocity_np).to(self.device)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             obs_tensor,
@@ -281,6 +292,7 @@ class StandardAgent(Agent):
             torch.from_numpy(normalized_action).to(self.device),
             self.prev_action_token_ids,
             task_prompt_token_ids,
+            velocity_tensor,
         )
 
         warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
@@ -301,6 +313,7 @@ class StandardAgent(Agent):
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
                 task_prompts=[obs["language"]],
+                velocity_seq=self.velocity_processor.normalize(latest_data.velocities),
             )
         )
         self.rnn_state = infer_result.rnn_state
