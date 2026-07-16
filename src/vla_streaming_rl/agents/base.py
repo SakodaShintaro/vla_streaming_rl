@@ -91,6 +91,7 @@ class Agent(ABC):
         ):
             data = self.rb.sample(self.batch_size)
             data.rewards = self.reward_processor.normalize(data.rewards)
+            data.velocities = self.velocity_processor.normalize(data.velocities)
             result = self.network.compute_loss(data)
             self.actor_optimizer.zero_grad(set_to_none=True)
             self.critic_optimizer.zero_grad(set_to_none=True)
