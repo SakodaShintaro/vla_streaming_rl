@@ -64,7 +64,6 @@ dependencies = [
     "ms-swift>=4.2",
     "loguru",
     "mani-skill>=3.0.1",
-    "mikasa-robo-suite",
 ]
 
 [build-system]
@@ -98,7 +97,6 @@ flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/down
 mamba-ssm = { url = "https://github.com/state-spaces/mamba/releases/download/v2.3.0/mamba_ssm-2.3.0+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 carla = { path = "../../CARLA_0.9.16/PythonAPI/carla/dist/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl" }
 torch = { index = "pytorch-cu128" }
-mikasa-robo-suite = { path = "external/MIKASA-Robo", editable = true }
 torchvision = { index = "pytorch-cu128" }
 
 [tool.ruff]

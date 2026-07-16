@@ -59,29 +59,6 @@ def make_libero_env(
     )
 
 
-def make_mikasa_env(
-    env_id: str,
-    resolution: int,
-    control_mode: str,
-    reward_mode: str,
-) -> gym.Env:
-    """Hydra `_target_` factory for the raw MIKASA-Robo-VLA env (no wrappers).
-
-    ``env_id`` is the ManiSkill task id (e.g. ``RememberColor3-VLA-v0``); the
-    wrist camera, proprioceptive state and language instruction are published by
-    ``MikasaEnv`` in the same layout as ``LiberoEnv``, so ``make_env`` reuses the
-    shared pixel-observation wrapper stack.
-    """
-    from vla_streaming_rl.envs.mikasa_env import MikasaEnv
-
-    return MikasaEnv(
-        env_id=env_id,
-        resolution=resolution,
-        control_mode=control_mode,
-        reward_mode=reward_mode,
-    )
-
-
 def make_robomemarena_env(
     task_id: str, resolution: int, horizon: int, settle_steps: int
 ) -> gym.Env:
@@ -192,15 +169,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         return env
 
     elif env_id == "LIBERO-v0":
-        env = hydra.utils.instantiate(env_factory)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
-        env = ZeroObsOnDoneWrapper(env)
-        env = LanguageObsWrapper(env)
-        env.unwrapped.eval_range = 100
-        return env
-
-    elif env_id == "MIKASA-v0":
         env = hydra.utils.instantiate(env_factory)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = TransposeAndNormalizeObs(env)

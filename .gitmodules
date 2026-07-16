@@ -4,9 +4,6 @@
 [submodule "external/animal-ai"]
 	path = external/animal-ai
 	url = https://github.com/SakodaShintaro/animal-ai.git
-[submodule "external/MIKASA-Robo"]
-	path = external/MIKASA-Robo
-	url = https://github.com/SakodaShintaro/MIKASA-Robo.git
 [submodule "external/RoboMemArena"]
 	path = external/RoboMemArena
 	url = https://github.com/SakodaShintaro/RoboMemArena.git
