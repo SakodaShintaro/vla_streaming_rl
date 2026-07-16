@@ -183,6 +183,8 @@ class AnimalAIEnv(gym.Env):
         # (x, z) agent position in arena coords; populated each step from the
         # AAI vector observation. None before the first reset.
         self._agent_xz: tuple[float, float] | None = None
+        # (vx, vy, vz) agent velocity from the AAI vector observation.
+        self._agent_velocity: np.ndarray = np.zeros(3, dtype=np.float32)
 
     def _current_progression_stem(self) -> str:
         idx = min(self._next_yaml_idx, len(self._all_arenas) - 1)
@@ -245,6 +247,12 @@ class AnimalAIEnv(gym.Env):
         # [health, vx, vy, vz, x, y, z]. We pull (x, z) for the top-down view.
         vec = obs_list[1][idx]
         return float(vec[4]), float(vec[6])
+
+    @staticmethod
+    def _extract_agent_velocity(obs_list, idx: int) -> np.ndarray:
+        # Same vector obs layout: obs[1][idx][1:4] is (vx, vy, vz).
+        vec = obs_list[1][idx]
+        return np.array([float(vec[1]), float(vec[2]), float(vec[3])], dtype=np.float32)
 
     def _render_topdown(self) -> np.ndarray:
         img_size = 256
@@ -344,6 +352,7 @@ class AnimalAIEnv(gym.Env):
         decision_steps, _ = self._aai.get_steps(self._behavior_name)
         self._latest_image = self._decode_obs(decision_steps.obs[0][0])
         self._agent_xz = self._extract_agent_xz(decision_steps.obs, 0)
+        self._agent_velocity = self._extract_agent_velocity(decision_steps.obs, 0)
         info = {
             "task_prompt": self.prompt,
             "arena_yaml": arena_yaml,
@@ -351,6 +360,7 @@ class AnimalAIEnv(gym.Env):
             "pass_mark": self.pass_mark,
             "cleared_count": len(self._cleared_arenas),
             "is_revisit": self._is_revisit,
+            "velocity": self._agent_velocity,
         }
         return self._latest_image, info
 
@@ -375,11 +385,13 @@ class AnimalAIEnv(gym.Env):
             reward = float(terminal_steps.reward[0])
             self._latest_image = self._decode_obs(terminal_steps.obs[0][0])
             self._agent_xz = self._extract_agent_xz(terminal_steps.obs, 0)
+            self._agent_velocity = self._extract_agent_velocity(terminal_steps.obs, 0)
         else:
             interrupted = False
             reward = float(decision_steps.reward[0])
             self._latest_image = self._decode_obs(decision_steps.obs[0][0])
             self._agent_xz = self._extract_agent_xz(decision_steps.obs, 0)
+            self._agent_velocity = self._extract_agent_velocity(decision_steps.obs, 0)
 
         self.episode_step += 1
         self._episode_return += reward
@@ -393,6 +405,7 @@ class AnimalAIEnv(gym.Env):
             "pass_mark": self.pass_mark,
             "cleared_count": len(self._cleared_arenas),
             "is_revisit": self._is_revisit,
+            "velocity": self._agent_velocity,
         }
         if terminated or truncated:
             success = self._episode_return >= self.pass_mark

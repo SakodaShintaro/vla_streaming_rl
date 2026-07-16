@@ -143,6 +143,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)
+        env = VelocityObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         return env
@@ -240,6 +241,24 @@ class LanguageObsWrapper(gym.Wrapper):
     def step(self, action: np.ndarray) -> tuple:
         obs, reward, terminated, truncated, info = self.env.step(action)
         obs["language"] = info.pop("task_prompt")
+        return obs, reward, terminated, truncated, info
+
+
+class VelocityObsWrapper(gym.Wrapper):
+    def __init__(self, env: gym.Env) -> None:
+        super().__init__(env)
+        spaces = dict(env.observation_space.spaces)
+        spaces["velocity"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
+        self.observation_space = gym.spaces.Dict(spaces)
+
+    def reset(self, **kwargs) -> tuple:
+        obs, info = self.env.reset(**kwargs)
+        obs["velocity"] = info.pop("velocity")
+        return obs, info
+
+    def step(self, action: np.ndarray) -> tuple:
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        obs["velocity"] = info.pop("velocity")
         return obs, reward, terminated, truncated, info
 
 
