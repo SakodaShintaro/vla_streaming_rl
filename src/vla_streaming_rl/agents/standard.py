@@ -37,7 +37,6 @@ class StandardAgent(Agent):
         et_lambda: float,
         buffer_size: int,
         buffer_device: str,
-        max_new_tokens: int,
         max_prompt_tokens: int,
         pad_token_id: int,
     ) -> None:
@@ -102,15 +101,11 @@ class StandardAgent(Agent):
             action_shape=action_space.shape,
             output_device=self.device,
             storage_device=torch.device(buffer_device),
-            max_new_tokens=max_new_tokens,
             max_prompt_tokens=max_prompt_tokens,
             pad_token_id=pad_token_id,
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
-        # Streaming stores the VLM action chunk's token ids alongside the
-        # transition; off-policy never uses them and leaves this empty.
-        self.prev_action_token_ids = []
         self._episode_reset = False
 
         # Next-frame prediction visualization state. ``_last_pred_image`` is the
@@ -146,7 +141,6 @@ class StandardAgent(Agent):
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
-            self.prev_action_token_ids = []
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
@@ -170,7 +164,6 @@ class StandardAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            self.prev_action_token_ids,
             task_prompt_token_ids,
         )
         panels = self._panels(reward)
@@ -190,8 +183,6 @@ class StandardAgent(Agent):
 
         infer_result = result.infer_result
         self.rnn_state = infer_result.rnn_state
-        if self.learning_mode == "streaming":
-            self.prev_action_token_ids = infer_result.action_token_ids
         metrics.update(infer_result.value_report)
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
@@ -255,7 +246,6 @@ class StandardAgent(Agent):
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
-            self.prev_action_token_ids = []
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
@@ -279,7 +269,6 @@ class StandardAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            self.prev_action_token_ids,
             task_prompt_token_ids,
         )
 
@@ -304,8 +293,6 @@ class StandardAgent(Agent):
             )
         )
         self.rnn_state = infer_result.rnn_state
-        if self.learning_mode == "streaming":
-            self.prev_action_token_ids = infer_result.action_token_ids
         metrics.update(infer_result.value_report)
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk

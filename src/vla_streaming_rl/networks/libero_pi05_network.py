@@ -142,7 +142,6 @@ class LiberoPi05Network(NetworkInterface):
             rnn_state=torch.zeros(1),
             next_image=np.zeros((1, 1, 3), dtype=np.uint8),
             next_reward=0.0,
-            action_token_ids=[],
             activations=ActivationFeatures(
                 state=state,
                 actor=action.reshape(action.shape[0], -1),
@@ -196,7 +195,6 @@ class LiberoPi05Network(NetworkInterface):
             dones=data.dones[:, 1:, 0],
             obs_z=data.obs_z,
             rnn_state=data.rnn_state,
-            action_token_ids=data.action_token_ids,
             task_prompt_token_ids=data.task_prompt_token_ids,
         )
 
@@ -293,7 +291,6 @@ class LiberoPi05Network(NetworkInterface):
             rnn_state=torch.zeros(1),
             next_image=np.zeros((1, 1, 3), dtype=np.uint8),
             next_reward=0.0,
-            action_token_ids=[],
             features=state,
             activations=ActivationFeatures(
                 state=state, actor=action_chunk, critic=state, state_predictor=state

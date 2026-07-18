@@ -28,7 +28,6 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             et_lambda=args.et_lambda,
             buffer_size=args.buffer_size,
             buffer_device=args.buffer_device,
-            max_new_tokens=args.max_new_tokens,
             max_prompt_tokens=args.max_prompt_tokens,
             pad_token_id=args.pad_token_id,
         )

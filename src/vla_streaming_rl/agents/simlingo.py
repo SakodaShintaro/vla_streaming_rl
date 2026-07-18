@@ -161,7 +161,6 @@ class SimLingoAgent(Agent):
             action_shape=(ACTION_DIM,),
             output_device=self.device,
             storage_device=torch.device("cpu"),
-            max_new_tokens=0,
             max_prompt_tokens=0,
             pad_token_id=0,
         )
@@ -202,7 +201,6 @@ class SimLingoAgent(Agent):
             terminated or truncated,
             self._dummy_rnn_state,
             self._prev_action,
-            [],
             [],
         )
         metrics = {"processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item()}
@@ -269,7 +267,6 @@ class SimLingoAgent(Agent):
             terminated or truncated,
             self._dummy_rnn_state,
             self._prev_action,
-            [],
             [],
         )
         action_mean = infer_result.action.squeeze(0)

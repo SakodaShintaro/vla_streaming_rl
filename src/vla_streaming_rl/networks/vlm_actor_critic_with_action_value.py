@@ -267,7 +267,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             rnn_state=data.rnn_state,
             next_image=next_image,
             next_reward=next_reward,
-            action_token_ids=[],
             activations=activations,
             features=state,
         )
@@ -396,7 +395,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             rnn_state=self._dummy_state.clone(),
             next_image=next_image,
             next_reward=next_reward,
-            action_token_ids=[],
             activations=activations,
             features=next_state,
         )

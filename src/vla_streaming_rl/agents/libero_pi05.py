@@ -158,7 +158,6 @@ class LiberoPi05Agent(Agent):
                 action_shape=(self.action_dim,),
                 output_device=self.device,
                 storage_device=torch.device("cpu"),
-                max_new_tokens=0,
                 max_prompt_tokens=0,
                 pad_token_id=0,
             )
@@ -184,7 +183,6 @@ class LiberoPi05Agent(Agent):
             terminated or truncated,
             self._dummy,
             self._prev_action,
-            [],
             [],
         )
         if terminated or truncated:
@@ -275,7 +273,6 @@ class LiberoPi05Agent(Agent):
                 action_shape=(self.action_dim,),
                 output_device=self.device,
                 storage_device=torch.device("cpu"),
-                max_new_tokens=0,
                 max_prompt_tokens=0,
                 pad_token_id=0,
             )
@@ -301,7 +298,6 @@ class LiberoPi05Agent(Agent):
             terminated or truncated,
             self._dummy,
             self._prev_action,
-            [],
             [],
         )
 

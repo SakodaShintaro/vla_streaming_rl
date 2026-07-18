@@ -203,7 +203,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             rnn_state=rnn_state,
             next_image=next_image,
             next_reward=next_reward,
-            action_token_ids=[],
             activations=activations,
             features=x,
         )
@@ -352,7 +351,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             rnn_state=next_rnn_state,
             next_image=next_image,
             next_reward=next_reward,
-            action_token_ids=[],
             activations=activations,
             features=next_state,
         )

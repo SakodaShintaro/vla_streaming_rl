@@ -24,7 +24,6 @@ class ReplayBufferData:
     # rnn_state shape (SpatialTemporalEncoder): (B, T, space_len, state_size, n_layer)
     rnn_state: torch.Tensor
     actions: torch.Tensor  # (B, T, action_shape)
-    action_token_ids: torch.Tensor  # (B, T, max_new_tokens)
     task_prompt_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
 
 
@@ -39,7 +38,6 @@ class ReplayBuffer:
         action_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
-        max_new_tokens: int,
         max_prompt_tokens: int,
         pad_token_id: int,
     ) -> None:
@@ -48,7 +46,6 @@ class ReplayBuffer:
         self.action_shape = action_shape
         self.output_device = output_device
         self.storage_device = storage_device
-        self.max_new_tokens = max_new_tokens
         self.max_prompt_tokens = max_prompt_tokens
         self.pad_token_id = pad_token_id
 
@@ -67,12 +64,6 @@ class ReplayBuffer:
         self.dones = init_tensor((size, 1))
         self.rnn_states = init_tensor((size, *rnn_state_shape))
         self.actions = init_tensor((size, *action_shape))
-        self.action_token_ids = torch.full(
-            (size, max_new_tokens),
-            pad_token_id,
-            dtype=torch.long,
-            device=self.storage_device,
-        )
         self.task_prompt_token_ids = torch.full(
             (size, max_prompt_tokens),
             pad_token_id,
@@ -103,7 +94,6 @@ class ReplayBuffer:
             self.dones[:curr_size].to(self.output_device, non_blocking=True),
             self.rnn_states[:curr_size].to(self.output_device, non_blocking=True),
             self.actions[:curr_size].to(self.output_device, non_blocking=True),
-            self.action_token_ids[:curr_size].to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[:curr_size].to(self.output_device, non_blocking=True),
         )
 
@@ -115,7 +105,6 @@ class ReplayBuffer:
         done: bool,
         rnn_state: torch.Tensor,
         action: torch.Tensor,
-        action_token_ids: list[int],
         task_prompt_token_ids: list[int],
     ) -> None:
         # Copy tensors to buffer storage
@@ -125,12 +114,6 @@ class ReplayBuffer:
         self.dones[self.idx].fill_(done)
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
-
-        self.action_token_ids[self.idx].fill_(self.pad_token_id)
-        token_len = min(len(action_token_ids), self.max_new_tokens)
-        self.action_token_ids[self.idx, :token_len] = torch.tensor(
-            action_token_ids[:token_len], dtype=torch.long, device=self.storage_device
-        )
 
         self.task_prompt_token_ids[self.idx].fill_(self.pad_token_id)
         if len(task_prompt_token_ids) > self.max_prompt_tokens:
@@ -167,7 +150,6 @@ class ReplayBuffer:
             self.dones[seq_indices].to(self.output_device, non_blocking=True),
             self.rnn_states[seq_indices].to(self.output_device, non_blocking=True),
             self.actions[seq_indices].to(self.output_device, non_blocking=True),
-            self.action_token_ids[seq_indices].to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[seq_indices].to(self.output_device, non_blocking=True),
         )
 
@@ -185,7 +167,6 @@ class ReplayBuffer:
             self.dones[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.rnn_states[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.actions[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.action_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[indices]
             .unsqueeze(0)
             .to(self.output_device, non_blocking=True),

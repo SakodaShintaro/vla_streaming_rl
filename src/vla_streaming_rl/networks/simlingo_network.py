@@ -269,7 +269,6 @@ class SimLingoNetwork(NetworkInterface):
             rnn_state=torch.zeros(1),
             next_image=np.zeros((1, 1, 3), dtype=np.uint8),
             next_reward=0.0,
-            action_token_ids=[],
             features=features,
             activations=ActivationFeatures(
                 state=s, actor=action, critic=critic_out, state_predictor=s

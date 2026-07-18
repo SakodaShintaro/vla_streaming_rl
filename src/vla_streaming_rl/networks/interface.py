@@ -65,7 +65,6 @@ class InferResult:
     rnn_state: torch.Tensor  # (B, ...)
     next_image: np.ndarray  # predicted next image (H, W, 3)
     next_reward: float  # predicted next reward
-    action_token_ids: list  # token ids for VLM action chunk; empty for non-VLM
     activations: ActivationFeatures  # forward-pass features for statistical metrics
     features: torch.Tensor
 
