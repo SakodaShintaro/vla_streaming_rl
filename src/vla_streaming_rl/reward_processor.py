@@ -52,23 +52,22 @@ class RewardProcessor:
         return result
 
 
-class VelocityProcessor:
-    """Running mean/std normalizer for the 3-D agent velocity."""
+class RunningNormalizer:
+    """Per-component running mean/std normalizer for a fixed-width vector."""
 
     def __init__(self, dim: int) -> None:
         self.return_rms = gym.wrappers.utils.RunningMeanStd(shape=(dim,))
         self.epsilon = 1e-8
 
-    def update(self, velocity: np.ndarray) -> None:
-        self.return_rms.update(velocity[None, :])
+    def update(self, x: np.ndarray) -> None:
+        self.return_rms.update(x[None, :])
 
-    def normalize(self, velocity: torch.Tensor) -> torch.Tensor:
-        mean = torch.as_tensor(self.return_rms.mean, dtype=velocity.dtype, device=velocity.device)
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        mean = torch.as_tensor(self.return_rms.mean, dtype=x.dtype, device=x.device)
         std = torch.sqrt(
-            torch.as_tensor(self.return_rms.var, dtype=velocity.dtype, device=velocity.device)
-            + self.epsilon
+            torch.as_tensor(self.return_rms.var, dtype=x.dtype, device=x.device) + self.epsilon
         )
-        return (velocity - mean) / std
+        return (x - mean) / std
 
 
 if __name__ == "__main__":

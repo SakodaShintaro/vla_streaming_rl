@@ -315,15 +315,17 @@ class StandardAgent(Agent):
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
-        the network-packed obs tensor (image plus the raw velocity; the network
-        updates its running velocity stats here and normalizes at unpack), its
-        encoded latent ``obs_z``, and the tokenized task prompt. ``info`` is unused
-        by the obs-driven standard agent."""
+        the network-packed obs tensor (image plus the raw scalar observations
+        ``[velocity, episode_return, pass_mark]``; the network updates its running
+        stats here and normalizes at unpack), its encoded latent ``obs_z``, and the
+        tokenized task prompt. ``info`` is unused by the obs-driven standard agent."""
         del info
         image = torch.from_numpy(obs["image"]).to(self.device)
-        velocity = obs["velocity"]
-        self.network.observe_velocity(velocity)
-        packed = self.network.pack_obs(image, torch.from_numpy(velocity).to(self.device))
+        scalar_obs = np.concatenate(
+            [obs["velocity"], obs["episode_return"], obs["pass_mark"]]
+        ).astype(np.float32)
+        self.network.observe_scalar_obs(scalar_obs)
+        packed = self.network.pack_obs(image, torch.from_numpy(scalar_obs).to(self.device))
         with torch.inference_mode():
             obs_z = self.network.image_processor.encode(image.unsqueeze(0)).squeeze(0)
         task_prompt_token_ids = self.network.tokenize_task_prompt(obs["language"])

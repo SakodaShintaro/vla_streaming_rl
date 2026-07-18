@@ -254,6 +254,17 @@ class AnimalAIEnv(gym.Env):
         vec = obs_list[1][idx]
         return np.array([float(vec[1]), float(vec[2]), float(vec[3])], dtype=np.float32)
 
+    def _build_prompt(self) -> str:
+        """Task text plus the current scalar observations, so a language-conditioned
+        policy reads the same values the scalar observation vector carries."""
+        vx, vy, vz = self._agent_velocity
+        return (
+            f"{self.prompt} "
+            f"Velocity: ({vx:.2f}, {vy:.2f}, {vz:.2f}). "
+            f"Return so far: {self._episode_return:.2f}. "
+            f"Pass mark: {self.pass_mark:.2f}."
+        )
+
     def _render_topdown(self) -> np.ndarray:
         img_size = 256
         scale = img_size / _ARENA_SIZE_M
@@ -354,7 +365,7 @@ class AnimalAIEnv(gym.Env):
         self._agent_xz = self._extract_agent_xz(decision_steps.obs, 0)
         self._agent_velocity = self._extract_agent_velocity(decision_steps.obs, 0)
         info = {
-            "task_prompt": self.prompt,
+            "task_prompt": self._build_prompt(),
             "arena_yaml": arena_yaml,
             "arena_name": self.arena_name,
             "pass_mark": self.pass_mark,
@@ -399,7 +410,7 @@ class AnimalAIEnv(gym.Env):
         truncated = episode_over and interrupted
 
         info = {
-            "task_prompt": self.prompt,
+            "task_prompt": self._build_prompt(),
             "episode_step": self.episode_step,
             "arena_name": self.arena_name,
             "pass_mark": self.pass_mark,

@@ -213,11 +213,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def packed_obs_shape(self) -> tuple[int, ...]:
         return tuple(self.observation_space_shape)
 
-    def observe_velocity(self, velocity) -> None:
-        del velocity
+    def observe_scalar_obs(self, scalar_obs) -> None:
+        del scalar_obs
 
-    def pack_obs(self, image: torch.Tensor, velocity: torch.Tensor) -> torch.Tensor:
-        del velocity
+    def pack_obs(self, image: torch.Tensor, scalar_obs: torch.Tensor) -> torch.Tensor:
+        del scalar_obs
         return image
 
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:

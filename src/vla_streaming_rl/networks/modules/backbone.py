@@ -36,7 +36,7 @@ class SpatialTemporalEncoder(nn.Module):
         seq_len: int,
         n_layer: int,
         action_dim: int,
-        velocity_dim: int,
+        scalar_obs_dim: int,
         temporal_model_type: str,
         use_image_only: bool,
     ) -> None:
@@ -55,7 +55,7 @@ class SpatialTemporalEncoder(nn.Module):
         self.hidden_w = self.image_processor.output_shape[2]
         self.image_tokens_num = self.hidden_h * self.hidden_w
         action_tokens_num = action_dim
-        velocity_tokens_num = velocity_dim
+        scalar_obs_tokens_num = scalar_obs_dim
         reward_tokens_num = 1
         register_tokens_num = 1
 
@@ -63,7 +63,7 @@ class SpatialTemporalEncoder(nn.Module):
             self.image_tokens_num
             + action_tokens_num
             + reward_tokens_num
-            + velocity_tokens_num
+            + scalar_obs_tokens_num
             + register_tokens_num
         )
 
@@ -83,7 +83,7 @@ class SpatialTemporalEncoder(nn.Module):
                 self.image_tokens_num
                 + action_tokens_num
                 + reward_tokens_num
-                + velocity_tokens_num
+                + scalar_obs_tokens_num
                 + register_tokens_num
             )
         )
@@ -105,7 +105,7 @@ class SpatialTemporalEncoder(nn.Module):
         actions: torch.Tensor,  #  (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)
-        velocity: torch.Tensor,  # (B, T, velocity_dim)
+        scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
     ) -> tuple[torch.Tensor, torch.Tensor, str]:
         """
         Returns:
@@ -133,17 +133,17 @@ class SpatialTemporalEncoder(nn.Module):
         # [B, T, 1] -> [B, T, 1, C']
         reward_embed = self.reward_processor.encode(rewards)  # (B, T, 1, C')
 
-        # [B, T, velocity_dim] -> [B, T, velocity_dim, C']
-        velocity_embed = get_fourier_embeds_from_coordinates(self.hidden_image_dim, velocity)
+        # [B, T, scalar_obs_dim] -> [B, T, scalar_obs_dim, C']
+        scalar_obs_embed = get_fourier_embeds_from_coordinates(self.hidden_image_dim, scalar_obs)
 
         # [B, T, 1, C']
         register_token = torch.zeros(
             (B, T, 1, self.hidden_image_dim), device=images.device, dtype=images.dtype
         )
 
-        # [B, T, S+action_dim+1+velocity_dim+1, C']
+        # [B, T, S+action_dim+1+scalar_obs_dim+1, C']
         all_embed = torch.cat(
-            [image_embed, action_embed, reward_embed, velocity_embed, register_token], dim=2
+            [image_embed, action_embed, reward_embed, scalar_obs_embed, register_token], dim=2
         )
 
         # Apply STT to all frames
