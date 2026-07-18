@@ -156,7 +156,6 @@ class LiberoPi05Agent(Agent):
                 obs_z_shape=(1,),
                 rnn_state_shape=(1,),
                 action_shape=(self.action_dim,),
-                velocity_shape=(1,),
                 output_device=self.device,
                 storage_device=torch.device("cpu"),
                 max_new_tokens=0,
@@ -187,7 +186,6 @@ class LiberoPi05Agent(Agent):
             self._prev_action,
             [],
             [],
-            self._dummy,
         )
         if terminated or truncated:
             self._episode_reset = True
@@ -222,7 +220,6 @@ class LiberoPi05Agent(Agent):
                             r_seq=self._dummy,
                             rnn_state=self._dummy,
                             task_prompts=[],
-                            velocity_seq=self._dummy,
                         )
                     )
             metrics.update(infer_result.value_report)
@@ -276,7 +273,6 @@ class LiberoPi05Agent(Agent):
                 obs_z_shape=(1,),
                 rnn_state_shape=(1,),
                 action_shape=(self.action_dim,),
-                velocity_shape=(1,),
                 output_device=self.device,
                 storage_device=torch.device("cpu"),
                 max_new_tokens=0,
@@ -307,7 +303,6 @@ class LiberoPi05Agent(Agent):
             self._prev_action,
             [],
             [],
-            self._dummy,
         )
 
         if not self._env_action_queue:
@@ -319,7 +314,6 @@ class LiberoPi05Agent(Agent):
                     r_seq=self._dummy,
                     rnn_state=self._dummy,
                     task_prompts=[],
-                    velocity_seq=self._dummy,
                 )
             )
             metrics.update(infer_result.value_report)

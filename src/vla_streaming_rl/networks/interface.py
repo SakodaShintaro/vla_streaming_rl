@@ -36,7 +36,6 @@ class InferInput:
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
     task_prompts: list[str]  # one prompt per batch element
-    velocity_seq: torch.Tensor  # (B, T, velocity_dim)
 
 
 @dataclass
