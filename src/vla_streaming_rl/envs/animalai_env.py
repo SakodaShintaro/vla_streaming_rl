@@ -155,11 +155,15 @@ class AnimalAIEnv(gym.Env):
         # success the current yaml is added to `_cleared_arenas` and the pointer
         # advances past any yamls already in cleared. On failure the pointer
         # stays. Each reset alternates between progression and revisit modes
-        # whenever any arena has been cleared.
+        # whenever any arena has been cleared. Revisits pick the cleared arena
+        # with the lowest success rate so far.
         self._next_yaml_idx = 0
         self._episode_return = 0.0
         self._cleared_arenas: set[str] = set()
         self._is_revisit = False
+        # Per-arena episode counts over every attempt (progression and revisit).
+        self._arena_attempts: dict[str, int] = dict.fromkeys(self._all_arenas, 0)
+        self._arena_successes: dict[str, int] = dict.fromkeys(self._all_arenas, 0)
 
         self.binary_path = str(Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64")
         self.resolution = resolution
@@ -201,6 +205,10 @@ class AnimalAIEnv(gym.Env):
             and self._all_arenas[self._next_yaml_idx] in self._cleared_arenas
         ):
             self._next_yaml_idx += 1
+
+    def _success_rate(self, arena_stem: str) -> float:
+        """Success rate over all attempts. Cleared arenas always have >=1 attempt."""
+        return self._arena_successes[arena_stem] / self._arena_attempts[arena_stem]
 
     def _on_episode_end(self, success: bool) -> bool:
         """Mark the just-finished progression arena cleared on success. Returns
@@ -348,7 +356,9 @@ class AnimalAIEnv(gym.Env):
         else:
             self._is_revisit = not self._is_revisit
         if self._is_revisit:
-            choices = sorted(self._cleared_arenas)
+            rates = {stem: self._success_rate(stem) for stem in sorted(self._cleared_arenas)}
+            lowest = min(rates.values())
+            choices = [stem for stem, rate in rates.items() if rate == lowest]
             arena_stem = choices[int(self.np_random.integers(len(choices)))]
             arena_yaml = str(self.competition_dir / f"{arena_stem}.yaml")
         else:
@@ -423,6 +433,8 @@ class AnimalAIEnv(gym.Env):
             # Pass-mark bonus: reward crossing the clear threshold, penalize missing it.
             # Computed from the pre-bonus return, then folded into this tick's reward.
             reward += 1.0 if success else -1.0
+            self._arena_attempts[self.arena_name] += 1
+            self._arena_successes[self.arena_name] += int(success)
             if self._is_revisit:
                 advanced = False
             else:
