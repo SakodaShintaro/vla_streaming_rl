@@ -108,16 +108,20 @@ def add_text_label_on_top(image: np.ndarray, text: str) -> np.ndarray:
     return result
 
 
-def overlay_caption(image: np.ndarray, text: str, max_lines: int = 3) -> np.ndarray:
+_CAPTION_LINE_BUDGET = 5
+
+
+def overlay_caption(image: np.ndarray, text: str) -> np.ndarray:
     """Append a word-wrapped text caption on a dark band below ``image``.
 
     Used to annotate a panel with free-form text (e.g. the LIBERO task prompt)
-    that is too long to fit on a single-line panel label. Returns a new image;
-    empty ``text`` returns the (uint8-converted) image unchanged.
+    that is too long to fit on a single-line panel label. The band always
+    reserves ``_CAPTION_LINE_BUDGET`` lines of height so the returned frame size
+    stays constant across a run even when the text length changes step to step
+    (the video writer requires identical frame sizes); text beyond the budget is
+    dropped and a shorter text simply leaves blank lines.
     """
     image = convert_to_uint8(image)
-    if not text:
-        return image
 
     width = image.shape[1]
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -137,11 +141,11 @@ def overlay_caption(image: np.ndarray, text: str, max_lines: int = 3) -> np.ndar
             current = word
     if current:
         lines.append(current)
-    lines = lines[:max_lines]
+    lines = lines[:_CAPTION_LINE_BUDGET]
 
     (_, text_height), baseline = cv2.getTextSize("Ag", font, font_scale, thickness)
     line_height = text_height + baseline + 4
-    band_height = line_height * len(lines) + 6
+    band_height = line_height * _CAPTION_LINE_BUDGET + 6
     if band_height % 2 != 0:  # keep even for the libx264 video writer
         band_height += 1
 

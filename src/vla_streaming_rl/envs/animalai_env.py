@@ -420,6 +420,9 @@ class AnimalAIEnv(gym.Env):
         }
         if terminated or truncated:
             success = self._episode_return >= self.pass_mark
+            # Pass-mark bonus: reward crossing the clear threshold, penalize missing it.
+            # Computed from the pre-bonus return, then folded into this tick's reward.
+            reward += 1.0 if success else -1.0
             if self._is_revisit:
                 advanced = False
             else:
