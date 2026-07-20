@@ -26,10 +26,15 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     return action_array, len(matches) > 0
 
 
-def make_animalai_env(resolution: int) -> gym.Env:
+def make_animalai_env(resolution: int, revisit_temperature: float) -> gym.Env:
     from vla_streaming_rl.envs.animalai_env import AnimalAIEnv
 
-    return AnimalAIEnv(resolution=resolution, seed=0, base_port=5005)
+    return AnimalAIEnv(
+        resolution=resolution,
+        seed=0,
+        base_port=5005,
+        revisit_temperature=revisit_temperature,
+    )
 
 
 def make_libero_env(

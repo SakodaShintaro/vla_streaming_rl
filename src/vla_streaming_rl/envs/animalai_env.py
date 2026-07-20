@@ -141,8 +141,10 @@ class AnimalAIEnv(gym.Env):
         resolution: int,
         seed: int,
         base_port: int,
+        revisit_temperature: float,
     ):
         super().__init__()
+        self.revisit_temperature = revisit_temperature
         self.competition_dir = Path("./external/animal-ai/configs/competition")
         self.arena_sets = _discover_arena_sets(self.competition_dir)
         if self.arena_sets.size == 0:
@@ -155,8 +157,8 @@ class AnimalAIEnv(gym.Env):
         # success the current yaml is added to `_cleared_arenas` and the pointer
         # advances past any yamls already in cleared. On failure the pointer
         # stays. Each reset alternates between progression and revisit modes
-        # whenever any arena has been cleared. Revisits pick the cleared arena
-        # with the lowest success rate so far.
+        # whenever any arena has been cleared. Revisits sample a cleared arena
+        # with probability softmax(failure_rate / revisit_temperature).
         self._next_yaml_idx = 0
         self._episode_return = 0.0
         self._cleared_arenas: set[str] = set()
@@ -356,10 +358,14 @@ class AnimalAIEnv(gym.Env):
         else:
             self._is_revisit = not self._is_revisit
         if self._is_revisit:
-            rates = {stem: self._success_rate(stem) for stem in sorted(self._cleared_arenas)}
-            lowest = min(rates.values())
-            choices = [stem for stem, rate in rates.items() if rate == lowest]
-            arena_stem = choices[int(self.np_random.integers(len(choices)))]
+            stems = sorted(self._cleared_arenas)
+            failures = np.array(
+                [1.0 - self._success_rate(stem) for stem in stems], dtype=np.float64
+            )
+            logits = failures / self.revisit_temperature
+            weights = np.exp(logits - logits.max())
+            probs = weights / weights.sum()
+            arena_stem = stems[int(self.np_random.choice(len(stems), p=probs))]
             arena_yaml = str(self.competition_dir / f"{arena_stem}.yaml")
         else:
             arena_yaml = self._current_yaml_path()

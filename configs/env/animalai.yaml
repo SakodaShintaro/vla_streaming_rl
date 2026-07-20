@@ -6,7 +6,11 @@ image_save_interval: 10
 # Curriculum: each reset has 50% chance of trying the next uncleared yaml in
 # index order (progression) and 50% chance of picking a random already-cleared
 # yaml (revisit). A yaml is "cleared" the first time the agent succeeds on it.
+# Revisits sample a cleared yaml with probability softmax(failure_rate /
+# revisit_temperature); lower temperature concentrates on the worst arenas.
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_env
   # - resolution: square camera height/width (kept divisible by the VAE stride 8).
   resolution: 96
+  # - revisit_temperature: softmax temperature over per-arena failure rate.
+  revisit_temperature: 1.0
