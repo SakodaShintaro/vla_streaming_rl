@@ -101,6 +101,8 @@ torchvision = { index = "pytorch-cu128" }
 [tool.ruff]
 line-length = 100
 src = ["src"]
+# Vendored third-party module — kept verbatim from huggingface/diffusers.
+extend-exclude = ["src/vla_streaming_rl/cosmos3/transformer_cosmos3.py"]
 
 [tool.ruff.lint]
 select = ["I", "F"]
