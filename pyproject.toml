@@ -74,10 +74,17 @@ packages = ["src/vla_streaming_rl"]
 
 [tool.uv]
 exclude-newer = "40 days"
-exclude-newer-package = { torch = false, torchvision = false }
+# The pinned git diffusers requires huggingface-hub>=1.23 (which in turn needs
+# click>=8.4.2); both are newer than the exclude-newer window would allow, so
+# exempt them from it.
+exclude-newer-package = { torch = false, torchvision = false, "huggingface-hub" = false, click = false }
 index-url = "https://pypi.org/simple"
 override-dependencies = [
     "protobuf==3.20.3",
+    # lerobot caps diffusers <0.36, but the Cosmos3 pipeline needs the git build.
+    # lerobot only uses stable diffusers APIs (Attention/FeedForward/schedulers/
+    # embeddings), all present in the pinned commit, so overriding the cap is safe.
+    "diffusers @ git+https://github.com/huggingface/diffusers.git@58a0c4d58d92b2e30ef08c506c267cbd4dfe9bca",
     "numpy>=1.26.4",
     "grpcio>=1.60",
     "pettingzoo>=1.24",
@@ -101,8 +108,6 @@ torchvision = { index = "pytorch-cu128" }
 [tool.ruff]
 line-length = 100
 src = ["src"]
-# Vendored third-party module — kept verbatim from huggingface/diffusers.
-extend-exclude = ["src/vla_streaming_rl/cosmos3/transformer_cosmos3.py"]
 
 [tool.ruff.lint]
 select = ["I", "F"]

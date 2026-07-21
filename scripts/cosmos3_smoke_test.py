@@ -9,13 +9,23 @@ head is differentiable (the prerequisite for DACER2-style policy RL).
 real mode (--real): download and load the published `nvidia/Cosmos3-Edge`
 transformer weights (~6.7 GB, bf16) and run one forward on GPU with dummy latents
 shaped to the real config, confirming the checkpoint maps onto the vendored class.
+
+pipeline mode (--pipeline): assemble the full vendored Cosmos3OmniPipeline from the
+real components (transformer, WanVAE, tokenizer, scheduler) and run an end-to-end
+action-policy generation on a dummy observation, producing a real action chunk.
 """
 
 import argparse
 
+import numpy as np
 import torch
+from PIL import Image
 
-from vla_streaming_rl.cosmos3 import Cosmos3OmniTransformer
+from vla_streaming_rl.cosmos3 import (
+    Cosmos3OmniPipeline,
+    Cosmos3OmniTransformer,
+    CosmosActionCondition,
+)
 
 REAL_REPO = "nvidia/Cosmos3-Edge"
 
@@ -23,6 +33,7 @@ REAL_REPO = "nvidia/Cosmos3-Edge"
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--real", action="store_true")
+    parser.add_argument("--pipeline", action="store_true")
     return parser.parse_args()
 
 
@@ -148,5 +159,60 @@ def run_real():
     print("REAL WEIGHT LOAD TEST PASSED")
 
 
+def run_pipeline():
+    device = torch.device("cuda")
+    chunk_size = 8
+    domain_name = "bridge_orig_lerobot"
+
+    # With diffusers pulled from git, from_pretrained resolves the Cosmos3 classes off
+    # model_index.json (including use_native_flow_schedule=True), so the canonical load
+    # path works directly — no manual component assembly or scheduler workaround.
+    print(f"loading {REAL_REPO} pipeline (bf16) ...")
+    pipe = Cosmos3OmniPipeline.from_pretrained(
+        REAL_REPO, torch_dtype=torch.bfloat16, enable_safety_checker=False
+    ).to(device)
+    # WanVAE was trained without amp; bf16 encode overflows to non-finite latents that
+    # poison the whole joint sequence. Keep the VAE in fp32 (a WanVAE property, not a
+    # diffusers-version issue).
+    pipe.vae.to(torch.float32)
+    print("pipeline loaded")
+
+    # A smooth gradient frame (a random-noise image encodes to wildly OOD VAE
+    # latents and produces non-finite outputs at low step counts).
+    grad = np.linspace(40, 210, 256, dtype=np.uint8)
+    canvas = np.repeat(grad[None, :, None], 256, axis=0).repeat(3, axis=2)
+    frames = [Image.fromarray(canvas) for _ in range(chunk_size + 1)]
+    result = pipe(
+        prompt="pick up the object on the table",
+        action=CosmosActionCondition(
+            mode="policy",
+            chunk_size=chunk_size,
+            domain_name=domain_name,
+            resolution_tier=256,
+            video=frames,
+            view_point="ego_view",
+        ),
+        fps=24.0,
+        num_inference_steps=10,
+        guidance_scale=1.0,
+        generator=torch.Generator().manual_seed(0),
+        use_system_prompt=False,
+        enable_safety_check=False,
+    )
+    action = result.action[0]
+    finite = bool(torch.isfinite(action.float()).all())
+    print(f"domain: {domain_name}  chunk_size: {chunk_size}")
+    print(f"action chunk shape: {tuple(action.shape)}")
+    print(f"action finite: {finite}")
+    print(f"gpu mem allocated: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+    assert finite, "action contains non-finite values"
+    print("PIPELINE ACTION-POLICY TEST PASSED")
+
+
 args = parse_args()
-run_real() if args.real else run_dummy()
+if args.pipeline:
+    run_pipeline()
+elif args.real:
+    run_real()
+else:
+    run_dummy()
