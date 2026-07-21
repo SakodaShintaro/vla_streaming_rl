@@ -193,6 +193,27 @@ def build_network(
             detach_critic=bool(args.detach_critic),
         )
 
+    elif args.network_class == "cosmos_edge":
+        from vla_streaming_rl.networks.cosmos_edge_network import CosmosEdgeNetwork
+
+        assert args.horizon == args.chunk_size, (
+            f"cosmos_edge requires horizon == chunk_size, got {args.horizon} != {args.chunk_size}"
+        )
+        network = CosmosEdgeNetwork(
+            device=device,
+            value_head_factory=value_head_factory,
+            chunk_size=args.chunk_size,
+            domain_name=args.domain_name,
+            resolution_tier=args.resolution_tier,
+            prompt=args.cosmos_prompt,
+            num_inference_steps=args.num_inference_steps,
+            actor_denoising_steps=args.actor_denoising_steps,
+            q_grad_eta=args.q_grad_eta,
+            dacer_loss_weight=args.dacer_loss_weight,
+            critic_loss_weight=args.critic_loss_weight,
+            detach_critic=bool(args.detach_critic),
+        )
+
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
 

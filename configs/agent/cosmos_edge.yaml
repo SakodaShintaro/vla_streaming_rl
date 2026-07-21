@@ -1,0 +1,48 @@
+# @package _global_
+# Cosmos3-Edge av policy + flow-matching policy RL on CARLA/Bench2Drive.
+#
+# The Cosmos3-Edge backbone (28-layer MoT) and WanVAE are frozen; only the action
+# projection heads (action_proj_in/out + action_modality_embed, the policy μ) and
+# the injected action-value critic learn. The action is the `av` embodiment's
+# ego-pose chunk (raw dim 9); the agent converts it to (steer, gas_or_brake) via
+# SimLingo's TrajectoryToControl PID.
+#
+# Learning (see networks/cosmos_edge_network.py):
+#   * Critic — TD bootstrap on the av action chunk; bootstrap action sampled from
+#     the policy itself. State = pooled backbone understanding stream (2048-D).
+#   * Actor — DACER2: advantage maximization -E[Q(s, pi(s))] through the
+#     differentiable action denoiser, plus a Q-gradient-guided flow-matching term.
+#
+# The Cosmos3-Edge checkpoint is pulled from the HF hub on first use.
+defaults:
+  - base_network
+  - base_off_policy
+  - base_streaming
+  - base_vlm
+  - _self_
+
+agent_type: cosmos_edge
+network_class: cosmos_edge
+learning_mode: off_policy
+batch_size: 1
+actor_lr: 2e-7
+critic_lr: 5e-7
+
+image_save_interval: 50
+print_interval: 1
+learning_starts: 800
+buffer_size: 4000
+
+# The critic scores the full av action chunk, so the value-head horizon must equal
+# the policy's chunk_size (asserted in the network).
+chunk_size: 8
+horizon: 8
+
+# Cosmos3-Edge av policy knobs.
+domain_name: av
+resolution_tier: 256
+cosmos_prompt: "drive forward along the lane, follow the road and traffic rules"
+num_inference_steps: 4
+actor_denoising_steps: 1
+q_grad_eta: 0.05
+dacer_loss_weight: 0.05

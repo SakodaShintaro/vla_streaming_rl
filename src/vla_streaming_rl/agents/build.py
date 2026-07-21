@@ -86,6 +86,25 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             reach_reward_scale=args.reach_reward_scale,
         )
 
+    elif args.agent_type == "cosmos_edge":
+        from vla_streaming_rl.agents.cosmos_edge import CosmosEdgeAgent
+
+        agent = CosmosEdgeAgent(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            network=network,
+            learning_mode=args.learning_mode,
+            horizon=args.horizon,
+            buffer_size=args.buffer_size,
+            batch_size=args.batch_size,
+            learning_starts=args.learning_starts,
+            actor_lr=args.actor_lr,
+            critic_lr=args.critic_lr,
+            weight_decay=args.weight_decay,
+            max_grad_norm=args.max_grad_norm,
+            gamma=args.gamma,
+        )
+
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
 
