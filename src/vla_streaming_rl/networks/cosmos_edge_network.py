@@ -8,8 +8,9 @@ state scored by the critic is the pooled backbone understanding stream.
 
 Rollout and training both sample through the same differentiable action denoiser
 (:class:`CosmosEdgePolicy`), with more integration steps at rollout than in the
-DACER2 actor unroll. Observations are stored as the resized RGB frame and
-re-encoded here; the fixed driving prompt is a network attribute.
+DACER2 actor unroll. The navigation-aware prompt is built by the environment and
+arrives via ``obs["language"]``; the agent stores its token ids in the replay so
+this network can rebuild the same conditioning when it re-encodes at loss time.
 """
 
 import numpy as np
@@ -32,6 +33,7 @@ from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 
 REAL_REPO = "nvidia/Cosmos3-Edge"
+MAX_PROMPT_TOKENS = 64
 
 
 class CosmosEdgeNetwork(NetworkInterface):
@@ -43,7 +45,6 @@ class CosmosEdgeNetwork(NetworkInterface):
         chunk_size: int,
         domain_name: str,
         resolution_tier: int,
-        prompt: str,
         num_inference_steps: int,
         actor_denoising_steps: int,
         q_grad_eta: float,
@@ -63,8 +64,9 @@ class CosmosEdgeNetwork(NetworkInterface):
         self.chunk_size = int(chunk_size)
         self.domain_name = str(domain_name)
         self.resolution_tier = int(resolution_tier)
-        self.prompt = str(prompt)
         self.num_inference_steps = int(num_inference_steps)
+        pad = self.policy.text_tokenizer.pad_token_id
+        self.pad_id = int(pad) if pad is not None else 0
         self.actor_denoising_steps = int(actor_denoising_steps)
         self.q_grad_eta = float(q_grad_eta)
         self.dacer_loss_weight = float(dacer_loss_weight)
@@ -91,12 +93,17 @@ class CosmosEdgeNetwork(NetworkInterface):
         return torch.zeros(1)
 
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
-        del task_prompt
-        return []
+        return self.policy.text_tokenizer.encode(task_prompt, add_special_tokens=False)[
+            :MAX_PROMPT_TOKENS
+        ]
+
+    def _detokenize(self, token_ids: torch.Tensor) -> str:
+        ids = [int(t) for t in token_ids.tolist() if int(t) != self.pad_id]
+        return self.policy.text_tokenizer.decode(ids, skip_special_tokens=True)
 
     @torch.no_grad()
     def infer(self, data: InferInput) -> InferResult:
-        enc = self._encode(data.s_seq)
+        enc = self._encode(data.s_seq, data.task_prompts[0])
         action = self.policy.sample_action_chunk(enc, self.num_inference_steps)
         critic_out = self.critic(enc.state[None], action[None]).output
         return InferResult(
@@ -115,7 +122,8 @@ class CosmosEdgeNetwork(NetworkInterface):
         )
 
     def pack_obs(self, frame: torch.Tensor) -> torch.Tensor:
-        """Flatten one resized RGB frame (C, H, W) into a float vector for the buffer."""
+        """Flatten one resized RGB frame (C, H, W) into a float vector for the buffer.
+        The navigation prompt travels separately in the buffer's token-id slot."""
         if self._obs_schema is None:
             self._obs_schema = (tuple(frame.shape), frame.dtype)
             self._obs_flat_dim = int(np.prod(frame.shape))
@@ -132,8 +140,11 @@ class CosmosEdgeNetwork(NetworkInterface):
     def _unpack_window(self, data: ReplayBufferData) -> ReplayBufferData:
         cur_frame = self._unpack_obs(data.observations[0, 0])
         next_frame = self._unpack_obs(data.observations[0, -1])
+        # Rebuild the rollout prompts from the stored token ids (first / last step).
+        cur_prompt = self._detokenize(data.task_prompt_token_ids[0, 0])
+        next_prompt = self._detokenize(data.task_prompt_token_ids[0, -1])
         return ReplayBufferData(
-            observations=[cur_frame, next_frame],
+            observations=[(cur_frame, cur_prompt), (next_frame, next_prompt)],
             actions=data.actions[:, 1:].contiguous(),
             rewards=data.rewards[:, 1:, 0],
             dones=data.dones[:, 1:, 0],
@@ -144,14 +155,14 @@ class CosmosEdgeNetwork(NetworkInterface):
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         data = self._unpack_window(data)
-        cur_frame, next_frame = data.observations
+        cur_obs, next_obs = data.observations
         action_chunk = data.actions
         chunk_rewards = data.rewards
         chunk_dones = data.dones
 
-        enc = self._encode(cur_frame)
+        enc = self._encode(*cur_obs)
         with torch.no_grad():
-            next_enc = self._encode(next_frame)
+            next_enc = self._encode(*next_obs)
             next_action = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
             next_output = self.critic(next_enc.state[None], next_action[None]).output
         target_value = self.critic.compute_target_value(next_output, chunk_rewards, chunk_dones)
@@ -171,14 +182,14 @@ class CosmosEdgeNetwork(NetworkInterface):
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         data = self._unpack_window(data)
-        cur_frame, next_frame = data.observations
+        cur_obs, next_obs = data.observations
         action_chunk = data.actions
         chunk_rewards = data.rewards
         chunk_dones = data.dones
 
-        enc = self._encode(cur_frame)
+        enc = self._encode(*cur_obs)
         with torch.no_grad():
-            next_enc = self._encode(next_frame)
+            next_enc = self._encode(*next_obs)
             next_action = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
             next_output = self.critic(next_enc.state[None], next_action[None]).output
             exec_action = self.policy.sample_action_chunk(next_enc, self.num_inference_steps)
@@ -229,11 +240,11 @@ class CosmosEdgeNetwork(NetworkInterface):
         arr = (frame.detach().float().clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         return Image.fromarray(np.transpose(arr, (1, 2, 0)))
 
-    def _encode(self, frame: torch.Tensor):
+    def _encode(self, frame: torch.Tensor, prompt: str):
         pil = self._to_pil(frame)
         return self.policy.encode(
             frames=[pil],
-            prompt=self.prompt,
+            prompt=prompt,
             chunk_size=self.chunk_size,
             domain_name=self.domain_name,
             resolution_tier=self.resolution_tier,

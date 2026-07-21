@@ -34,7 +34,7 @@ from agents.navigation.controller import VehiclePIDController
 from torch import optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.networks.cosmos_edge_network import CosmosEdgeNetwork
+from vla_streaming_rl.networks.cosmos_edge_network import MAX_PROMPT_TOKENS, CosmosEdgeNetwork
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.utils import create_reward_image
@@ -108,7 +108,9 @@ class CosmosEdgeAgent(Agent):
         from vla_streaming_rl.replay_buffer import ReplayBuffer
 
         # seq_len = chunk_size + 1: a sampled window reconstructs the executed
-        # chunk (one av row per tick) plus the bootstrap next-observation.
+        # chunk (one av row per tick) plus the bootstrap next-observation. The
+        # navigation prompt (built by the env, in obs["language"]) is tokenized
+        # into the buffer's prompt slot so the loss can rebuild the conditioning.
         self.rb = ReplayBuffer(
             size=buffer_size,
             seq_len=self.chunk_size + 1,
@@ -118,8 +120,8 @@ class CosmosEdgeAgent(Agent):
             action_shape=(self.action_dim,),
             output_device=self.device,
             storage_device=torch.device("cpu"),
-            max_prompt_tokens=0,
-            pad_token_id=0,
+            max_prompt_tokens=MAX_PROMPT_TOKENS,
+            pad_token_id=network.pad_id,
         )
         self._dummy = torch.zeros(1, device=self.device)
 
@@ -184,6 +186,10 @@ class CosmosEdgeAgent(Agent):
     ) -> StepResult:
         del global_step
         frame = self._preprocess(obs, info)
+        # The navigation prompt is built by the env and delivered in obs["language"];
+        # store its token ids so the loss can rebuild the same conditioning.
+        prompt = obs["language"]
+        token_ids = self.network.tokenize_task_prompt(prompt)
         self.rb.add(
             self.network.pack_obs(frame).to(self.device),
             self._dummy,
@@ -191,7 +197,7 @@ class CosmosEdgeAgent(Agent):
             terminated or truncated,
             self._dummy,
             self._prev_action,
-            [],
+            token_ids,
         )
 
         # Re-plan a fresh av chunk at the start of each open-loop window.
@@ -203,7 +209,7 @@ class CosmosEdgeAgent(Agent):
                     a_seq=self._dummy,
                     r_seq=self._dummy,
                     rnn_state=self._dummy,
-                    task_prompts=[],
+                    task_prompts=[prompt],
                 )
             )
             self._chunk = live.action.squeeze(0)  # (chunk, 9)

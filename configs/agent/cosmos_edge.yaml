@@ -38,10 +38,10 @@ buffer_size: 4000
 chunk_size: 8
 horizon: 8
 
-# Cosmos3-Edge av policy knobs.
+# Cosmos3-Edge av policy knobs. The navigation prompt is built by the CARLA env
+# (route command -> maneuver sentence) and delivered via obs["language"].
 domain_name: av
 resolution_tier: 256
-cosmos_prompt: "drive forward along the lane, follow the road and traffic rules"
 num_inference_steps: 4
 actor_denoising_steps: 1
 q_grad_eta: 0.05

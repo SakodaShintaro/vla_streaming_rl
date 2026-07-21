@@ -205,7 +205,6 @@ def build_network(
             chunk_size=args.chunk_size,
             domain_name=args.domain_name,
             resolution_tier=args.resolution_tier,
-            prompt=args.cosmos_prompt,
             num_inference_steps=args.num_inference_steps,
             actor_denoising_steps=args.actor_denoising_steps,
             q_grad_eta=args.q_grad_eta,
