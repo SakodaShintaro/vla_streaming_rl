@@ -4,19 +4,25 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
+from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb_vision
 
 
-def _temporal_sinusoidal_pos_emb(
-    num_frames: int, dim: int, device: torch.device, dtype: torch.dtype
-) -> torch.Tensor:
-    """Fixed sinusoidal positional embedding for temporal positions. Returns (num_frames, dim)."""
-    half = dim // 2
-    positions = torch.arange(num_frames, device=device, dtype=torch.float32)
-    freqs = torch.exp(
+def _temporal_rope_cos_sin(
+    num_frames: int, head_dim: int, device: torch.device, dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotary positional embedding for temporal positions. Returns (num_frames, head_dim) cos/sin.
+
+    Position 0 maps to a zero rotation angle, so the first frame's query/key are left
+    untouched and its temporal attention output does not depend on this embedding at all.
+    """
+    half = head_dim // 2
+    inv_freq = torch.exp(
         torch.arange(half, device=device, dtype=torch.float32) * -(math.log(10000.0) / half)
     )
-    angles = positions[:, None] * freqs[None, :]
-    return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1).to(dtype)
+    positions = torch.arange(num_frames, device=device, dtype=torch.float32)
+    angles = positions[:, None] * inv_freq[None, :]
+    emb = torch.cat([angles, angles], dim=-1)
+    return emb.cos().to(dtype), emb.sin().to(dtype)
 
 
 def _temporal_causal_attention(
@@ -25,7 +31,8 @@ def _temporal_causal_attention(
     batch_size: int,
     seq_len: int,
     num_patches: int,
-    temporal_pos_emb: torch.Tensor,
+    temporal_cos: torch.Tensor,
+    temporal_sin: torch.Tensor,
 ) -> torch.Tensor:
     """Compute causal temporal attention across frames for same-patch positions.
 
@@ -38,7 +45,8 @@ def _temporal_causal_attention(
         batch_size: B
         seq_len: T (frames per batch element)
         num_patches: n (spatial patches per frame)
-        temporal_pos_emb: (T, hidden_dim) sinusoidal
+        temporal_cos: (T, head_dim) rotary cosine
+        temporal_sin: (T, head_dim) rotary sine
 
     Returns:
         output: (B * T * num_patches, hidden_dim)
@@ -51,31 +59,25 @@ def _temporal_causal_attention(
     x = hidden_states.view(batch_size, seq_len, num_patches, hidden_dim)
     x = x.transpose(1, 2)  # (B, n, T, d)
 
-    # Add temporal position embedding: (T, d) broadcast to (B, n, T, d)
-    x = x + temporal_pos_emb[None, None, :, :]
-
     # QKV projection
     qkv = attn_module.qkv(x.reshape(-1, hidden_dim))  # (B*n*T, 3*d)
     qkv = qkv.view(batch_size, num_patches, seq_len, 3, num_heads, head_dim)
-    # -> (3, B*n, heads, T, head_dim)
-    qkv = qkv.permute(3, 0, 1, 4, 2, 5).reshape(
-        3, batch_size * num_patches, num_heads, seq_len, head_dim
+    # -> (3, B*n, T, heads, head_dim)
+    qkv = qkv.permute(3, 0, 1, 2, 4, 5).reshape(
+        3, batch_size * num_patches, seq_len, num_heads, head_dim
     )
     q, k, v = qkv.unbind(0)
 
-    # Causal mask: frame t attends to frames 0..t
-    causal_mask = torch.triu(
-        torch.full(
-            (seq_len, seq_len),
-            float("-inf"),
-            device=hidden_states.device,
-            dtype=hidden_states.dtype,
-        ),
-        diagonal=1,
-    )
+    # Rotary temporal position: identity at t=0, relative across frames
+    q, k = apply_rotary_pos_emb_vision(q, k, temporal_cos, temporal_sin)
+
+    # (B*n, T, heads, head_dim) -> (B*n, heads, T, head_dim)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
 
     attn_out = F.scaled_dot_product_attention(
-        q, k, v, attn_mask=causal_mask, scale=attn_module.scaling
+        q, k, v, is_causal=True, scale=attn_module.scaling
     )  # (B*n, heads, T, head_dim)
 
     # Output projection
@@ -142,10 +144,11 @@ class VideoEncoder(nn.Module):
         for i, n in enumerate(patches_per_image):
             cu_seqlens[i + 1] = cu_seqlens[i] + n
 
-        # --- Temporal position embedding (fixed sinusoidal, no learnable params) ---
+        # --- Temporal position embedding (rotary, no learnable params) ---
         hidden_dim = hidden_states.shape[-1]
-        temporal_pos_emb = _temporal_sinusoidal_pos_emb(
-            seq_len, hidden_dim, hidden_states.device, hidden_states.dtype
+        head_dim = hidden_dim // visual.blocks[0].attn.num_heads
+        temporal_cos, temporal_sin = _temporal_rope_cos_sin(
+            seq_len, head_dim, hidden_states.device, hidden_states.dtype
         )
 
         # Assume all images have the same spatial resolution
@@ -169,7 +172,8 @@ class VideoEncoder(nn.Module):
                     batch_size,
                     seq_len,
                     num_patches,
-                    temporal_pos_emb,
+                    temporal_cos,
+                    temporal_sin,
                 )
                 hidden_states = hidden_states + temporal_out
 
