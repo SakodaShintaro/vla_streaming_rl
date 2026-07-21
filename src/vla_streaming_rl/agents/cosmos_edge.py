@@ -9,10 +9,18 @@ critic's per-step chunk reward/done window). The ego-frame translation is
 transformed to a world target point and driven to via CARLA's
 ``VehiclePIDController`` (built against the live ego vehicle each episode).
 
-NOTE (calibration): the exact av ego-pose convention (translation axis order /
-units / frame) is not yet pinned against NVIDIA's av reference data, so the
-ego->world target mapping and the SPEED_SCALE in ``_to_env_action`` are a
-documented first guess and will need calibration on a live CARLA run.
+av action convention (Cosmos 3 paper arXiv:2606.02800 + NVIDIA action code,
+confirmed against the HF ``edge_action_id_av_*`` examples):
+  * 9D = [translation(3), rotation_6d(6)]; rotation_6d is the diffusion_policy /
+    pytorch3d first-two-columns representation.
+  * Each row is a *relative pose delta between consecutive frames* (not an
+    absolute pose), expressed in the ego head-camera frame:
+    x = right, y = down, z = forward (OpenCV camera convention).
+  * Temporal spacing is 20 fps -> dt = 0.05 s, which equals the CARLA tick, so
+    one av row is consumed per env step. Translation is physical (metres): the
+    output is un-normalized (rotation_6d values are raw ~unit SO(3) columns).
+The one residual assumption is the metre unit of translation; everything else is
+sourced, not tuned.
 """
 
 from typing import Any
@@ -32,14 +40,13 @@ from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.utils import create_reward_image
 
 FRAME_HW = 256
-DT = 0.05  # CARLA control tick (20 FPS)
+DT = 0.05  # av frame == CARLA control tick (both 20 FPS)
 
-# Longitudinal calibration knobs mapping the av chunk's (unknown-unit) forward
-# progress to a target speed in m/s. Provisional v1 values — calibrate against
-# NVIDIA's av reference data / observed CARLA behaviour.
-SPEED_SCALE = 20.0
+# Target-speed floor (exploration: keep the car moving so RL gets a signal even
+# when the untrained policy predicts ~0 forward motion) and cap (urban safety),
+# in m/s. The speed itself is physical (mean forward delta / dt), not tuned.
 MIN_SPEED = 2.0
-MAX_SPEED = 6.0
+MAX_SPEED = 8.0
 
 
 class _TargetWaypoint:
@@ -146,23 +153,22 @@ class CosmosEdgeAgent(Agent):
     def _to_env_action(self, chunk: torch.Tensor, idx: int, velocity: float):
         """av ego-pose chunk -> (steer, gas_or_brake) via CARLA's VehiclePIDController.
 
-        The furthest remaining av translation point ``chunk[-1, :2]`` (ego frame:
-        x forward, y left — av-convention-dependent, see module note) is transformed
-        to world coordinates and passed as the target waypoint; the target speed is
-        derived from the av chunk's forward progress."""
-        path = chunk[idx:, :2].detach().float().cpu().numpy()
-        target_local = path[-1]  # furthest lookahead point
+        The remaining per-frame ego-camera translation deltas (x=right, y=down,
+        z=forward; see module note) are summed into a lookahead target point and
+        transformed to world coordinates; the target speed is the mean forward
+        delta over dt. Small near-identity per-frame rotations are approximated by
+        summing translations directly in the current ego frame."""
+        deltas = chunk[idx:, :3].detach().float().cpu().numpy()  # (M, 3): right, down, forward
+        forward_total = float(deltas[:, 2].sum())
+        right_total = float(deltas[:, 0].sum())
 
-        step = (
-            float(np.linalg.norm(np.diff(path, axis=0), axis=1).mean()) if len(path) >= 2 else 0.0
-        )
-        desired_speed_kmh = float(np.clip(step * SPEED_SCALE, MIN_SPEED, MAX_SPEED)) * 3.6
+        desired_speed = float(np.clip(deltas[:, 2].mean() / DT, MIN_SPEED, MAX_SPEED))  # m/s
 
         vehicle = self.env.unwrapped.vehicle
-        # av ego (x fwd, y left) -> CARLA vehicle local (x fwd, y right): negate y.
-        local = carla.Location(x=float(target_local[0]), y=-float(target_local[1]), z=0.0)
+        # ego camera (x=right, z=forward) -> CARLA vehicle local (x=forward, y=right).
+        local = carla.Location(x=forward_total, y=right_total, z=0.0)
         world_loc = vehicle.get_transform().transform(local)
-        control = self._pid_controller().run_step(desired_speed_kmh, _TargetWaypoint(world_loc))
+        control = self._pid_controller().run_step(desired_speed * 3.6, _TargetWaypoint(world_loc))
         gas_or_brake = float(control.throttle) - float(control.brake)
         return np.array([float(control.steer), gas_or_brake], dtype=np.float32)
 
