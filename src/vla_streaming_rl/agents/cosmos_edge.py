@@ -5,32 +5,50 @@ Mirrors the off-policy structure of ``SimLingoAgent`` but drives the Cosmos3-Edg
 av policy: the network turns the front camera + a fixed driving prompt into an
 ego-pose action chunk (raw dim 9 = 3D translation + 6D rotation), which the agent
 executes open-loop over ``chunk_size`` ticks (one row per tick, matching the
-critic's per-step chunk reward/done window). Each row's ego-frame translation is
-converted to ``(steer, gas_or_brake)`` via SimLingo's TrajectoryToControl PID.
+critic's per-step chunk reward/done window). The ego-frame translation is
+transformed to a world target point and driven to via CARLA's
+``VehiclePIDController`` (built against the live ego vehicle each episode).
 
 NOTE (calibration): the exact av ego-pose convention (translation axis order /
 units / frame) is not yet pinned against NVIDIA's av reference data, so the
-translation->waypoint mapping in ``_to_env_action`` is a documented first guess
-and will need calibration on a live CARLA run.
+ego->world target mapping and the SPEED_SCALE in ``_to_env_action`` are a
+documented first guess and will need calibration on a live CARLA run.
 """
 
 from typing import Any
 
+import carla
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn.functional as F
+from agents.navigation.controller import VehiclePIDController
 from torch import optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.networks.cosmos_edge_network import CosmosEdgeNetwork
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.reward_processor import RewardProcessor
-from vla_streaming_rl.simlingo.team_code.config_simlingo import GlobalConfig
-from vla_streaming_rl.simlingo.team_code.trajectory_to_control import TrajectoryToControl
 from vla_streaming_rl.utils import create_reward_image
 
 FRAME_HW = 256
+DT = 0.05  # CARLA control tick (20 FPS)
+
+# Longitudinal calibration knobs mapping the av chunk's (unknown-unit) forward
+# progress to a target speed in m/s. Provisional v1 values — calibrate against
+# NVIDIA's av reference data / observed CARLA behaviour.
+SPEED_SCALE = 20.0
+MIN_SPEED = 2.0
+MAX_SPEED = 6.0
+
+
+class _TargetWaypoint:
+    """Minimal duck-typed waypoint (VehiclePIDController's lateral controller only
+    reads ``.transform.location``), so the av target point can be steered toward
+    directly without snapping it to a lane."""
+
+    def __init__(self, location: "carla.Location") -> None:
+        self.transform = carla.Transform(location)
 
 
 class CosmosEdgeAgent(Agent):
@@ -40,6 +58,7 @@ class CosmosEdgeAgent(Agent):
         observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: CosmosEdgeNetwork,
+        env,
         learning_mode: str,
         horizon: int,
         buffer_size: int,
@@ -57,13 +76,16 @@ class CosmosEdgeAgent(Agent):
 
         self.device = torch.device("cuda")
         self.network = network
+        self.env = env
         self.chunk_size = network.chunk_size
         self.action_dim = network.action_dim
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.max_grad_norm = max_grad_norm
 
-        self.trajectory_to_control = TrajectoryToControl(GlobalConfig())
+        # CARLA VehiclePIDController, (re)built per episode against the live vehicle.
+        self._controller: VehiclePIDController | None = None
+        self._ctrl_vehicle = None
 
         self.actor_optimizer = optim.AdamW(
             network.actor_parameters, lr=actor_lr, weight_decay=weight_decay
@@ -109,17 +131,38 @@ class CosmosEdgeAgent(Agent):
         )[0]
         return frame
 
-    def _to_env_action(self, chunk: torch.Tensor, idx: int, velocity: float):
-        """av ego-pose chunk row -> (steer, gas_or_brake) via TrajectoryToControl.
+    def _pid_controller(self) -> VehiclePIDController:
+        """(Re)build the CARLA VehiclePIDController against the current ego vehicle."""
+        vehicle = self.env.unwrapped.vehicle
+        if self._controller is None or self._ctrl_vehicle is not vehicle:
+            self._controller = VehiclePIDController(
+                vehicle,
+                args_lateral={"K_P": 1.5, "K_I": 0.05, "K_D": 0.1, "dt": DT},
+                args_longitudinal={"K_P": 1.0, "K_I": 0.05, "K_D": 0.0, "dt": DT},
+            )
+            self._ctrl_vehicle = vehicle
+        return self._controller
 
-        The remaining ego-frame translation trajectory ``chunk[idx:, :2]`` is fed as
-        route waypoints (x forward, y left, assumed metres — see module note)."""
-        route = chunk[idx:, :2].detach().float().cpu()
-        if route.shape[0] < 2:
-            route = torch.cat([route, route[-1:].expand(2 - route.shape[0], -1)], dim=0)
-        route_wps = route[None]  # (1, N, 2)
-        speed_wps = route_wps
-        control = self.trajectory_to_control(route_wps, torch.tensor([[velocity]]), speed_wps)
+    def _to_env_action(self, chunk: torch.Tensor, idx: int, velocity: float):
+        """av ego-pose chunk -> (steer, gas_or_brake) via CARLA's VehiclePIDController.
+
+        The furthest remaining av translation point ``chunk[-1, :2]`` (ego frame:
+        x forward, y left — av-convention-dependent, see module note) is transformed
+        to world coordinates and passed as the target waypoint; the target speed is
+        derived from the av chunk's forward progress."""
+        path = chunk[idx:, :2].detach().float().cpu().numpy()
+        target_local = path[-1]  # furthest lookahead point
+
+        step = (
+            float(np.linalg.norm(np.diff(path, axis=0), axis=1).mean()) if len(path) >= 2 else 0.0
+        )
+        desired_speed_kmh = float(np.clip(step * SPEED_SCALE, MIN_SPEED, MAX_SPEED)) * 3.6
+
+        vehicle = self.env.unwrapped.vehicle
+        # av ego (x fwd, y left) -> CARLA vehicle local (x fwd, y right): negate y.
+        local = carla.Location(x=float(target_local[0]), y=-float(target_local[1]), z=0.0)
+        world_loc = vehicle.get_transform().transform(local)
+        control = self._pid_controller().run_step(desired_speed_kmh, _TargetWaypoint(world_loc))
         gas_or_brake = float(control.throttle) - float(control.brake)
         return np.array([float(control.steer), gas_or_brake], dtype=np.float32)
 
@@ -173,12 +216,24 @@ class CosmosEdgeAgent(Agent):
         }
         return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
 
+    def _step_streaming(
+        self,
+        global_step: int,
+        obs: dict[str, Any],
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        info: dict,
+    ) -> StepResult:
+        raise NotImplementedError("cosmos_edge supports off_policy only")
+
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
         self._chunk = None
         self._chunk_idx = 0
+        self._controller = None  # rebuilt against the next episode's vehicle
         return {}
 
     def _panels(self, obs: dict[str, Any], reward: float) -> dict[str, np.ndarray]:
         del obs
-        return {"reward": create_reward_image(reward)}
+        return {"reward": create_reward_image(None, reward)}

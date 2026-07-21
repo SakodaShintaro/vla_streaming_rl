@@ -93,6 +93,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             observation_space=env.observation_space,
             action_space=env.action_space,
             network=network,
+            env=env,
             learning_mode=args.learning_mode,
             horizon=args.horizon,
             buffer_size=args.buffer_size,
