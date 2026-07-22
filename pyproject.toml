@@ -73,11 +73,12 @@ build-backend = "hatchling.build"
 packages = ["src/vla_streaming_rl"]
 
 [tool.uv]
-exclude-newer = "40 days"
+exclude-newer = "10 days"
 exclude-newer-package = { torch = false, torchvision = false }
 index-url = "https://pypi.org/simple"
 override-dependencies = [
     "protobuf==3.20.3",
+    "diffusers @ git+https://github.com/huggingface/diffusers.git@58a0c4d58d92b2e30ef08c506c267cbd4dfe9bca",
     "numpy>=1.26.4",
     "grpcio>=1.60",
     "pettingzoo>=1.24",
