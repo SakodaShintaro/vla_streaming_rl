@@ -27,6 +27,10 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from diffusers import Cosmos3OmniPipeline, CosmosActionCondition
+from diffusers.pipelines.cosmos.pipeline_cosmos3_omni import (
+    _ACTION_RESOLUTION_BINS,
+    VideoProcessor,
+)
 
 # Trainable action-head submodule name prefixes on the transformer.
 ACTION_HEAD_PREFIXES = ("action_proj_in", "action_proj_out", "action_modality_embed")
@@ -76,10 +80,6 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         """Replicate the cond-only setup of ``__call__`` (no CFG / sound / safety)."""
         num_frames = action_cond.chunk_size + 1
         probe = self.video_processor.preprocess_video(frames)
-        from diffusers.pipelines.cosmos.pipeline_cosmos3_omni import (
-            _ACTION_RESOLUTION_BINS,
-            VideoProcessor,
-        )
 
         height, width = VideoProcessor.classify_height_width_bin(
             int(probe.shape[-2]),
