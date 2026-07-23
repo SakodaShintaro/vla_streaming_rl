@@ -113,7 +113,8 @@ class CosmosEdgeNetwork(NetworkInterface):
             action=action[None],
             value_report=self.critic.value_report(critic_out),
             rnn_state=torch.zeros(1),
-            next_image=self.policy.decode_vision_latents(vision_latents),
+            # The world model's farthest future-frame prediction (last decoded frame).
+            next_image=self.policy.decode_vision_latents(vision_latents, -1),
             next_reward=0.0,
             activations=ActivationFeatures(
                 state=enc.state[None],

@@ -13,8 +13,9 @@ with the 28-layer backbone, the VAE and the text/vision projections all frozen.
   text + vision-conditioning latents + fresh action noise — reusing the pipeline's
   own ``_prepare_*`` helpers, and captures a pooled backbone state for the critic.
 * ``sample_action_chunk`` (grad): re-runs the joint denoise for a few steps with
-  gradient enabled on the action tokens only (vision is stepped under no-grad and
-  detached each step, so it is fixed context), returning the raw action chunk.
+  gradient enabled on the action tokens only (vision is denoised under no-grad and
+  detached each step, so the predicted future frames condition the action without
+  being trained), returning the raw action chunk and the predicted vision latents.
 
 Rollout actions for the env still come from the validated ``__call__`` inference
 path; this module is used only inside the training loss.
@@ -294,7 +295,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
                 enc.num_noisy_action_tokens,
                 device,
             )
-            _vv, _vs, v_action = self._mask_velocity_predictions(
+            v_vision, _vs, v_action = self._mask_velocity_predictions(
                 preds_vision,
                 None,
                 vision_condition_mask=[enc.vision_condition_mask],
@@ -302,30 +303,37 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
                 action_condition_mask=[enc.action_condition_mask],
                 raw_action_dim=raw,
             )
-            # Vision advances under no-grad (fixed context; never trained).
+            # Vision advances as fixed (detached) context — the world model's
+            # future-frame prediction. Use the per-frame-masked velocity from
+            # ``_mask_velocity_predictions`` (conditioning frame kept, noisy frames
+            # denoised); never trained. NB: ``vision_condition_mask`` is per-frame
+            # along the temporal axis, so it must be broadcast over the whole 5D
+            # latent, not indexed at frame 0.
             with torch.no_grad():
-                v_vision = preds_vision[0] * (1.0 - enc.vision_condition_mask[0]).to(
-                    preds_vision[0].dtype
-                )
-                vision_latents = (vision_latents + dt * v_vision).detach()
+                vision_latents = (
+                    vision_latents + dt * v_vision.detach().to(vision_latents.dtype)
+                ).detach()
             # Action carries gradient into the action heads.
             action_latents = action_latents + dt * v_action.to(action_latents.dtype)
         return action_latents[:, :raw].contiguous(), vision_latents
 
     @torch.no_grad()
-    def decode_vision_latents(self, vision_latents: torch.Tensor) -> np.ndarray:
-        """Decode the predicted (5D) video latents to the farthest future RGB frame.
+    def decode_vision_latents(self, vision_latents: torch.Tensor, frame_index: int) -> np.ndarray:
+        """Decode the (5D) video latents and return frame ``frame_index`` as
+        ``(H, W, 3)`` uint8.
 
         Mirrors the pipeline's postprocess/decode: de-normalize by the VAE latent
-        statistics, VAE-decode, postprocess to numpy, and return the last frame
-        ``(H, W, 3)`` uint8 (the farthest future prediction of the world model)."""
+        statistics, VAE-decode, postprocess to numpy. Frame 0 is the conditioning
+        frame (a VAE reconstruction of the current observation — a sanity check on
+        the encode/decode path); the last frame is the world model's farthest
+        future prediction."""
         dtype = self.vae.dtype
         mean = self._vae_latents_mean.to(device=vision_latents.device, dtype=dtype)
         inv_std = self._vae_latents_inv_std.to(device=vision_latents.device, dtype=dtype)
         z_raw = vision_latents.to(dtype) / inv_std.view(1, -1, 1, 1, 1) + mean.view(1, -1, 1, 1, 1)
         decoded = self.vae.decode(z_raw).sample
         video = self.video_processor.postprocess_video(decoded, output_type="np")[0]  # (T, H, W, 3)
-        return (video[-1] * 255.0).clip(0, 255).astype(np.uint8)
+        return (video[frame_index] * 255.0).clip(0, 255).astype(np.uint8)
 
     def action_velocity(
         self, enc: CosmosEdgeEncoding, action_tokens: torch.Tensor, flow_time: float
