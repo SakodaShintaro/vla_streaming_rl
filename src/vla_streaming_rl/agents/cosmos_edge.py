@@ -27,6 +27,7 @@ sourced, not tuned.
 from typing import Any
 
 import carla
+import cv2
 import gymnasium as gym
 import numpy as np
 import torch
@@ -231,7 +232,8 @@ class CosmosEdgeAgent(Agent):
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
             **live.value_report,
         }
-        return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
+        panels = self._panels(reward, trajectory, live.value_report["value"])
+        return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def _step_streaming(
         self,
@@ -249,6 +251,48 @@ class CosmosEdgeAgent(Agent):
         self._controller = None  # rebuilt against the next episode's vehicle
         return {}
 
-    def _panels(self, obs: dict[str, Any], reward: float) -> dict[str, np.ndarray]:
-        del obs
-        return {"reward": create_reward_image(None, reward)}
+    def _panels(self, reward: float, trajectory: torch.Tensor, q: float) -> dict[str, np.ndarray]:
+        """Reward panel plus a top-down (ego-frame) view of the predicted av
+        trajectory, annotated with the critic's value estimate Q(s, a).
+
+        The per-row ego-camera deltas (x=right, z=forward; see module note) are
+        accumulated into cumulative ego positions (cyan path); forward -> up,
+        right -> right. The ``LOOKAHEAD_INDEX`` point actually fed to the PID is
+        highlighted in orange. Ego is the green marker near the bottom."""
+        deltas = (
+            trajectory[:, :3].detach().float().cpu().numpy()
+        )  # (chunk, 3): right, down, forward
+        positions = np.cumsum(deltas, axis=0)  # cumulative ego positions
+
+        size = 256
+        scale = 6.0  # pixels per meter
+        img = np.full((size, size, 3), 30, dtype=np.uint8)
+        ego_px = (size // 2, int(size * 0.8))
+
+        def to_px(forward: float, right: float) -> tuple[int, int]:
+            return (int(ego_px[0] + right * scale), int(ego_px[1] - forward * scale))
+
+        # range rings every 10 m for scale reference
+        for r_m in (10, 20, 30):
+            cv2.circle(img, ego_px, int(r_m * scale), (60, 60, 60), 1)
+
+        traj_color = (0, 200, 255)
+        look_color = (255, 165, 0)
+        pts = [to_px(float(p[2]), float(p[0])) for p in positions]
+        for i in range(len(pts) - 1):
+            cv2.line(img, pts[i], pts[i + 1], traj_color, 2)
+        for p in pts:
+            cv2.circle(img, p, 2, traj_color, -1)
+        cv2.circle(img, pts[LOOKAHEAD_INDEX], 5, look_color, -1)
+
+        # ego marker pointing forward (up)
+        cv2.drawMarker(img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2)
+
+        # value annotation (green if non-negative, red otherwise) + legend
+        q_color = (0, 255, 0) if q >= 0.0 else (255, 80, 80)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(img, f"Q: {q:.3f}", (8, 22), font, 0.6, q_color, 2)
+        cv2.putText(img, "trajectory", (8, size - 24), font, 0.45, traj_color, 1)
+        cv2.putText(img, "lookahead", (8, size - 8), font, 0.45, look_color, 1)
+
+        return {"reward": create_reward_image(None, reward), "bev_value": img}
