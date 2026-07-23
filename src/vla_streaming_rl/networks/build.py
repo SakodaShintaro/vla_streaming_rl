@@ -196,8 +196,9 @@ def build_network(
     elif args.network_class == "cosmos_edge":
         from vla_streaming_rl.networks.cosmos_edge_network import CosmosEdgeNetwork
 
-        assert args.horizon == args.chunk_size, (
-            f"cosmos_edge requires horizon == chunk_size, got {args.horizon} != {args.chunk_size}"
+        assert args.horizon == 1, (
+            f"cosmos_edge re-plans every tick, so the critic uses a single-step "
+            f"reward window: horizon must be 1, got {args.horizon}"
         )
         network = CosmosEdgeNetwork(
             device=device,
