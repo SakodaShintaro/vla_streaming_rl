@@ -17,9 +17,9 @@ from vla_streaming_rl.envs.carla_obs import (
     CARLAObsConfig,
     RouteTracker,
     action_to_vehicle_control,
-    compose_obs,
     make_action_space,
     make_obs_space,
+    paste_route_overlay,
 )
 from vla_streaming_rl.envs.eval_writer import Bench2DriveEvalWriter
 from vla_streaming_rl.envs.vehicle_graph import overlay_vehicle_graphs
@@ -697,12 +697,9 @@ class CARLALeaderboardEnv(gym.Env):
 
         assert self.current_image is not None
 
-        # Compose observation: camera RGB + route overlay in the bottom-right quarter.
-        camera_hwc_uint8 = (self.current_image.transpose(1, 2, 0) * 255).astype(np.uint8)
-        vehicle_yaw_rad = np.radians(self.vehicle.get_transform().rotation.yaw)
-        overlay = self.route_tracker.render_overlay(self.vehicle.get_location(), vehicle_yaw_rad)
-        image = compose_obs(camera_hwc_uint8, overlay, self.obs_cfg)
-        observation = {"image": image, "sensors": self._build_sensors_dict()}
+        # Observation is the raw camera RGB; the route is given to the agent as
+        # text, so no route overlay is baked into the policy input.
+        observation = {"image": self.current_image.copy(), "sensors": self._build_sensors_dict()}
 
         # Record history
         self.physics_history.append(copy.deepcopy(self.vehicle_physics))
@@ -747,6 +744,9 @@ class CARLALeaderboardEnv(gym.Env):
 
         img = self.third_person_image.copy()
         overlay_vehicle_graphs(img, self.physics_history)
+        vehicle_yaw_rad = np.radians(self.vehicle.get_transform().rotation.yaw)
+        overlay = self.route_tracker.render_overlay(self.vehicle.get_location(), vehicle_yaw_rad)
+        paste_route_overlay(img, overlay, self.obs_cfg)
         return img
 
     def close(self):

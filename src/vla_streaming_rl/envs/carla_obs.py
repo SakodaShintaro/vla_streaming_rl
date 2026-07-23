@@ -35,6 +35,7 @@ class CARLAObsConfig:
     num_interp_points: int = 1000
     route_thickness: int = 20
     triangle_size: int = 15
+    route_inset_divisor: int = 6
 
 
 def make_obs_space(cfg: CARLAObsConfig) -> gym.spaces.Box:
@@ -174,19 +175,21 @@ class RouteTracker:
         return img
 
 
-def compose_obs(
-    camera_rgb_hwc_uint8: np.ndarray,
+def paste_route_overlay(
+    img_hwc_uint8: np.ndarray,
     overlay_bgr_hw3_uint8: np.ndarray,
     cfg: CARLAObsConfig,
-) -> np.ndarray:
-    """Return CHW float32 [0, 1] with overlay pasted in the bottom-right quarter."""
-    w, h = cfg.image_size
-    route_h = h // 4
-    route_w = w // 4
+) -> None:
+    """Stamp a small route overlay into the bottom-left corner (mutates ``img`` in place).
+
+    Used only on the human-facing render image; the policy observation carries
+    no route overlay because the route is conveyed to the agent as text.
+    """
+    h, w = img_hwc_uint8.shape[:2]
+    route_h = h // cfg.route_inset_divisor
+    route_w = w // cfg.route_inset_divisor
     overlay_resized = cv2.resize(overlay_bgr_hw3_uint8, (route_w, route_h))
-    img = camera_rgb_hwc_uint8.copy()
-    img[-route_h:, -route_w:] = overlay_resized
-    return img.transpose(2, 0, 1).astype(np.float32) / 255.0
+    img_hwc_uint8[-route_h:, :route_w] = overlay_resized
 
 
 def action_to_vehicle_control(action: np.ndarray) -> tuple[float, float, float]:
