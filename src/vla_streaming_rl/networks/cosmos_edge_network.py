@@ -36,6 +36,11 @@ REAL_REPO = "nvidia/Cosmos3-Edge"
 MAX_PROMPT_TOKENS = 64
 
 
+# The av "no motion" row: zero translation + identity rotation_6d. Used as the
+# delta at an episode's first frame and to pad the history at episode start.
+AV_IDENTITY_ROW = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+
+
 def ego_history_av_deltas(poses: np.ndarray) -> np.ndarray:
     """Real av-convention pose deltas connecting consecutive ego poses.
 
@@ -183,10 +188,12 @@ class CosmosEdgeNetwork(NetworkInterface):
         )
         cur_prompt = self._detokenize(data.task_prompt_token_ids[0, num - 1])
         next_prompt = self._detokenize(data.task_prompt_token_ids[0, num])
-        # Real history action rows from the stored ego poses (obs_z = (x, y, yaw)).
-        poses = data.obs_z[0].float().cpu().numpy()
-        cur_hist = torch.from_numpy(ego_history_av_deltas(poses[:num])).to(self.device)
-        next_hist = torch.from_numpy(ego_history_av_deltas(poses[1 : num + 1])).to(self.device)
+        # obs_z slot t holds the real av delta row (frame t-1 -> t; identity at an
+        # episode's first frame), so the history rows are direct slices — no pose
+        # differencing that could cross an episode/spawn discontinuity.
+        deltas = data.obs_z[0].float().to(self.device)
+        cur_hist = deltas[1:num]
+        next_hist = deltas[2 : num + 1]
         return ReplayBufferData(
             observations=[
                 (cur_frames, cur_prompt, cur_hist),
@@ -309,7 +316,10 @@ class CosmosEdgeNetwork(NetworkInterface):
         """Regress the action velocity toward a Q-improved target (DACER2 score term)."""
         full_dim = enc.action_latents.shape[-1]
         target = F.pad(target_action, (0, full_dim - self.action_dim))
+        # Padding channels beyond the raw action dim stay zero (train-time
+        # convention of the stock pipeline), so the noised sample keeps them clean.
         noise = torch.randn_like(target)
+        noise[:, self.action_dim :] = 0.0
         flow_time = float(torch.rand(()).item())
         x_t = flow_time * noise + (1.0 - flow_time) * target
         u_t = noise - target

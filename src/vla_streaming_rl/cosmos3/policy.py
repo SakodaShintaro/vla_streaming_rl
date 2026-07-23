@@ -356,6 +356,10 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             1.0 - enc.action_condition_mask
         ) * torch.randn_like(enc.action_latents)
         raw = enc.raw_action_dim
+        # Padding channels beyond the raw action dim are zero at train time (the
+        # stock pipeline zeroes them at init and after every step); keep them clean.
+        # The masked velocity is already zero there, so zeroing once at init holds.
+        action_latents[:, raw:] = 0.0
         dt = -1.0 / num_steps
         for step in range(num_steps):
             t = (1.0 + step * dt) * self.scheduler.config.num_train_timesteps

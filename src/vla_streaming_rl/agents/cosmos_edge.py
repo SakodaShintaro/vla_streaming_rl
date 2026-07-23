@@ -40,6 +40,7 @@ from torch import optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.networks.cosmos_edge_network import (
+    AV_IDENTITY_ROW,
     MAX_PROMPT_TOKENS,
     CosmosEdgeNetwork,
     ego_history_av_deltas,
@@ -138,7 +139,10 @@ class CosmosEdgeAgent(Agent):
             size=buffer_size,
             seq_len=self.history_len + 1,
             obs_shape=(network.obs_flat_dim,),
-            obs_z_shape=(3,),  # ego pose (x, y, yaw) -> real history action deltas at loss time
+            # Real av delta row (previous frame -> current frame, identity at an
+            # episode's first frame): the loss slices these directly as the history
+            # action rows, so they never cross an episode/spawn discontinuity.
+            obs_z_shape=(self.action_dim,),
             rnn_state_shape=(1,),
             action_shape=(self.chunk_size * self.action_dim,),
             output_device=self.device,
@@ -150,10 +154,12 @@ class CosmosEdgeAgent(Agent):
 
         # The previous tick's flattened trajectory, stored as the transition's action.
         self._prev_action = torch.zeros(self.chunk_size * self.action_dim, device=self.device)
-        # Recent-frame + ego-pose history for the rollout clip (reset per episode). The
-        # poses give the real history action rows that anchor the joint generation.
+        # Recent-frame + av-delta history for the rollout clip (reset per episode).
+        # The delta rows are the real history action rows that anchor the joint
+        # generation; identity rows pad the episode start.
         self._frame_history: deque = deque(maxlen=self._clip_len)
-        self._pose_history: deque = deque(maxlen=self._clip_len)
+        self._delta_history: deque = deque(maxlen=self.future_start)
+        self._prev_pose: np.ndarray | None = None
 
     # --- required agent surface --------------------------------------------
 
@@ -219,17 +225,18 @@ class CosmosEdgeAgent(Agent):
         # store its token ids so the loss can rebuild the same conditioning.
         prompt = obs["language"]
         token_ids = self.network.tokenize_task_prompt(prompt)
-        # Current ego pose (world x, y, yaw) -> stored so the loss can rebuild the real
-        # history action rows; also drives the rollout history action below.
+        # Current ego pose (world x, y, yaw) -> the real av delta row from the
+        # previous frame (identity at the episode's first frame). Stored as obs_z so
+        # the loss can slice the history action rows directly, and appended to the
+        # rollout history below.
         tf = self.env.unwrapped.vehicle.get_transform()
-        pose = torch.tensor(
-            [tf.location.x, tf.location.y, math.radians(tf.rotation.yaw)],
-            device=self.device,
-            dtype=torch.float32,
-        )
+        pose = np.array([tf.location.x, tf.location.y, math.radians(tf.rotation.yaw)])
+        prev_pose = self._prev_pose if self._prev_pose is not None else pose
+        delta_row = ego_history_av_deltas(np.stack([prev_pose, pose]))[0]
+        self._prev_pose = pose
         self.rb.add(
             self.network.pack_obs(frame).to(self.device),
-            pose,
+            torch.from_numpy(delta_row).to(self.device),
             reward,
             terminated or truncated,
             self._dummy,
@@ -237,16 +244,16 @@ class CosmosEdgeAgent(Agent):
             token_ids,
         )
 
-        # Feed the recent-frame history clip + the real history action rows (from the
-        # ego poses) to the joint generation, re-planned every tick. At episode start
-        # the history is padded at the front with its oldest entry.
+        # Feed the recent-frame history clip + the real history action rows to the
+        # joint generation, re-planned every tick. At episode start the frames are
+        # padded at the front with the oldest entry and the deltas with identity rows.
         self._frame_history.append(frame)
-        self._pose_history.append(pose.cpu().numpy())
+        self._delta_history.append(delta_row)
         clip = list(self._frame_history)
         clip = [clip[0]] * (self._clip_len - len(clip)) + clip
-        poses = list(self._pose_history)
-        poses = [poses[0]] * (self._clip_len - len(poses)) + poses
-        history_action = torch.from_numpy(ego_history_av_deltas(np.stack(poses))).to(self.device)
+        rows = list(self._delta_history)
+        rows = [AV_IDENTITY_ROW] * (self.future_start - len(rows)) + rows
+        history_action = torch.from_numpy(np.stack(rows)).to(self.device)
         live = self.network.infer(
             InferInput(
                 s_seq=torch.stack(clip).to(self.device),
@@ -284,7 +291,8 @@ class CosmosEdgeAgent(Agent):
         del score, feedback_text
         self._controller = None  # rebuilt against the next episode's vehicle
         self._frame_history.clear()  # history must not cross episode boundaries
-        self._pose_history.clear()
+        self._delta_history.clear()
+        self._prev_pose = None
         return {}
 
     def _panels(
@@ -303,21 +311,22 @@ class CosmosEdgeAgent(Agent):
         deltas = (
             trajectory[:, :3].detach().float().cpu().numpy()
         )  # (chunk, 3): right, down, forward
-        positions = np.cumsum(deltas, axis=0)  # cumulative positions from the oldest frame
-        # Re-center on the CURRENT frame (end of the history rows) so the ego marker
-        # sits at the origin: history rows fall behind it, generated future ahead.
-        positions = positions - positions[self.future_start - 1]
+        # positions[i] = pose BEFORE row i (origin prepended), so segment i is row i's
+        # motion. Re-center on the CURRENT frame (after the last history row) so the
+        # ego marker sits at the origin: history rows fall behind it, future ahead.
+        positions = np.concatenate([np.zeros((1, 3)), np.cumsum(deltas, axis=0)], axis=0)
+        positions = positions - positions[self.future_start]
 
         size = 256
-        scale = 6.0  # pixels per meter
+        scale = 25.0  # pixels per meter (chunk horizon is ~0.6 s -> a few meters)
         img = np.full((size, size, 3), 30, dtype=np.uint8)
         ego_px = (size // 2, int(size * 0.8))
 
         def to_px(forward: float, right: float) -> tuple[int, int]:
             return (int(ego_px[0] + right * scale), int(ego_px[1] - forward * scale))
 
-        # range rings every 10 m for scale reference
-        for r_m in (10, 20, 30):
+        # range rings at 1 / 2 / 5 m for scale reference
+        for r_m in (1, 2, 5):
             cv2.circle(img, ego_px, int(r_m * scale), (60, 60, 60), 1)
 
         hist_color = (90, 90, 90)
@@ -328,7 +337,7 @@ class CosmosEdgeAgent(Agent):
             color = hist_color if i < self.future_start else traj_color
             cv2.line(img, pts[i], pts[i + 1], color, 2)
         for i, p in enumerate(pts):
-            cv2.circle(img, p, 2, hist_color if i < self.future_start else traj_color, -1)
+            cv2.circle(img, p, 2, hist_color if i <= self.future_start else traj_color, -1)
         cv2.circle(img, pts[-1], 5, look_color, -1)
 
         # ego marker pointing forward (up)
