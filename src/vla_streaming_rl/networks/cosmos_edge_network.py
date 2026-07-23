@@ -99,6 +99,13 @@ class CosmosEdgeNetwork(NetworkInterface):
         self.num_cond_latent_frames = int(num_cond_latent_frames)
         self.history_len = (self.num_cond_latent_frames - 1) * 4 + 1
         self.future_start = (self.num_cond_latent_frames - 1) * 4
+        self.policy.setup(
+            chunk_size=self.chunk_size,
+            domain_name=self.domain_name,
+            resolution_tier=self.resolution_tier,
+            num_inference_steps=self.num_inference_steps,
+            num_cond_latent_frames=self.num_cond_latent_frames,
+        )
         pad = self.policy.text_tokenizer.pad_token_id
         self.pad_id = int(pad) if pad is not None else 0
         self.actor_denoising_steps = int(actor_denoising_steps)
@@ -300,17 +307,7 @@ class CosmosEdgeNetwork(NetworkInterface):
         # anchors the history action rows with the real ego-pose deltas, so only the
         # future rows are generated.
         pils = [self._to_pil(f) for f in frames]
-        return self.policy.encode(
-            frames=pils,
-            prompt=prompt,
-            chunk_size=self.chunk_size,
-            domain_name=self.domain_name,
-            resolution_tier=self.resolution_tier,
-            num_inference_steps=self.num_inference_steps,
-            generator=None,
-            num_cond_latent_frames=self.num_cond_latent_frames,
-            history_action=history_action,
-        )
+        return self.policy.encode(pils, prompt, history_action)
 
     def _flow_matching_velocity_loss(self, enc, target_action: torch.Tensor) -> torch.Tensor:
         """Regress the action velocity toward a Q-improved target (DACER2 score term)."""
