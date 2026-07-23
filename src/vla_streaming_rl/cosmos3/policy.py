@@ -22,6 +22,7 @@ path; this module is used only inside the training loss.
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from diffusers import Cosmos3OmniPipeline, CosmosActionCondition
 
@@ -268,10 +269,14 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             state=state,
         )
 
-    def sample_action_chunk(self, enc: CosmosEdgeEncoding, num_steps: int) -> torch.Tensor:
+    def sample_action_chunk(
+        self, enc: CosmosEdgeEncoding, num_steps: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Differentiable action chunk: Euler-integrate the flow with grad on the
-        action tokens; vision is stepped under no-grad (fixed context). Returns
-        ``[chunk_size, raw_action_dim]`` (raw, unnormalized-space action latents)."""
+        action tokens; vision is stepped under no-grad (fixed context). Returns the
+        raw action chunk ``[chunk_size, raw_action_dim]`` and the (detached) final
+        predicted vision latents (the world model's future-frame prediction, for
+        decoding/visualization)."""
         device = self._get_execution_device()
         vision_latents = enc.vision_latents.clone()
         action_latents = torch.randn_like(enc.action_latents)
@@ -305,7 +310,22 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
                 vision_latents = (vision_latents + dt * v_vision).detach()
             # Action carries gradient into the action heads.
             action_latents = action_latents + dt * v_action.to(action_latents.dtype)
-        return action_latents[:, :raw].contiguous()
+        return action_latents[:, :raw].contiguous(), vision_latents
+
+    @torch.no_grad()
+    def decode_vision_latents(self, vision_latents: torch.Tensor) -> np.ndarray:
+        """Decode the predicted (5D) video latents to the farthest future RGB frame.
+
+        Mirrors the pipeline's postprocess/decode: de-normalize by the VAE latent
+        statistics, VAE-decode, postprocess to numpy, and return the last frame
+        ``(H, W, 3)`` uint8 (the farthest future prediction of the world model)."""
+        dtype = self.vae.dtype
+        mean = self._vae_latents_mean.to(device=vision_latents.device, dtype=dtype)
+        inv_std = self._vae_latents_inv_std.to(device=vision_latents.device, dtype=dtype)
+        z_raw = vision_latents.to(dtype) / inv_std.view(1, -1, 1, 1, 1) + mean.view(1, -1, 1, 1, 1)
+        decoded = self.vae.decode(z_raw).sample
+        video = self.video_processor.postprocess_video(decoded, output_type="np")[0]  # (T, H, W, 3)
+        return (video[-1] * 255.0).clip(0, 255).astype(np.uint8)
 
     def action_velocity(
         self, enc: CosmosEdgeEncoding, action_tokens: torch.Tensor, flow_time: float

@@ -107,13 +107,13 @@ class CosmosEdgeNetwork(NetworkInterface):
     @torch.no_grad()
     def infer(self, data: InferInput) -> InferResult:
         enc = self._encode(data.s_seq, data.task_prompts[0])
-        action = self.policy.sample_action_chunk(enc, self.num_inference_steps)
+        action, vision_latents = self.policy.sample_action_chunk(enc, self.num_inference_steps)
         critic_out = self.critic(enc.state[None], action[None]).output
         return InferResult(
             action=action[None],
             value_report=self.critic.value_report(critic_out),
             rnn_state=torch.zeros(1),
-            next_image=np.zeros((1, 1, 3), dtype=np.uint8),
+            next_image=self.policy.decode_vision_latents(vision_latents),
             next_reward=0.0,
             activations=ActivationFeatures(
                 state=enc.state[None],
@@ -166,7 +166,7 @@ class CosmosEdgeNetwork(NetworkInterface):
         enc = self._encode(*cur_obs)
         with torch.no_grad():
             next_enc = self._encode(*next_obs)
-            next_action = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
+            next_action, _ = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
             next_output = self.critic(next_enc.state[None], next_action[None]).output
         target_value = self.critic.compute_target_value(next_output, chunk_rewards, chunk_dones)
         critic_loss, critic_info = self.critic.compute_critic_loss(
@@ -193,9 +193,9 @@ class CosmosEdgeNetwork(NetworkInterface):
         enc = self._encode(*cur_obs)
         with torch.no_grad():
             next_enc = self._encode(*next_obs)
-            next_action = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
+            next_action, _ = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
             next_output = self.critic(next_enc.state[None], next_action[None]).output
-            exec_action = self.policy.sample_action_chunk(next_enc, self.num_inference_steps)
+            exec_action, _ = self.policy.sample_action_chunk(next_enc, self.num_inference_steps)
         target_value = self.critic.compute_target_value(next_output, chunk_rewards, chunk_dones)
         critic_loss, critic_info = self.critic.compute_critic_loss(
             enc.state[None], action_chunk, target_value, self.detach_critic
@@ -267,7 +267,7 @@ class CosmosEdgeNetwork(NetworkInterface):
         return F.mse_loss(v_pred[:, : self.action_dim], u_t[:, : self.action_dim])
 
     def _dacer2_actor_loss(self, enc) -> tuple[torch.Tensor, dict]:
-        action_pi = self.policy.sample_action_chunk(enc, self.actor_denoising_steps)
+        action_pi, _ = self.policy.sample_action_chunk(enc, self.actor_denoising_steps)
         state = enc.state.detach()
 
         for p in self.critic.parameters():

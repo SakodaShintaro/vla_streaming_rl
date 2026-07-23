@@ -232,7 +232,7 @@ class CosmosEdgeAgent(Agent):
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
             **live.value_report,
         }
-        panels = self._panels(reward, trajectory, live.value_report["value"])
+        panels = self._panels(reward, trajectory, live.value_report["value"], live.next_image)
         return StepResult(action=env_action, metrics=metrics, panels=panels)
 
     def _step_streaming(
@@ -251,9 +251,12 @@ class CosmosEdgeAgent(Agent):
         self._controller = None  # rebuilt against the next episode's vehicle
         return {}
 
-    def _panels(self, reward: float, trajectory: torch.Tensor, q: float) -> dict[str, np.ndarray]:
-        """Reward panel plus a top-down (ego-frame) view of the predicted av
-        trajectory, annotated with the critic's value estimate Q(s, a).
+    def _panels(
+        self, reward: float, trajectory: torch.Tensor, q: float, pred_image: np.ndarray
+    ) -> dict[str, np.ndarray]:
+        """Reward panel, the Cosmos world model's predicted future frame, and a
+        top-down (ego-frame) view of the predicted av trajectory annotated with the
+        critic's value estimate Q(s, a).
 
         The per-row ego-camera deltas (x=right, z=forward; see module note) are
         accumulated into cumulative ego positions (cyan path); forward -> up,
@@ -295,4 +298,8 @@ class CosmosEdgeAgent(Agent):
         cv2.putText(img, "trajectory", (8, size - 24), font, 0.45, traj_color, 1)
         cv2.putText(img, "lookahead", (8, size - 8), font, 0.45, look_color, 1)
 
-        return {"reward": create_reward_image(None, reward), "bev_value": img}
+        return {
+            "reward": create_reward_image(None, reward),
+            "prediction": pred_image,
+            "bev_value": img,
+        }
