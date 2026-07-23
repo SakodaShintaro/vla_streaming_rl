@@ -1,6 +1,7 @@
 {
   "python.analysis.extraPaths": [
     "external/Bench2Drive/leaderboard",
-    "external/Bench2Drive/scenario_runner"
+    "external/Bench2Drive/scenario_runner",
+    "${env:HOME}/CARLA_0.9.16/PythonAPI/carla"
   ]
 }
