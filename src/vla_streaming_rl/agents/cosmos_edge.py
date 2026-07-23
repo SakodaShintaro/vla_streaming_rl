@@ -45,6 +45,7 @@ from vla_streaming_rl.networks.cosmos_edge_network import (
     ego_history_av_deltas,
 )
 from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.utils import create_reward_image
 
@@ -123,7 +124,6 @@ class CosmosEdgeAgent(Agent):
         # Learn the flat-obs schema up front so the buffer can be sized.
         zero_frame = torch.zeros(3, FRAME_HW, FRAME_HW)
         network.pack_obs(zero_frame)
-        from vla_streaming_rl.replay_buffer import ReplayBuffer
 
         # seq_len = history_len + 1: the model conditions on a history clip of
         # ``history_len`` consecutive frames, so a sampled window holds that clip plus
