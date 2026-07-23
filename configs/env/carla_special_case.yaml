@@ -3,7 +3,7 @@ env_id: CARLA-Leaderboard-v0
 episode_limit: 200
 step_limit: 1_000_000
 render_scale: 0.33
-time_limit_hour: 2.0
+time_limit_hour: 4.0
 
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_carla_env
