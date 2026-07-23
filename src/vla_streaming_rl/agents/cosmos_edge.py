@@ -25,6 +25,7 @@ The one residual assumption is the metre unit of translation; everything else is
 sourced, not tuned.
 """
 
+import math
 from collections import deque
 from typing import Any
 
@@ -38,7 +39,11 @@ from agents.navigation.controller import VehiclePIDController
 from torch import optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.networks.cosmos_edge_network import MAX_PROMPT_TOKENS, CosmosEdgeNetwork
+from vla_streaming_rl.networks.cosmos_edge_network import (
+    MAX_PROMPT_TOKENS,
+    CosmosEdgeNetwork,
+    ego_history_av_deltas,
+)
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.utils import create_reward_image
@@ -133,7 +138,7 @@ class CosmosEdgeAgent(Agent):
             size=buffer_size,
             seq_len=self.history_len + 1,
             obs_shape=(network.obs_flat_dim,),
-            obs_z_shape=(1,),
+            obs_z_shape=(3,),  # ego pose (x, y, yaw) -> real history action deltas at loss time
             rnn_state_shape=(1,),
             action_shape=(self.chunk_size * self.action_dim,),
             output_device=self.device,
@@ -145,8 +150,10 @@ class CosmosEdgeAgent(Agent):
 
         # The previous tick's flattened trajectory, stored as the transition's action.
         self._prev_action = torch.zeros(self.chunk_size * self.action_dim, device=self.device)
-        # Recent-frame history for the inverse_dynamics rollout clip (reset per episode).
+        # Recent-frame + ego-pose history for the rollout clip (reset per episode). The
+        # poses give the real history action rows that anchor the joint generation.
         self._frame_history: deque = deque(maxlen=self._clip_len)
+        self._pose_history: deque = deque(maxlen=self._clip_len)
 
     # --- required agent surface --------------------------------------------
 
@@ -212,9 +219,17 @@ class CosmosEdgeAgent(Agent):
         # store its token ids so the loss can rebuild the same conditioning.
         prompt = obs["language"]
         token_ids = self.network.tokenize_task_prompt(prompt)
+        # Current ego pose (world x, y, yaw) -> stored so the loss can rebuild the real
+        # history action rows; also drives the rollout history action below.
+        tf = self.env.unwrapped.vehicle.get_transform()
+        pose = torch.tensor(
+            [tf.location.x, tf.location.y, math.radians(tf.rotation.yaw)],
+            device=self.device,
+            dtype=torch.float32,
+        )
         self.rb.add(
             self.network.pack_obs(frame).to(self.device),
-            self._dummy,
+            pose,
             reward,
             terminated or truncated,
             self._dummy,
@@ -222,17 +237,21 @@ class CosmosEdgeAgent(Agent):
             token_ids,
         )
 
-        # Feed the recent-frame history clip to inverse_dynamics (re-planned every
-        # tick). At episode start the history is padded at the front with its oldest
-        # frame so the clip always has ``chunk_size + 1`` frames.
+        # Feed the recent-frame history clip + the real history action rows (from the
+        # ego poses) to the joint generation, re-planned every tick. At episode start
+        # the history is padded at the front with its oldest entry.
         self._frame_history.append(frame)
+        self._pose_history.append(pose.cpu().numpy())
         clip = list(self._frame_history)
         clip = [clip[0]] * (self._clip_len - len(clip)) + clip
+        poses = list(self._pose_history)
+        poses = [poses[0]] * (self._clip_len - len(poses)) + poses
+        history_action = torch.from_numpy(ego_history_av_deltas(np.stack(poses))).to(self.device)
         live = self.network.infer(
             InferInput(
                 s_seq=torch.stack(clip).to(self.device),
                 obs_z_seq=self._dummy,
-                a_seq=self._dummy,
+                a_seq=history_action,
                 r_seq=self._dummy,
                 rnn_state=self._dummy,
                 task_prompts=[prompt],
@@ -265,6 +284,7 @@ class CosmosEdgeAgent(Agent):
         del score, feedback_text
         self._controller = None  # rebuilt against the next episode's vehicle
         self._frame_history.clear()  # history must not cross episode boundaries
+        self._pose_history.clear()
         return {}
 
     def _panels(

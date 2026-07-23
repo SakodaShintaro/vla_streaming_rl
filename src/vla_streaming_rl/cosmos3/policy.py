@@ -39,6 +39,7 @@ class CosmosEdgeEncoding:
     fwd_static: dict
     vision_latents: torch.Tensor
     action_latents: torch.Tensor
+    x0_action: torch.Tensor  # clean action values for anchored (history) rows; 0 elsewhere
     vision_condition_mask: torch.Tensor
     action_condition_mask: torch.Tensor
     action_domain_id: torch.Tensor
@@ -70,6 +71,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         device,
         dtype,
         num_cond_latent_frames,
+        history_action,
     ):
         """Replicate the cond-only setup of ``__call__`` (no CFG / sound / safety)."""
         num_frames = action_cond.chunk_size + 1
@@ -154,6 +156,24 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             device=device,
             condition_frame_indexes=vc_idx,
         )
+        # Anchor the history action rows with the given real ego-pose deltas (clean),
+        # so only the future rows are generated. ``history_action`` is the first
+        # ``len`` rows in raw av dim; pad to the model's action_dim.
+        chunk = action_latents.shape[0]
+        x0_action = torch.zeros_like(action_latents)
+        if history_action is None:
+            action_cond_frames = []
+            action_condition_mask = torch.zeros(
+                (chunk, 1), device=device, dtype=action_latents.dtype
+            )
+        else:
+            n_fix = history_action.shape[0]
+            x0_action[:n_fix, : history_action.shape[1]] = history_action.to(action_latents)
+            action_cond_frames = list(range(n_fix))
+            action_condition_mask = torch.zeros(
+                (chunk, 1), device=device, dtype=action_latents.dtype
+            )
+            action_condition_mask[:n_fix, 0] = 1.0
         action_seg = self._prepare_action_segment(
             input_action_tokens=action_latents,
             condition_frame_indexes=action_cond_frames,
@@ -197,6 +217,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             fwd_static,
             vision_latents,
             action_latents,
+            x0_action,
             vision_condition_mask,
             action_condition_mask,
             action_domain_id,
@@ -240,6 +261,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         num_inference_steps,
         generator,
         num_cond_latent_frames,
+        history_action,
     ) -> CosmosEdgeEncoding:
         device = self._get_execution_device()
         dtype = self.transformer.dtype
@@ -264,6 +286,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             fwd_static,
             vision_latents,
             action_latents,
+            x0_action,
             vision_condition_mask,
             action_condition_mask,
             action_domain_id,
@@ -278,6 +301,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             device,
             dtype,
             num_cond_latent_frames,
+            history_action,
         )
 
         # Capture a pooled backbone state for the critic via a hook on the final
@@ -305,6 +329,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             fwd_static=fwd_static,
             vision_latents=vision_latents,
             action_latents=action_latents,
+            x0_action=x0_action,
             vision_condition_mask=vision_condition_mask,
             action_condition_mask=action_condition_mask,
             action_domain_id=action_domain_id,
@@ -325,7 +350,11 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         for decoding/visualization)."""
         device = self._get_execution_device()
         vision_latents = enc.vision_latents.clone()
-        action_latents = torch.randn_like(enc.action_latents)
+        # Anchored (history) action rows start at their clean real value and are held
+        # fixed (masked velocity == 0); the future rows start from noise and denoise.
+        action_latents = enc.action_condition_mask * enc.x0_action + (
+            1.0 - enc.action_condition_mask
+        ) * torch.randn_like(enc.action_latents)
         raw = enc.raw_action_dim
         dt = -1.0 / num_steps
         for step in range(num_steps):

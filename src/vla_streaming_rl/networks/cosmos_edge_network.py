@@ -36,6 +36,27 @@ REAL_REPO = "nvidia/Cosmos3-Edge"
 MAX_PROMPT_TOKENS = 64
 
 
+def ego_history_av_deltas(poses: np.ndarray) -> np.ndarray:
+    """Real av-convention pose deltas connecting consecutive ego poses.
+
+    ``poses`` is ``(N, 3)`` of world ``(x, y, yaw_rad)`` (the recorded ego trajectory
+    of the history clip). Returns ``(N - 1, 9)``: per transition, translation
+    ``[x=right, y=down=0, z=forward]`` in the ego frame at the start pose, plus the
+    ``rotation_6d`` (first two SO(3) columns) of the heading change toward the ego's
+    right (identity == ``[1,0,0,0,1,0]``). These fix the history rows so the model
+    generates only the future, grounded in the actual recent motion (not inferred)."""
+    rows = []
+    for a, b in zip(poses[:-1], poses[1:]):
+        d = np.array([b[0] - a[0], b[1] - a[1]])
+        fwd = np.array([np.cos(a[2]), np.sin(a[2])])
+        right = np.array([-np.sin(a[2]), np.cos(a[2])])  # CARLA left-handed ego right
+        fwd_b = np.array([np.cos(b[2]), np.sin(b[2])])
+        theta = float(np.arctan2(float(right @ fwd_b), float(fwd @ fwd_b)))
+        c, s = np.cos(theta), np.sin(theta)
+        rows.append([float(d @ right), 0.0, float(d @ fwd), c, 0.0, -s, 0.0, 1.0, 0.0])
+    return np.asarray(rows, dtype=np.float32)
+
+
 class CosmosEdgeNetwork(NetworkInterface):
     def __init__(
         self,
@@ -114,7 +135,8 @@ class CosmosEdgeNetwork(NetworkInterface):
 
     @torch.no_grad()
     def infer(self, data: InferInput) -> InferResult:
-        enc = self._encode(data.s_seq, data.task_prompts[0])
+        # data.a_seq carries the real history action rows (from the agent's ego poses).
+        enc = self._encode(data.s_seq, data.task_prompts[0], data.a_seq)
         action, vision_latents = self.policy.sample_action_chunk(enc, self.num_inference_steps)
         critic_out = self.critic(enc.state[None], action[None]).output
         return InferResult(
@@ -161,8 +183,15 @@ class CosmosEdgeNetwork(NetworkInterface):
         )
         cur_prompt = self._detokenize(data.task_prompt_token_ids[0, num - 1])
         next_prompt = self._detokenize(data.task_prompt_token_ids[0, num])
+        # Real history action rows from the stored ego poses (obs_z = (x, y, yaw)).
+        poses = data.obs_z[0].float().cpu().numpy()
+        cur_hist = torch.from_numpy(ego_history_av_deltas(poses[:num])).to(self.device)
+        next_hist = torch.from_numpy(ego_history_av_deltas(poses[1 : num + 1])).to(self.device)
         return ReplayBufferData(
-            observations=[(cur_frames, cur_prompt), (next_frames, next_prompt)],
+            observations=[
+                (cur_frames, cur_prompt, cur_hist),
+                (next_frames, next_prompt, next_hist),
+            ],
             actions=data.actions[:, -1:].contiguous(),
             rewards=data.rewards[:, -1:, 0],
             dones=data.dones[:, -1:, 0],
@@ -258,10 +287,11 @@ class CosmosEdgeNetwork(NetworkInterface):
         arr = (frame.detach().float().clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         return Image.fromarray(np.transpose(arr, (1, 2, 0)))
 
-    def _encode(self, frames: torch.Tensor, prompt: str):
-        # ``frames`` is the history clip (T, C, H, W). The first num_cond_latent_frames
-        # latent frames are anchored as history; the rest are generated jointly with
-        # the action.
+    def _encode(self, frames: torch.Tensor, prompt: str, history_action: torch.Tensor):
+        # ``frames`` is the history clip (T, C, H, W); the first num_cond_latent_frames
+        # latent frames are anchored as history. ``history_action`` (future_start rows)
+        # anchors the history action rows with the real ego-pose deltas, so only the
+        # future rows are generated.
         pils = [self._to_pil(f) for f in frames]
         return self.policy.encode(
             frames=pils,
@@ -272,6 +302,7 @@ class CosmosEdgeNetwork(NetworkInterface):
             num_inference_steps=self.num_inference_steps,
             generator=None,
             num_cond_latent_frames=self.num_cond_latent_frames,
+            history_action=history_action,
         )
 
     def _flow_matching_velocity_loss(self, enc, target_action: torch.Tensor) -> torch.Tensor:
