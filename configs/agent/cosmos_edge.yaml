@@ -33,10 +33,12 @@ print_interval: 1
 learning_starts: 800
 buffer_size: 4000
 
-# The critic scores the full av action chunk, so the value-head horizon must equal
-# the policy's chunk_size (asserted in the network).
+# The trajectory is re-planned every tick (closed-loop), so the critic scores the
+# whole flattened trajectory as one action with a single-step reward window:
+# horizon must be 1 (asserted in the network). The action-input width is sized by
+# chunk_size * action_dim inside the network, independent of this horizon.
 chunk_size: 8
-horizon: 8
+horizon: 1
 
 # Cosmos3-Edge av policy knobs. The navigation prompt is built by the CARLA env
 # (route command -> maneuver sentence) and delivered via obs["language"].

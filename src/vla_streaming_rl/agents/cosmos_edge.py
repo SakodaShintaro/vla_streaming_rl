@@ -3,11 +3,12 @@
 
 Mirrors the off-policy structure of ``SimLingoAgent`` but drives the Cosmos3-Edge
 av policy: the network turns the front camera + a fixed driving prompt into an
-ego-pose action chunk (raw dim 9 = 3D translation + 6D rotation), which the agent
-executes open-loop over ``chunk_size`` ticks (one row per tick, matching the
-critic's per-step chunk reward/done window). The ego-frame translation is
-transformed to a world target point and driven to via CARLA's
-``VehiclePIDController`` (built against the live ego vehicle each episode).
+ego-pose trajectory (raw dim 9 = 3D translation + 6D rotation per row). The agent
+re-plans a fresh trajectory every tick (closed-loop) and steers toward its fixed
+``LOOKAHEAD_INDEX`` point: the ego-frame translation up to that row is transformed
+to a world target point and driven to via CARLA's ``VehiclePIDController`` (built
+against the live ego vehicle each episode). The whole flattened trajectory is the
+RL action; the critic scores it with a single-step reward/done window.
 
 av action convention (Cosmos 3 paper arXiv:2606.02800 + NVIDIA action code,
 confirmed against the HF ``edge_action_id_av_*`` examples):
@@ -47,6 +48,12 @@ DT = 0.05  # av frame == CARLA control tick (both 20 FPS)
 # in m/s. The speed itself is physical (mean forward delta / dt), not tuned.
 MIN_SPEED = 2.0
 MAX_SPEED = 8.0
+
+# The trajectory is re-planned every tick (closed-loop); its fixed lookahead row
+# defines the PID target point. Index L means the cumulative ego position L frames
+# ahead (sum of the first L+1 per-frame deltas). L = chunk_size - 1 = the farthest
+# point (the whole predicted trajectory's endpoint).
+LOOKAHEAD_INDEX = 7
 
 
 class _TargetWaypoint:
@@ -107,17 +114,20 @@ class CosmosEdgeAgent(Agent):
         network.pack_obs(zero_frame)
         from vla_streaming_rl.replay_buffer import ReplayBuffer
 
-        # seq_len = chunk_size + 1: a sampled window reconstructs the executed
-        # chunk (one av row per tick) plus the bootstrap next-observation. The
-        # navigation prompt (built by the env, in obs["language"]) is tokenized
-        # into the buffer's prompt slot so the loss can rebuild the conditioning.
+        # seq_len = 2: the trajectory is re-planned every tick (closed-loop), so a
+        # sampled window is a single (obs, action, reward, next-obs) transition. The
+        # stored action is the whole predicted trajectory flattened (chunk_size *
+        # action_dim); the critic scores it as one action with a single-step reward
+        # window. The navigation prompt (built by the env, in obs["language"]) is
+        # tokenized into the buffer's prompt slot so the loss can rebuild the
+        # conditioning.
         self.rb = ReplayBuffer(
             size=buffer_size,
-            seq_len=self.chunk_size + 1,
+            seq_len=2,
             obs_shape=(network.obs_flat_dim,),
             obs_z_shape=(1,),
             rnn_state_shape=(1,),
-            action_shape=(self.action_dim,),
+            action_shape=(self.chunk_size * self.action_dim,),
             output_device=self.device,
             storage_device=torch.device("cpu"),
             max_prompt_tokens=MAX_PROMPT_TOKENS,
@@ -125,10 +135,8 @@ class CosmosEdgeAgent(Agent):
         )
         self._dummy = torch.zeros(1, device=self.device)
 
-        # Open-loop chunk execution state.
-        self._chunk: torch.Tensor | None = None
-        self._chunk_idx = 0
-        self._prev_action = torch.zeros(self.action_dim, device=self.device)
+        # The previous tick's flattened trajectory, stored as the transition's action.
+        self._prev_action = torch.zeros(self.chunk_size * self.action_dim, device=self.device)
 
     # --- required agent surface --------------------------------------------
 
@@ -152,15 +160,18 @@ class CosmosEdgeAgent(Agent):
             self._ctrl_vehicle = vehicle
         return self._controller
 
-    def _to_env_action(self, chunk: torch.Tensor, idx: int, velocity: float):
-        """av ego-pose chunk -> (steer, gas_or_brake) via CARLA's VehiclePIDController.
+    def _to_env_action(self, trajectory: torch.Tensor):
+        """av ego-pose trajectory -> (steer, gas_or_brake) via CARLA's VehiclePIDController.
 
-        The remaining per-frame ego-camera translation deltas (x=right, y=down,
-        z=forward; see module note) are summed into a lookahead target point and
+        The per-frame ego-camera translation deltas (x=right, y=down, z=forward;
+        see module note) up to ``LOOKAHEAD_INDEX`` are summed into the lookahead
+        target point (the cumulative ego position that many frames ahead) and
         transformed to world coordinates; the target speed is the mean forward
         delta over dt. Small near-identity per-frame rotations are approximated by
         summing translations directly in the current ego frame."""
-        deltas = chunk[idx:, :3].detach().float().cpu().numpy()  # (M, 3): right, down, forward
+        deltas = (
+            trajectory[: LOOKAHEAD_INDEX + 1, :3].detach().float().cpu().numpy()
+        )  # (L+1, 3): right, down, forward
         forward_total = float(deltas[:, 2].sum())
         right_total = float(deltas[:, 0].sum())
 
@@ -200,31 +211,25 @@ class CosmosEdgeAgent(Agent):
             token_ids,
         )
 
-        # Re-plan a fresh av chunk at the start of each open-loop window.
-        if self._chunk is None or self._chunk_idx == 0:
-            live = self.network.infer(
-                InferInput(
-                    s_seq=frame.to(self.device),
-                    obs_z_seq=self._dummy,
-                    a_seq=self._dummy,
-                    r_seq=self._dummy,
-                    rnn_state=self._dummy,
-                    task_prompts=[prompt],
-                )
+        # Re-plan a fresh trajectory every tick (closed-loop); no open-loop chunk.
+        live = self.network.infer(
+            InferInput(
+                s_seq=frame.to(self.device),
+                obs_z_seq=self._dummy,
+                a_seq=self._dummy,
+                r_seq=self._dummy,
+                rnn_state=self._dummy,
+                task_prompts=[prompt],
             )
-            self._chunk = live.action.squeeze(0)  # (chunk, 9)
-            self._value_report = live.value_report
-
-        row = self._chunk[self._chunk_idx]
-        self._prev_action = row
-        speed = float(obs["sensors"]["speed"][1]["speed"]) if "sensors" in obs else 0.0
-        env_action = self._to_env_action(self._chunk, self._chunk_idx, speed)
-        self._chunk_idx = (self._chunk_idx + 1) % self.chunk_size
+        )
+        trajectory = live.action.squeeze(0)  # (chunk, 9)
+        self._prev_action = trajectory.reshape(-1)
+        env_action = self._to_env_action(trajectory)
 
         metrics = {
             "action_norm": float(np.linalg.norm(env_action)),
             "processed_reward": self.reward_processor.normalize(torch.tensor(reward)).item(),
-            **self._value_report,
+            **live.value_report,
         }
         return StepResult(action=env_action, metrics=metrics, panels=self._panels(obs, reward))
 
@@ -241,8 +246,6 @@ class CosmosEdgeAgent(Agent):
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
-        self._chunk = None
-        self._chunk_idx = 0
         self._controller = None  # rebuilt against the next episode's vehicle
         return {}
 

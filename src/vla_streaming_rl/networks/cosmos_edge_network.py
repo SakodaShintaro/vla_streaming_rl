@@ -76,12 +76,15 @@ class CosmosEdgeNetwork(NetworkInterface):
         self.action_dim = int(_EMBODIMENT_TO_RAW_ACTION_DIM[self.domain_name])
         self.state_dim = self.policy.pooled_state_dim
 
+        # The critic scores the whole flattened trajectory as one action
+        # (chunk_size * action_dim wide), with a single-step reward window
+        # (horizon == 1), since the trajectory is re-planned every tick.
         self.critic: DistributionalValueHead = value_head_factory(
-            self.state_dim, self.action_dim
+            self.state_dim, self.chunk_size * self.action_dim
         ).to(device)
-        assert self.critic.horizon == self.chunk_size, (
-            f"critic horizon ({self.critic.horizon}) must equal chunk_size "
-            f"({self.chunk_size}); set `horizon: {self.chunk_size}` in the agent config"
+        assert self.critic.horizon == 1, (
+            f"critic horizon ({self.critic.horizon}) must be 1 (single-step reward "
+            f"window); set `horizon: 1` in the agent config"
         )
 
         self._obs_schema: list | None = None
