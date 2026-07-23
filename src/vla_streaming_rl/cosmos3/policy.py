@@ -12,13 +12,14 @@ with the 28-layer backbone, the VAE and the text/vision projections all frozen.
 * ``encode`` (no-grad): builds the joint-sequence packing for one observation —
   text + vision-conditioning latents + fresh action noise — reusing the pipeline's
   own ``_prepare_*`` helpers, and captures a pooled backbone state for the critic.
-* ``sample_action_chunk`` (grad): re-runs the joint denoise for a few steps with
-  gradient enabled on the action tokens only (vision is denoised under no-grad and
-  detached each step, so the predicted future frames condition the action without
-  being trained), returning the raw action chunk and the predicted vision latents.
+* ``sample_action_chunk`` (grad): Euler-integrates the flow for a few steps with
+  gradient on the action tokens only. ``encode`` anchors the first few latent frames
+  as the clean history clip; the remaining (future) vision frames are noisy and are
+  generated jointly with the action (vision stepped under no-grad, action with grad).
+  Returns the raw action chunk plus the vision latents holding history + generated
+  future — so the action is a velocity-grounded, prompt-steered future trajectory.
 
-Rollout actions for the env still come from the validated ``__call__`` inference
-path; this module is used only inside the training loss.
+Both rollout (``infer``) and the training loss sample through this method.
 """
 
 from dataclasses import dataclass
@@ -60,7 +61,15 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         return int(self.transformer.config.hidden_size)
 
     def _pack_static(
-        self, frames, prompt, action_cond, num_inference_steps, generator, device, dtype
+        self,
+        frames,
+        prompt,
+        action_cond,
+        num_inference_steps,
+        generator,
+        device,
+        dtype,
+        num_cond_latent_frames,
     ):
         """Replicate the cond-only setup of ``__call__`` (no CFG / sound / safety)."""
         num_frames = action_cond.chunk_size + 1
@@ -115,9 +124,27 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             enable_sound=False,
             action=action_cond,
         )
-        vc_idx = (
-            torch.nonzero(vision_condition_mask[:, 0, 0] > 0, as_tuple=False).flatten().tolist()
+        # History-conditioned joint generation: anchor the first
+        # ``num_cond_latent_frames`` latent frames as the clean past+current history
+        # clip; the remaining latent frames stay noisy and are generated jointly with
+        # the action. VAE temporal factor is 4, so N latent frames == the first
+        # ``(N-1) * 4 + 1`` pixel frames of the conditioning clip.
+        cond_clip = action_cond.video if action_cond.video is not None else [action_cond.image]
+        vision_tensor, action_image_size, _, _ = self._prepare_action_video_conditioning(
+            cond_clip, action_cond.resolution_tier, num_frames, device, dtype
         )
+        x0_vision = self._remove_action_video_padding_from_latent(
+            self._encode_video(vision_tensor).contiguous().float(), action_image_size
+        ).to(vision_latents.dtype)
+        latent_t = x0_vision.shape[2]
+        vision_condition_mask = torch.zeros(
+            (latent_t, 1, 1), device=device, dtype=vision_latents.dtype
+        )
+        vision_condition_mask[:num_cond_latent_frames, 0, 0] = 1.0
+        vision_latents = vision_condition_mask * x0_vision + (
+            1.0 - vision_condition_mask
+        ) * torch.randn_like(x0_vision)
+        vc_idx = list(range(num_cond_latent_frames))
         vision_seg = self._prepare_vision_segment(
             input_vision_tokens=vision_latents,
             has_image_condition=bool(vc_idx),
@@ -212,9 +239,19 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         resolution_tier,
         num_inference_steps,
         generator,
+        num_cond_latent_frames,
     ) -> CosmosEdgeEncoding:
         device = self._get_execution_device()
         dtype = self.transformer.dtype
+        # History-conditioned joint generation: ``frames`` is the recent history clip.
+        # ``_pack_static`` anchors the first ``num_cond_latent_frames`` latent frames
+        # (past+current); the remaining latent frames stay noisy and are generated
+        # jointly with the action, so ``sample_action_chunk`` produces the future
+        # ego-pose trajectory (grounded in the observed velocity + the navigation
+        # prompt). ``policy`` mode leaves the action tokens all-noisy (generated) and
+        # tags the prompt with the policy caption template — the right label for
+        # "generate future + action from observation"; the vision anchoring (which
+        # ``policy`` would otherwise set to frame 0 only) is overridden above.
         action_cond = CosmosActionCondition(
             mode="policy",
             chunk_size=chunk_size,
@@ -233,7 +270,14 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             _fps,
             meta,
         ) = self._pack_static(
-            frames, prompt, action_cond, num_inference_steps, generator, device, dtype
+            frames,
+            prompt,
+            action_cond,
+            num_inference_steps,
+            generator,
+            device,
+            dtype,
+            num_cond_latent_frames,
         )
 
         # Capture a pooled backbone state for the critic via a hook on the final
@@ -274,10 +318,11 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         self, enc: CosmosEdgeEncoding, num_steps: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Differentiable action chunk: Euler-integrate the flow with grad on the
-        action tokens; vision is stepped under no-grad (fixed context). Returns the
-        raw action chunk ``[chunk_size, raw_action_dim]`` and the (detached) final
-        predicted vision latents (the world model's future-frame prediction, for
-        decoding/visualization)."""
+        action tokens; the future (non-history) vision frames are generated under
+        no-grad while the anchored history frames stay fixed. Returns the raw action
+        chunk ``[chunk_size, raw_action_dim]`` and the vision latents holding the
+        history + generated future (the last frame is the farthest future prediction,
+        for decoding/visualization)."""
         device = self._get_execution_device()
         vision_latents = enc.vision_latents.clone()
         action_latents = torch.randn_like(enc.action_latents)

@@ -47,6 +47,7 @@ class CosmosEdgeNetwork(NetworkInterface):
         resolution_tier: int,
         num_inference_steps: int,
         actor_denoising_steps: int,
+        num_cond_latent_frames: int,
         q_grad_eta: float,
         dacer_loss_weight: float,
         critic_loss_weight: float,
@@ -65,6 +66,13 @@ class CosmosEdgeNetwork(NetworkInterface):
         self.domain_name = str(domain_name)
         self.resolution_tier = int(resolution_tier)
         self.num_inference_steps = int(num_inference_steps)
+        # History-conditioned joint generation: the first ``num_cond_latent_frames``
+        # latent frames are the clean history clip. VAE temporal factor is 4, so that
+        # is the first ``history_len`` pixel frames; ``future_start`` is the action
+        # row (== current-frame pixel index) where the *generated future* begins.
+        self.num_cond_latent_frames = int(num_cond_latent_frames)
+        self.history_len = (self.num_cond_latent_frames - 1) * 4 + 1
+        self.future_start = (self.num_cond_latent_frames - 1) * 4
         pad = self.policy.text_tokenizer.pad_token_id
         self.pad_id = int(pad) if pad is not None else 0
         self.actor_denoising_steps = int(actor_denoising_steps)
@@ -142,16 +150,22 @@ class CosmosEdgeNetwork(NetworkInterface):
         return flat.reshape(*shape).to(dtype)
 
     def _unpack_window(self, data: ReplayBufferData) -> ReplayBufferData:
-        cur_frame = self._unpack_obs(data.observations[0, 0])
-        next_frame = self._unpack_obs(data.observations[0, -1])
-        # Rebuild the rollout prompts from the stored token ids (first / last step).
-        cur_prompt = self._detokenize(data.task_prompt_token_ids[0, 0])
-        next_prompt = self._detokenize(data.task_prompt_token_ids[0, -1])
+        # seq_len = history_len + 1 consecutive stored frames. The current history clip
+        # is the first ``history_len`` frames; the bootstrap (next) clip is shifted by
+        # one. The transition's action / reward / done live in the last stored slot
+        # (the action taken at the current frame, its reward, done).
+        num = self.history_len
+        cur_frames = torch.stack([self._unpack_obs(data.observations[0, i]) for i in range(num)])
+        next_frames = torch.stack(
+            [self._unpack_obs(data.observations[0, i]) for i in range(1, num + 1)]
+        )
+        cur_prompt = self._detokenize(data.task_prompt_token_ids[0, num - 1])
+        next_prompt = self._detokenize(data.task_prompt_token_ids[0, num])
         return ReplayBufferData(
-            observations=[(cur_frame, cur_prompt), (next_frame, next_prompt)],
-            actions=data.actions[:, 1:].contiguous(),
-            rewards=data.rewards[:, 1:, 0],
-            dones=data.dones[:, 1:, 0],
+            observations=[(cur_frames, cur_prompt), (next_frames, next_prompt)],
+            actions=data.actions[:, -1:].contiguous(),
+            rewards=data.rewards[:, -1:, 0],
+            dones=data.dones[:, -1:, 0],
             obs_z=data.obs_z,
             rnn_state=data.rnn_state,
             task_prompt_token_ids=data.task_prompt_token_ids,
@@ -244,16 +258,20 @@ class CosmosEdgeNetwork(NetworkInterface):
         arr = (frame.detach().float().clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         return Image.fromarray(np.transpose(arr, (1, 2, 0)))
 
-    def _encode(self, frame: torch.Tensor, prompt: str):
-        pil = self._to_pil(frame)
+    def _encode(self, frames: torch.Tensor, prompt: str):
+        # ``frames`` is the history clip (T, C, H, W). The first num_cond_latent_frames
+        # latent frames are anchored as history; the rest are generated jointly with
+        # the action.
+        pils = [self._to_pil(f) for f in frames]
         return self.policy.encode(
-            frames=[pil],
+            frames=pils,
             prompt=prompt,
             chunk_size=self.chunk_size,
             domain_name=self.domain_name,
             resolution_tier=self.resolution_tier,
             num_inference_steps=self.num_inference_steps,
             generator=None,
+            num_cond_latent_frames=self.num_cond_latent_frames,
         )
 
     def _flow_matching_velocity_loss(self, enc, target_action: torch.Tensor) -> torch.Tensor:
