@@ -1,21 +1,35 @@
 # SPDX-License-Identifier: MIT
-"""Cosmos3-Edge av policy + injected value head, trained with DACER2.
+"""Cosmos3-Edge backbone + new ``navigation`` action domain, trained with DACER2.
 
-Mirrors :class:`LiberoPi05Network`: the Cosmos3-Edge backbone / VAE are frozen,
-only the action projection heads (the policy μ) and the injected action-value
-critic learn. The action is the av embodiment's ego-pose chunk (raw dim 9); the
-state scored by the critic is the pooled backbone understanding stream.
+The ``navigation`` embodiment is a NEW domain occupying a free slot (id 31) of
+the transformer's 32-slot ``DomainAwareLinear`` action projections. Its action
+row is the direct 2D env control ``[steer, gas_or_brake]`` at the model frame
+rate (``action_fps``), so the same action space can later serve other envs
+(e.g. Animal-AI at a different ``frame_stride``). Only the new slot's
+projection rows (+ the shared action modality embed) learn; the trunk
+(und/gen streams), VAE and text stay frozen — the bet is that the frozen trunk
+already computes future ego-motion in the action-token positions and a linear
+readout per domain suffices (that is exactly how the ~20 pretrained
+embodiments are wired).
 
-Rollout and training both sample through the same differentiable action denoiser
-(:class:`CosmosEdgePolicy`), with more integration steps at rollout than in the
-DACER2 actor unroll. The navigation-aware prompt is built by the environment and
-arrives via ``obs["language"]``; the agent stores its token ids in the replay so
-this network can rebuild the same conditioning when it re-encodes at loss time.
+Chunk semantics — one config value ``chunk_size`` (== critic horizon):
+  * The joint sequence carries ``future_start + chunk_size`` action rows: the
+    ``future_start`` history rows are anchored to the really-executed controls,
+    the ``chunk_size`` future rows are generated.
+  * The agent executes the future rows open-loop (one row per model frame,
+    held for ``frame_stride`` env ticks), then replans. The replay stores one
+    slot per model frame, so a sampled window of ``history_len + chunk_size``
+    slots holds the conditioning clip, the executed rows and the
+    ``chunk_size``-step reward window the critic bootstraps over
+    (``libero_pi05`` pattern).
 """
 
 import numpy as np
 import torch
-from diffusers.pipelines.cosmos.pipeline_cosmos3_omni import _EMBODIMENT_TO_RAW_ACTION_DIM
+from diffusers.pipelines.cosmos.pipeline_cosmos3_omni import (
+    _EMBODIMENT_TO_DOMAIN_ID,
+    _EMBODIMENT_TO_RAW_ACTION_DIM,
+)
 from PIL import Image
 from torch.nn import functional as F
 
@@ -35,54 +49,20 @@ from vla_streaming_rl.replay_buffer import ReplayBufferData
 REAL_REPO = "nvidia/Cosmos3-Edge"
 MAX_PROMPT_TOKENS = 64
 
+# New embodiment domain: 2D direct control [steer, gas_or_brake]. Slot 31 is
+# unused by the pretrained checkpoint (registered ids stop at 20, the
+# projection banks hold 32 slots); registering here makes the diffusers
+# pipeline accept the domain name end-to-end.
+NAVIGATION_DOMAIN_NAME = "navigation"
+NAVIGATION_DOMAIN_ID = 31
+NAVIGATION_ACTION_DIM = 2
 
-# The av "no motion" row: zero translation + identity rotation_6d. Used as the
-# delta at an episode's first frame and to pad the history at episode start.
-AV_IDENTITY_ROW = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-
-
-def ego_history_av_deltas(poses: np.ndarray) -> np.ndarray:
-    """Real av-convention pose deltas connecting consecutive ego poses.
-
-    ``poses`` is ``(N, 3)`` of world ``(x, y, yaw_rad)`` (the recorded ego trajectory
-    of the history clip). Returns ``(N - 1, 9)``: per transition, translation
-    ``[x=right, y=down=0, z=forward]`` in the ego frame at the start pose, plus the
-    ``rotation_6d`` (first two SO(3) columns) of the heading change toward the ego's
-    right (identity == ``[1,0,0,0,1,0]``). These fix the history rows so the model
-    generates only the future, grounded in the actual recent motion (not inferred)."""
-    rows = []
-    for a, b in zip(poses[:-1], poses[1:]):
-        d = np.array([b[0] - a[0], b[1] - a[1]])
-        fwd = np.array([np.cos(a[2]), np.sin(a[2])])
-        right = np.array([-np.sin(a[2]), np.cos(a[2])])  # CARLA left-handed ego right
-        fwd_b = np.array([np.cos(b[2]), np.sin(b[2])])
-        theta = float(np.arctan2(float(right @ fwd_b), float(fwd @ fwd_b)))
-        c, s = np.cos(theta), np.sin(theta)
-        rows.append([float(d @ right), 0.0, float(d @ fwd), c, 0.0, -s, 0.0, 1.0, 0.0])
-    return np.asarray(rows, dtype=np.float32)
-
-
-def _compose_av_delta_pair(r1: torch.Tensor, r2: torch.Tensor) -> torch.Tensor:
-    c1, s1 = r1[:, 3], -r1[:, 5]
-    c2, s2 = r2[:, 3], -r2[:, 5]
-    out = torch.zeros_like(r1)
-    out[:, 0] = r1[:, 0] + c1 * r2[:, 0] + s1 * r2[:, 2]
-    out[:, 2] = r1[:, 2] - s1 * r2[:, 0] + c1 * r2[:, 2]
-    out[:, 3] = c1 * c2 - s1 * s2
-    out[:, 5] = -(s1 * c2 + c1 * s2)
-    out[:, 7] = 1.0
-    return out
-
-
-def compose_av_delta_rows(rows: torch.Tensor, stride: int) -> torch.Tensor:
-    """Compose ``stride`` consecutive per-tick av delta rows into one row per model
-    frame step (exact SE(2) group product of the yaw-only rows), so 20 Hz CARLA
-    ticks collapse to the model's 10 Hz av spacing."""
-    grouped = rows.reshape(-1, stride, rows.shape[-1])
-    out = grouped[:, 0]
-    for i in range(1, stride):
-        out = _compose_av_delta_pair(out, grouped[:, i])
-    return out
+assert all(
+    domain_id != NAVIGATION_DOMAIN_ID or name == NAVIGATION_DOMAIN_NAME
+    for name, domain_id in _EMBODIMENT_TO_DOMAIN_ID.items()
+), f"Cosmos3 domain id {NAVIGATION_DOMAIN_ID} is already taken"
+_EMBODIMENT_TO_DOMAIN_ID[NAVIGATION_DOMAIN_NAME] = NAVIGATION_DOMAIN_ID
+_EMBODIMENT_TO_RAW_ACTION_DIM[NAVIGATION_DOMAIN_NAME] = NAVIGATION_ACTION_DIM
 
 
 class CosmosEdgeNetwork(NetworkInterface):
@@ -92,7 +72,6 @@ class CosmosEdgeNetwork(NetworkInterface):
         device: torch.device,
         value_head_factory,
         chunk_size: int,
-        domain_name: str,
         resolution_tier: int,
         num_inference_steps: int,
         actor_denoising_steps: int,
@@ -111,63 +90,75 @@ class CosmosEdgeNetwork(NetworkInterface):
         ).to(device)
         # WanVAE is unstable in bf16 (trained without amp); keep it in fp32.
         self.policy.vae.to(torch.float32)
-        self.actor_parameters = self.policy.freeze_backbone()
 
+        # ``chunk_size`` is the number of *generated future* rows the agent
+        # executes == the critic reward window (horizon). The model's joint
+        # sequence additionally carries the ``future_start`` anchored history
+        # rows; the VAE temporal factor 4 requires the total row count to be a
+        # multiple of 4 (num_frames = rows + 1 -> integer latent frames).
         self.chunk_size = int(chunk_size)
-        self.domain_name = str(domain_name)
-        self.resolution_tier = int(resolution_tier)
-        self.num_inference_steps = int(num_inference_steps)
-        # History-conditioned joint generation: the first ``num_cond_latent_frames``
-        # latent frames are the clean history clip. VAE temporal factor is 4, so that
-        # is the first ``history_len`` pixel frames; ``future_start`` is the action
-        # row (== current-frame pixel index) where the *generated future* begins.
         self.num_cond_latent_frames = int(num_cond_latent_frames)
         self.history_len = (self.num_cond_latent_frames - 1) * 4 + 1
         self.future_start = (self.num_cond_latent_frames - 1) * 4
-        # av rows / conditioning frames are 10 Hz in the pretrained model (HF
-        # assets edge_action_id_av_*: 60 rows, 61 frames, 10 fps) while the env
-        # ticks faster; ``frame_stride`` env ticks make up one model frame step.
+        self.model_chunk = self.future_start + self.chunk_size
+        assert self.model_chunk % 4 == 0, (
+            f"future_start ({self.future_start}) + chunk_size ({self.chunk_size}) must be a "
+            f"multiple of 4 (VAE temporal factor)"
+        )
+        # Model frames are ``action_fps`` Hz while the env ticks faster; one row
+        # spans ``frame_stride`` env ticks (agent-side cadence).
         self.action_fps = float(action_fps)
         self.frame_stride = int(frame_stride)
         self.policy.setup(
-            chunk_size=self.chunk_size,
-            domain_name=self.domain_name,
-            resolution_tier=self.resolution_tier,
-            num_inference_steps=self.num_inference_steps,
+            chunk_size=self.model_chunk,
+            domain_name=NAVIGATION_DOMAIN_NAME,
+            resolution_tier=int(resolution_tier),
+            num_inference_steps=int(num_inference_steps),
             num_cond_latent_frames=self.num_cond_latent_frames,
             fps=self.action_fps,
         )
+        # Fresh projection rows for the new domain — the checkpoint values of an
+        # unused slot are arbitrary pretraining leftovers.
+        transformer = self.policy.transformer
+        for proj in (transformer.action_proj_in, transformer.action_proj_out):
+            torch.nn.init.normal_(proj.fc.weight.data[NAVIGATION_DOMAIN_ID], std=0.02)
+            torch.nn.init.zeros_(proj.bias.weight.data[NAVIGATION_DOMAIN_ID])
+        # NOTE: the DomainAwareLinear banks are single embedding tensors, so the
+        # optimizer sees every domain's rows even though only the navigation
+        # rows receive gradients (embedding lookup). Keep the actor optimizer's
+        # weight_decay at 0 or the other domains' pretrained rows decay.
+        self.actor_parameters = self.policy.freeze_backbone()
+
         pad = self.policy.text_tokenizer.pad_token_id
         self.pad_id = int(pad) if pad is not None else 0
+        self.num_inference_steps = int(num_inference_steps)
         self.actor_denoising_steps = int(actor_denoising_steps)
         self.q_grad_eta = float(q_grad_eta)
         self.dacer_loss_weight = float(dacer_loss_weight)
         self.critic_loss_weight = float(critic_loss_weight)
         self.detach_critic = bool(detach_critic)
 
-        self.action_dim = int(_EMBODIMENT_TO_RAW_ACTION_DIM[self.domain_name])
+        self.action_dim = NAVIGATION_ACTION_DIM
         self.state_dim = self.policy.pooled_state_dim
 
-        # The critic scores the whole flattened trajectory as one action
-        # (chunk_size * action_dim wide), with a single-step reward window
-        # (horizon == 1), since the trajectory is re-planned every tick.
+        # The critic scores the executed future rows (chunk_size x action_dim,
+        # flattened inside the head) against the chunk_size-step reward window.
         self.critic: DistributionalValueHead = value_head_factory(
-            self.state_dim, self.chunk_size * self.action_dim
+            self.state_dim, self.action_dim
         ).to(device)
-        assert self.critic.horizon == 1, (
-            f"critic horizon ({self.critic.horizon}) must be 1 (single-step reward "
-            f"window); set `horizon: 1` in the agent config"
+        assert self.critic.horizon == self.chunk_size, (
+            f"critic horizon ({self.critic.horizon}) must equal chunk_size "
+            f"({self.chunk_size}); set `horizon: ${{chunk_size}}` in the agent config"
         )
 
         self._obs_schema: list | None = None
         self._obs_flat_dim: int | None = None
 
     @property
-    def window_ticks(self) -> int:
-        """Env ticks a sampled replay window must span: the current history clip
-        covers ``(history_len - 1) * frame_stride`` ticks, plus one tick for the
-        current frame and one for the bootstrap (next) clip's shift."""
-        return (self.history_len - 1) * self.frame_stride + 2
+    def seq_len(self) -> int:
+        """Replay slots (one per model frame) a sampled window must span: the
+        conditioning clip plus the executed chunk / reward window."""
+        return self.history_len + self.chunk_size
 
     # --- NetworkInterface contract -----------------------------------------
 
@@ -185,9 +176,10 @@ class CosmosEdgeNetwork(NetworkInterface):
 
     @torch.no_grad()
     def infer(self, data: InferInput) -> InferResult:
-        # data.a_seq carries the real history action rows (from the agent's ego poses).
+        # data.a_seq carries the executed history control rows (future_start, 2).
         enc = self._encode(data.s_seq, data.task_prompts[0], data.a_seq)
-        action, vision_latents = self.policy.sample_action_chunk(enc, self.num_inference_steps)
+        full, vision_latents = self.policy.sample_action_chunk(enc, self.num_inference_steps)
+        action = full[self.future_start :].float()  # (chunk_size, 2) generated future rows
         critic_out = self.critic(enc.state[None], action[None]).output
         return InferResult(
             action=action[None],
@@ -222,36 +214,34 @@ class CosmosEdgeNetwork(NetworkInterface):
         return flat.reshape(*shape).to(dtype)
 
     def _unpack_window(self, data: ReplayBufferData) -> ReplayBufferData:
-        # seq_len = window_ticks consecutive stored env ticks; the model's history
-        # clip subsamples every ``frame_stride``-th frame (10 Hz av spacing). The
-        # current clip's frames sit at slots 0, stride, ..., span; the bootstrap
-        # (next) clip is shifted by one tick. The transition's action / reward /
-        # done live in the last stored slot.
-        stride = self.frame_stride
-        span = (self.history_len - 1) * stride
-        cur_frames = torch.stack(
-            [self._unpack_obs(data.observations[0, i]) for i in range(0, span + 1, stride)]
-        )
+        # seq_len = history_len + chunk_size stored model frames. Slot t holds
+        # (frame_t, row executed during the previous model frame, reward of that
+        # row, done). The current clip is slots [0, history_len); its history
+        # rows are the executed rows at slots [1, history_len) (the transitions
+        # connecting the clip frames). The executed chunk / rewards / dones live
+        # in slots [history_len, seq_len); the bootstrap (next) clip is the last
+        # history_len slots.
+        num = self.history_len
+        cur_frames = torch.stack([self._unpack_obs(data.observations[0, i]) for i in range(num)])
         next_frames = torch.stack(
-            [self._unpack_obs(data.observations[0, i]) for i in range(1, span + 2, stride)]
+            [
+                self._unpack_obs(data.observations[0, i])
+                for i in range(self.chunk_size, self.chunk_size + num)
+            ]
         )
-        cur_prompt = self._detokenize(data.task_prompt_token_ids[0, span])
-        next_prompt = self._detokenize(data.task_prompt_token_ids[0, span + 1])
-        # obs_z slot t holds the real per-tick av delta row (frame t-1 -> t;
-        # identity at an episode's first frame); ``stride`` consecutive rows compose
-        # into one model-frame-step history row — no pose differencing that could
-        # cross an episode/spawn discontinuity.
-        deltas = data.obs_z[0].float().to(self.device)
-        cur_hist = compose_av_delta_rows(deltas[1 : span + 1], stride)
-        next_hist = compose_av_delta_rows(deltas[2 : span + 2], stride)
+        cur_prompt = self._detokenize(data.task_prompt_token_ids[0, num - 1])
+        next_prompt = self._detokenize(data.task_prompt_token_ids[0, -1])
+        rows = data.actions[0].float().to(self.device)  # (seq_len, 2)
+        cur_hist = rows[1:num]
+        next_hist = rows[self.chunk_size + 1 : self.chunk_size + num]
         return ReplayBufferData(
             observations=[
                 (cur_frames, cur_prompt, cur_hist),
                 (next_frames, next_prompt, next_hist),
             ],
-            actions=data.actions[:, -1:].contiguous(),
-            rewards=data.rewards[:, -1:, 0],
-            dones=data.dones[:, -1:, 0],
+            actions=data.actions[:, num:].contiguous(),  # (B, chunk_size, 2) executed rows
+            rewards=data.rewards[:, num:, 0],
+            dones=data.dones[:, num:, 0],
             obs_z=data.obs_z,
             rnn_state=data.rnn_state,
             task_prompt_token_ids=data.task_prompt_token_ids,
@@ -267,7 +257,8 @@ class CosmosEdgeNetwork(NetworkInterface):
         enc = self._encode(*cur_obs)
         with torch.no_grad():
             next_enc = self._encode(*next_obs)
-            next_action, _ = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
+            next_full, _ = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
+            next_action = next_full[self.future_start :].float()
             next_output = self.critic(next_enc.state[None], next_action[None]).output
         target_value = self.critic.compute_target_value(next_output, chunk_rewards, chunk_dones)
         critic_loss, critic_info = self.critic.compute_critic_loss(
@@ -294,9 +285,11 @@ class CosmosEdgeNetwork(NetworkInterface):
         enc = self._encode(*cur_obs)
         with torch.no_grad():
             next_enc = self._encode(*next_obs)
-            next_action, _ = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
+            next_full, _ = self.policy.sample_action_chunk(next_enc, self.actor_denoising_steps)
+            next_action = next_full[self.future_start :].float()
             next_output = self.critic(next_enc.state[None], next_action[None]).output
-            exec_action, _ = self.policy.sample_action_chunk(next_enc, self.num_inference_steps)
+            exec_full, _ = self.policy.sample_action_chunk(next_enc, self.num_inference_steps)
+            exec_action = exec_full[self.future_start :].float()
         target_value = self.critic.compute_target_value(next_output, chunk_rewards, chunk_dones)
         critic_loss, critic_info = self.critic.compute_critic_loss(
             enc.state[None], action_chunk, target_value, self.detach_critic
@@ -344,30 +337,35 @@ class CosmosEdgeNetwork(NetworkInterface):
         arr = (frame.detach().float().clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
         return Image.fromarray(np.transpose(arr, (1, 2, 0)))
 
-    def _encode(self, frames: torch.Tensor, prompt: str, history_action: torch.Tensor):
+    def _encode(self, frames: torch.Tensor, prompt: str, history_rows: torch.Tensor):
         # ``frames`` is the history clip (T, C, H, W); the first num_cond_latent_frames
-        # latent frames are anchored as history. ``history_action`` (future_start rows)
-        # anchors the history action rows with the real ego-pose deltas, so only the
-        # future rows are generated.
+        # latent frames are anchored as history. ``history_rows`` (future_start, 2)
+        # anchors the history action rows with the really-executed controls, so
+        # only the future rows are generated.
         pils = [self._to_pil(f) for f in frames]
-        return self.policy.encode(pils, prompt, history_action)
+        return self.policy.encode(pils, prompt, history_rows)
 
-    def _flow_matching_velocity_loss(self, enc, target_action: torch.Tensor) -> torch.Tensor:
-        """Regress the action velocity toward a Q-improved target (DACER2 score term)."""
-        full_dim = enc.action_latents.shape[-1]
-        target = F.pad(target_action, (0, full_dim - self.action_dim))
-        # Padding channels beyond the raw action dim stay zero (train-time
-        # convention of the stock pipeline), so the noised sample keeps them clean.
+    def _flow_matching_velocity_loss(self, enc, target_future: torch.Tensor) -> torch.Tensor:
+        """Regress the future-row action velocity toward a Q-improved target
+        (DACER2 score term). History rows stay clean (they are conditioning);
+        the loss reads only the generated future rows and raw action dims."""
+        target = enc.x0_action.clone()  # (model_chunk, action_dim): real history rows, 0 elsewhere
+        target[self.future_start :, : self.action_dim] = target_future.to(target)
         noise = torch.randn_like(target)
         noise[:, self.action_dim :] = 0.0
+        noise[: self.future_start] = 0.0
         flow_time = float(torch.rand(()).item())
         x_t = flow_time * noise + (1.0 - flow_time) * target
         u_t = noise - target
         v_pred = self.policy.action_velocity(enc, x_t, flow_time)
-        return F.mse_loss(v_pred[:, : self.action_dim], u_t[:, : self.action_dim])
+        return F.mse_loss(
+            v_pred[self.future_start :, : self.action_dim],
+            u_t[self.future_start :, : self.action_dim],
+        )
 
     def _dacer2_actor_loss(self, enc) -> tuple[torch.Tensor, dict]:
-        action_pi, _ = self.policy.sample_action_chunk(enc, self.actor_denoising_steps)
+        full, _ = self.policy.sample_action_chunk(enc, self.actor_denoising_steps)
+        action_pi = full[self.future_start :].float()
         state = enc.state.detach()
 
         for p in self.critic.parameters():

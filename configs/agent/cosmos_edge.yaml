@@ -1,15 +1,17 @@
 # @package _global_
-# Cosmos3-Edge av policy + flow-matching policy RL on CARLA/Bench2Drive.
+# Cosmos3-Edge backbone + new `navigation` action domain on CARLA.
 #
-# The Cosmos3-Edge backbone (28-layer MoT) and WanVAE are frozen; only the action
-# projection heads (action_proj_in/out + action_modality_embed, the policy μ) and
-# the injected action-value critic learn. The action is the `av` embodiment's
-# ego-pose chunk (raw dim 9); the agent converts it to (steer, gas_or_brake) via
-# SimLingo's TrajectoryToControl PID.
+# The Cosmos3-Edge trunk (und/gen streams) and WanVAE are frozen; the policy is
+# a NEW embodiment domain `navigation` (free DomainAwareLinear slot 31, raw dim
+# 2 = [steer, gas_or_brake]) whose projection rows (+ shared action modality
+# embed) are the only actor parameters, plus the injected action-value critic.
+# The action row IS the env control — no trajectory/PID conversion — so the
+# same action space can later serve other envs (Animal-AI) via frame_stride.
 #
 # Learning (see networks/cosmos_edge_network.py):
-#   * Critic — TD bootstrap on the av action chunk; bootstrap action sampled from
-#     the policy itself. State = pooled backbone understanding stream (2048-D).
+#   * Critic — TD bootstrap over the chunk_size-step reward window on the
+#     executed control rows; bootstrap action sampled from the policy itself.
+#     State = pooled backbone understanding stream (2048-D).
 #   * Actor — DACER2: advantage maximization -E[Q(s, pi(s))] through the
 #     differentiable action denoiser, plus a Q-gradient-guided flow-matching term.
 #
@@ -25,33 +27,32 @@ agent_type: cosmos_edge
 network_class: cosmos_edge
 learning_mode: off_policy
 batch_size: 1
-actor_lr: 2e-7
-critic_lr: 5e-7
+# The actor trains freshly-initialized projection rows (not pretrained heads),
+# so the learning rates are conventional; tune down if unstable.
+actor_lr: 1e-4
+critic_lr: 1e-4
 
 image_save_interval: 50
 print_interval: 1
 learning_starts: 800
 buffer_size: 4000
 
-# History-conditioned joint generation, matching the HF av reference config
-# (assets/edge_action_id_av_*: 60 action rows, 61-frame 10-fps clip). num_frames =
-# chunk_size + 1 = 61. With num_cond_latent_frames=2 the first 5 pixel frames
-# (2 latent) are the history clip and the remaining 56 frames are the generated
-# future. In rows: the 4 history deltas are rows 0..3 and the 56 future deltas are
-# rows 4..59 (the forward plan; future_start=4). av frames are 10 Hz (action_fps)
-# while CARLA ticks at 20 Hz, so one model frame spans frame_stride=2 env ticks.
-# The critic scores the whole flattened trajectory as one action (horizon must be
-# 1, asserted in the network); the action-input width is chunk_size * action_dim
-# inside the network.
-chunk_size: 60
-horizon: 1
+# `chunk_size` is the number of generated future control rows the agent
+# executes open-loop per plan AND the critic's reward window (horizon) — one
+# knob. The model's joint sequence additionally carries future_start = 4
+# anchored history rows, so it holds future_start + chunk_size = 12 rows
+# (num_frames = 13 -> 4 latent frames; the total must be a multiple of 4).
+# Model frames are action_fps = 10 Hz while CARLA ticks at 20 Hz, so one row
+# spans frame_stride = 2 env ticks (Animal-AI at 50 Hz would use 5); the
+# replay stores one slot per model frame.
+chunk_size: 8
+horizon: ${chunk_size}
 num_cond_latent_frames: 2
 action_fps: 10.0
 frame_stride: 2
 
-# Cosmos3-Edge av policy knobs. The navigation prompt is built by the CARLA env
+# Cosmos3-Edge knobs. The navigation prompt is built by the CARLA env
 # (route command -> maneuver sentence) and delivered via obs["language"].
-domain_name: av
 resolution_tier: 480
 num_inference_steps: 4
 actor_denoising_steps: 1
