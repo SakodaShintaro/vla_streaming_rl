@@ -62,6 +62,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         resolution_tier: int,
         num_inference_steps: int,
         num_cond_latent_frames: int,
+        fps: float,
     ) -> None:
         """Fix the per-run generation configuration once (called right after
         ``from_pretrained``), so ``encode`` only takes per-observation inputs."""
@@ -70,6 +71,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         self.resolution_tier = resolution_tier
         self.num_inference_steps = num_inference_steps
         self.num_cond_latent_frames = num_cond_latent_frames
+        self.fps = fps
 
     def freeze_backbone(self) -> list:
         """Freeze everything except the action heads; return the trainable params."""
@@ -117,7 +119,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             num_frames=num_frames,
             height=height,
             width=width,
-            fps=24.0,
+            fps=self.fps,
             use_system_prompt=False,
             add_resolution_template=True,
             add_duration_template=True,
@@ -144,7 +146,7 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             num_frames=num_frames,
             height=height,
             width=width,
-            fps=24.0,
+            fps=self.fps,
             generator=None,
             device=device,
             dtype=dtype,

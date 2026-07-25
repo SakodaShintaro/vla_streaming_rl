@@ -33,16 +33,21 @@ print_interval: 1
 learning_starts: 800
 buffer_size: 4000
 
-# History-conditioned joint generation. num_frames = chunk_size + 1. With
-# num_cond_latent_frames=2 the first 5 pixel frames (2 latent) are the history clip
-# and the remaining 8 frames are the generated future -> 5 + 8 = 13 frames. In rows:
-# the 4 history deltas are rows 0..3 and the 8 future deltas are rows 4..11 (the
-# forward plan; future_start=4) -> 4 + 8 = 12 = chunk_size. The critic scores the whole
-# flattened trajectory as one action (horizon must be 1, asserted in the network);
-# the action-input width is chunk_size * action_dim inside the network.
-chunk_size: 12
+# History-conditioned joint generation, matching the HF av reference config
+# (assets/edge_action_id_av_*: 60 action rows, 61-frame 10-fps clip). num_frames =
+# chunk_size + 1 = 61. With num_cond_latent_frames=2 the first 5 pixel frames
+# (2 latent) are the history clip and the remaining 56 frames are the generated
+# future. In rows: the 4 history deltas are rows 0..3 and the 56 future deltas are
+# rows 4..59 (the forward plan; future_start=4). av frames are 10 Hz (action_fps)
+# while CARLA ticks at 20 Hz, so one model frame spans frame_stride=2 env ticks.
+# The critic scores the whole flattened trajectory as one action (horizon must be
+# 1, asserted in the network); the action-input width is chunk_size * action_dim
+# inside the network.
+chunk_size: 60
 horizon: 1
 num_cond_latent_frames: 2
+action_fps: 10.0
+frame_stride: 2
 
 # Cosmos3-Edge av policy knobs. The navigation prompt is built by the CARLA env
 # (route command -> maneuver sentence) and delivered via obs["language"].

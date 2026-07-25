@@ -62,6 +62,29 @@ def ego_history_av_deltas(poses: np.ndarray) -> np.ndarray:
     return np.asarray(rows, dtype=np.float32)
 
 
+def _compose_av_delta_pair(r1: torch.Tensor, r2: torch.Tensor) -> torch.Tensor:
+    c1, s1 = r1[:, 3], -r1[:, 5]
+    c2, s2 = r2[:, 3], -r2[:, 5]
+    out = torch.zeros_like(r1)
+    out[:, 0] = r1[:, 0] + c1 * r2[:, 0] + s1 * r2[:, 2]
+    out[:, 2] = r1[:, 2] - s1 * r2[:, 0] + c1 * r2[:, 2]
+    out[:, 3] = c1 * c2 - s1 * s2
+    out[:, 5] = -(s1 * c2 + c1 * s2)
+    out[:, 7] = 1.0
+    return out
+
+
+def compose_av_delta_rows(rows: torch.Tensor, stride: int) -> torch.Tensor:
+    """Compose ``stride`` consecutive per-tick av delta rows into one row per model
+    frame step (exact SE(2) group product of the yaw-only rows), so 20 Hz CARLA
+    ticks collapse to the model's 10 Hz av spacing."""
+    grouped = rows.reshape(-1, stride, rows.shape[-1])
+    out = grouped[:, 0]
+    for i in range(1, stride):
+        out = _compose_av_delta_pair(out, grouped[:, i])
+    return out
+
+
 class CosmosEdgeNetwork(NetworkInterface):
     def __init__(
         self,
@@ -74,6 +97,8 @@ class CosmosEdgeNetwork(NetworkInterface):
         num_inference_steps: int,
         actor_denoising_steps: int,
         num_cond_latent_frames: int,
+        action_fps: float,
+        frame_stride: int,
         q_grad_eta: float,
         dacer_loss_weight: float,
         critic_loss_weight: float,
@@ -99,12 +124,18 @@ class CosmosEdgeNetwork(NetworkInterface):
         self.num_cond_latent_frames = int(num_cond_latent_frames)
         self.history_len = (self.num_cond_latent_frames - 1) * 4 + 1
         self.future_start = (self.num_cond_latent_frames - 1) * 4
+        # av rows / conditioning frames are 10 Hz in the pretrained model (HF
+        # assets edge_action_id_av_*: 60 rows, 61 frames, 10 fps) while the env
+        # ticks faster; ``frame_stride`` env ticks make up one model frame step.
+        self.action_fps = float(action_fps)
+        self.frame_stride = int(frame_stride)
         self.policy.setup(
             chunk_size=self.chunk_size,
             domain_name=self.domain_name,
             resolution_tier=self.resolution_tier,
             num_inference_steps=self.num_inference_steps,
             num_cond_latent_frames=self.num_cond_latent_frames,
+            fps=self.action_fps,
         )
         pad = self.policy.text_tokenizer.pad_token_id
         self.pad_id = int(pad) if pad is not None else 0
@@ -130,6 +161,13 @@ class CosmosEdgeNetwork(NetworkInterface):
 
         self._obs_schema: list | None = None
         self._obs_flat_dim: int | None = None
+
+    @property
+    def window_ticks(self) -> int:
+        """Env ticks a sampled replay window must span: the current history clip
+        covers ``(history_len - 1) * frame_stride`` ticks, plus one tick for the
+        current frame and one for the bootstrap (next) clip's shift."""
+        return (self.history_len - 1) * self.frame_stride + 2
 
     # --- NetworkInterface contract -----------------------------------------
 
@@ -184,23 +222,28 @@ class CosmosEdgeNetwork(NetworkInterface):
         return flat.reshape(*shape).to(dtype)
 
     def _unpack_window(self, data: ReplayBufferData) -> ReplayBufferData:
-        # seq_len = history_len + 1 consecutive stored frames. The current history clip
-        # is the first ``history_len`` frames; the bootstrap (next) clip is shifted by
-        # one. The transition's action / reward / done live in the last stored slot
-        # (the action taken at the current frame, its reward, done).
-        num = self.history_len
-        cur_frames = torch.stack([self._unpack_obs(data.observations[0, i]) for i in range(num)])
-        next_frames = torch.stack(
-            [self._unpack_obs(data.observations[0, i]) for i in range(1, num + 1)]
+        # seq_len = window_ticks consecutive stored env ticks; the model's history
+        # clip subsamples every ``frame_stride``-th frame (10 Hz av spacing). The
+        # current clip's frames sit at slots 0, stride, ..., span; the bootstrap
+        # (next) clip is shifted by one tick. The transition's action / reward /
+        # done live in the last stored slot.
+        stride = self.frame_stride
+        span = (self.history_len - 1) * stride
+        cur_frames = torch.stack(
+            [self._unpack_obs(data.observations[0, i]) for i in range(0, span + 1, stride)]
         )
-        cur_prompt = self._detokenize(data.task_prompt_token_ids[0, num - 1])
-        next_prompt = self._detokenize(data.task_prompt_token_ids[0, num])
-        # obs_z slot t holds the real av delta row (frame t-1 -> t; identity at an
-        # episode's first frame), so the history rows are direct slices — no pose
-        # differencing that could cross an episode/spawn discontinuity.
+        next_frames = torch.stack(
+            [self._unpack_obs(data.observations[0, i]) for i in range(1, span + 2, stride)]
+        )
+        cur_prompt = self._detokenize(data.task_prompt_token_ids[0, span])
+        next_prompt = self._detokenize(data.task_prompt_token_ids[0, span + 1])
+        # obs_z slot t holds the real per-tick av delta row (frame t-1 -> t;
+        # identity at an episode's first frame); ``stride`` consecutive rows compose
+        # into one model-frame-step history row — no pose differencing that could
+        # cross an episode/spawn discontinuity.
         deltas = data.obs_z[0].float().to(self.device)
-        cur_hist = deltas[1:num]
-        next_hist = deltas[2 : num + 1]
+        cur_hist = compose_av_delta_rows(deltas[1 : span + 1], stride)
+        next_hist = compose_av_delta_rows(deltas[2 : span + 2], stride)
         return ReplayBufferData(
             observations=[
                 (cur_frames, cur_prompt, cur_hist),

@@ -18,9 +18,11 @@ confirmed against the HF ``edge_action_id_av_*`` examples):
   * Each row is a *relative pose delta between consecutive frames* (not an
     absolute pose), expressed in the ego head-camera frame:
     x = right, y = down, z = forward (OpenCV camera convention).
-  * Temporal spacing is 20 fps -> dt = 0.05 s, which equals the CARLA tick, so
-    one av row is consumed per env step. Translation is physical (metres): the
-    output is un-normalized (rotation_6d values are raw ~unit SO(3) columns).
+  * Temporal spacing is 10 fps -> dt = 0.1 s (the HF av examples are 61-frame
+    10-fps clips with 60 action rows), so one av row spans ``frame_stride`` = 2
+    of CARLA's 20-fps ticks; history frames/rows are subsampled accordingly.
+    Translation is physical (metres): the output is un-normalized (rotation_6d
+    values are raw ~unit SO(3) columns).
 The one residual assumption is the metre unit of translation; everything else is
 sourced, not tuned.
 """
@@ -43,6 +45,7 @@ from vla_streaming_rl.networks.cosmos_edge_network import (
     AV_IDENTITY_ROW,
     MAX_PROMPT_TOKENS,
     CosmosEdgeNetwork,
+    compose_av_delta_rows,
     ego_history_av_deltas,
 )
 from vla_streaming_rl.networks.interface import InferInput
@@ -51,7 +54,8 @@ from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.utils import create_reward_image
 
 FRAME_HW = 256
-DT = 0.05  # av frame == CARLA control tick (both 20 FPS)
+DT = 0.05  # CARLA control tick (20 FPS); av model frames are slower (10 FPS)
+LOOKAHEAD_SECONDS = 1.0
 
 # Target-speed floor (exploration: keep the car moving so RL gets a signal even
 # when the untrained policy predicts ~0 forward motion) and cap (urban safety),
@@ -59,9 +63,10 @@ DT = 0.05  # av frame == CARLA control tick (both 20 FPS)
 MIN_SPEED = 2.0
 MAX_SPEED = 8.0
 
-# The PID target is the net ego displacement over the *generated future* rows
-# (``future_start`` onward, i.e. the farthest predicted future frame). Earlier rows
-# connect the given history frames and are not steered along.
+# The PID target is the net ego displacement over the first ``LOOKAHEAD_SECONDS``
+# of the *generated future* rows (``future_start`` onward). Earlier rows connect
+# the given history frames, and the far tail of the 6 s plan is too distant for a
+# PID target point; neither is steered along.
 
 
 class _TargetWaypoint:
@@ -101,11 +106,20 @@ class CosmosEdgeAgent(Agent):
         self.env = env
         self.chunk_size = network.chunk_size
         self.action_dim = network.action_dim
-        # History-conditioned joint generation: the clip is ``history_len`` recent
-        # frames; the action rows from ``future_start`` on are the generated future
-        # (the forward plan we steer along).
+        # History-conditioned joint generation: the clip is ``history_len`` frames
+        # at the av 10 Hz spacing (one model frame per ``frame_stride`` env ticks);
+        # the action rows from ``future_start`` on are the generated future (the
+        # forward plan we steer along).
         self.history_len = network.history_len
         self.future_start = network.future_start
+        self.frame_stride = network.frame_stride
+        self.av_dt = self.frame_stride * DT
+        assert abs(self.av_dt * network.action_fps - 1.0) < 1e-6, (
+            f"frame_stride ({network.frame_stride}) * CARLA tick ({DT}) must equal "
+            f"the av frame period 1 / action_fps (1 / {network.action_fps})"
+        )
+        self.lookahead_rows = int(round(LOOKAHEAD_SECONDS / self.av_dt))
+        assert self.future_start + self.lookahead_rows <= self.chunk_size
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.max_grad_norm = max_grad_norm
@@ -126,18 +140,19 @@ class CosmosEdgeAgent(Agent):
         zero_frame = torch.zeros(3, FRAME_HW, FRAME_HW)
         network.pack_obs(zero_frame)
 
-        # seq_len = history_len + 1: the model conditions on a history clip of
-        # ``history_len`` consecutive frames, so a sampled window holds that clip plus
-        # the one-step-shifted bootstrap (next) clip. Per-step the buffer stores a
-        # single frame; consecutive stored frames reconstruct the clip. The stored
-        # action is the whole joint trajectory flattened (chunk_size * action_dim);
-        # the critic scores it as one action with a single-step reward window. The
-        # navigation prompt (in obs["language"]) is tokenized into the prompt slot so
-        # the loss can rebuild the conditioning.
-        self._clip_len = self.history_len
+        # seq_len = network.window_ticks: the model conditions on a history clip of
+        # ``history_len`` frames spaced ``frame_stride`` ticks apart, so a sampled
+        # window holds the ticks spanning that clip plus the one-tick-shifted
+        # bootstrap (next) clip. Per-step the buffer stores a single frame; the loss
+        # subsamples the stored ticks back into the clip. The stored action is the
+        # whole joint trajectory flattened (chunk_size * action_dim); the critic
+        # scores it as one action with a single-step reward window. The navigation
+        # prompt (in obs["language"]) is tokenized into the prompt slot so the loss
+        # can rebuild the conditioning.
+        self._clip_len = (self.history_len - 1) * self.frame_stride + 1
         self.rb = ReplayBuffer(
             size=buffer_size,
-            seq_len=self.history_len + 1,
+            seq_len=network.window_ticks,
             obs_shape=(network.obs_flat_dim,),
             # Real av delta row (previous frame -> current frame, identity at an
             # episode's first frame): the loss slices these directly as the history
@@ -158,7 +173,7 @@ class CosmosEdgeAgent(Agent):
         # The delta rows are the real history action rows that anchor the joint
         # generation; identity rows pad the episode start.
         self._frame_history: deque = deque(maxlen=self._clip_len)
-        self._delta_history: deque = deque(maxlen=self.future_start)
+        self._delta_history: deque = deque(maxlen=self.future_start * self.frame_stride)
         self._prev_pose: np.ndarray | None = None
 
     # --- required agent surface --------------------------------------------
@@ -186,20 +201,25 @@ class CosmosEdgeAgent(Agent):
     def _to_env_action(self, trajectory: torch.Tensor):
         """av ego-pose trajectory -> (steer, gas_or_brake) via CARLA's VehiclePIDController.
 
-        Only the *generated future* rows (``future_start`` onward) are used — the
-        earlier rows connect the given history frames. Their per-frame ego-camera
-        translation deltas (x=right, y=down, z=forward; see module note) are summed
-        into the lookahead target point (the net ego displacement to the farthest
-        predicted future frame) and transformed to world coordinates; the target
-        speed is the mean forward delta over dt. Small near-identity per-frame
-        rotations are approximated by summing translations in the current ego frame."""
+        Only the first ``lookahead_rows`` *generated future* rows (``future_start``
+        onward) are used — the earlier rows connect the given history frames, and
+        the far tail of the 6 s plan is too distant for a PID target. Their
+        per-frame ego-camera translation deltas (x=right, y=down, z=forward; see
+        module note) are summed into the lookahead target point and transformed to
+        world coordinates; the target speed is the mean forward delta over the av
+        frame period. Small near-identity per-frame rotations are approximated by
+        summing translations in the current ego frame."""
         deltas = (
-            trajectory[self.future_start :, :3].detach().float().cpu().numpy()
-        )  # (future_len, 3): right, down, forward
+            trajectory[self.future_start : self.future_start + self.lookahead_rows, :3]
+            .detach()
+            .float()
+            .cpu()
+            .numpy()
+        )  # (lookahead_rows, 3): right, down, forward
         forward_total = float(deltas[:, 2].sum())
         right_total = float(deltas[:, 0].sum())
 
-        desired_speed = float(np.clip(deltas[:, 2].mean() / DT, MIN_SPEED, MAX_SPEED))  # m/s
+        desired_speed = float(np.clip(deltas[:, 2].mean() / self.av_dt, MIN_SPEED, MAX_SPEED))
 
         vehicle = self.env.unwrapped.vehicle
         # ego camera (x=right, z=forward) -> CARLA vehicle local (x=forward, y=right).
@@ -245,15 +265,20 @@ class CosmosEdgeAgent(Agent):
         )
 
         # Feed the recent-frame history clip + the real history action rows to the
-        # joint generation, re-planned every tick. At episode start the frames are
-        # padded at the front with the oldest entry and the deltas with identity rows.
+        # joint generation, re-planned every tick. The buffered per-tick entries are
+        # subsampled/composed down to the model's 10 Hz frame spacing. At episode
+        # start the frames are padded at the front with the oldest entry and the
+        # deltas with identity rows.
         self._frame_history.append(frame)
         self._delta_history.append(delta_row)
         clip = list(self._frame_history)
         clip = [clip[0]] * (self._clip_len - len(clip)) + clip
+        clip = clip[:: self.frame_stride]
         rows = list(self._delta_history)
-        rows = [AV_IDENTITY_ROW] * (self.future_start - len(rows)) + rows
-        history_action = torch.from_numpy(np.stack(rows)).to(self.device)
+        rows = [AV_IDENTITY_ROW] * (self.future_start * self.frame_stride - len(rows)) + rows
+        history_action = compose_av_delta_rows(
+            torch.from_numpy(np.stack(rows)).to(self.device), self.frame_stride
+        )
         live = self.network.infer(
             InferInput(
                 s_seq=torch.stack(clip).to(self.device),
@@ -306,7 +331,7 @@ class CosmosEdgeAgent(Agent):
         accumulated into cumulative positions, re-centered on the current frame so the
         ego marker is the origin; forward -> up, right -> right. The history rows fall
         behind the ego and are dim; the generated future rows (``future_start`` onward)
-        are cyan ahead of it, and the farthest future point actually fed to the PID is
+        are cyan ahead of it, and the lookahead point actually fed to the PID is
         highlighted in orange. Ego is the green marker."""
         deltas = (
             trajectory[:, :3].detach().float().cpu().numpy()
@@ -318,15 +343,15 @@ class CosmosEdgeAgent(Agent):
         positions = positions - positions[self.future_start]
 
         size = 256
-        scale = 25.0  # pixels per meter (chunk horizon is ~0.6 s -> a few meters)
+        scale = 4.0  # pixels per meter (chunk horizon is 6 s -> tens of meters)
         img = np.full((size, size, 3), 30, dtype=np.uint8)
         ego_px = (size // 2, int(size * 0.8))
 
         def to_px(forward: float, right: float) -> tuple[int, int]:
             return (int(ego_px[0] + right * scale), int(ego_px[1] - forward * scale))
 
-        # range rings at 1 / 2 / 5 m for scale reference
-        for r_m in (1, 2, 5):
+        # range rings at 5 / 10 / 25 m for scale reference
+        for r_m in (5, 10, 25):
             cv2.circle(img, ego_px, int(r_m * scale), (60, 60, 60), 1)
 
         hist_color = (90, 90, 90)
@@ -338,7 +363,7 @@ class CosmosEdgeAgent(Agent):
             cv2.line(img, pts[i], pts[i + 1], color, 2)
         for i, p in enumerate(pts):
             cv2.circle(img, p, 2, hist_color if i <= self.future_start else traj_color, -1)
-        cv2.circle(img, pts[-1], 5, look_color, -1)
+        cv2.circle(img, pts[self.future_start + self.lookahead_rows], 5, look_color, -1)
 
         # ego marker pointing forward (up)
         cv2.drawMarker(img, ego_px, (0, 255, 0), cv2.MARKER_TRIANGLE_UP, markerSize=12, thickness=2)

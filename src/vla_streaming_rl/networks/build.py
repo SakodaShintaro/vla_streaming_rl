@@ -209,6 +209,8 @@ def build_network(
             num_inference_steps=args.num_inference_steps,
             actor_denoising_steps=args.actor_denoising_steps,
             num_cond_latent_frames=args.num_cond_latent_frames,
+            action_fps=args.action_fps,
+            frame_stride=args.frame_stride,
             q_grad_eta=args.q_grad_eta,
             dacer_loss_weight=args.dacer_loss_weight,
             critic_loss_weight=args.critic_loss_weight,
