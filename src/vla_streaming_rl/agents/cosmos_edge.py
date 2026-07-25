@@ -38,6 +38,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from agents.navigation.controller import VehiclePIDController
+from diffusers.pipelines.cosmos.pipeline_cosmos3_omni import (
+    _ACTION_RESOLUTION_BINS,
+    VideoProcessor,
+)
 from torch import optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
@@ -53,7 +57,6 @@ from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.utils import create_reward_image
 
-FRAME_HW = 256
 DT = 0.05  # CARLA control tick (20 FPS); av model frames are slower (10 FPS)
 LOOKAHEAD_SECONDS = 1.0
 
@@ -98,11 +101,26 @@ class CosmosEdgeAgent(Agent):
         gamma: float,
     ) -> None:
         super().__init__(learning_mode=learning_mode, horizon=horizon)
-        del observation_space, action_space
+        del action_space
         assert learning_mode == "off_policy", "cosmos_edge supports off_policy only"
 
         self.device = torch.device("cuda")
         self.network = network
+        # Aspect-preserving conditioning size. The pipeline bins the *input's*
+        # aspect ratio into a canvas of the resolution tier, downscales into it
+        # (never upscales, ``scale = min(target/source, 1.0)``) and pads the rest
+        # (``_prepare_action_video_conditioning``). Squashing the wide camera obs
+        # into a square therefore both distorts the scene and selects a square
+        # canvas the av embodiment was not trained on. Feeding frames at exactly
+        # the content size for the obs aspect keeps the pipeline resize a no-op.
+        _c, obs_h, obs_w = observation_space["image"].shape
+        canvas_h, canvas_w = VideoProcessor.classify_height_width_bin(
+            obs_h, obs_w, ratios=_ACTION_RESOLUTION_BINS[str(network.resolution_tier)]
+        )
+        scale = min(canvas_w / obs_w, canvas_h / obs_h, 1.0)
+        self.frame_h = max(1, int(scale * obs_h + 0.5))
+        self.frame_w = max(1, int(scale * obs_w + 0.5))
+        del observation_space
         self.env = env
         self.chunk_size = network.chunk_size
         self.action_dim = network.action_dim
@@ -137,7 +155,7 @@ class CosmosEdgeAgent(Agent):
         self.reward_processor = RewardProcessor("carla", 1.0)
 
         # Learn the flat-obs schema up front so the buffer can be sized.
-        zero_frame = torch.zeros(3, FRAME_HW, FRAME_HW)
+        zero_frame = torch.zeros(3, self.frame_h, self.frame_w)
         network.pack_obs(zero_frame)
 
         # seq_len = network.window_ticks: the model conditions on a history clip of
@@ -182,7 +200,7 @@ class CosmosEdgeAgent(Agent):
         del info
         image = torch.as_tensor(np.asarray(obs["image"]), dtype=torch.float32)  # (3, H, W) in [0,1]
         frame = F.interpolate(
-            image[None], size=(FRAME_HW, FRAME_HW), mode="bilinear", align_corners=False
+            image[None], size=(self.frame_h, self.frame_w), mode="bilinear", align_corners=False
         )[0]
         return frame
 
