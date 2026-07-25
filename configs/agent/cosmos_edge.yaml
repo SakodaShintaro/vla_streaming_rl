@@ -29,8 +29,8 @@ learning_mode: off_policy
 batch_size: 1
 # The actor trains freshly-initialized projection rows (not pretrained heads),
 # so the learning rates are conventional; tune down if unstable.
-actor_lr: 1e-4
-critic_lr: 1e-4
+actor_lr: 1e-7
+critic_lr: 1e-7
 
 image_save_interval: 50
 print_interval: 1
@@ -45,7 +45,7 @@ buffer_size: 4000
 # Model frames are action_fps = 10 Hz while CARLA ticks at 20 Hz, so one row
 # spans frame_stride = 2 env ticks (Animal-AI at 50 Hz would use 5); the
 # replay stores one slot per model frame.
-chunk_size: 8
+chunk_size: 4
 horizon: ${chunk_size}
 num_cond_latent_frames: 2
 action_fps: 10.0
@@ -54,7 +54,7 @@ frame_stride: 2
 # Cosmos3-Edge knobs. The navigation prompt is built by the CARLA env
 # (route command -> maneuver sentence) and delivered via obs["language"].
 resolution_tier: 480
-num_inference_steps: 4
+num_inference_steps: 1
 actor_denoising_steps: 1
 q_grad_eta: 0.05
 dacer_loss_weight: 0.05
