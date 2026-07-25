@@ -11,8 +11,10 @@ frames + the really-executed history control rows + the navigation prompt
 generated future rows are queued for open-loop execution.
 
 The action row IS the env action (no PID / trajectory conversion), clipped to
-[-1, 1], so the same agent can later drive other envs with the same 2D action
-space by changing ``frame_stride`` (CARLA 20 Hz -> 2, Animal-AI 50 Hz -> 5).
+[-1, 1], so the same agent can drive other envs with the same 2D action space
+by changing ``frame_stride`` to match the env's per-tick real-time duration
+(CARLA ticks at 20 Hz -> frame_stride 2; Animal-AI's ``decisionPeriod=5``
+already yields one env tick per 10 Hz decision -> frame_stride 1).
 """
 
 from collections import deque
@@ -59,6 +61,7 @@ class CosmosEdgeAgent(Agent):
         weight_decay: float,
         max_grad_norm: float,
         gamma: float,
+        reward_processor_type: str,
     ) -> None:
         super().__init__(learning_mode=learning_mode, horizon=horizon)
         del action_space, gamma
@@ -98,7 +101,7 @@ class CosmosEdgeAgent(Agent):
         self.critic_optimizer = optim.AdamW(
             network.critic.parameters(), lr=critic_lr, weight_decay=0.0
         )
-        self.reward_processor = RewardProcessor("carla", 1.0)
+        self.reward_processor = RewardProcessor(reward_processor_type, 1.0)
 
         # Learn the flat-obs schema up front so the buffer can be sized.
         zero_frame = torch.zeros(3, self.frame_h, self.frame_w)

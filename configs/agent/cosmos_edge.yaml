@@ -37,13 +37,20 @@ print_interval: 1
 learning_starts: 800
 buffer_size: 4000
 
+# RewardProcessor variant (see reward_processor.py). "carla" treats an
+# exact-zero per-step reward as a stuck-idle penalty, matching CARLA's
+# score_composed-delta semantics; other envs (e.g. Animal-AI) should
+# override this to "scaling".
+reward_processor_type: carla
+
 # `chunk_size` is the number of generated future control rows the agent
 # executes open-loop per plan AND the critic's reward window (horizon) — one
 # knob. The model's joint sequence additionally carries future_start = 4
 # anchored history rows, so it holds future_start + chunk_size = 12 rows
 # (num_frames = 13 -> 4 latent frames; the total must be a multiple of 4).
 # Model frames are action_fps = 10 Hz while CARLA ticks at 20 Hz, so one row
-# spans frame_stride = 2 env ticks (Animal-AI at 50 Hz would use 5); the
+# spans frame_stride = 2 env ticks (Animal-AI's decisionPeriod=5 already
+# yields one env tick per 10 Hz decision, so frame_stride = 1 there); the
 # replay stores one slot per model frame.
 chunk_size: 4
 horizon: ${chunk_size}

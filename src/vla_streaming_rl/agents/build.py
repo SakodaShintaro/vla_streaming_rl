@@ -104,6 +104,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             weight_decay=args.weight_decay,
             max_grad_norm=args.max_grad_norm,
             gamma=args.gamma,
+            reward_processor_type=args.reward_processor_type,
         )
 
     else:
