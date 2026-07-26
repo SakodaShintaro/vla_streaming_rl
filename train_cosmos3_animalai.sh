@@ -21,9 +21,16 @@ fi
 : "${DISPLAY:=:0}"
 export DISPLAY
 
+# Animal-AI's 96x96 frames are never upscaled, but the action-conditioning
+# pipeline still pads whatever it's given up to the full resolution_tier
+# canvas before VAE-encoding it (640x640 for the default tier 480, vs 256x256
+# for tier 256 — the smallest available). Since the content itself stays
+# 96x96 either way, the larger tier is pure wasted padding; 256 is the best
+# fit available.
 uv run python scripts/train.py \
   agent=cosmos_edge \
   env=animalai \
   reward_processor_type=scaling \
   frame_stride=1 \
+  resolution_tier=256 \
   exp_name=cosmos3_animalai${suffix}

@@ -30,6 +30,7 @@ import torch
 from diffusers import Cosmos3OmniPipeline, CosmosActionCondition
 from diffusers.pipelines.cosmos.pipeline_cosmos3_omni import (
     _ACTION_RESOLUTION_BINS,
+    _EMBODIMENT_TO_DOMAIN_ID,
     VideoProcessor,
 )
 
@@ -127,31 +128,25 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             action_view_point=action_cond.view_point,
         )
         text_seg = self._prepare_text_segment(cond_input_ids, device=device)
-        (
-            vision_latents,
-            _sound,
-            action_latents,
-            fps_vision,
-            _fps_sound,
-            vision_condition_mask,
-            _scm,
-            action_condition_mask,
-            action_domain_id,
-            _img_size,
-            raw_action_dim,
-            _action_cond_frames,
-        ) = self.prepare_latents(
-            image=None,
-            video=frames,
-            num_frames=num_frames,
-            height=height,
-            width=width,
-            fps=self.fps,
-            generator=None,
-            device=device,
-            dtype=dtype,
-            enable_sound=False,
-            action=action_cond,
+        # ``prepare_latents`` would hand back (vision_latents, action_latents,
+        # fps_vision, vision_condition_mask, action_condition_mask,
+        # action_domain_id, raw_action_dim, ...), but the history-conditioned
+        # anchoring below immediately overwrites vision_latents/vision_condition_mask
+        # and action_condition_mask, and action_latents' *values* are never read
+        # (only its shape/dtype, via zeros_like/randn_like) — only fps_vision,
+        # action_domain_id and raw_action_dim actually survive. Calling
+        # ``prepare_latents`` for those would pay for a second, wasted VAE encode
+        # of the same padded-to-canvas conditioning video (it runs its own
+        # ``_prepare_action_video_conditioning`` + ``_encode_video`` internally for
+        # a single-frame anchor we don't use), so compute the three trivial
+        # survivors directly instead.
+        fps_vision = self.fps
+        action_domain_id = torch.tensor(
+            [_EMBODIMENT_TO_DOMAIN_ID[self.domain_name]], dtype=torch.long, device=device
+        )
+        raw_action_dim = action_cond.raw_action_dim
+        action_latents = torch.zeros(
+            self.chunk_size, self.transformer.action_dim, device=device, dtype=dtype
         )
         # History-conditioned joint generation: anchor the first
         # ``num_cond_latent_frames`` latent frames as the clean past+current history
@@ -163,11 +158,9 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         )
         x0_vision = self._remove_action_video_padding_from_latent(
             self._encode_video(vision_tensor).contiguous().float(), action_image_size
-        ).to(vision_latents.dtype)
+        ).to(dtype)
         latent_t = x0_vision.shape[2]
-        vision_condition_mask = torch.zeros(
-            (latent_t, 1, 1), device=device, dtype=vision_latents.dtype
-        )
+        vision_condition_mask = torch.zeros((latent_t, 1, 1), device=device, dtype=dtype)
         vision_condition_mask[: self.num_cond_latent_frames, 0, 0] = 1.0
         vision_latents = vision_condition_mask * x0_vision + (
             1.0 - vision_condition_mask
