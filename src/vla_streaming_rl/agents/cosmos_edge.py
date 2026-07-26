@@ -50,7 +50,6 @@ class CosmosEdgeAgent(Agent):
         observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: CosmosEdgeNetwork,
-        env,
         learning_mode: str,
         horizon: int,
         buffer_size: int,
@@ -69,7 +68,6 @@ class CosmosEdgeAgent(Agent):
 
         self.device = torch.device("cuda")
         self.network = network
-        self.env = env
         # Aspect-preserving conditioning size. The pipeline bins the *input's*
         # aspect ratio into a canvas of the resolution tier, downscales into it
         # (never upscales, ``scale = min(target/source, 1.0)``) and pads the rest
