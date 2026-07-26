@@ -46,7 +46,6 @@ from vla_streaming_rl.networks.interface import (
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 
-REAL_REPO = "nvidia/Cosmos3-Edge"
 MAX_PROMPT_TOKENS = 64
 
 # New embodiment domain: 2D direct control [steer, gas_or_brake]. Slot 31 is
@@ -86,7 +85,7 @@ class CosmosEdgeNetwork(NetworkInterface):
         super().__init__()
         self.device = device
         self.policy = CosmosEdgePolicy.from_pretrained(
-            REAL_REPO, torch_dtype=torch.bfloat16, enable_safety_checker=False
+            "nvidia/Cosmos3-Edge", torch_dtype=torch.bfloat16, enable_safety_checker=False
         ).to(device)
         # WanVAE is unstable in bf16 (trained without amp); keep it in fp32.
         self.policy.vae.to(torch.float32)
@@ -222,21 +221,21 @@ class CosmosEdgeNetwork(NetworkInterface):
         # in slots [history_len, seq_len); the bootstrap (next) clip is the last
         # history_len slots.
         num = self.history_len
-        cur_frames = torch.stack([self._unpack_obs(data.observations[0, i]) for i in range(num)])
+        curr_frames = torch.stack([self._unpack_obs(data.observations[0, i]) for i in range(num)])
         next_frames = torch.stack(
             [
                 self._unpack_obs(data.observations[0, i])
                 for i in range(self.chunk_size, self.chunk_size + num)
             ]
         )
-        cur_prompt = self._detokenize(data.task_prompt_token_ids[0, num - 1])
+        curr_prompt = self._detokenize(data.task_prompt_token_ids[0, num - 1])
         next_prompt = self._detokenize(data.task_prompt_token_ids[0, -1])
         rows = data.actions[0].float().to(self.device)  # (seq_len, 2)
-        cur_hist = rows[1:num]
+        curr_hist = rows[1:num]
         next_hist = rows[self.chunk_size + 1 : self.chunk_size + num]
         return ReplayBufferData(
             observations=[
-                (cur_frames, cur_prompt, cur_hist),
+                (curr_frames, curr_prompt, curr_hist),
                 (next_frames, next_prompt, next_hist),
             ],
             actions=data.actions[:, num:].contiguous(),  # (B, chunk_size, 2) executed rows
@@ -342,8 +341,8 @@ class CosmosEdgeNetwork(NetworkInterface):
         # latent frames are anchored as history. ``history_rows`` (future_start, 2)
         # anchors the history action rows with the really-executed controls, so
         # only the future rows are generated.
-        pils = [self._to_pil(f) for f in frames]
-        return self.policy.encode(pils, prompt, history_rows)
+        pil_frames = [self._to_pil(f) for f in frames]
+        return self.policy.encode(pil_frames, prompt, history_rows)
 
     def _flow_matching_velocity_loss(self, enc, target_future: torch.Tensor) -> torch.Tensor:
         """Regress the future-row action velocity toward a Q-improved target
