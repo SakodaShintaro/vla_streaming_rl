@@ -52,6 +52,7 @@ class CosmosEdgeEncoding:
     raw_action_dim: int
     num_noisy_vision_tokens: int
     num_noisy_action_tokens: int
+    num_history_vision_tokens: int  # leading (clean history frame) tokens in the vision segment
     state: torch.Tensor  # pooled backbone state for the critic; filled by ``encode``
 
 
@@ -229,6 +230,8 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
             raw_action_dim=int(raw_action_dim),
             num_noisy_vision_tokens=vision_seg["num_noisy_vision_tokens"],
             num_noisy_action_tokens=action_seg["num_noisy_action_tokens"],
+            num_history_vision_tokens=self.num_cond_latent_frames
+            * (vision_seg["num_vision_tokens"] // latent_t),
             state=torch.zeros(0),
         )
 
@@ -252,20 +255,30 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
     def encode(self, frames, prompt, history_action) -> CosmosEdgeEncoding:
         """Pack one observation (history clip + prompt + real history action rows)
         and capture the pooled backbone state for the critic, via a hook on the
-        final understanding-stream norm from one forward at the initial (noisy)
-        step. ``sample_action_chunk`` then produces the future ego-pose trajectory
+        final generation-stream norm from one forward at the initial (noisy)
+        step. The state is the mean of the final-layer tokens of the clean history
+        vision frames (the leading tokens of the generation stream). The
+        understanding stream is causal over the text prompt only and never attends
+        to vision tokens, so it carries no observation information; the generation
+        tokens attend to the full joint sequence (prompt included).
+        ``sample_action_chunk`` then produces the future ego-pose trajectory
         (grounded in the observed velocity + the navigation prompt)."""
         enc = self._pack_static(frames, prompt, history_action)
 
         captured = {}
-        handle = self.transformer.norm.register_forward_hook(
-            lambda mod, inp, out: captured.__setitem__("und", out)
+        handle = self.transformer.norm_moe_gen.register_forward_hook(
+            lambda mod, inp, out: captured.__setitem__("gen", out)
         )
         self.scheduler.set_timesteps(self.num_inference_steps, device=self._get_execution_device())
         t0 = self.scheduler.timesteps[0].item()
         self._forward_step(enc, enc.vision_latents, enc.action_latents, t0)
         handle.remove()
-        enc.state = captured["und"].float().mean(dim=0)  # [hidden_size]
+        # Vision tokens lead the generation stream, frame-major; the first
+        # ``num_history_vision_tokens`` belong to the anchored (noise-free) history
+        # frames, so the pooled state is deterministic given the observation.
+        enc.state = (
+            captured["gen"][: enc.num_history_vision_tokens].float().mean(dim=0)
+        )  # [hidden_size]
         return enc
 
     def sample_action_chunk(
