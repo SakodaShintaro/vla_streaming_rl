@@ -11,6 +11,7 @@ warnings.filterwarnings("ignore", message=".*Attempting to run cuBLAS.*")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 import csv
+import json
 import random
 import time
 from pathlib import Path
@@ -111,6 +112,100 @@ def save_episode_data(
             f.write(f"{float(reward):.6f}\n")
 
 
+def save_checkpoint(result_dir: Path, network, agent) -> None:
+    """Save trainable weights (checkpoint.pt) and optimizer states (optimizer.pt)."""
+    module = network._orig_mod if hasattr(network, "_orig_mod") else network
+    trainable_state = {
+        name: param.detach().cpu()
+        for name, param in module.named_parameters()
+        if param.requires_grad
+    }
+    torch.save(trainable_state, result_dir / "checkpoint.pt")
+    optimizer_state = {
+        "actor": agent.actor_optimizer.state_dict(),
+        "critic": agent.critic_optimizer.state_dict(),
+    }
+    torch.save(optimizer_state, result_dir / "optimizer.pt")
+
+
+def write_arena_stats(path: Path, curriculum: dict, best_score_per_arena: dict) -> None:
+    """Per-arena record (attempts / successes / success rate / best score).
+
+    Human-readable, and also read back by ``load_resume_state`` on resume."""
+    attempts = curriculum["arena_attempts"]
+    successes = curriculum["arena_successes"]
+    with open(path, "w") as f:
+        f.write("arena\tattempts\tsuccesses\tsuccess_rate\tbest_score\tcleared\n")
+        for arena in sorted(attempts):
+            success_rate = successes[arena] / attempts[arena]
+            f.write(
+                f"{arena}\t{attempts[arena]}\t{successes[arena]}\t{success_rate:.4f}"
+                f"\t{best_score_per_arena[arena]:.6f}\t{int(successes[arena] > 0)}\n"
+            )
+
+
+def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
+    """Restore weights / optimizer / counters / curriculum from a previous run dir.
+
+    checkpoint.pt is required; the other files are optional so directories
+    written before this resume mechanism existed still load (their missing
+    parts fall back to the defaults below)."""
+    state = {
+        "global_step": 0,
+        "episode_id": 0,
+        "episode_count": 0,
+        "score_sum_all": 0.0,
+        "best_score": -float("inf"),
+        "score_list": [],
+        "is_revisit": False,
+        "best_score_per_arena": {},
+    }
+
+    checkpoint_path = resume_dir / "checkpoint.pt"
+    trainable_state = torch.load(checkpoint_path, map_location="cuda")
+    module = network._orig_mod if hasattr(network, "_orig_mod") else network
+    missing, unexpected = module.load_state_dict(trainable_state, strict=False)
+    if unexpected:
+        raise ValueError(f"checkpoint parameters not found in the network: {unexpected[:5]}")
+    print(f"Resume: loaded {len(trainable_state)} weight tensors from {checkpoint_path}")
+
+    optimizer_path = resume_dir / "optimizer.pt"
+    if optimizer_path.exists():
+        optimizer_state = torch.load(optimizer_path, map_location="cuda")
+        agent.actor_optimizer.load_state_dict(optimizer_state["actor"])
+        agent.critic_optimizer.load_state_dict(optimizer_state["critic"])
+        print(f"Resume: loaded optimizer states from {optimizer_path}")
+    else:
+        print(f"Resume: {optimizer_path} not found, optimizers start fresh")
+
+    train_state_path = resume_dir / "train_state.json"
+    if train_state_path.exists():
+        state.update(json.loads(train_state_path.read_text()))
+        print(f"Resume: loaded counters from {train_state_path}")
+    else:
+        print(f"Resume: {train_state_path} not found, counters start from zero")
+
+    arena_stats_path = resume_dir / "arena_stats.tsv"
+    set_curriculum = getattr(env.unwrapped, "set_curriculum_state", None)
+    if arena_stats_path.exists() and set_curriculum is not None:
+        attempts = {}
+        successes = {}
+        best_scores = {}
+        for row in arena_stats_path.read_text().splitlines()[1:]:
+            arena, n_attempt, n_success, _rate, best, _cleared = row.split("\t")
+            attempts[arena] = int(n_attempt)
+            successes[arena] = int(n_success)
+            best_scores[arena] = float(best)
+        set_curriculum(attempts, successes, state["is_revisit"])
+        state["best_score_per_arena"] = best_scores
+        cleared_count = sum(n > 0 for n in successes.values())
+        print(
+            f"Resume: loaded {len(attempts)} arena records from {arena_stats_path} "
+            f"(cleared={cleared_count})"
+        )
+    return state
+
+
 def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -198,6 +293,17 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     print(f"Parameter count: {parameter_count:,}")
 
     episode_id = 0
+    if args.resume_dir is not None:
+        resume_state = load_resume_state(Path(args.resume_dir), network, agent, env)
+        global_step = resume_state["global_step"]
+        episode_id = resume_state["episode_id"]
+        episode_count = resume_state["episode_count"]
+        score_sum_all = resume_state["score_sum_all"]
+        best_score = resume_state["best_score"]
+        score_list = list(resume_state["score_list"])
+        best_score_per_arena = dict(resume_state["best_score_per_arena"])
+        print(f"Resumed from {args.resume_dir}: global_step={global_step} episode_id={episode_id}")
+
     while True:
         # Stop when the env has dispensed every scenario in a fixed playlist
         # (e.g. Bench2Drive220 sequential mode). For envs without a finite
@@ -288,13 +394,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 cv2.waitKey(1)
 
             if global_step % checkpoint_interval == 0 and result_dir is not None:
-                module = network._orig_mod if hasattr(network, "_orig_mod") else network
-                trainable_state = {
-                    name: param.detach().cpu()
-                    for name, param in module.named_parameters()
-                    if param.requires_grad
-                }
-                torch.save(trainable_state, result_dir / "checkpoint.pt")
+                save_checkpoint(result_dir, network, agent)
 
             if terminated or truncated:
                 break
@@ -386,22 +486,19 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             arena_is_best = (
                 arena_name not in best_score_per_arena or score > best_score_per_arena[arena_name]
             )
-            if arena_is_best and result_dir is not None:
+            if arena_is_best:
                 best_score_per_arena[arena_name] = score
-                save_episode_data(
-                    video_dir,
-                    image_dir,
-                    obs_dir,
-                    f"best_{arena_name}",
-                    bgr_image_list,
-                    action_list,
-                    reward_list,
-                    obs_list,
-                )
-                with open(result_dir / "best_score_per_arena.tsv", "w") as f:
-                    f.write("arena\tbest_score\n")
-                    for name in sorted(best_score_per_arena):
-                        f.write(f"{name}\t{best_score_per_arena[name]:.6f}\n")
+                if result_dir is not None:
+                    save_episode_data(
+                        video_dir,
+                        image_dir,
+                        obs_dir,
+                        f"best_{arena_name}",
+                        bgr_image_list,
+                        action_list,
+                        reward_list,
+                        obs_list,
+                    )
         else:
             is_best = score > best_score
             if is_best and result_dir is not None:
@@ -433,7 +530,28 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 obs_list,
             )
 
+        # Persist the light resume state every episode (the heavy weights /
+        # optimizer files follow the checkpoint_interval cadence above).
+        if result_dir is not None:
+            train_state = {
+                "global_step": global_step,
+                "episode_id": episode_id + 1,
+                "episode_count": episode_count,
+                "score_sum_all": float(score_sum_all),
+                "best_score": float(best_score),
+                "score_list": [float(s) for s in score_list],
+            }
+            get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
+            if get_curriculum is not None:
+                curriculum = get_curriculum()
+                train_state["is_revisit"] = curriculum["is_revisit"]
+                write_arena_stats(result_dir / "arena_stats.tsv", curriculum, best_score_per_arena)
+            (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
+
         episode_id += 1
+
+    if result_dir is not None:
+        save_checkpoint(result_dir, network, agent)
 
     env.close()
     # env.close() auto-merges the Bench2Drive eval sweep and stashes the

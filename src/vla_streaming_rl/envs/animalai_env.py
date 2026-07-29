@@ -223,6 +223,32 @@ class AnimalAIEnv(gym.Env):
         self._advance_progression()
         return self._next_yaml_idx != before
 
+    def get_curriculum_state(self) -> dict:
+        """Curriculum snapshot for resume: per-arena attempt/success counts
+        (attempted arenas only) plus the progression/revisit alternation flag."""
+        attempts = {k: v for k, v in self._arena_attempts.items() if v > 0}
+        successes = {k: self._arena_successes[k] for k in attempts}
+        return {
+            "arena_attempts": attempts,
+            "arena_successes": successes,
+            "is_revisit": self._is_revisit,
+        }
+
+    def set_curriculum_state(
+        self, arena_attempts: dict, arena_successes: dict, is_revisit: bool
+    ) -> None:
+        """Restore the curriculum from a previous run. Cleared arenas and the
+        progression pointer are recomputed from the success counts (an arena is
+        cleared iff it has ever succeeded). Arena names unknown to the current
+        competition directory are ignored."""
+        known = set(self._all_arenas)
+        self._arena_attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
+        self._arena_successes.update({k: int(v) for k, v in arena_successes.items() if k in known})
+        self._is_revisit = bool(is_revisit)
+        self._cleared_arenas = {k for k, v in self._arena_successes.items() if v > 0}
+        self._next_yaml_idx = 0
+        self._advance_progression()
+
     def _ensure_started(self):
         if self._aai is not None:
             return
