@@ -12,6 +12,9 @@ hydra:
 
 exp_name: ${hydra:runtime.choices.agent}_${seed}
 result_dir: results
+# Previous run directory to resume from (checkpoint.pt / optimizer.pt /
+# train_state.json / arena_stats.tsv are read; outputs go to a new run dir).
+resume_dir: null
 env_factory: null
 trial_num: 1
 seed: -1

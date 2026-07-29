@@ -1,7 +1,7 @@
 #!/bin/bash
 set -eux
 
-suffix=${1:-""}
+exp_name=${1}
 cd $(dirname $0)
 
 # Animal-AI v5 does not auto-download the Unity binary. Place the unzipped
@@ -28,4 +28,5 @@ uv run python scripts/train.py \
   actor_lr=1e-5 \
   critic_lr=1e-5 \
   env=animalai \
-  exp_name=animalai${suffix}
+  exp_name=${exp_name} \
+  resume_dir=null \
