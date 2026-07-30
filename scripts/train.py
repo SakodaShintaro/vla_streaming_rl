@@ -331,7 +331,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         obs_for_render = obs["image"].copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
         panels = {
-            "environment": overlay_caption(env.render(), f"{obs['language']}  reward: {0.0:.3f}"),
+            "environment": overlay_caption(env.render(), f"{obs['language']}  reward: {0.0:+.3f}"),
             "observation": obs_viz,
             **result.panels,
         }

@@ -296,9 +296,9 @@ class AnimalAIEnv(gym.Env):
         vx, vy, vz = self._agent_velocity
         return (
             f"{self.prompt} "
-            f"Velocity: ({vx:.2f}, {vy:.2f}, {vz:.2f}). "
-            f"Return so far: {self._episode_return:.2f}. "
-            f"Pass mark: {self.pass_mark:.2f}."
+            f"Velocity: ({vx:+.2f}, {vy:+.2f}, {vz:+.2f}). "
+            f"Return so far: {self._episode_return:+.2f}. "
+            f"Pass mark: {self.pass_mark:+.2f}."
         )
 
     def _render_topdown(self) -> np.ndarray:
