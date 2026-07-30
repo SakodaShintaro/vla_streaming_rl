@@ -32,7 +32,6 @@ ROAD_OPTION_TO_TEXT = {
 
 @dataclasses.dataclass
 class EpisodeData:
-    episode_dir: Path
     annos: list[dict]
     frames: list[Image.Image]
     road_options: list[int]
@@ -46,7 +45,6 @@ def load_episode(episode_dir: Path) -> EpisodeData:
         for i in range(num_frames)
     ]
     return EpisodeData(
-        episode_dir=episode_dir,
         annos=annos,
         frames=frames,
         road_options=[a["command_near"] for a in annos],
