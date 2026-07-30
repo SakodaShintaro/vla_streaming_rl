@@ -77,11 +77,11 @@ def find_first_bright_episode(
     raise RuntimeError(f"no bright-enough episode found among {len(episode_dirs)} candidates")
 
 
-def load_episode(episode_dir: Path, camera: str) -> EpisodeData:
+def load_episode(episode_dir: Path) -> EpisodeData:
     num_frames = len(list((episode_dir / "anno").glob("*.json.gz")))
     annos = [load_anno(episode_dir, i) for i in range(num_frames)]
     frames = [
-        Image.open(episode_dir / "camera" / camera / f"{i:05d}.jpg").convert("RGB")
+        Image.open(episode_dir / "camera/rgb_front" / f"{i:05d}.jpg").convert("RGB")
         for i in range(num_frames)
     ]
     return EpisodeData(
@@ -262,7 +262,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--bench2drive_root", type=Path, default=(Path.home() / "data/bench2drive"))
     parser.add_argument("--episode_dir", type=Path, default=None)
-    parser.add_argument("--camera", type=str, default="rgb_front")
     parser.add_argument("--num_cond_latent_frames", type=int, default=2)
     parser.add_argument("--future_chunk_size", type=int, default=8)
     parser.add_argument("--frame_stride", type=int, default=4)
@@ -299,7 +298,7 @@ def main() -> None:
         )
     print(f"episode: {episode_dir.name}")
 
-    episode = load_episode(episode_dir, args.camera)
+    episode = load_episode(episode_dir)
     num_frames = len(episode.frames)
     first_center = history_len - 1
     last_center = num_frames - 1 - args.future_chunk_size
