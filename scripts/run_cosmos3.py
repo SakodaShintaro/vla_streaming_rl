@@ -213,7 +213,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("root_dir", type=Path, default=(Path.home() / "data/bench2drive"))
     parser.add_argument("--num_cond_latent_frames", type=int, default=2)
-    parser.add_argument("--future_chunk_size", type=int, default=8)
+    parser.add_argument("--future_chunk_size", type=int, default=4)
     parser.add_argument("--frame_stride", type=int, default=4)
     parser.add_argument("--resolution_tier", type=int, default=480, choices=[256, 480, 704, 720])
     parser.add_argument("--num_inference_steps", type=int, default=4)
