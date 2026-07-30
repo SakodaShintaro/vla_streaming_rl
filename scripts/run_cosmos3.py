@@ -3,6 +3,7 @@ import argparse
 import dataclasses
 import gzip
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -140,10 +141,19 @@ def run_policy(
     future_chunk_size: int,
     num_inference_steps: int,
 ) -> tuple[np.ndarray, np.ndarray]:
+    encode_start = time.perf_counter()
     encoding = policy.encode(frames, prompt, history_action)
+    sample_start = time.perf_counter()
     full_chunk, vision_latents = policy.sample_action_chunk(encoding, num_inference_steps)
     future_chunk = full_chunk[last_history_frame_idx:].float().cpu().numpy()
+    decode_start = time.perf_counter()
     predicted_frames = policy.decode_vision_latents(vision_latents, slice(-future_chunk_size, None))
+    decode_end = time.perf_counter()
+    print(
+        f"encode: {int((sample_start - encode_start) * 1000)}msec, "
+        f"sample_action_chunk: {int((decode_start - sample_start) * 1000)}msec, "
+        f"decode_vision_latents: {int((decode_end - decode_start) * 1000)}msec"
+    )
     return future_chunk, predicted_frames
 
 
@@ -350,6 +360,7 @@ def main() -> None:
         history_action = history_action_from_episode(episode, history_start, center).to(device)
         prompt = build_prompt(episode.road_options[center])
 
+        run_policy_start = time.perf_counter()
         action_chunk, predicted_frames = run_policy(
             policy,
             clip_frames,
@@ -359,6 +370,8 @@ def main() -> None:
             args.future_chunk_size,
             args.num_inference_steps,
         )
+        run_policy_msec = int((time.perf_counter() - run_policy_start) * 1000)
+        print(f"run_policy: {run_policy_msec}msec")
 
         predicted_path = integrate_ego_path(action_chunk)
         ground_truth_path = ground_truth_future_positions(episode, center, args.future_chunk_size)
