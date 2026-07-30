@@ -212,16 +212,13 @@ def compose_panel(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root_dir", type=Path, default=(Path.home() / "data/bench2drive"))
+    parser.add_argument("root_dir", type=Path, default=(Path.home() / "data/bench2drive"))
     parser.add_argument("--num_cond_latent_frames", type=int, default=2)
     parser.add_argument("--future_chunk_size", type=int, default=8)
     parser.add_argument("--frame_stride", type=int, default=4)
     parser.add_argument("--resolution_tier", type=int, default=480, choices=[256, 480, 704, 720])
     parser.add_argument("--num_inference_steps", type=int, default=4)
     parser.add_argument("--action_fps", type=float, default=10.0)
-    parser.add_argument("--min_sun_altitude", type=float, default=30.0)
-    parser.add_argument("--max_fog_density", type=float, default=20.0)
-    parser.add_argument("--max_precipitation", type=float, default=20.0)
     parser.add_argument("--canvas_width", type=int, default=1280)
     parser.add_argument("--canvas_height", type=int, default=720)
     parser.add_argument("--video_fps", type=float, default=10.0)
