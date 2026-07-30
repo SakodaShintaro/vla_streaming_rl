@@ -44,11 +44,6 @@ def load_anno(episode_dir: Path, frame_index: int) -> dict:
         return json.load(f)
 
 
-def list_episode_dirs(bench2drive_root: Path) -> list[Path]:
-    camera_dirs = sorted(bench2drive_root.rglob("camera"))
-    return [camera_dir.parent for camera_dir in camera_dirs]
-
-
 def is_bright_scene(
     anno: dict, min_sun_altitude: float, max_fog_density: float, max_precipitation: float
 ) -> bool:
@@ -284,7 +279,8 @@ def main() -> None:
     model_chunk = last_history_frame_idx + args.future_chunk_size
     history_len = last_history_frame_idx + 1
 
-    episode_dirs = list_episode_dirs(args.bench2drive_root)
+    camera_dirs = sorted(args.bench2drive_root.rglob("camera"))
+    episode_dirs = [camera_dir.parent for camera_dir in camera_dirs]
     assert episode_dirs, f"no bench2drive episodes found under {args.bench2drive_root}"
     episode_dir = find_first_bright_episode(
         episode_dirs, args.min_sun_altitude, args.max_fog_density, args.max_precipitation
