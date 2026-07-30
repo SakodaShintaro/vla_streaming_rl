@@ -3,7 +3,7 @@
 
 Image latent encoder used by ``networks.modules.image_processor.ImageProcessor``.
 The VAE model lives in ``vae.py`` (Alibaba Wan Team); ``WanVAEWrapper`` below is
-the thin encode/decode glue.
+the thin encode glue.
 """
 
 import torch
@@ -83,17 +83,6 @@ class WanVAEWrapper(torch.nn.Module):
                 .squeeze(0)
                 for u in pixel
             ],
-            dim=0,
-        )
-        # [B, C, T, H, W] -> [B, T, C, H, W]
-        return output.permute(0, 2, 1, 3, 4)
-
-    def decode_to_pixel(self, latent: torch.Tensor) -> torch.Tensor:
-        # [B, T, C, H, W] -> [B, C, T, H, W]
-        zs = latent.permute(0, 2, 1, 3, 4)
-        scale = self._scale(latent.device, latent.dtype)
-        output = torch.stack(
-            [self.model.decode(u.unsqueeze(0), scale).float().clamp_(-1, 1).squeeze(0) for u in zs],
             dim=0,
         )
         # [B, C, T, H, W] -> [B, T, C, H, W]

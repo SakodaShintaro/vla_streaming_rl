@@ -181,13 +181,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         q_out = self.value_head(x, action)
         value_report = self.value_head.value_report(q_out.output)
 
-        # Get predicted next state
-        next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
-            x,
-            action[:, 0],  # use first action in chunk for prediction
-            self.observation_space_shape,
-            self.predictor_step_num,
-            self.disable_state_predictor,
+        # Get predicted next state (image + reward, both in latent space)
+        next_image_latent, next_reward_latent, predictor_activation = (
+            self.prediction_head.predict_next_state(
+                x,
+                action[:, 0],  # use first action in chunk for prediction
+                self.predictor_step_num,
+                self.disable_state_predictor,
+            )
         )
 
         activations = ActivationFeatures(
@@ -201,8 +202,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             action=action,
             value_report=value_report,
             rnn_state=rnn_state,
-            next_image=next_image,
-            next_reward=next_reward,
+            next_image_latent=next_image_latent,
+            next_reward_latent=next_reward_latent,
             activations=activations,
             features=x,
         )
@@ -330,12 +331,13 @@ class ActorCriticWithActionValue(NetworkInterface):
         et_critic_out = self.value_head(prev_state.detach(), action_chunk.detach())
         neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
 
-        next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
-            next_state,
-            next_action[:, 0],
-            self.observation_space_shape,
-            self.predictor_step_num,
-            self.disable_state_predictor,
+        next_image_latent, next_reward_latent, predictor_activation = (
+            self.prediction_head.predict_next_state(
+                next_state,
+                next_action[:, 0],
+                self.predictor_step_num,
+                self.disable_state_predictor,
+            )
         )
 
         activations = ActivationFeatures(
@@ -349,8 +351,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             action=next_action,
             value_report=self.value_head.value_report(next_q_out.output),
             rnn_state=next_rnn_state,
-            next_image=next_image,
-            next_reward=next_reward,
+            next_image_latent=next_image_latent,
+            next_reward_latent=next_reward_latent,
             activations=activations,
             features=next_state,
         )

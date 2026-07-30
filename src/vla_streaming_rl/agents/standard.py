@@ -44,7 +44,6 @@ class StandardAgent(Agent):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
-        image_space = observation_space["image"]
 
         # action properties
         self.action_space = action_space
@@ -108,23 +107,6 @@ class StandardAgent(Agent):
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
         self._episode_reset = False
 
-        # Next-frame prediction visualization state. ``_last_pred_image`` is the
-        # latest predicted frame, kept so the "prediction" panel persists across
-        # cached-chunk steps; ``_fresh_pred_image`` is the prediction that is
-        # exactly one step old, so its loss is logged only once (when it can be
-        # compared against the observation it predicted). The placeholder keeps
-        # the panel a fixed shape before the first prediction exists, honoring
-        # the stable-panel contract.
-        obs_c, obs_h, obs_w = image_space.shape
-        self._pred_placeholder = np.zeros((obs_h, obs_w, obs_c), dtype=np.float32)
-        self._last_pred_image: np.ndarray | None = None
-        self._fresh_pred_image: np.ndarray | None = None
-        # Same persist (panel) / fresh (loss-once) split for the reward
-        # prediction. ``create_reward_image`` is a fixed size regardless of its
-        # inputs, so the reward panel needs no placeholder.
-        self._last_pred_reward: float | None = None
-        self._fresh_pred_reward: float | None = None
-
     # --- agent surface -----------------------------------------------------
 
     def _step_streaming(
@@ -146,15 +128,6 @@ class StandardAgent(Agent):
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        obs_hwc = obs["image"].transpose(1, 2, 0)
-        if self._fresh_pred_image is not None:
-            metrics["losses/pred_image_loss"] = float(
-                np.mean(np.abs(self._fresh_pred_image - obs_hwc))
-            )
-            self._fresh_pred_image = None
-        if self._fresh_pred_reward is not None:
-            metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
-            self._fresh_pred_reward = None
         obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
@@ -190,10 +163,6 @@ class StandardAgent(Agent):
         action = self._to_env_action(action_chunk[0])
         self.prev_action = action
         metrics["chunk_step"] = self.chunk_step
-        self._last_pred_image = infer_result.next_image
-        self._fresh_pred_image = infer_result.next_image
-        self._last_pred_reward = infer_result.next_reward
-        self._fresh_pred_reward = infer_result.next_reward
         metrics.update(result.loss_result.info)
 
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -217,16 +186,6 @@ class StandardAgent(Agent):
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
-        # Between-episode cleanup of state that outlives the terminal step's own
-        # processing: the next-frame / reward predictions (stashed during the
-        # terminal step, dropped here so they are never validated against the next
-        # episode's first frame). The chunk / eligibility-trace reset is done at the
-        # top of ``select_action`` / ``_step_streaming`` instead, since it must take
-        # effect *before* the terminal step trains.
-        self._last_pred_image = None
-        self._fresh_pred_image = None
-        self._last_pred_reward = None
-        self._fresh_pred_reward = None
         return {}
 
     # --- per-tick machinery ------------------------------------------------
@@ -251,15 +210,6 @@ class StandardAgent(Agent):
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        obs_hwc = obs["image"].transpose(1, 2, 0)
-        if self._fresh_pred_image is not None:
-            metrics["losses/pred_image_loss"] = float(
-                np.mean(np.abs(self._fresh_pred_image - obs_hwc))
-            )
-            self._fresh_pred_image = None
-        if self._fresh_pred_reward is not None:
-            metrics["losses/pred_reward_loss"] = abs(self._fresh_pred_reward - reward)
-            self._fresh_pred_reward = None
         obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
@@ -300,10 +250,6 @@ class StandardAgent(Agent):
         action = self._to_env_action(action_chunk[0])
         self.prev_action = action
         metrics["chunk_step"] = self.chunk_step
-        self._last_pred_image = infer_result.next_image
-        self._fresh_pred_image = infer_result.next_image
-        self._last_pred_reward = infer_result.next_reward
-        self._fresh_pred_reward = infer_result.next_reward
 
         if warmup:
             action = self.action_space.sample()
@@ -338,13 +284,4 @@ class StandardAgent(Agent):
         )
 
     def _panels(self, reward: float) -> dict:
-        panels = {}
-        if not self.network.disable_state_predictor:
-            panels["prediction"] = (
-                self._last_pred_image
-                if self._last_pred_image is not None
-                else self._pred_placeholder
-            )
-        pred_reward = self._last_pred_reward if self._last_pred_reward is not None else 0.0
-        panels["reward"] = create_reward_image(pred_reward, reward)
-        return panels
+        return {"reward": create_reward_image(None, reward)}

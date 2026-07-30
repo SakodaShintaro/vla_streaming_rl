@@ -27,16 +27,6 @@ class ImageProcessor(nn.Module):
             return z.squeeze(1)  # (B, 16, H/8, W/8)
         return self.processor.encode(x).latents  # (B, 4, H/8, W/8)
 
-    def decode(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C_lat, H_lat, W_lat) -> (B, 3, H, W) in [0, 1]
-        x = x.view(x.size(0), *self.output_shape)
-        if VAE_TYPE == "wan":
-            pix = self.processor.decode_to_pixel(x.unsqueeze(1)).squeeze(1)
-            self.processor.model.clear_cache()
-        else:
-            pix = self.processor.decode(x).sample
-        return (pix * 0.5 + 0.5).clamp(0, 1)
-
 
 def _build_vae() -> nn.Module:
     if VAE_TYPE == "wan":

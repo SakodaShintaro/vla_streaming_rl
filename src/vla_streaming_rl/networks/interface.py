@@ -12,7 +12,6 @@ convention) and is not part of the public surface.
 import abc
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -63,8 +62,8 @@ class InferResult:
     action: torch.Tensor  # (B, horizon, action_dim)
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
     rnn_state: torch.Tensor  # (B, ...)
-    next_image: np.ndarray  # predicted next image (H, W, 3)
-    next_reward: float  # predicted next reward
+    next_image_latent: torch.Tensor  # predicted next image, in encoder latent space
+    next_reward_latent: torch.Tensor  # predicted next reward, in encoder latent space
     activations: ActivationFeatures  # forward-pass features for statistical metrics
     features: torch.Tensor
 

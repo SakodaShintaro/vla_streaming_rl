@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: MIT
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -86,23 +85,21 @@ class StatePredictionHead(nn.Module):
         self,
         state_curr: torch.Tensor,
         action_curr: torch.Tensor,
-        observation_space_shape: tuple[int, ...],
         predictor_step_num: int,
         disable_state_predictor: bool,
-    ) -> tuple[np.ndarray, float, torch.Tensor]:
-        if disable_state_predictor:
-            H = observation_space_shape[1]
-            W = observation_space_shape[2]
-            next_image = np.zeros((H, W, 3), dtype=np.float32)
-            next_reward = 0.0
-            dummy_activation = torch.zeros((state_curr.size(0), 1), device=state_curr.device)
-            return next_image, next_reward, dummy_activation
-
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device = state_curr.device
         B = state_curr.size(0)
         C = self.image_processor.output_shape[0]
         H = self.image_processor.output_shape[1]
         W = self.image_processor.output_shape[2]
+
+        if disable_state_predictor:
+            next_image_latent = torch.zeros((B, C, H, W), device=device)
+            next_reward_latent = torch.zeros((B, C), device=device)
+            dummy_activation = torch.zeros((B, 1), device=device)
+            return next_image_latent, next_reward_latent, dummy_activation
+
         state_curr = state_curr.view(B, -1, C)
         noise_shape = (B, (H * W) + 1, C)
         normal = torch.distributions.Normal(
@@ -124,16 +121,11 @@ class StatePredictionHead(nn.Module):
             raise ValueError(f"Unknown predictor_type: {self.predictor_type}")
 
         image_part = next_hidden_state[:, :-1, :]
-        image_part = image_part.permute(0, 2, 1).view(B, C, H, W)
-        next_image = self.image_processor.decode(image_part)
-        next_image = next_image.detach().cpu().numpy()
-        next_image = next_image.squeeze(0)
-        next_image = next_image.transpose(1, 2, 0)
+        next_image_latent = image_part.permute(0, 2, 1).view(B, C, H, W)
 
-        reward_part = next_hidden_state[:, -1, :]
-        next_reward = self.reward_processor.decode(reward_part)
+        next_reward_latent = next_hidden_state[:, -1, :]
 
-        return next_image, next_reward.item(), activation
+        return next_image_latent, next_reward_latent, activation
 
     def _loss_flow_matching(
         self,

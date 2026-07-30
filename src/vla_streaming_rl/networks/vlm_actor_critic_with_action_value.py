@@ -246,12 +246,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def infer(self, data: InferInput) -> InferResult:
         state, action, _, actor_activation, critic_out = self._infer(data.s_seq, data.task_prompts)
 
-        next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
-            self._state_for_predictor(state),
-            action[:, 0],
-            self.observation_space_shape,
-            self.predictor_step_num,
-            self.disable_state_predictor,
+        next_image_latent, next_reward_latent, predictor_activation = (
+            self.prediction_head.predict_next_state(
+                self._state_for_predictor(state),
+                action[:, 0],
+                self.predictor_step_num,
+                self.disable_state_predictor,
+            )
         )
 
         activations = ActivationFeatures(
@@ -265,8 +266,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             action=action,
             value_report=self.value_head.value_report(critic_out.output),
             rnn_state=data.rnn_state,
-            next_image=next_image,
-            next_reward=next_reward,
+            next_image_latent=next_image_latent,
+            next_reward_latent=next_reward_latent,
             activations=activations,
             features=state,
         )
@@ -374,12 +375,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         et_critic_out = self.value_head(state.detach(), action_chunk.detach())
         neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
 
-        next_image, next_reward, predictor_activation = self.prediction_head.predict_next_state(
-            self._state_for_predictor(state),
-            next_action[:, 0],
-            self.observation_space_shape,
-            self.predictor_step_num,
-            self.disable_state_predictor,
+        next_image_latent, next_reward_latent, predictor_activation = (
+            self.prediction_head.predict_next_state(
+                self._state_for_predictor(state),
+                next_action[:, 0],
+                self.predictor_step_num,
+                self.disable_state_predictor,
+            )
         )
 
         activations = ActivationFeatures(
@@ -393,8 +395,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             action=next_action,
             value_report=self.value_head.value_report(critic_out.output),
             rnn_state=self._dummy_state.clone(),
-            next_image=next_image,
-            next_reward=next_reward,
+            next_image_latent=next_image_latent,
+            next_reward_latent=next_reward_latent,
             activations=activations,
             features=next_state,
         )
