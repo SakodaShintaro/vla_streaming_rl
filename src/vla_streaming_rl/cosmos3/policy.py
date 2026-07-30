@@ -328,9 +328,11 @@ class CosmosEdgePolicy(Cosmos3OmniPipeline):
         return action_latents[:, :raw].contiguous(), vision_latents
 
     @torch.no_grad()
-    def decode_vision_latents(self, vision_latents: torch.Tensor, frame_index: int) -> np.ndarray:
-        """Decode the (5D) video latents and return frame ``frame_index`` as
-        ``(H, W, 3)`` uint8.
+    def decode_vision_latents(
+        self, vision_latents: torch.Tensor, frame_index: int | slice
+    ) -> np.ndarray:
+        """Decode the (5D) video latents and return frame(s) ``frame_index`` as
+        ``(H, W, 3)`` uint8 (or ``(N, H, W, 3)`` if ``frame_index`` is a slice).
 
         Mirrors the pipeline's postprocess/decode: de-normalize by the VAE latent
         statistics, VAE-decode, postprocess to numpy. Frame 0 is the conditioning

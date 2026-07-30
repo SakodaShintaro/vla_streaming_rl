@@ -20,7 +20,9 @@ from vla_streaming_rl.cosmos3.policy import CosmosEdgePolicy
 
 AV_DOMAIN_NAME = "av"
 AV_ACTION_DIM = 9
-AV_LATERAL_IDX, AV_VERTICAL_IDX, AV_FORWARD_IDX = 0, 1, 2
+AV_LATERAL_IDX = 0
+AV_VERTICAL_IDX = 1
+AV_FORWARD_IDX = 2
 CARLA_TO_AV_FRAME = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
 ROAD_OPTION_TO_TEXT = {
     1: "turns left",
@@ -35,6 +37,8 @@ class EpisodeData:
     world2cams: list[np.ndarray]
     frames: list[Image.Image]
     road_options: list[int]
+    intrinsic: np.ndarray
+    camera_height: float
 
 
 def load_episode(episode_dir: Path) -> EpisodeData:
@@ -48,6 +52,8 @@ def load_episode(episode_dir: Path) -> EpisodeData:
         world2cams=[np.array(a["sensors"]["CAM_FRONT"]["world2cam"]) for a in annos],
         frames=frames,
         road_options=[a["command_near"] for a in annos],
+        intrinsic=np.array(annos[0]["sensors"]["CAM_FRONT"]["intrinsic"]),
+        camera_height=float(annos[0]["sensors"]["CAM_FRONT"]["cam2ego"][2][3]),
     )
 
 
@@ -131,13 +137,74 @@ def run_policy(
     prompt: str,
     history_action: torch.Tensor,
     last_history_frame_idx: int,
+    future_chunk_size: int,
     num_inference_steps: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     encoding = policy.encode(frames, prompt, history_action)
     full_chunk, vision_latents = policy.sample_action_chunk(encoding, num_inference_steps)
     future_chunk = full_chunk[last_history_frame_idx:].float().cpu().numpy()
-    predicted_frame = policy.decode_vision_latents(vision_latents, -1)
-    return future_chunk, predicted_frame
+    predicted_frames = policy.decode_vision_latents(vision_latents, slice(-future_chunk_size, None))
+    return future_chunk, predicted_frames
+
+
+def project_path_to_image(
+    path: np.ndarray, intrinsic: np.ndarray, camera_height: float
+) -> np.ndarray:
+    ground_path = path.copy()
+    ground_path[:, AV_VERTICAL_IDX] += camera_height / 4
+    in_front = ground_path[:, AV_FORWARD_IDX] > 0.1
+    camera_points = ground_path[in_front]
+    projected = camera_points @ intrinsic.T
+    return projected[:, :2] / projected[:, 2:3]
+
+
+def draw_path(
+    image_rgb: np.ndarray,
+    path: np.ndarray,
+    intrinsic: np.ndarray,
+    camera_height: float,
+    color: tuple[int, int, int],
+) -> None:
+    pixels = project_path_to_image(path, intrinsic, camera_height).astype(int)
+    for p1, p2 in zip(pixels[:-1], pixels[1:]):
+        cv2.line(image_rgb, tuple(p1), tuple(p2), color, 2)
+    for p in pixels:
+        cv2.circle(image_rgb, tuple(p), 4, color, -1)
+
+
+def draw_legend(
+    image_rgb: np.ndarray,
+    ground_truth_color: tuple[int, int, int],
+    predicted_color: tuple[int, int, int],
+) -> None:
+    cv2.putText(
+        image_rgb,
+        "ground truth",
+        (8, 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        ground_truth_color,
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        image_rgb,
+        "predicted",
+        (8, 44),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        predicted_color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def label_thumbnail(thumbnail_rgb: np.ndarray, text: str) -> None:
+    text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+    x = thumbnail_rgb.shape[1] - text_size[0] - 4
+    cv2.putText(
+        thumbnail_rgb, text, (x, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA
+    )
 
 
 def render_topdown_plot(
@@ -180,33 +247,38 @@ def render_topdown_plot(
 
 def compose_panel(
     current_frame_rgb: np.ndarray,
-    predicted_frame_rgb: np.ndarray,
+    predicted_frames_rgb: np.ndarray,
     predicted_path: np.ndarray,
     ground_truth_path: np.ndarray,
-    canvas_width: int,
-    canvas_height: int,
+    intrinsic: np.ndarray,
+    camera_height: float,
     lateral_range: tuple[float, float],
     forward_range: tuple[float, float],
 ) -> np.ndarray:
-    left_width = canvas_width // 2
-    right_width = canvas_width - left_width
-    top_height = canvas_height // 2
-    bottom_height = canvas_height - top_height
+    ground_truth_color = (0, 255, 0)
+    predicted_color = (255, 0, 0)
+    overlaid = current_frame_rgb.copy()
+    draw_path(overlaid, ground_truth_path, intrinsic, camera_height, ground_truth_color)
+    draw_path(overlaid, predicted_path, intrinsic, camera_height, predicted_color)
+    draw_legend(overlaid, ground_truth_color, predicted_color)
 
+    height, width = overlaid.shape[:2]
+    thumb_width = width // 4
+    thumb_height = height // len(predicted_frames_rgb)
+    thumbnails = []
+    for step, frame in enumerate(predicted_frames_rgb, start=1):
+        thumbnail = cv2.resize(frame, (thumb_width, thumb_height), interpolation=cv2.INTER_AREA)
+        label_thumbnail(thumbnail, f"t+{step}")
+        thumbnails.append(thumbnail)
+
+    topdown_width = width // 2
     topdown = render_topdown_plot(
-        predicted_path, ground_truth_path, left_width, canvas_height, lateral_range, forward_range
+        predicted_path, ground_truth_path, topdown_width, height, lateral_range, forward_range
     )
-    if topdown.shape[:2] != (canvas_height, left_width):
-        topdown = cv2.resize(topdown, (left_width, canvas_height), interpolation=cv2.INTER_AREA)
+    if topdown.shape[:2] != (height, topdown_width):
+        topdown = cv2.resize(topdown, (topdown_width, height), interpolation=cv2.INTER_AREA)
 
-    current_resized = cv2.resize(
-        current_frame_rgb, (right_width, top_height), interpolation=cv2.INTER_AREA
-    )
-    predicted_resized = cv2.resize(
-        predicted_frame_rgb, (right_width, bottom_height), interpolation=cv2.INTER_CUBIC
-    )
-    right_half = np.concatenate([current_resized, predicted_resized], axis=0)
-    return np.concatenate([topdown, right_half], axis=1)
+    return np.concatenate([topdown, overlaid, np.concatenate(thumbnails, axis=0)], axis=1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -218,8 +290,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resolution_tier", type=int, default=480, choices=[256, 480, 704, 720])
     parser.add_argument("--num_inference_steps", type=int, default=4)
     parser.add_argument("--action_fps", type=float, default=10.0)
-    parser.add_argument("--canvas_width", type=int, default=1280)
-    parser.add_argument("--canvas_height", type=int, default=720)
     parser.add_argument("--video_fps", type=float, default=10.0)
     parser.add_argument("--topdown_lateral_range", type=float, nargs=2, default=(-5.0, 5.0))
     parser.add_argument("--topdown_forward_range", type=float, nargs=2, default=(-1.0, 10.0))
@@ -280,12 +350,13 @@ def main() -> None:
         history_action = history_action_from_episode(episode, history_start, center).to(device)
         prompt = build_prompt(episode.road_options[center])
 
-        action_chunk, predicted_frame = run_policy(
+        action_chunk, predicted_frames = run_policy(
             policy,
             clip_frames,
             prompt,
             history_action,
             last_history_frame_idx,
+            args.future_chunk_size,
             args.num_inference_steps,
         )
 
@@ -295,11 +366,11 @@ def main() -> None:
         current_frame_rgb = np.array(clip_frames[-1])
         panel_rgb = compose_panel(
             current_frame_rgb,
-            predicted_frame,
+            predicted_frames,
             predicted_path,
             ground_truth_path,
-            args.canvas_width,
-            args.canvas_height,
+            episode.intrinsic,
+            episode.camera_height,
             tuple(args.topdown_lateral_range),
             tuple(args.topdown_forward_range),
         )
