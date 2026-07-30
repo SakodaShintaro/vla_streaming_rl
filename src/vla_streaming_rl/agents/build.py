@@ -53,39 +53,6 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             et_lambda=args.et_lambda,
         )
 
-    elif args.agent_type == "libero_pi05":
-        from vla_streaming_rl.agents.libero_pi05 import LiberoPi05Agent
-
-        relabeler = None
-        if args.vlac.enabled:
-            from vla_streaming_rl.networks.vlac import VlacRewardRelabeler
-
-            relabeler = VlacRewardRelabeler(
-                milestone_interval=args.vlac.milestone_interval,
-                check_interval=args.vlac.check_interval,
-                gamma=args.gamma,
-            )
-
-        agent = LiberoPi05Agent(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
-            network=network,
-            learning_mode=args.learning_mode,
-            horizon=args.horizon,
-            buffer_size=args.buffer_size,
-            batch_size=args.batch_size,
-            learning_starts=args.learning_starts,
-            actor_lr=args.actor_lr,
-            critic_lr=args.critic_lr,
-            weight_decay=args.weight_decay,
-            max_grad_norm=args.max_grad_norm,
-            et_lambda=args.et_lambda,
-            gamma=args.gamma,
-            relabeler=relabeler,
-            vlac_ref_num=args.vlac.ref_num,
-            reach_reward_scale=args.reach_reward_scale,
-        )
-
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
 

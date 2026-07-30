@@ -37,33 +37,6 @@ def make_animalai_env(resolution: int, revisit_temperature: float) -> gym.Env:
     )
 
 
-def make_libero_env(
-    task_suite_name: str,
-    task_id: int,
-    resolution: int,
-    settle_steps: int,
-    horizon: int,
-    perturb_robot_joint_std: float,
-) -> gym.Env:
-    """Hydra `_target_` factory for the raw LIBERO env (no wrappers).
-
-    The wrist camera, proprioceptive state and language instruction are
-    published in the info dict (see ``LiberoEnv``); ``make_env`` only adds the
-    image-observation wrappers shared with the other pixel envs.
-    """
-    from vla_streaming_rl.envs.libero_env import LiberoEnv
-
-    return LiberoEnv(
-        task_suite_name=task_suite_name,
-        task_id=task_id,
-        resolution=resolution,
-        settle_steps=settle_steps,
-        horizon=horizon,
-        perturb_robot_joint_std=perturb_robot_joint_std,
-        seed=0,
-    )
-
-
 def make_carla_env(
     route_id: str | None,
     sequence_mode: str,
@@ -157,15 +130,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = EpisodeReturnObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
-        return env
-
-    elif env_id == "LIBERO-v0":
-        env = hydra.utils.instantiate(env_factory)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = TransposeAndNormalizeObs(env)
-        env = ZeroObsOnDoneWrapper(env)
-        env = LanguageObsWrapper(env)
-        env.unwrapped.eval_range = 100
         return env
 
     else:

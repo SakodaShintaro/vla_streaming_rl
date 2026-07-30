@@ -48,14 +48,6 @@ ENVS = {
         "score_col": "recent_average_score",  # already a trailing average
         "smooth": None,
     },
-    "libero": {
-        "score_ylabel": "Success Rate",
-        "score_fname": "libero_success_rate.pdf",
-        "score_ymax": 1.0,
-        "prefix": "libero",
-        "score_col": "recent_average_score",
-        "smooth": None,
-    },
     "carla": {
         "score_ylabel": "Driving Score",
         "score_fname": "carla_score.pdf",

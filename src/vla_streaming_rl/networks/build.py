@@ -76,8 +76,7 @@ def build_network(
 ) -> nn.Module:
     # One factory for every network: all critic config comes from ``args`` and is
     # bound here, leaving ``in_channels`` and ``action_dim`` for the network to
-    # supply at call time (see ``_build_value_head``). LiberoPi05Network has no
-    # critic and ignores it.
+    # supply at call time (see ``_build_value_head``).
     value_head_factory = functools.partial(
         _build_value_head,
         critic_arch=args.critic_arch,
@@ -179,19 +178,6 @@ def build_network(
             awr_temperature=args.awr_temperature,
             awr_sample_noise=args.awr_sample_noise,
         ).to(device)
-
-    elif args.network_class == "libero_pi05":
-        from vla_streaming_rl.networks.libero_pi05_network import LiberoPi05Network
-
-        network = LiberoPi05Network(
-            device=device,
-            value_head_factory=value_head_factory,
-            actor_denoising_steps=args.actor_denoising_steps,
-            q_grad_eta=args.q_grad_eta,
-            dacer_loss_weight=args.dacer_loss_weight,
-            critic_loss_weight=args.critic_loss_weight,
-            detach_critic=bool(args.detach_critic),
-        )
 
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")
