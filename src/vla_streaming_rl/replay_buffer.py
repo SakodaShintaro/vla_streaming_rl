@@ -18,7 +18,6 @@ selecting an action at timestep t. Specifically:
 @dataclass
 class ReplayBufferData:
     observations: torch.Tensor  # (B, T, obs_shape)
-    obs_z: torch.Tensor  # (B, T, obs_z_shape) - encoded observations
     rewards: torch.Tensor  # (B, T)
     dones: torch.Tensor  # (B, T)
     # rnn_state shape (SpatialTemporalEncoder): (B, T, space_len, state_size, n_layer)
@@ -33,7 +32,6 @@ class ReplayBuffer:
         size: int,
         seq_len: int,
         obs_shape: tuple[int, ...],
-        obs_z_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
         output_device: torch.device,
@@ -59,7 +57,6 @@ class ReplayBuffer:
             )
 
         self.observations = init_tensor((size, *obs_shape))
-        self.obs_z = init_tensor((size, *obs_z_shape))
         self.rewards = init_tensor((size, 1))
         self.dones = init_tensor((size, 1))
         self.rnn_states = init_tensor((size, *rnn_state_shape))
@@ -89,7 +86,6 @@ class ReplayBuffer:
         curr_size = self.size if self.full else self.idx
         return ReplayBufferData(
             self.observations[:curr_size].to(self.output_device, non_blocking=True),
-            self.obs_z[:curr_size].to(self.output_device, non_blocking=True),
             self.rewards[:curr_size].to(self.output_device, non_blocking=True),
             self.dones[:curr_size].to(self.output_device, non_blocking=True),
             self.rnn_states[:curr_size].to(self.output_device, non_blocking=True),
@@ -100,7 +96,6 @@ class ReplayBuffer:
     def add(
         self,
         obs: torch.Tensor,
-        obs_z: torch.Tensor,
         reward: float,
         done: bool,
         rnn_state: torch.Tensor,
@@ -109,7 +104,6 @@ class ReplayBuffer:
     ) -> None:
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
-        self.obs_z[self.idx].copy_(obs_z.reshape(self.obs_z[self.idx].shape))
         self.rewards[self.idx].fill_(reward)
         self.dones[self.idx].fill_(done)
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
@@ -145,7 +139,6 @@ class ReplayBuffer:
         # Vectorized slicing - much faster than loop + append
         return ReplayBufferData(
             self.observations[seq_indices].to(self.output_device, non_blocking=True),
-            self.obs_z[seq_indices].to(self.output_device, non_blocking=True),
             self.rewards[seq_indices].to(self.output_device, non_blocking=True),
             self.dones[seq_indices].to(self.output_device, non_blocking=True),
             self.rnn_states[seq_indices].to(self.output_device, non_blocking=True),
@@ -162,7 +155,6 @@ class ReplayBuffer:
         # Vectorized slicing
         return ReplayBufferData(
             self.observations[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.obs_z[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.rewards[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.dones[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.rnn_states[indices].unsqueeze(0).to(self.output_device, non_blocking=True),

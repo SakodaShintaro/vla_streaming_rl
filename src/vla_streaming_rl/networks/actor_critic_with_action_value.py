@@ -56,6 +56,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         detach_predictor: bool,
         disable_state_predictor: bool,
         predictor_type: str,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
     ) -> None:
         super().__init__()
         self.sparsity = sparsity
@@ -67,7 +69,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.observation_space_shape = observation_space_shape
         self.image_numel = int(np.prod(observation_space_shape))
 
-        self.image_processor = ImageProcessor(observation_space_shape)
+        self.image_processor = ImageProcessor(
+            observation_space_shape, image_encoder_type, image_encoder_output_dim
+        )
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
@@ -171,7 +175,7 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         image, scalar_obs = self._unpack_obs(data.s_seq)
         x, rnn_state = self.encoder(
-            image, data.obs_z_seq, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
+            image, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
         )  # (B, hidden_dim)
 
         # Get action chunk from policy_head
@@ -214,7 +218,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             next_image, next_scalar_obs = self._unpack_obs(data.observations[:, self.horizon :])
             next_state, _ = self.encoder.forward(
                 next_image,
-                data.obs_z[:, self.horizon :],
                 data.actions[:, self.horizon :],
                 data.rewards[:, self.horizon :],
                 data.rnn_state[:, self.horizon],
@@ -228,13 +231,12 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         # Use seq_len frames (excluding last horizon frames)
         curr_image, curr_scalar_obs = self._unpack_obs(data.observations[:, : -self.horizon])
-        curr_obs_z = data.obs_z[:, : -self.horizon]
         curr_actions = data.actions[:, : -self.horizon]
         curr_rewards = data.rewards[:, : -self.horizon]
         curr_rnn_state = data.rnn_state[:, 0]  # (B, ...)
 
         curr_state, _ = self.encoder.forward(
-            curr_image, curr_obs_z, curr_actions, curr_rewards, curr_rnn_state, curr_scalar_obs
+            curr_image, curr_actions, curr_rewards, curr_rnn_state, curr_scalar_obs
         )  # (B, state_dim)
 
         # Action chunk: (B, horizon, action_dim)
@@ -276,7 +278,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             next_image, next_scalar_obs = self._unpack_obs(data.observations[:, self.horizon :])
             next_state, next_rnn_state = self.encoder.forward(
                 next_image,
-                data.obs_z[:, self.horizon :],
                 data.actions[:, self.horizon :],
                 data.rewards[:, self.horizon :],
                 data.rnn_state[:, self.horizon],
@@ -292,13 +293,12 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
 
         prev_image, prev_scalar_obs = self._unpack_obs(data.observations[:, : -self.horizon])
-        prev_obs_z = data.obs_z[:, : -self.horizon]
         prev_actions = data.actions[:, : -self.horizon]
         prev_rewards = data.rewards[:, : -self.horizon]
         prev_rnn_state = data.rnn_state[:, 0]
 
         prev_state, _ = self.encoder.forward(
-            prev_image, prev_obs_z, prev_actions, prev_rewards, prev_rnn_state, prev_scalar_obs
+            prev_image, prev_actions, prev_rewards, prev_rnn_state, prev_scalar_obs
         )
 
         action_chunk = data.actions[:, -self.horizon :]
