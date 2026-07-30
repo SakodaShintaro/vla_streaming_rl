@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MIT
+# xvfb.def
+Bootstrap: docker
+From: nvidia/cuda:12.6.1-cudnn-runtime-ubuntu22.04
+
+%post
+    apt-get update && apt-get install -y \
+        xvfb \
+        curl \
+        git \
+        ca-certificates \
+        libglib2.0-0 \
+        libgl1 \
+        libsm6 \
+        libxext6 \
+        libxrender1
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    mv /root/.local/bin/uv /usr/local/bin/uv
+    mv /root/.local/bin/uvx /usr/local/bin/uvx
+    apt-get clean
+
+%environment
+    export PATH=/usr/local/bin:$PATH
