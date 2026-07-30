@@ -211,14 +211,7 @@ def compose_panel(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Roll Cosmos3-Edge's pretrained 'av' embodiment forward over one bench2drive clip, "
-            "and render a panel per sampled frame: a top-down predicted-vs-ground-truth future "
-            "path plot on the left, the current camera frame and the model's generated future "
-            "frame stacked on the right."
-        )
-    )
+    parser = argparse.ArgumentParser()
     parser.add_argument("--root_dir", type=Path, default=(Path.home() / "data/bench2drive"))
     parser.add_argument("--num_cond_latent_frames", type=int, default=2)
     parser.add_argument("--future_chunk_size", type=int, default=8)
