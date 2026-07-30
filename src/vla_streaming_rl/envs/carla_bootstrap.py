@@ -61,7 +61,11 @@ def setup_carla_paths() -> None:
     agent, which import ``leaderboard`` / ``srunner`` at module load.
     """
     root = resolve_carla_root()
-    for p in (root / "PythonAPI" / "carla", _B2D_ROOT / "leaderboard", _B2D_ROOT / "scenario_runner"):
+    for p in (
+        root / "PythonAPI" / "carla",
+        _B2D_ROOT / "leaderboard",
+        _B2D_ROOT / "scenario_runner",
+    ):
         sp = str(p)
         if sp not in sys.path:
             sys.path.insert(0, sp)
