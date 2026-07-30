@@ -18,7 +18,7 @@ num_bins: 1
 detach_actor: 1
 detach_critic: 0
 detach_predictor: 0
-disable_state_predictor: 1
+disable_state_predictor: 0
 dacer_loss_weight: 0.05
 denoising_steps: 1
 som_alpha: 1.0
