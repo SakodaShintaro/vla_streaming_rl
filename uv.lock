@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-07-20T05:01:07.675461198Z"
+exclude-newer = "2026-07-20T21:34:33.741832323Z"
 exclude-newer-span = "P10D"
 
 [options.exclude-newer-package]
@@ -614,7 +614,7 @@ wheels = [
 
 [[package]]
 name = "gymnasium"
-version = "1.3.0"
+version = "1.2.3"
 source = { registry = "https://pypi.flatt.tech/simple/" }
 dependencies = [
     { name = "cloudpickle" },
@@ -622,15 +622,15 @@ dependencies = [
     { name = "numpy" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://pypi.flatt.tech/files/packages/4d/ff/14b6880d703dfaca204490979d3254ccd280c99550798993319902873658/gymnasium-1.3.0.tar.gz", hash = "sha256:6939e86e835d6b71b6ba6bfd360487420876deafc79bfb7bacba83a7c446bcf3", size = 830646, upload-time = "2026-04-22T13:47:14.155Z" }
+sdist = { url = "https://pypi.flatt.tech/files/packages/76/59/653a9417d98ed3e29ef9734ba52c3495f6c6823b8d5c0c75369f25111708/gymnasium-1.2.3.tar.gz", hash = "sha256:2b2cb5b5fbbbdf3afb9f38ca952cc48aa6aa3e26561400d940747fda3ad42509", size = 829230, upload-time = "2025-12-18T16:51:10.234Z" }
 wheels = [
-    { url = "https://pypi.flatt.tech/files/packages/e9/73/fda6a25f3beeb5e49d74330b44092b9e5a547395ccd478d1103ddcbff1fc/gymnasium-1.3.0-py3-none-any.whl", hash = "sha256:6b8c159a8540dcbcb221722d7efda24d78ebbcbc3bd2ea1c2611aa2a34471fc2", size = 953904, upload-time = "2026-04-22T13:47:12.13Z" },
+    { url = "https://pypi.flatt.tech/files/packages/56/d3/ea5f088e3638dbab12e5c20d6559d5b3bdaeaa1f2af74e526e6815836285/gymnasium-1.2.3-py3-none-any.whl", hash = "sha256:e6314bba8f549c7fdcc8677f7cd786b64908af6e79b57ddaa5ce1825bffb5373", size = 952113, upload-time = "2025-12-18T16:51:08.445Z" },
 ]
 
 [package.optional-dependencies]
 box2d = [
     { name = "box2d" },
-    { name = "pygame-ce" },
+    { name = "pygame" },
     { name = "swig" },
 ]
 mujoco = [
@@ -1496,18 +1496,18 @@ wheels = [
 ]
 
 [[package]]
-name = "pygame-ce"
-version = "2.5.7"
+name = "pygame"
+version = "2.6.1"
 source = { registry = "https://pypi.flatt.tech/simple/" }
-sdist = { url = "https://pypi.flatt.tech/files/packages/e9/0d/bb6a6fdf1b227c0bb9a44437a70962a3854bcc541533c261e5021a5ee691/pygame_ce-2.5.7.tar.gz", hash = "sha256:86beb797cd73c141299a29b56f7df2b0543fbdc81d428022458329ff694aaa51", size = 5935870, upload-time = "2026-03-02T09:26:59.005Z" }
+sdist = { url = "https://pypi.flatt.tech/files/packages/49/cc/08bba60f00541f62aaa252ce0cfbd60aebd04616c0b9574f755b583e45ae/pygame-2.6.1.tar.gz", hash = "sha256:56fb02ead529cee00d415c3e007f75e0780c655909aaa8e8bf616ee09c9feb1f", size = 14808125, upload-time = "2024-09-29T13:41:34.698Z" }
 wheels = [
-    { url = "https://pypi.flatt.tech/files/packages/57/a7/cd305034f505bfa1a1acdafd3d86af54da14b29151a0d99f348306272773/pygame_ce-2.5.7-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:dca2f8ba56bf3b4b8c73c4863d0603773403f4f66bc2fe25784ea74aee3fffc3", size = 17210332, upload-time = "2026-03-02T09:25:52.18Z" },
-    { url = "https://pypi.flatt.tech/files/packages/e5/94/7f6304a31ccc7d11d4443e590cbfa6fce2bd34077575a7790d4f0a14f440/pygame_ce-2.5.7-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:4dc989462faf2c5947881f708fa406d7ac13c1bc987c1588d630ca62ad369989", size = 12709001, upload-time = "2026-03-02T09:25:54.806Z" },
-    { url = "https://pypi.flatt.tech/files/packages/09/8b/a7886b7bfe874fa381201ee538928af3c1cab2fe3e36927ed08f3f1d0b61/pygame_ce-2.5.7-cp312-cp312-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:538689d77c44f5dbefc0abeab5b9806d6c90ebc6d64078736c8a4c731f08b37e", size = 13236706, upload-time = "2026-03-02T09:25:57.524Z" },
-    { url = "https://pypi.flatt.tech/files/packages/db/17/70ada4cef84eca48a995cc9e0f2f087e6190b3e4111e9c8ec3c7a8f689bd/pygame_ce-2.5.7-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:0d8fa8822c0f4b5ae6b44ada7be9f2193fd512da1381c37fa3c5bda8971d64cb", size = 12812909, upload-time = "2026-03-02T09:25:59.971Z" },
-    { url = "https://pypi.flatt.tech/files/packages/40/db/1cfcfb7813ce6d2202919ad87c7e1b278a4f820902ba826df43dc8906e34/pygame_ce-2.5.7-cp312-cp312-win32.whl", hash = "sha256:604207c8813a594919bb7e6d3ed3834f79aa099d2d648e8a8fc3d786ad3fa1c8", size = 9837595, upload-time = "2026-03-02T09:26:02.573Z" },
-    { url = "https://pypi.flatt.tech/files/packages/1f/d4/43b006affa13e2f4572aa28a0d1f64c91c330d289c30a022b5416245714c/pygame_ce-2.5.7-cp312-cp312-win_amd64.whl", hash = "sha256:b6b7eec2779fac11ed265a18ab926b3829654120a5c9a07c36eeedeb012b8c3c", size = 10414958, upload-time = "2026-03-02T09:26:05.25Z" },
-    { url = "https://pypi.flatt.tech/files/packages/18/1b/971a432d8bab8c52031ddbd0e681750a57348213ec0f8a0e0d6713e8df46/pygame_ce-2.5.7-cp312-cp312-win_arm64.whl", hash = "sha256:eb99a8a7185057064163610b3ca3e1d3307f0eb3dfff6e19556fa5132c6bca87", size = 10859829, upload-time = "2026-03-02T09:26:08.06Z" },
+    { url = "https://pypi.flatt.tech/files/packages/92/16/2c602c332f45ff9526d61f6bd764db5096ff9035433e2172e2d2cadae8db/pygame-2.6.1-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:4ee7f2771f588c966fa2fa8b829be26698c9b4836f82ede5e4edc1a68594942e", size = 13118279, upload-time = "2024-09-29T14:26:30.427Z" },
+    { url = "https://pypi.flatt.tech/files/packages/cd/53/77ccbc384b251c6e34bfd2e734c638233922449a7844e3c7a11ef91cee39/pygame-2.6.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c8040ea2ab18c6b255af706ec01355c8a6b08dc48d77fd4ee783f8fc46a843bf", size = 12384524, upload-time = "2024-09-29T14:26:49.996Z" },
+    { url = "https://pypi.flatt.tech/files/packages/06/be/3ed337583f010696c3b3435e89a74fb29d0c74d0931e8f33c0a4246307a9/pygame-2.6.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c47a6938de93fa610accd4969e638c2aebcb29b2fca518a84c3a39d91ab47116", size = 13587123, upload-time = "2024-09-29T11:10:50.072Z" },
+    { url = "https://pypi.flatt.tech/files/packages/fd/ca/b015586a450db59313535662991b34d24c1f0c0dc149cc5f496573900f4e/pygame-2.6.1-cp312-cp312-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:33006f784e1c7d7e466fcb61d5489da59cc5f7eb098712f792a225df1d4e229d", size = 14275532, upload-time = "2024-09-29T11:39:59.356Z" },
+    { url = "https://pypi.flatt.tech/files/packages/b9/f2/d31e6ad42d657af07be2ffd779190353f759a07b51232b9e1d724f2cda46/pygame-2.6.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1206125f14cae22c44565c9d333607f1d9f59487b1f1432945dfc809aeaa3e88", size = 13952653, upload-time = "2024-09-29T11:40:01.781Z" },
+    { url = "https://pypi.flatt.tech/files/packages/f3/42/8ea2a6979e6fa971702fece1747e862e2256d4a8558fe0da6364dd946c53/pygame-2.6.1-cp312-cp312-win32.whl", hash = "sha256:84fc4054e25262140d09d39e094f6880d730199710829902f0d8ceae0213379e", size = 10252421, upload-time = "2024-09-29T11:14:26.877Z" },
+    { url = "https://pypi.flatt.tech/files/packages/5f/90/7d766d54bb95939725e9a9361f9c06b0cfbe3fe100aa35400f0a461a278a/pygame-2.6.1-cp312-cp312-win_amd64.whl", hash = "sha256:3a9e7396be0d9633831c3f8d5d82dd63ba373ad65599628294b7a4f8a5a01a65", size = 10624591, upload-time = "2024-09-29T11:52:54.489Z" },
 ]
 
 [[package]]
@@ -2367,9 +2367,9 @@ requires-dist = [
     { name = "flash-attn", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-linear-attention" },
     { name = "ftfy" },
-    { name = "gymnasium", extras = ["box2d"] },
-    { name = "gymnasium", extras = ["mujoco"] },
-    { name = "gymnasium", extras = ["other"] },
+    { name = "gymnasium", extras = ["box2d"], specifier = "==1.2.3" },
+    { name = "gymnasium", extras = ["mujoco"], specifier = "==1.2.3" },
+    { name = "gymnasium", extras = ["other"], specifier = "==1.2.3" },
     { name = "hl-gauss-pytorch" },
     { name = "huggingface-hub" },
     { name = "hydra-core", specifier = ">=1.3" },
