@@ -42,8 +42,8 @@ def create_reward_image(pred_reward: float | None, actual_reward: float) -> np.n
     """
     Visualize the reward (simple text display). The panel is a fixed 200x200
     regardless of inputs. ``pred_reward=None`` means the agent does not predict
-    the reward (e.g. SimLingo): only the actual reward is shown, with the Pred
-    / Error lines omitted.
+    the reward: only the actual reward is shown, with the Pred / Error lines
+    omitted.
     """
     height, width = (200, 200)
     img = np.zeros((height, width, 3), dtype=np.uint8)

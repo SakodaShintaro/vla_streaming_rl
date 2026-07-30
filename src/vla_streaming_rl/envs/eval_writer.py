@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 """Write Bench2Drive-eval-compatible artifacts from inside the RL training loop.
 
-Mirrors what ``leaderboard_evaluator.py`` + ``agent_simlingo.py`` produce
-during ``simlingo/scripts/eval_220routes.sh`` so that the same downstream
+Mirrors what ``leaderboard_evaluator.py`` produces during Bench2Drive's
+standard eval scripts so that the same downstream
 tools (``Bench2Drive/tools/merge_route_json.py``,
 ``efficiency_smoothness_benchmark.py``) can compute Driving Score,
 Success Rate, Efficiency, and Comfort directly from this run's output.
@@ -125,10 +125,9 @@ class Bench2DriveEvalWriter:
                 "missing finalize on the previous episode"
             )
 
-        # One ``StatisticsManager`` per route (mirrors simlingo's
-        # eval_220routes.sh: leaderboard_evaluator is invoked once per
-        # route file, so each output JSON has exactly one entry in
-        # ``records``).
+        # One ``StatisticsManager`` per route (mirrors Bench2Drive's eval
+        # scripts: leaderboard_evaluator is invoked once per route file, so
+        # each output JSON has exactly one entry in ``records``).
         endpoint = self.eval_res_dir / f"{scenario_index:03d}_res.json"
         debug_endpoint = self.eval_res_dir / f"debug_{scenario_index:03d}.txt"
         stats = StatisticsManager(str(endpoint), str(debug_endpoint))
@@ -137,7 +136,7 @@ class Bench2DriveEvalWriter:
 
         # repetition_index is set by leaderboard's RouteIndexer (not by the
         # bare RouteParser we use); default to 0 so route_name still
-        # matches simlingo's "RouteScenario_<id>_rep0" convention.
+        # matches the "RouteScenario_<id>_rep0" convention.
         repetition_index = getattr(config, "repetition_index", 0)
         route_name = f"{config.name}_rep{repetition_index}"
         scenario_name = config.scenario_configs[0].name if config.scenario_configs else "NoScenario"

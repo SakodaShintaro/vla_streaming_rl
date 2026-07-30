@@ -19,15 +19,8 @@ import scipy.interpolate
 
 @dataclass(frozen=True)
 class CARLAObsConfig:
-    # Matches simlingo's camera_width_0 / camera_height_0 in
-    # config_simlingo.py — the SimLingo VLM was trained at this resolution
-    # and crops/resamples internally, so we feed it the same.
     image_size: tuple[int, int] = (1024, 512)  # (width, height)
     fov: float = 110.0
-    # Mount position copied from simlingo/team_code/config_simlingo.py
-    # (camera_pos_0 = [-1.5, 0.0, 2.0]). Training/eval observation must
-    # match the agent's calibration or the policy sees a different view
-    # than what simlingo was trained on.
     camera_x: float = -1.5
     camera_z: float = 2.0
     map_size: int = 512
@@ -196,9 +189,9 @@ def action_to_vehicle_control(action: np.ndarray) -> tuple[float, float, float]:
     """Map 2-D policy action to ``(steer, throttle, brake)``.
 
     ``action[1] > 0`` → throttle, ``action[1] < 0`` → brake. No floor or
-    clamp beyond ``[-1, 1]``: external policies (e.g. SimLingo) round-trip
-    their ``carla.VehicleControl`` through this mapping and must see the
-    raw throttle/brake they emitted.
+    clamp beyond ``[-1, 1]``: external policies round-trip their
+    ``carla.VehicleControl`` through this mapping and must see the raw
+    throttle/brake they emitted.
     """
     steer = float(np.clip(action[0], -1.0, 1.0))
     gas_or_brake = float(np.clip(action[1], -1.0, 1.0))

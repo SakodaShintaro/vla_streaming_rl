@@ -31,8 +31,7 @@ def _build_value_head(
 
     Networks receive this (via ``functools.partial`` fixing every config knob but
     ``in_channels`` and ``action_dim``) and call it with their own state width and
-    action dim — the two shape values only the network knows (RL networks use the
-    env action dim, SimLingo a fixed 60-D waypoint action). All value-related
+    action dim — the two shape values only the network knows. All value-related
     construction — critic architecture, discount, bins, hidden sizes — lives here,
     so a value change touches only this builder and ``value_head``, never the
     networks.
@@ -163,20 +162,6 @@ def build_network(
             image_mode=args.image_mode,
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,
-        ).to(device)
-
-    elif args.network_class == "simlingo":
-        from vla_streaming_rl.networks.simlingo_network import SimLingoNetwork
-
-        # SimLingo's critic scores a single 60-D waypoint action
-        assert args.horizon == 1, f"SimLingo requires horizon == 1, got {args.horizon}"
-
-        network = SimLingoNetwork(
-            value_head_factory=value_head_factory,
-            actor_loss_type=args.actor_loss_type,
-            awr_num_samples=args.awr_num_samples,
-            awr_temperature=args.awr_temperature,
-            awr_sample_noise=args.awr_sample_noise,
         ).to(device)
 
     else:

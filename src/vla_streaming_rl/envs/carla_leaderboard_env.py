@@ -185,8 +185,8 @@ class CARLALeaderboardEnv(gym.Env):
             eval_output_dir: If set, the env writes Bench2Drive-eval-
                 compatible artifacts (``eval_res/{idx:03d}_res.json``,
                 ``eval_viz/{save_name}/metric_info.json``) under this
-                directory after every episode — same files
-                simlingo/scripts/eval_220routes.sh produces, so the
+                directory after every episode — same files Bench2Drive's
+                standard eval scripts produce, so the
                 downstream tools (merge_route_json.py,
                 efficiency_smoothness_benchmark.py) work unmodified. Only
                 used when a Bench2DriveRuntime is attached. The matching
@@ -543,7 +543,7 @@ class CARLALeaderboardEnv(gym.Env):
 
         observation = {"image": self.current_image.copy(), "sensors": self._build_sensors_dict()}
         # The (gps, world-coord) global plan for VLA agents that build their own
-        # route planner (e.g. SimLingo). Only the Bench2Drive runtime has a
+        # route planner. Only the Bench2Drive runtime has a
         # RouteScenario; the reset observation carries it once per episode so the
         # agent never reaches into the env to fetch it.
         if self.runtime is not None and self.runtime.route_scenario is not None:

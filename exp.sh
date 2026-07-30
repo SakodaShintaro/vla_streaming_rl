@@ -4,7 +4,7 @@ set -eux
 cd $(dirname $0)
 
 # ==== Select setup via argument =======================================
-# Usage: ./exp.sh {car_racing|carla}
+# Usage: ./exp.sh {car_racing}
 
 SETUP=${1:-}
 
@@ -15,14 +15,8 @@ case "$SETUP" in
     OFF16_LR="actor_lr=1e-5 critic_lr=1e-5"
     OFF1_LR="actor_lr=1e-6 critic_lr=1e-5"
     ;;
-  carla)
-    AGENT=simlingo; ENV=carla_special_case
-    STREAM_LR="actor_lr=2e-7 critic_lr=5e-7"
-    OFF16_LR="actor_lr=2e-6 critic_lr=5e-6"
-    OFF1_LR="actor_lr=2e-7 critic_lr=5e-7"
-    ;;
   *)
-    echo "Usage: $0 {car_racing|carla}" >&2
+    echo "Usage: $0 {car_racing}" >&2
     exit 1
     ;;
 esac
