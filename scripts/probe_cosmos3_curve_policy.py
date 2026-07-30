@@ -252,7 +252,7 @@ def parse_args() -> argparse.Namespace:
             "frame stacked on the right."
         )
     )
-    parser.add_argument("--bench2drive_root", type=Path, default=(Path.home() / "data/bench2drive"))
+    parser.add_argument("--root_dir", type=Path, default=(Path.home() / "data/bench2drive"))
     parser.add_argument("--num_cond_latent_frames", type=int, default=2)
     parser.add_argument("--future_chunk_size", type=int, default=8)
     parser.add_argument("--frame_stride", type=int, default=4)
@@ -279,9 +279,9 @@ def main() -> None:
     model_chunk = last_history_frame_idx + args.future_chunk_size
     history_len = last_history_frame_idx + 1
 
-    camera_dirs = sorted(args.bench2drive_root.rglob("camera"))
+    camera_dirs = sorted(args.root_dir.rglob("camera"))
     episode_dirs = [camera_dir.parent for camera_dir in camera_dirs]
-    assert episode_dirs, f"no bench2drive episodes found under {args.bench2drive_root}"
+    assert episode_dirs, f"no bench2drive episodes found under {args.root_dir}"
     episode_dir = find_first_bright_episode(
         episode_dirs, args.min_sun_altitude, args.max_fog_density, args.max_precipitation
     )
