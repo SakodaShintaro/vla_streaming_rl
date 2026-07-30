@@ -6,9 +6,9 @@ readme = "README.md"
 license = "MIT"
 authors = [{ name = "Shintaro Sakoda" }]
 dependencies = [
-    "gymnasium[box2d]",
-    "gymnasium[mujoco]",
-    "gymnasium[other]",
+    "gymnasium[box2d]==1.2.3",
+    "gymnasium[mujoco]==1.2.3",
+    "gymnasium[other]==1.2.3",
     "wandb",
     "timm",
     "opencv-python",
