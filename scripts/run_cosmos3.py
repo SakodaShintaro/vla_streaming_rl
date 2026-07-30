@@ -32,9 +32,13 @@ ROAD_OPTION_TO_TEXT = {
 
 @dataclasses.dataclass
 class EpisodeData:
-    annos: list[dict]
+    world2cams: list[np.ndarray]
     frames: list[Image.Image]
     road_options: list[int]
+
+
+def load_world2cam(anno: dict) -> np.ndarray:
+    return np.array(anno["sensors"]["CAM_FRONT"]["world2cam"])
 
 
 def load_episode(episode_dir: Path) -> EpisodeData:
@@ -45,19 +49,15 @@ def load_episode(episode_dir: Path) -> EpisodeData:
         for i in range(num_frames)
     ]
     return EpisodeData(
-        annos=annos,
+        world2cams=[load_world2cam(a) for a in annos],
         frames=frames,
         road_options=[a["command_near"] for a in annos],
     )
 
 
-def load_world2cam(anno: dict) -> np.ndarray:
-    return np.array(anno["sensors"]["CAM_FRONT"]["world2cam"])
-
-
-def relative_camera_pose(anno_from: dict, anno_to: dict) -> tuple[np.ndarray, np.ndarray]:
-    world2cam_from = load_world2cam(anno_from)
-    world2cam_to = load_world2cam(anno_to)
+def relative_camera_pose(
+    world2cam_from: np.ndarray, world2cam_to: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     to_in_from = world2cam_from @ np.linalg.inv(world2cam_to)
     return to_in_from[:3, :3], to_in_from[:3, 3]
 
@@ -84,8 +84,8 @@ def rotation_matrix_from_6d(rotation_6d: np.ndarray) -> np.ndarray:
     return np.stack([b1, b2, b3], axis=1)
 
 
-def av_pose_delta(anno_from: dict, anno_to: dict) -> np.ndarray:
-    rotation, translation = carla_to_av_frame(*relative_camera_pose(anno_from, anno_to))
+def av_pose_delta(world2cam_from: np.ndarray, world2cam_to: np.ndarray) -> np.ndarray:
+    rotation, translation = carla_to_av_frame(*relative_camera_pose(world2cam_from, world2cam_to))
     return np.concatenate([translation, rotation_6d_from_matrix(rotation)])
 
 
@@ -93,7 +93,8 @@ def history_action_from_episode(
     episode: EpisodeData, history_start: int, current: int
 ) -> torch.Tensor:
     rows = [
-        av_pose_delta(episode.annos[i], episode.annos[i + 1]) for i in range(history_start, current)
+        av_pose_delta(episode.world2cams[i], episode.world2cams[i + 1])
+        for i in range(history_start, current)
     ]
     return torch.tensor(np.stack(rows), dtype=torch.float32)
 
@@ -101,10 +102,12 @@ def history_action_from_episode(
 def ground_truth_future_positions(
     episode: EpisodeData, center: int, future_chunk_size: int
 ) -> np.ndarray:
-    anchor = episode.annos[center]
+    anchor = episode.world2cams[center]
     positions = []
     for j in range(center, center + future_chunk_size + 1):
-        _rotation, translation = carla_to_av_frame(*relative_camera_pose(anchor, episode.annos[j]))
+        _rotation, translation = carla_to_av_frame(
+            *relative_camera_pose(anchor, episode.world2cams[j])
+        )
         positions.append(translation)
     return np.array(positions)
 
