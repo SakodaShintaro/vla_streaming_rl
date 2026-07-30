@@ -288,7 +288,6 @@ def main() -> None:
             last_history_frame_idx,
             args.num_inference_steps,
         )
-        torch.cuda.empty_cache()
 
         predicted_path = integrate_ego_path(action_chunk)
         ground_truth_path = ground_truth_future_positions(episode, center, args.future_chunk_size)
