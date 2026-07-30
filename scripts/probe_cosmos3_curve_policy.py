@@ -44,31 +44,6 @@ def load_anno(episode_dir: Path, frame_index: int) -> dict:
         return json.load(f)
 
 
-def is_bright_scene(
-    anno: dict, min_sun_altitude: float, max_fog_density: float, max_precipitation: float
-) -> bool:
-    weather = anno["weather"]
-    return (
-        weather["sun_altitude_angle"] >= min_sun_altitude
-        and weather["fog_density"] <= max_fog_density
-        and weather["precipitation"] <= max_precipitation
-    )
-
-
-def find_first_bright_episode(
-    episode_dirs: list[Path],
-    min_sun_altitude: float,
-    max_fog_density: float,
-    max_precipitation: float,
-) -> Path:
-    for episode_dir in episode_dirs:
-        if is_bright_scene(
-            load_anno(episode_dir, 0), min_sun_altitude, max_fog_density, max_precipitation
-        ):
-            return episode_dir
-    raise RuntimeError(f"no bright-enough episode found among {len(episode_dirs)} candidates")
-
-
 def load_episode(episode_dir: Path) -> EpisodeData:
     num_frames = len(list((episode_dir / "anno").glob("*.json.gz")))
     annos = [load_anno(episode_dir, i) for i in range(num_frames)]
@@ -282,9 +257,7 @@ def main() -> None:
     camera_dirs = sorted(args.root_dir.rglob("camera"))
     episode_dirs = [camera_dir.parent for camera_dir in camera_dirs]
     assert episode_dirs, f"no bench2drive episodes found under {args.root_dir}"
-    episode_dir = find_first_bright_episode(
-        episode_dirs, args.min_sun_altitude, args.max_fog_density, args.max_precipitation
-    )
+    episode_dir = episode_dirs[0]
     print(f"episode: {episode_dir.name}")
 
     episode = load_episode(episode_dir)
