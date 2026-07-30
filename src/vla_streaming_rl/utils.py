@@ -38,37 +38,6 @@ def convert_to_uint8(image: np.ndarray) -> np.ndarray:
         return image.copy()
 
 
-def create_reward_image(pred_reward: float | None, actual_reward: float) -> np.ndarray:
-    """
-    Visualize the reward (simple text display). The panel is a fixed 200x200
-    regardless of inputs. ``pred_reward=None`` means the agent does not predict
-    the reward: only the actual reward is shown, with the Pred / Error lines
-    omitted.
-    """
-    height, width = (200, 200)
-    img = np.zeros((height, width, 3), dtype=np.uint8)
-
-    # Draw text
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.8
-    thickness = 2
-
-    if pred_reward is not None:
-        pred_text = f"Pred: {pred_reward:.3f}"
-        cv2.putText(img, pred_text, (10, 40), font, font_scale, (0, 128, 255), thickness)
-
-    # Actual reward
-    actual_text = f"Actual: {actual_reward:.3f}"
-    cv2.putText(img, actual_text, (10, 80), font, font_scale, (255, 0, 0), thickness)
-
-    if pred_reward is not None:
-        error = abs(pred_reward - actual_reward)
-        error_text = f"Error: {error:.3f}"
-        cv2.putText(img, error_text, (10, 120), font, font_scale, (255, 255, 255), thickness)
-
-    return img
-
-
 def add_text_label_on_top(image: np.ndarray, text: str) -> np.ndarray:
     """
     Add a text label on top of the image.

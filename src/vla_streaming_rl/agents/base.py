@@ -122,6 +122,3 @@ class Agent(ABC):
 
     @abstractmethod
     def _to_env_action(self, net_action): ...
-
-    @abstractmethod
-    def _panels(self, obs: np.ndarray, reward: float) -> dict: ...

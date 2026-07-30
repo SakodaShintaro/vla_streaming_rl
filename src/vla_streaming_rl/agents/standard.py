@@ -11,7 +11,6 @@ from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
-from vla_streaming_rl.utils import create_reward_image
 
 
 class StandardAgent(Agent):
@@ -139,14 +138,12 @@ class StandardAgent(Agent):
             torch.from_numpy(normalized_action).to(self.device),
             task_prompt_token_ids,
         )
-        panels = self._panels(reward)
-
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
             self.prev_action = action
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
-            return StepResult(action=action, metrics=metrics, panels=panels)
+            return StepResult(action=action, metrics=metrics, panels={})
 
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
@@ -182,7 +179,7 @@ class StandardAgent(Agent):
             self.actor_optimizer.step()
             self.critic_optimizer.step()
 
-        return StepResult(action=action, metrics=metrics, panels=panels)
+        return StepResult(action=action, metrics=metrics, panels={})
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
@@ -229,7 +226,7 @@ class StandardAgent(Agent):
             self.prev_action = action
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
-            return StepResult(action=action, metrics=metrics, panels=self._panels(reward))
+            return StepResult(action=action, metrics=metrics, panels={})
 
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
@@ -257,7 +254,7 @@ class StandardAgent(Agent):
             self.chunk_step = 0
             self.prev_action = action
             metrics["chunk_step"] = self.chunk_step
-        return StepResult(action=action, metrics=metrics, panels=self._panels(reward))
+        return StepResult(action=action, metrics=metrics, panels={})
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
@@ -282,6 +279,3 @@ class StandardAgent(Agent):
         return np.clip(
             net_action * self.action_scale + self.action_bias, self.action_low, self.action_high
         )
-
-    def _panels(self, reward: float) -> dict:
-        return {"reward": create_reward_image(None, reward)}
