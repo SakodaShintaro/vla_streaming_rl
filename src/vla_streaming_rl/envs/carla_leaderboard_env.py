@@ -446,6 +446,8 @@ class CARLALeaderboardEnv(gym.Env):
                     time.sleep(0.1)
                     continue
 
+        self.vehicle.apply_control(carla.VehicleControl(manual_gear_shift=True, gear=1))
+
         self.route_tracker = RouteTracker.from_raw_waypoints(route_locations, self.obs_cfg)
 
         blueprint_library = self.world.get_blueprint_library()
@@ -594,6 +596,7 @@ class CARLALeaderboardEnv(gym.Env):
         # Apply action: action[0]=steer, action[1]=gas_or_brake (same as CarRacing)
         self.current_action = np.array(action, dtype=np.float32)
         steer, throttle, brake = action_to_vehicle_control(self.current_action)
+        brake *= 0.0
 
         control = carla.VehicleControl(
             steer=steer, throttle=throttle, brake=brake, hand_brake=False, manual_gear_shift=False
