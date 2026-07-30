@@ -37,10 +37,6 @@ class EpisodeData:
     road_options: list[int]
 
 
-def load_world2cam(anno: dict) -> np.ndarray:
-    return np.array(anno["sensors"]["CAM_FRONT"]["world2cam"])
-
-
 def load_episode(episode_dir: Path) -> EpisodeData:
     num_frames = len(list((episode_dir / "anno").glob("*.json.gz")))
     annos = [json.load(gzip.open(episode_dir / f"anno/{i:05d}.json.gz")) for i in range(num_frames)]
@@ -49,7 +45,7 @@ def load_episode(episode_dir: Path) -> EpisodeData:
         for i in range(num_frames)
     ]
     return EpisodeData(
-        world2cams=[load_world2cam(a) for a in annos],
+        world2cams=[np.array(a["sensors"]["CAM_FRONT"]["world2cam"]) for a in annos],
         frames=frames,
         road_options=[a["command_near"] for a in annos],
     )
