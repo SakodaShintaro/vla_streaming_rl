@@ -845,7 +845,6 @@ class CARLALeaderboardEnv(gym.Env):
         return reward
 
     def _score_from_criteria(self) -> tuple[float, float]:
-        score_route = 0.0
         score_penalty = 1.0
         off_route_pct = 0.0
         for criterion in self.runtime.route_scenario.get_criteria():
@@ -864,9 +863,11 @@ class CARLALeaderboardEnv(gym.Env):
                     # "unused" → no-op (matches statistics_manager).
                     if event_type == TrafficEventType.OUTSIDE_ROUTE_LANES_INFRACTION:
                         off_route_pct = event.get_dict()["percentage"]
-                elif event_type == TrafficEventType.ROUTE_COMPLETION:
-                    score_route = event.get_dict()["route_completed"]
         self._latest_off_route_pct = off_route_pct
+        # RouteCompletionTest only advances on discrete waypoint crossings
+        # (external/Bench2Drive .../atomic_criteria.py); route_tracker gives
+        # continuous sub-segment progress instead, for dense reward shaping.
+        score_route = self.route_tracker.route_completion * 100.0
         return score_route, score_penalty
 
     def _score_from_sensors(self) -> tuple[float, float]:
