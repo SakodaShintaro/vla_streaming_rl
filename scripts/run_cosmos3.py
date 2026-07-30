@@ -38,17 +38,11 @@ class EpisodeData:
     road_options: list[int]
 
 
-def load_anno(episode_dir: Path, frame_index: int) -> dict:
-    path = episode_dir / "anno" / f"{frame_index:05d}.json.gz"
-    with gzip.open(path) as f:
-        return json.load(f)
-
-
 def load_episode(episode_dir: Path) -> EpisodeData:
     num_frames = len(list((episode_dir / "anno").glob("*.json.gz")))
-    annos = [load_anno(episode_dir, i) for i in range(num_frames)]
+    annos = [json.load(gzip.open(episode_dir / f"anno/{i:05d}.json.gz")) for i in range(num_frames)]
     frames = [
-        Image.open(episode_dir / "camera/rgb_front" / f"{i:05d}.jpg").convert("RGB")
+        Image.open(episode_dir / f"camera/rgb_front/{i:05d}.jpg").convert("RGB")
         for i in range(num_frames)
     ]
     return EpisodeData(
