@@ -172,12 +172,12 @@ def run_policy(
     frames: list[Image.Image],
     prompt: str,
     history_action: torch.Tensor,
-    future_start: int,
+    last_history_frame_idx: int,
     num_inference_steps: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     encoding = policy.encode(frames, prompt, history_action)
     full_chunk, vision_latents = policy.sample_action_chunk(encoding, num_inference_steps)
-    future_chunk = full_chunk[future_start:].float().cpu().numpy()
+    future_chunk = full_chunk[last_history_frame_idx:].float().cpu().numpy()
     predicted_frame = policy.decode_vision_latents(vision_latents, -1)
     return future_chunk, predicted_frame
 
@@ -285,9 +285,9 @@ def main() -> None:
     assert args.future_chunk_size % 4 == 0, (
         "future_chunk_size must be a multiple of 4 (Cosmos3 VAE temporal factor)"
     )
-    future_start = (args.num_cond_latent_frames - 1) * 4
-    model_chunk = future_start + args.future_chunk_size
-    history_len = future_start + 1
+    last_history_frame_idx = (args.num_cond_latent_frames - 1) * 4
+    model_chunk = last_history_frame_idx + args.future_chunk_size
+    history_len = last_history_frame_idx + 1
 
     if args.episode_dir is not None:
         episode_dir = args.episode_dir
@@ -339,7 +339,12 @@ def main() -> None:
         prompt = build_prompt(episode.road_options[center])
 
         action_chunk, predicted_frame = run_policy(
-            policy, clip_frames, prompt, history_action, future_start, args.num_inference_steps
+            policy,
+            clip_frames,
+            prompt,
+            history_action,
+            last_history_frame_idx,
+            args.num_inference_steps,
         )
         torch.cuda.empty_cache()
 
