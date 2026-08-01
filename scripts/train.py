@@ -2,6 +2,7 @@
 # This script was initially inspired by CleanRL https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/sac_continuous_action.py
 import logging
 import os
+import subprocess
 import warnings
 
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts=false"
@@ -233,10 +234,16 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         with open(result_dir / "seed.txt", "w") as f:
             f.write(str(seed))
 
-        # Save git show -s and git diff results
+        # Save branch name, git show -s and git diff results
+        branch_name = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True
+        ).stdout
+        git_show = subprocess.run(["git", "show", "-s"], capture_output=True, text=True).stdout
+        git_diff = subprocess.run(["git", "diff"], capture_output=True, text=True).stdout
         with open(result_dir / "git_info.txt", "w") as f:
-            f.write(f"git show -s:\n{os.popen('git show -s').read()}\n")
-            f.write(f"git diff:\n{os.popen('git diff').read()}\n")
+            f.write(f"branch:\n{branch_name}\n")
+            f.write(f"git show -s:\n{git_show}\n")
+            f.write(f"git diff:\n{git_diff}\n")
 
         video_dir = result_dir / "video"
         video_dir.mkdir(parents=True, exist_ok=True)
