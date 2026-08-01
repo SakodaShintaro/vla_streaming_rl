@@ -107,7 +107,10 @@ class ImageProcessor(nn.Module):
         self.backbone = IMAGE_ENCODERS[image_encoder_type]().eval().requires_grad_(False)
         x = torch.zeros(1, *observation_space_shape)
         backbone_dim = self.backbone.encode(x).size(1)
-        self.projection = nn.Conv2d(backbone_dim, image_encoder_output_dim, kernel_size=1)
+        if backbone_dim > image_encoder_output_dim:
+            self.projection = nn.Conv2d(backbone_dim, image_encoder_output_dim, kernel_size=1)
+        else:
+            self.projection = nn.Identity()
         self.output_shape = list(self.encode(x).size())[1:]
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
