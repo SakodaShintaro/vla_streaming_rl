@@ -9,11 +9,16 @@ From: nvidia/cuda:12.6.1-cudnn-runtime-ubuntu22.04
         curl \
         git \
         ca-certificates \
+        build-essential \
         libglib2.0-0 \
         libgl1 \
         libsm6 \
         libxext6 \
-        libxrender1
+        libxrender1 \
+        libsdl2-2.0-0 \
+        libsdl2-image-2.0-0 \
+        libsdl2-mixer-2.0-0 \
+        libsdl2-ttf-2.0-0
     curl -LsSf https://astral.sh/uv/install.sh | sh
     mv /root/.local/bin/uv /usr/local/bin/uv
     mv /root/.local/bin/uvx /usr/local/bin/uvx
