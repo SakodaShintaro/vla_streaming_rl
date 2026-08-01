@@ -11,7 +11,7 @@ critic_block_num: 1
 #   dueling : original LayerNorm dueling V/A critic.
 critic_arch: dueling
 # Image encoder: taesd, wan, dinov2, siglip2, vjepa2 (see IMAGE_ENCODERS in image_processor.py).
-image_encoder_type: dinov2
+image_encoder_type: taesd
 # Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
 image_encoder_output_dim: 16
 predictor_hidden_dim: 512
