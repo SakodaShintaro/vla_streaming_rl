@@ -28,9 +28,9 @@ class WanEncoder(nn.Module):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = x * 2.0 - 1.0  # [0, 1] -> [-1, 1]
-        z = self.vae.encode_to_latent(x.unsqueeze(2))  # Wan expects (B, 3, T=1, H, W)
+        z = self.vae.encode_to_latent(x.unsqueeze(2))
         self.vae.model.clear_cache()
-        return z.squeeze(2)  # (B, 16, H/8, W/8)
+        return z.squeeze(1)  # (B, 16, H/8, W/8)
 
 
 class Dinov2Encoder(nn.Module):
