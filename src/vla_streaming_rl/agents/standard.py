@@ -92,7 +92,7 @@ class StandardAgent(Agent):
         self.rb = ReplayBuffer(
             size=buffer_capacity,
             seq_len=self.seq_len + self.horizon,
-            obs_shape=self.network.packed_obs_shape,
+            obs_shape=self.network.observation_space_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
             output_device=self.device,
@@ -125,15 +125,28 @@ class StandardAgent(Agent):
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        obs_tensor, task_prompt_token_ids = self._preprocess(obs, info)
+        (
+            image,
+            velocity_x,
+            velocity_y,
+            velocity_z,
+            episode_return,
+            pass_mark,
+            task_prompt_token_ids,
+        ) = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            obs_tensor,
+            image,
             reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
             task_prompt_token_ids,
+            velocity_x,
+            velocity_y,
+            velocity_z,
+            episode_return,
+            pass_mark,
         )
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -204,15 +217,28 @@ class StandardAgent(Agent):
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        obs_tensor, task_prompt_token_ids = self._preprocess(obs, info)
+        (
+            image,
+            velocity_x,
+            velocity_y,
+            velocity_z,
+            episode_return,
+            pass_mark,
+            task_prompt_token_ids,
+        ) = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            obs_tensor,
+            image,
             reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
             task_prompt_token_ids,
+            velocity_x,
+            velocity_y,
+            velocity_z,
+            episode_return,
+            pass_mark,
         )
 
         warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
@@ -232,6 +258,11 @@ class StandardAgent(Agent):
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
                 task_prompts=[obs["language"]],
+                velocity_x_seq=latest_data.velocity_x,
+                velocity_y_seq=latest_data.velocity_y,
+                velocity_z_seq=latest_data.velocity_z,
+                episode_return_seq=latest_data.episode_return,
+                pass_mark_seq=latest_data.pass_mark,
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -253,19 +284,28 @@ class StandardAgent(Agent):
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
-        the network-packed obs tensor (image plus the raw scalar observations
-        ``[velocity, episode_return, pass_mark]``; the network updates its running
-        stats here and normalizes at unpack) and the tokenized task prompt.
+        the image tensor, the raw scalar observations (velocity_x, velocity_y,
+        velocity_z, episode_return, pass_mark; the network updates its running
+        normalizer stats here) and the tokenized task prompt.
         ``info`` is unused by the obs-driven standard agent."""
         del info
         image = torch.from_numpy(obs["image"]).to(self.device)
-        scalar_obs = np.concatenate(
-            [obs["velocity"], obs["episode_return"], obs["pass_mark"]]
-        ).astype(np.float32)
-        self.network.observe_scalar_obs(scalar_obs)
-        packed = self.network.pack_obs(image, torch.from_numpy(scalar_obs).to(self.device))
+        velocity_x, velocity_y, velocity_z = obs["velocity"].astype(np.float32)
+        episode_return = np.float32(obs["episode_return"][0])
+        pass_mark = np.float32(obs["pass_mark"][0])
+        self.network.observe_scalar_obs(
+            velocity_x, velocity_y, velocity_z, episode_return, pass_mark
+        )
         task_prompt_token_ids = self.network.tokenize_task_prompt(obs["language"])
-        return packed, task_prompt_token_ids
+        return (
+            image,
+            velocity_x,
+            velocity_y,
+            velocity_z,
+            episode_return,
+            pass_mark,
+            task_prompt_token_ids,
+        )
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         """Map a single normalized policy action into the env's action space."""

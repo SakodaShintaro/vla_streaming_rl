@@ -29,11 +29,16 @@ class InferInput:
     read off the buffer. Batch size is 1.
     """
 
-    s_seq: torch.Tensor  # (B, T, *obs_shape) observation window
+    s_seq: torch.Tensor  # (B, T, *obs_shape) image observation window
     a_seq: torch.Tensor  # (B, T, action_dim)
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
     task_prompts: list[str]  # one prompt per batch element
+    velocity_x_seq: torch.Tensor  # (B, T, 1)
+    velocity_y_seq: torch.Tensor  # (B, T, 1)
+    velocity_z_seq: torch.Tensor  # (B, T, 1)
+    episode_return_seq: torch.Tensor  # (B, T, 1)
+    pass_mark_seq: torch.Tensor  # (B, T, 1)
 
 
 @dataclass

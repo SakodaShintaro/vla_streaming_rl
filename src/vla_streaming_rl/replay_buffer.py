@@ -17,13 +17,18 @@ selecting an action at timestep t. Specifically:
 
 @dataclass
 class ReplayBufferData:
-    observations: torch.Tensor  # (B, T, obs_shape)
+    observations: torch.Tensor  # (B, T, obs_shape) image only
     rewards: torch.Tensor  # (B, T)
     dones: torch.Tensor  # (B, T)
     # rnn_state shape (SpatialTemporalEncoder): (B, T, space_len, state_size, n_layer)
     rnn_state: torch.Tensor
     actions: torch.Tensor  # (B, T, action_shape)
     task_prompt_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
+    velocity_x: torch.Tensor  # (B, T, 1)
+    velocity_y: torch.Tensor  # (B, T, 1)
+    velocity_z: torch.Tensor  # (B, T, 1)
+    episode_return: torch.Tensor  # (B, T, 1)
+    pass_mark: torch.Tensor  # (B, T, 1)
 
 
 class ReplayBuffer:
@@ -61,6 +66,11 @@ class ReplayBuffer:
         self.dones = init_tensor((size, 1))
         self.rnn_states = init_tensor((size, *rnn_state_shape))
         self.actions = init_tensor((size, *action_shape))
+        self.velocity_x = init_tensor((size, 1))
+        self.velocity_y = init_tensor((size, 1))
+        self.velocity_z = init_tensor((size, 1))
+        self.episode_return = init_tensor((size, 1))
+        self.pass_mark = init_tensor((size, 1))
         self.task_prompt_token_ids = torch.full(
             (size, max_prompt_tokens),
             pad_token_id,
@@ -91,6 +101,11 @@ class ReplayBuffer:
             self.rnn_states[:curr_size].to(self.output_device, non_blocking=True),
             self.actions[:curr_size].to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[:curr_size].to(self.output_device, non_blocking=True),
+            self.velocity_x[:curr_size].to(self.output_device, non_blocking=True),
+            self.velocity_y[:curr_size].to(self.output_device, non_blocking=True),
+            self.velocity_z[:curr_size].to(self.output_device, non_blocking=True),
+            self.episode_return[:curr_size].to(self.output_device, non_blocking=True),
+            self.pass_mark[:curr_size].to(self.output_device, non_blocking=True),
         )
 
     def add(
@@ -101,6 +116,11 @@ class ReplayBuffer:
         rnn_state: torch.Tensor,
         action: torch.Tensor,
         task_prompt_token_ids: list[int],
+        velocity_x: float,
+        velocity_y: float,
+        velocity_z: float,
+        episode_return: float,
+        pass_mark: float,
     ) -> None:
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
@@ -108,6 +128,11 @@ class ReplayBuffer:
         self.dones[self.idx].fill_(done)
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
+        self.velocity_x[self.idx].fill_(velocity_x)
+        self.velocity_y[self.idx].fill_(velocity_y)
+        self.velocity_z[self.idx].fill_(velocity_z)
+        self.episode_return[self.idx].fill_(episode_return)
+        self.pass_mark[self.idx].fill_(pass_mark)
 
         self.task_prompt_token_ids[self.idx].fill_(self.pad_token_id)
         if len(task_prompt_token_ids) > self.max_prompt_tokens:
@@ -144,6 +169,11 @@ class ReplayBuffer:
             self.rnn_states[seq_indices].to(self.output_device, non_blocking=True),
             self.actions[seq_indices].to(self.output_device, non_blocking=True),
             self.task_prompt_token_ids[seq_indices].to(self.output_device, non_blocking=True),
+            self.velocity_x[seq_indices].to(self.output_device, non_blocking=True),
+            self.velocity_y[seq_indices].to(self.output_device, non_blocking=True),
+            self.velocity_z[seq_indices].to(self.output_device, non_blocking=True),
+            self.episode_return[seq_indices].to(self.output_device, non_blocking=True),
+            self.pass_mark[seq_indices].to(self.output_device, non_blocking=True),
         )
 
     def get_latest(self, seq_len: int) -> ReplayBufferData:
@@ -162,4 +192,9 @@ class ReplayBuffer:
             self.task_prompt_token_ids[indices]
             .unsqueeze(0)
             .to(self.output_device, non_blocking=True),
+            self.velocity_x[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.velocity_y[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.velocity_z[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.episode_return[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.pass_mark[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
         )

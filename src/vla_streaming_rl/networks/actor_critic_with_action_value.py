@@ -67,7 +67,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.action_dim = action_space_shape[0]
         self.predictor_step_num = predictor_step_num
         self.observation_space_shape = observation_space_shape
-        self.image_numel = int(np.prod(observation_space_shape))
 
         self.image_processor = ImageProcessor(
             observation_space_shape, image_encoder_type, image_encoder_output_dim
@@ -150,32 +149,43 @@ class ActorCriticWithActionValue(NetworkInterface):
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
         return []
 
-    @property
-    def packed_obs_shape(self) -> tuple[int, ...]:
-        return (self.image_numel + self.scalar_obs_dim,)
-
-    def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
+    def observe_scalar_obs(
+        self,
+        velocity_x: float,
+        velocity_y: float,
+        velocity_z: float,
+        episode_return: float,
+        pass_mark: float,
+    ) -> None:
+        scalar_obs = np.array(
+            [velocity_x, velocity_y, velocity_z, episode_return, pass_mark], dtype=np.float32
+        )
         self.scalar_obs_normalizer.update(scalar_obs)
 
-    def pack_obs(self, image: torch.Tensor, scalar_obs: torch.Tensor) -> torch.Tensor:
-        # Store raw scalar_obs next to the flattened image; normalization is applied
-        # at unpack with the latest running statistics (as with the reward).
-        return torch.cat([image.reshape(*image.shape[:-3], -1), scalar_obs], dim=-1)
-
-    def _unpack_obs(self, packed: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        image = packed[..., : self.image_numel].reshape(
-            *packed.shape[:-1], *self.observation_space_shape
-        )
-        scalar_obs = self.scalar_obs_normalizer.normalize(packed[..., self.image_numel :])
-        return image, scalar_obs
+    def _scalar_obs(
+        self,
+        velocity_x: torch.Tensor,
+        velocity_y: torch.Tensor,
+        velocity_z: torch.Tensor,
+        episode_return: torch.Tensor,
+        pass_mark: torch.Tensor,
+    ) -> torch.Tensor:
+        raw = torch.cat([velocity_x, velocity_y, velocity_z, episode_return, pass_mark], dim=-1)
+        return self.scalar_obs_normalizer.normalize(raw)
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
 
-        image, scalar_obs = self._unpack_obs(data.s_seq)
+        scalar_obs = self._scalar_obs(
+            data.velocity_x_seq,
+            data.velocity_y_seq,
+            data.velocity_z_seq,
+            data.episode_return_seq,
+            data.pass_mark_seq,
+        )
         x, rnn_state = self.encoder(
-            image, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
+            data.s_seq, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
         )  # (B, hidden_dim)
 
         # Get action chunk from policy_head
@@ -215,7 +225,14 @@ class ActorCriticWithActionValue(NetworkInterface):
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
         with torch.inference_mode():
-            next_image, next_scalar_obs = self._unpack_obs(data.observations[:, self.horizon :])
+            next_image = data.observations[:, self.horizon :]
+            next_scalar_obs = self._scalar_obs(
+                data.velocity_x[:, self.horizon :],
+                data.velocity_y[:, self.horizon :],
+                data.velocity_z[:, self.horizon :],
+                data.episode_return[:, self.horizon :],
+                data.pass_mark[:, self.horizon :],
+            )
             next_state, _ = self.encoder.forward(
                 next_image,
                 data.actions[:, self.horizon :],
@@ -230,7 +247,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         target_value = self.value_head.compute_target_value(next_output, chunk_rewards, chunk_dones)
 
         # Use seq_len frames (excluding last horizon frames)
-        curr_image, curr_scalar_obs = self._unpack_obs(data.observations[:, : -self.horizon])
+        curr_image = data.observations[:, : -self.horizon]
+        curr_scalar_obs = self._scalar_obs(
+            data.velocity_x[:, : -self.horizon],
+            data.velocity_y[:, : -self.horizon],
+            data.velocity_z[:, : -self.horizon],
+            data.episode_return[:, : -self.horizon],
+            data.pass_mark[:, : -self.horizon],
+        )
         curr_actions = data.actions[:, : -self.horizon]
         curr_rewards = data.rewards[:, : -self.horizon]
         curr_rnn_state = data.rnn_state[:, 0]  # (B, ...)
@@ -251,7 +275,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        target_image, _ = self._unpack_obs(data.observations[:, -1])
+        target_image = data.observations[:, -1]
         seq_loss, seq_info = self.prediction_head.compute_loss(
             curr_state,
             data.actions[:, -1],
@@ -275,7 +299,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         # Next-step inference (no grad): the action the agent will take, its Q,
         # and the activations carried into the InferResult.
         with torch.inference_mode():
-            next_image, next_scalar_obs = self._unpack_obs(data.observations[:, self.horizon :])
+            next_image = data.observations[:, self.horizon :]
+            next_scalar_obs = self._scalar_obs(
+                data.velocity_x[:, self.horizon :],
+                data.velocity_y[:, self.horizon :],
+                data.velocity_z[:, self.horizon :],
+                data.episode_return[:, self.horizon :],
+                data.pass_mark[:, self.horizon :],
+            )
             next_state, next_rnn_state = self.encoder.forward(
                 next_image,
                 data.actions[:, self.horizon :],
@@ -292,7 +323,14 @@ class ActorCriticWithActionValue(NetworkInterface):
             next_q_out.output, chunk_rewards, chunk_dones
         )
 
-        prev_image, prev_scalar_obs = self._unpack_obs(data.observations[:, : -self.horizon])
+        prev_image = data.observations[:, : -self.horizon]
+        prev_scalar_obs = self._scalar_obs(
+            data.velocity_x[:, : -self.horizon],
+            data.velocity_y[:, : -self.horizon],
+            data.velocity_z[:, : -self.horizon],
+            data.episode_return[:, : -self.horizon],
+            data.pass_mark[:, : -self.horizon],
+        )
         prev_actions = data.actions[:, : -self.horizon]
         prev_rewards = data.rewards[:, : -self.horizon]
         prev_rnn_state = data.rnn_state[:, 0]
@@ -312,7 +350,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        target_image, _ = self._unpack_obs(data.observations[:, -1])
+        target_image = data.observations[:, -1]
         seq_loss, seq_info = self.prediction_head.compute_loss(
             prev_state,
             data.actions[:, -1],

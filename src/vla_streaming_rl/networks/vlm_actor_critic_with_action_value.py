@@ -212,16 +212,15 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self._dummy_state.clone()
 
-    @property
-    def packed_obs_shape(self) -> tuple[int, ...]:
-        return tuple(self.observation_space_shape)
-
-    def observe_scalar_obs(self, scalar_obs) -> None:
-        del scalar_obs
-
-    def pack_obs(self, image: torch.Tensor, scalar_obs: torch.Tensor) -> torch.Tensor:
-        del scalar_obs
-        return image
+    def observe_scalar_obs(
+        self,
+        velocity_x: float,
+        velocity_y: float,
+        velocity_z: float,
+        episode_return: float,
+        pass_mark: float,
+    ) -> None:
+        del velocity_x, velocity_y, velocity_z, episode_return, pass_mark
 
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
         """Tokenize a task prompt string into token IDs."""
