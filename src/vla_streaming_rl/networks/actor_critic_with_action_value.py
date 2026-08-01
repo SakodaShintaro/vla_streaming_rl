@@ -56,6 +56,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         detach_predictor: bool,
         disable_state_predictor: bool,
         predictor_type: str,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
     ) -> None:
         super().__init__()
         self.sparsity = sparsity
@@ -67,7 +69,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.observation_space_shape = observation_space_shape
         self.image_numel = int(np.prod(observation_space_shape))
 
-        self.image_processor = ImageProcessor(observation_space_shape)
+        self.image_processor = ImageProcessor(
+            observation_space_shape, image_encoder_type, image_encoder_output_dim
+        )
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 

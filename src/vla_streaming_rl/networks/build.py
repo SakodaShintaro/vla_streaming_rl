@@ -119,6 +119,8 @@ def build_network(
             detach_predictor=args.detach_predictor,
             disable_state_predictor=args.disable_state_predictor,
             predictor_type=args.predictor_type,
+            image_encoder_type=args.image_encoder_type,
+            image_encoder_output_dim=args.image_encoder_output_dim,
         ).to(device)
         network = torch.compile(network)
 
@@ -162,6 +164,8 @@ def build_network(
             image_mode=args.image_mode,
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,
+            image_encoder_type=args.image_encoder_type,
+            image_encoder_output_dim=args.image_encoder_output_dim,
         ).to(device)
 
     else:

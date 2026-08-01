@@ -77,6 +77,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         image_mode: str,
         predictor_type: str,
         policy_type: str,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
     ) -> None:
         super().__init__()
         if image_mode not in ("mem", "sequence"):
@@ -96,7 +98,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.detach_critic = detach_critic
         self.detach_predictor = detach_predictor
 
-        self.image_processor = ImageProcessor(observation_space_shape)
+        self.image_processor = ImageProcessor(
+            observation_space_shape, image_encoder_type, image_encoder_output_dim
+        )
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
