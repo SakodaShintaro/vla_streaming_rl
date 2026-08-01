@@ -101,7 +101,6 @@ class SpatialTemporalEncoder(nn.Module):
     def forward(
         self,
         images: torch.Tensor,  # (B, T, 3, H, W)
-        obs_z: torch.Tensor,  # (B, T, C', H', W') - pre-encoded observations
         actions: torch.Tensor,  #  (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)

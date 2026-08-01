@@ -30,7 +30,6 @@ class InferInput:
     """
 
     s_seq: torch.Tensor  # (B, T, *obs_shape) observation window
-    obs_z_seq: torch.Tensor  # (B, T, *obs_z_shape) encoded observations
     a_seq: torch.Tensor  # (B, T, action_dim)
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent

@@ -89,12 +89,10 @@ class StandardAgent(Agent):
         # Off-policy keeps a large replay buffer; streaming keeps only the one
         # window it trains on (the latest seq_len + horizon transition).
         buffer_capacity = buffer_size if learning_mode == "off_policy" else seq_len + horizon
-        obs_z_shape = tuple(self.network.image_processor.output_shape)
         self.rb = ReplayBuffer(
             size=buffer_capacity,
             seq_len=self.seq_len + self.horizon,
             obs_shape=self.network.packed_obs_shape,
-            obs_z_shape=obs_z_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
             output_device=self.device,
@@ -127,11 +125,10 @@ class StandardAgent(Agent):
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info)
+        obs_tensor, task_prompt_token_ids = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             obs_tensor,
-            obs_z,
             reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
@@ -207,11 +204,10 @@ class StandardAgent(Agent):
         if not self.normalizing_by_return:
             self.reward_processor.update(reward)
         metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        obs_tensor, obs_z, task_prompt_token_ids = self._preprocess(obs, info)
+        obs_tensor, task_prompt_token_ids = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             obs_tensor,
-            obs_z,
             reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
@@ -232,7 +228,6 @@ class StandardAgent(Agent):
         infer_result = self.network.infer(
             InferInput(
                 s_seq=latest_data.observations,
-                obs_z_seq=latest_data.obs_z,
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
@@ -260,8 +255,8 @@ class StandardAgent(Agent):
         """Turn the raw observation into what the replay buffer stores this tick:
         the network-packed obs tensor (image plus the raw scalar observations
         ``[velocity, episode_return, pass_mark]``; the network updates its running
-        stats here and normalizes at unpack), its encoded latent ``obs_z``, and the
-        tokenized task prompt. ``info`` is unused by the obs-driven standard agent."""
+        stats here and normalizes at unpack) and the tokenized task prompt.
+        ``info`` is unused by the obs-driven standard agent."""
         del info
         image = torch.from_numpy(obs["image"]).to(self.device)
         scalar_obs = np.concatenate(
@@ -269,10 +264,8 @@ class StandardAgent(Agent):
         ).astype(np.float32)
         self.network.observe_scalar_obs(scalar_obs)
         packed = self.network.pack_obs(image, torch.from_numpy(scalar_obs).to(self.device))
-        with torch.inference_mode():
-            obs_z = self.network.image_processor.encode(image.unsqueeze(0)).squeeze(0)
         task_prompt_token_ids = self.network.tokenize_task_prompt(obs["language"])
-        return packed, obs_z, task_prompt_token_ids
+        return packed, task_prompt_token_ids
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         """Map a single normalized policy action into the env's action space."""

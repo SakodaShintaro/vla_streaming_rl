@@ -96,7 +96,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.detach_critic = detach_critic
         self.detach_predictor = detach_predictor
 
-        # Image processor (for replay buffer obs_z encoding)
         self.image_processor = ImageProcessor(observation_space_shape)
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
