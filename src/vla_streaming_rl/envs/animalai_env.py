@@ -366,6 +366,25 @@ class AnimalAIEnv(gym.Env):
             )
         return np.vstack([header, canvas])
 
+    def _select_curriculum_arena_yaml(self) -> str:
+        """Curriculum arena choice: alternate progression / revisit each reset."""
+        all_done = self._next_yaml_idx >= len(self._all_arenas)
+        if not self._cleared_arenas:
+            self._is_revisit = False
+        elif all_done:
+            self._is_revisit = True
+        else:
+            self._is_revisit = not self._is_revisit
+        if not self._is_revisit:
+            return self._current_yaml_path()
+        stems = sorted(self._cleared_arenas)
+        failures = np.array([1.0 - self._success_rate(stem) for stem in stems], dtype=np.float64)
+        logits = failures / self.revisit_temperature
+        weights = np.exp(logits - logits.max())
+        probs = weights / weights.sum()
+        arena_stem = stems[int(self.np_random.choice(len(stems), p=probs))]
+        return str(self.competition_dir / f"{arena_stem}.yaml")
+
     def reset(
         self,
         seed: int | None,
@@ -374,27 +393,17 @@ class AnimalAIEnv(gym.Env):
         super().reset(seed=seed)
         self._ensure_started()
 
-        # All progression yamls cleared -> always revisit. Otherwise alternate
-        # between progression and revisit each reset.
-        all_done = self._next_yaml_idx >= len(self._all_arenas)
-        if not self._cleared_arenas:
+        # `options={"arena_stem": ...}` bypasses the progression/revisit
+        # curriculum and forces a specific arena (used by scripts/test.py to
+        # sweep every arena exactly once with a frozen policy).
+        forced_stem = (
+            options["arena_stem"] if options is not None and "arena_stem" in options else None
+        )
+        if forced_stem is not None:
             self._is_revisit = False
-        elif all_done:
-            self._is_revisit = True
+            arena_yaml = str(self.competition_dir / f"{forced_stem}.yaml")
         else:
-            self._is_revisit = not self._is_revisit
-        if self._is_revisit:
-            stems = sorted(self._cleared_arenas)
-            failures = np.array(
-                [1.0 - self._success_rate(stem) for stem in stems], dtype=np.float64
-            )
-            logits = failures / self.revisit_temperature
-            weights = np.exp(logits - logits.max())
-            probs = weights / weights.sum()
-            arena_stem = stems[int(self.np_random.choice(len(stems), p=probs))]
-            arena_yaml = str(self.competition_dir / f"{arena_stem}.yaml")
-        else:
-            arena_yaml = self._current_yaml_path()
+            arena_yaml = self._select_curriculum_arena_yaml()
 
         self.arena_name = Path(arena_yaml).stem
         self.pass_mark, self._arena_items = _parse_arena(arena_yaml)
