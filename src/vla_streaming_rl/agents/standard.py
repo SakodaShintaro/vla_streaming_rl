@@ -103,6 +103,9 @@ class StandardAgent(Agent):
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
         self._episode_reset = False
+        # Shared representation fed to policy/value/prediction heads on the
+        # most recent select_action inference (used by scripts/probe.py).
+        self.last_features: torch.Tensor | None = None
 
     # --- agent surface -----------------------------------------------------
 
@@ -266,6 +269,7 @@ class StandardAgent(Agent):
             )
         )
         self.rnn_state = infer_result.rnn_state
+        self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk

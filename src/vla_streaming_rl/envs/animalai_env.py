@@ -186,9 +186,9 @@ class AnimalAIEnv(gym.Env):
         self.arena_name: str = ""
         self.pass_mark: float = 0.0
         self._arena_items: list[dict] = []
-        # (x, z) agent position in arena coords; populated each step from the
-        # AAI vector observation. None before the first reset.
-        self._agent_xz: tuple[float, float] | None = None
+        # (x, y, z) agent position in arena coords; populated each step from
+        # the AAI vector observation. None before the first reset.
+        self._agent_xyz: tuple[float, float, float] | None = None
         # (vx, vy, vz) agent velocity from the AAI vector observation.
         self._agent_velocity: np.ndarray = np.zeros(3, dtype=np.float32)
 
@@ -278,11 +278,11 @@ class AnimalAIEnv(gym.Env):
         return (obs_chw_float.transpose(1, 2, 0) * 255.0).astype(np.uint8)
 
     @staticmethod
-    def _extract_agent_xz(obs_list, idx: int) -> tuple[float, float]:
+    def _extract_agent_xyz(obs_list, idx: int) -> tuple[float, float, float]:
         # Vector obs layout (useCamera=True, useRayCasts=False): obs[1][idx] is
-        # [health, vx, vy, vz, x, y, z]. We pull (x, z) for the top-down view.
+        # [health, vx, vy, vz, x, y, z].
         vec = obs_list[1][idx]
-        return float(vec[4]), float(vec[6])
+        return float(vec[4]), float(vec[5]), float(vec[6])
 
     @staticmethod
     def _extract_agent_velocity(obs_list, idx: int) -> np.ndarray:
@@ -339,8 +339,9 @@ class AnimalAIEnv(gym.Env):
             thickness = 1 if transparent else cv2.FILLED
             cv2.drawContours(canvas, [box], 0, color, thickness)
 
-        if self._agent_xz is not None:
-            apx, apy = to_px(*self._agent_xz)
+        if self._agent_xyz is not None:
+            ax, _ay, az = self._agent_xyz
+            apx, apy = to_px(ax, az)
             radius = max(int(0.6 * scale), 4)
             cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
             cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
@@ -413,7 +414,7 @@ class AnimalAIEnv(gym.Env):
 
         decision_steps, _ = self._aai.get_steps(self._behavior_name)
         self._latest_image = self._decode_obs(decision_steps.obs[0][0])
-        self._agent_xz = self._extract_agent_xz(decision_steps.obs, 0)
+        self._agent_xyz = self._extract_agent_xyz(decision_steps.obs, 0)
         self._agent_velocity = self._extract_agent_velocity(decision_steps.obs, 0)
         info = {
             "task_prompt": self._build_prompt(),
@@ -423,6 +424,7 @@ class AnimalAIEnv(gym.Env):
             "cleared_count": len(self._cleared_arenas),
             "is_revisit": self._is_revisit,
             "velocity": self._agent_velocity,
+            "agent_xyz": self._agent_xyz,
         }
         return self._latest_image, info
 
@@ -446,13 +448,13 @@ class AnimalAIEnv(gym.Env):
             interrupted = bool(terminal_steps.interrupted[0])
             reward = float(terminal_steps.reward[0])
             self._latest_image = self._decode_obs(terminal_steps.obs[0][0])
-            self._agent_xz = self._extract_agent_xz(terminal_steps.obs, 0)
+            self._agent_xyz = self._extract_agent_xyz(terminal_steps.obs, 0)
             self._agent_velocity = self._extract_agent_velocity(terminal_steps.obs, 0)
         else:
             interrupted = False
             reward = float(decision_steps.reward[0])
             self._latest_image = self._decode_obs(decision_steps.obs[0][0])
-            self._agent_xz = self._extract_agent_xz(decision_steps.obs, 0)
+            self._agent_xyz = self._extract_agent_xyz(decision_steps.obs, 0)
             self._agent_velocity = self._extract_agent_velocity(decision_steps.obs, 0)
 
         self.episode_step += 1
@@ -468,6 +470,7 @@ class AnimalAIEnv(gym.Env):
             "cleared_count": len(self._cleared_arenas),
             "is_revisit": self._is_revisit,
             "velocity": self._agent_velocity,
+            "agent_xyz": self._agent_xyz,
         }
         if terminated or truncated:
             success = self._episode_return >= self.pass_mark
