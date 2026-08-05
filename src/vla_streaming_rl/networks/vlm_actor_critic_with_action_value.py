@@ -529,19 +529,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state = state.transpose(1, 2)  # (B, num_state_queries, state_out_dim)
         return state.flatten(start_dim=1), outputs.past_key_values
 
-    def _extract_kv(self, vlm_past_kv) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], int]:
-        """Extract (K, V) pairs for the VLM attention layers (used by text generation).
-
-        Returns:
-            vlm_kv_list: list of (K, V) tuples, one per attention layer
-            vlm_seq_len: sequence length of the VLM KV cache
-        """
-        kv_list = []
-        for idx in self.attn_layer_indices:
-            kv_list.append((vlm_past_kv.key_cache[idx], vlm_past_kv.value_cache[idx]))
-        seq_len = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[2]
-        return kv_list, seq_len
-
     def _generate_text_and_extend_kv(self, prompt: str, vlm_past_kv, max_new_tokens: int):
         """Generate text via manual forward loop (supports batched KV cache).
 
@@ -550,7 +537,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         Returns (first_item_text, extended_kv_cache).
         """
         tokenizer = self.processor.tokenizer
-        _, kv_len = self._extract_kv(vlm_past_kv)
+        kv_len = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[2]
         eos_token_id = tokenizer.eos_token_id
 
         if prompt:
