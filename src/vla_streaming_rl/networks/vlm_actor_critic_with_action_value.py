@@ -524,9 +524,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state = self.state_out_proj(hidden)  # (B, T, state_out_dim)
         # AdaptiveAvgPool1d folds the variable T into a fixed num_state_queries
         # so the downstream policy/critic sees a constant state dim.
-        state = F.adaptive_avg_pool1d(state.transpose(1, 2), self.num_state_queries).transpose(
-            1, 2
-        )  # (B, num_state_queries, state_out_dim)
+        state = state.transpose(1, 2)  # (B, state_out_dim, T)
+        state = F.adaptive_avg_pool1d(state, self.num_state_queries)
+        state = state.transpose(1, 2)  # (B, num_state_queries, state_out_dim)
         return state.flatten(start_dim=1), outputs.past_key_values
 
     def _extract_kv(self, vlm_past_kv) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], int]:
