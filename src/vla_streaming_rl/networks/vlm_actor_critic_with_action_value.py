@@ -81,8 +81,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         image_encoder_output_dim: int,
     ) -> None:
         super().__init__()
-        if image_mode not in ("mem", "sequence"):
-            raise ValueError(f"Unknown image_mode: {image_mode}")
+        assert image_mode in ("mem", "sequence"), f"Unknown image_mode: {image_mode}"
         self.seq_len = seq_len
         self.horizon = horizon
         self.action_dim = action_space_shape[0]
