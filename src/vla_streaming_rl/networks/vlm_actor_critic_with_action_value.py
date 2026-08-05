@@ -422,16 +422,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     # Internal methods #
     ####################
 
-    def _weighted_hidden(self, hidden_states) -> torch.Tensor:
-        """Softmax-weighted sum over all VLM hidden layers (incl. embedding output).
-
-        Hidden values are detached (the VLM is frozen); gradient flows only into
-        ``self.layer_logits`` through the softmax weights.
-        """
-        stacked = torch.stack([h.to(torch.float32).detach() for h in hidden_states], dim=0)
-        weights = F.softmax(self.layer_logits, dim=0)
-        return (weights.view(-1, 1, 1, 1) * stacked).sum(dim=0)
-
     def _get_visual(self) -> nn.Module:
         """Get the visual encoder from the VLM model (handles PEFT wrapping)."""
         if self.use_lora:
@@ -524,7 +514,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Store last input_id for text generation seeding
         self._last_input_ids = inputs["input_ids"]
 
-        hidden = self._weighted_hidden(outputs.hidden_states)
+        # Compute state representation: softmax-weighted sum across embedding + each layer's hidden states
+        stacked = torch.stack([h.to(torch.float32).detach() for h in outputs.hidden_states], dim=0)
+        weights = F.softmax(self.layer_logits, dim=0)
+        hidden = (weights.view(-1, 1, 1, 1) * stacked).sum(dim=0)
+
         state = self.state_out_proj(hidden)  # (B, T, state_out_dim)
         # AdaptiveAvgPool1d folds the variable T into a fixed num_state_queries
         # so the downstream policy/critic sees a constant state dim.
