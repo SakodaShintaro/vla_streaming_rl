@@ -1,6 +1,6 @@
 # @package _global_
 env_id: AnimalAI-v0
-step_limit: 1_000_000
+step_limit: 2_000_000
 image_save_interval: 20
 
 # Curriculum: each reset has 50% chance of trying the next uncleared yaml in
