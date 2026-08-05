@@ -501,9 +501,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # language_model forward via the outer model (handles lm_head, cache wrapping)
         return self.vlm_model.forward(**forward_kwargs)
 
-    def _vlm_forward(self, images: torch.Tensor, task_prompts: list[str]):
+    def _forward_state(
+        self, obs: torch.Tensor, task_prompts: list[str]
+    ) -> tuple[torch.Tensor, object]:
         """Run VLM forward and return (state, past_key_values)."""
-        inputs = self._input_cache(images, task_prompts)
+        inputs = self._input_cache(obs, task_prompts)
         inputs_embeds = self._build_inputs_embeds(inputs)
 
         # When the VLM weights themselves are frozen we can save a lot of memory
@@ -526,12 +528,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             1, 2
         )  # (B, num_state_queries, state_out_dim)
         return state.flatten(start_dim=1), outputs.past_key_values
-
-    def _forward_state(
-        self, obs: torch.Tensor, task_prompts: list[str]
-    ) -> tuple[torch.Tensor, object]:
-        """Run VLM forward and compute state. Returns (state, vlm_past_kv)."""
-        return self._vlm_forward(obs, task_prompts)
 
     def _extract_kv(self, vlm_past_kv) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], int]:
         """Extract (K, V) pairs for the VLM attention layers (used by text generation).
