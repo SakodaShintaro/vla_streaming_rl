@@ -569,10 +569,15 @@ class AnimalAIStagedEnv(_AnimalAIBase):
     million steps on the last stage" is just the tail of that same phase).
     """
 
+    # Tasks per level in the Animal-AI Testbed (Table 2) -- also how many new
+    # arenas scripts/split_paper_curriculum.py writes into each stageNN dir.
+    _TASKS_PER_LEVEL = 30
+
     def __init__(self, resolution: int, seed: int, base_port: int, steps_per_stage: int):
         super().__init__(resolution=resolution, seed=seed, base_port=base_port)
         self.steps_per_stage = steps_per_stage
         self._stage_arenas: list[list[str]] = self._discover_stage_arenas()
+        self._current_arena_origin_stage: int | None = None
         self._global_step = 0
 
     def _discover_stage_arenas(self) -> list[list[str]]:
@@ -592,7 +597,8 @@ class AnimalAIStagedEnv(_AnimalAIBase):
         cumulative: list[str] = []
         stages: list[list[str]] = []
         for stage_dir in stage_dirs:
-            cumulative = cumulative + sorted(str(p) for p in stage_dir.glob("arena*.yaml"))
+            new_arenas = sorted(str(p) for p in stage_dir.glob("arena*.yaml"))
+            cumulative = cumulative + new_arenas
             stages.append(cumulative)
         return stages
 
@@ -608,10 +614,12 @@ class AnimalAIStagedEnv(_AnimalAIBase):
     def _select_arena_yaml(self) -> str:
         stage = self._current_stage_index()
         arenas = self._stage_arenas[stage]
-        return arenas[int(self.np_random.integers(len(arenas)))]
+        index = int(self.np_random.integers(len(arenas)))
+        self._current_arena_origin_stage = index // self._TASKS_PER_LEVEL
+        return arenas[index]
 
     def _on_forced_reset(self) -> None:
-        pass
+        self._current_arena_origin_stage = None
 
     def _on_step(self) -> None:
         self._global_step += 1
@@ -623,10 +631,12 @@ class AnimalAIStagedEnv(_AnimalAIBase):
         return {"stage": self._current_stage_index(), "global_step": self._global_step}
 
     def _render_header_text(self) -> str:
-        return (
-            f"{self.arena_name}  stage:{self._current_stage_index() + 1}/{len(self._stage_arenas)}"
-            f"  step:{self._global_step}"
+        origin = (
+            f"L{self._current_arena_origin_stage + 1}-{self.arena_name}"
+            if self._current_arena_origin_stage is not None
+            else self.arena_name
         )
+        return f"{origin}  stage:{self._current_stage_index() + 1}/{len(self._stage_arenas)}  step:{self._global_step}"
 
 
 if __name__ == "__main__":
