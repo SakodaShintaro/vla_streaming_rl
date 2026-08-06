@@ -7,6 +7,14 @@ as a single-agent gym.Env. The native AAI action is MultiDiscrete([3, 3]):
     dim 1 (rotate):       0=noop, 1=right,   2=left
 We expose this as Box(-1, 1, shape=(2,)) for parity with the project's other
 environments (CARLA, GUI games), discretising with a +/-1/3 dead-zone.
+
+Two curricula are provided, both built on the shared ``_AnimalAIBase``:
+  - ``AnimalAIEnv``: success-driven progression/revisit curriculum that walks
+    every one of the 900 Testbed arenas.
+  - ``AnimalAIStagedEnv``: the cumulative 11-stage curriculum from the
+    Animal-AI Environment paper (Testbed section), trained on a subset of
+    each task's 3 variants and evaluated on all 900 by sweeping
+    ``_all_arenas`` with a frozen policy (see scripts/test_trained_agent.py).
 """
 
 import random
@@ -131,41 +139,34 @@ _AGENT_COLOR: tuple[int, int, int] = (40, 80, 220)
 _ARENA_SIZE_M = 40.0  # standard Animal-AI arena is 40 m square
 
 
-class AnimalAIEnv(gym.Env):
-    """Animal-AI environment with continuous Box action space."""
+class _AnimalAIBase(gym.Env):
+    """Shared Unity lifecycle, observation decoding, and pass-mark reward
+    logic for every Animal-AI curriculum variant.
+
+    Subclasses implement:
+      - `_select_arena_yaml()`: which arena to load on a (non-forced) reset.
+      - `_on_forced_reset()`: hook run when `options["arena_stem"]` bypasses
+        the curriculum (used by the eval sweep over all 900 arenas).
+      - `_on_step()`: hook run on every `step()` call, before episode-end
+        bookkeeping (e.g. to advance a global step counter).
+      - `_record_episode_end(success)`: curriculum bookkeeping on episode end;
+        returns extra `info` fields.
+      - `_reset_info_fields()`: extra `info` fields to attach on reset.
+      - `_render_header_text()`: one-line status string drawn on the top-down
+        render.
+    """
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
-    def __init__(
-        self,
-        resolution: int,
-        seed: int,
-        base_port: int,
-        revisit_temperature: float,
-    ):
+    def __init__(self, resolution: int, seed: int, base_port: int):
         super().__init__()
-        self.revisit_temperature = revisit_temperature
         self.competition_dir = Path("./external/animal-ai/configs/competition")
         self.arena_sets = _discover_arena_sets(self.competition_dir)
         if self.arena_sets.size == 0:
             raise ValueError(f"no XX-YY-ZZ.yaml files found under {self.competition_dir}")
-        # Flat sorted list of every yaml stem; progression walks this in order.
+        # Flat sorted list of every yaml stem (all 900 Testbed arenas).
         self._all_arenas: list[str] = sorted(self.arena_sets.flatten().tolist())
         self.prompt = "Find and reach the green goal sphere; avoid red zones and yellow goals."
-
-        # Curriculum state. Pointer walks `_all_arenas` from low index. On
-        # success the current yaml is added to `_cleared_arenas` and the pointer
-        # advances past any yamls already in cleared. On failure the pointer
-        # stays. Each reset alternates between progression and revisit modes
-        # whenever any arena has been cleared. Revisits sample a cleared arena
-        # with probability softmax(failure_rate / revisit_temperature).
-        self._next_yaml_idx = 0
-        self._episode_return = 0.0
-        self._cleared_arenas: set[str] = set()
-        self._is_revisit = False
-        # Per-arena episode counts over every attempt (progression and revisit).
-        self._arena_attempts: dict[str, int] = dict.fromkeys(self._all_arenas, 0)
-        self._arena_successes: dict[str, int] = dict.fromkeys(self._all_arenas, 0)
 
         self.binary_path = str(Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64")
         self.resolution = resolution
@@ -183,6 +184,7 @@ class AnimalAIEnv(gym.Env):
         self._behavior_name: str | None = None
         self._latest_image: np.ndarray | None = None
         self.episode_step = 0
+        self._episode_return = 0.0
         self.arena_name: str = ""
         self.pass_mark: float = 0.0
         self._arena_items: list[dict] = []
@@ -192,69 +194,31 @@ class AnimalAIEnv(gym.Env):
         # (vx, vy, vz) agent velocity from the AAI vector observation.
         self._agent_velocity: np.ndarray = np.zeros(3, dtype=np.float32)
 
-    def _current_progression_stem(self) -> str:
-        idx = min(self._next_yaml_idx, len(self._all_arenas) - 1)
-        return self._all_arenas[idx]
+    def _select_arena_yaml(self) -> str:
+        raise NotImplementedError
 
-    def _current_yaml_path(self) -> str:
-        return str(self.competition_dir / f"{self._current_progression_stem()}.yaml")
+    def _on_forced_reset(self) -> None:
+        raise NotImplementedError
 
-    def _advance_progression(self) -> None:
-        """Move the progression pointer past any yamls already in cleared."""
-        n = len(self._all_arenas)
-        while (
-            self._next_yaml_idx < n
-            and self._all_arenas[self._next_yaml_idx] in self._cleared_arenas
-        ):
-            self._next_yaml_idx += 1
+    def _on_step(self) -> None:
+        raise NotImplementedError
 
-    def _success_rate(self, arena_stem: str) -> float:
-        """Success rate over all attempts. Cleared arenas always have >=1 attempt."""
-        return self._arena_successes[arena_stem] / self._arena_attempts[arena_stem]
+    def _record_episode_end(self, success: bool) -> dict:
+        raise NotImplementedError
 
-    def _on_episode_end(self, success: bool) -> bool:
-        """Mark the just-finished progression arena cleared on success. Returns
-        True if the progression pointer advanced.
-        """
-        if not success:
-            return False
-        before = self._next_yaml_idx
-        self._cleared_arenas.add(self.arena_name)
-        self._advance_progression()
-        return self._next_yaml_idx != before
+    def _reset_info_fields(self) -> dict:
+        raise NotImplementedError
 
-    def get_curriculum_state(self) -> dict:
-        """Curriculum snapshot for resume: per-arena attempt/success counts
-        (attempted arenas only) plus the progression/revisit alternation flag."""
-        attempts = {k: v for k, v in self._arena_attempts.items() if v > 0}
-        successes = {k: self._arena_successes[k] for k in attempts}
-        return {
-            "arena_attempts": attempts,
-            "arena_successes": successes,
-            "is_revisit": self._is_revisit,
-        }
-
-    def set_curriculum_state(
-        self, arena_attempts: dict, arena_successes: dict, is_revisit: bool
-    ) -> None:
-        """Restore the curriculum from a previous run. Cleared arenas and the
-        progression pointer are recomputed from the success counts (an arena is
-        cleared iff it has ever succeeded). Arena names unknown to the current
-        competition directory are ignored."""
-        known = set(self._all_arenas)
-        self._arena_attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
-        self._arena_successes.update({k: int(v) for k, v in arena_successes.items() if k in known})
-        self._is_revisit = bool(is_revisit)
-        self._cleared_arenas = {k for k, v in self._arena_successes.items() if v > 0}
-        self._next_yaml_idx = 0
-        self._advance_progression()
+    def _render_header_text(self) -> str:
+        raise NotImplementedError
 
     def _ensure_started(self):
         if self._aai is not None:
             return
+        boot_yaml = str(self.competition_dir / f"{self._all_arenas[0]}.yaml")
         self._aai = AnimalAIEnvironment(
             file_name=self.binary_path,
-            arenas_configurations=self._current_yaml_path(),
+            arenas_configurations=boot_yaml,
             seed=self.seed_value,
             play=False,
             useCamera=True,
@@ -349,15 +313,9 @@ class AnimalAIEnv(gym.Env):
         header_height = 22
         header = np.full((header_height, img_size, 3), 215, dtype=np.uint8)
         if self.arena_name:
-            tag = " R" if self._is_revisit else ""
-            text = (
-                f"{self.arena_name}  "
-                f"cleared:{len(self._cleared_arenas)}/{len(self._all_arenas)}"
-                f"{tag}"
-            )
             cv2.putText(
                 header,
-                text,
+                self._render_header_text(),
                 (4, 16),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
@@ -367,25 +325,6 @@ class AnimalAIEnv(gym.Env):
             )
         return np.vstack([header, canvas])
 
-    def _select_curriculum_arena_yaml(self) -> str:
-        """Curriculum arena choice: alternate progression / revisit each reset."""
-        all_done = self._next_yaml_idx >= len(self._all_arenas)
-        if not self._cleared_arenas:
-            self._is_revisit = False
-        elif all_done:
-            self._is_revisit = True
-        else:
-            self._is_revisit = not self._is_revisit
-        if not self._is_revisit:
-            return self._current_yaml_path()
-        stems = sorted(self._cleared_arenas)
-        failures = np.array([1.0 - self._success_rate(stem) for stem in stems], dtype=np.float64)
-        logits = failures / self.revisit_temperature
-        weights = np.exp(logits - logits.max())
-        probs = weights / weights.sum()
-        arena_stem = stems[int(self.np_random.choice(len(stems), p=probs))]
-        return str(self.competition_dir / f"{arena_stem}.yaml")
-
     def reset(
         self,
         seed: int | None,
@@ -394,17 +333,17 @@ class AnimalAIEnv(gym.Env):
         super().reset(seed=seed)
         self._ensure_started()
 
-        # `options={"arena_stem": ...}` bypasses the progression/revisit
-        # curriculum and forces a specific arena (used by scripts/test.py to
-        # sweep every arena exactly once with a frozen policy).
+        # `options={"arena_stem": ...}` bypasses the curriculum entirely
+        # (used by scripts/test_trained_agent.py to sweep every arena exactly
+        # once with a frozen policy).
         forced_stem = (
             options["arena_stem"] if options is not None and "arena_stem" in options else None
         )
         if forced_stem is not None:
-            self._is_revisit = False
+            self._on_forced_reset()
             arena_yaml = str(self.competition_dir / f"{forced_stem}.yaml")
         else:
-            arena_yaml = self._select_curriculum_arena_yaml()
+            arena_yaml = self._select_arena_yaml()
 
         self.arena_name = Path(arena_yaml).stem
         self.pass_mark, self._arena_items = _parse_arena(arena_yaml)
@@ -421,14 +360,14 @@ class AnimalAIEnv(gym.Env):
             "arena_yaml": arena_yaml,
             "arena_name": self.arena_name,
             "pass_mark": self.pass_mark,
-            "cleared_count": len(self._cleared_arenas),
-            "is_revisit": self._is_revisit,
             "velocity": self._agent_velocity,
             "agent_xyz": self._agent_xyz,
         }
+        info.update(self._reset_info_fields())
         return self._latest_image, info
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
+        self._on_step()
         a = np.asarray(action, dtype=np.float32)
         discrete = np.array(
             [[_to_discrete(float(a[0])), _to_discrete(float(a[1]))]], dtype=np.int32
@@ -447,15 +386,14 @@ class AnimalAIEnv(gym.Env):
             # limit rather than a real terminal (goal reached / death zone).
             interrupted = bool(terminal_steps.interrupted[0])
             reward = float(terminal_steps.reward[0])
-            self._latest_image = self._decode_obs(terminal_steps.obs[0][0])
-            self._agent_xyz = self._extract_agent_xyz(terminal_steps.obs, 0)
-            self._agent_velocity = self._extract_agent_velocity(terminal_steps.obs, 0)
+            obs_source = terminal_steps
         else:
             interrupted = False
             reward = float(decision_steps.reward[0])
-            self._latest_image = self._decode_obs(decision_steps.obs[0][0])
-            self._agent_xyz = self._extract_agent_xyz(decision_steps.obs, 0)
-            self._agent_velocity = self._extract_agent_velocity(decision_steps.obs, 0)
+            obs_source = decision_steps
+        self._latest_image = self._decode_obs(obs_source.obs[0][0])
+        self._agent_xyz = self._extract_agent_xyz(obs_source.obs, 0)
+        self._agent_velocity = self._extract_agent_velocity(obs_source.obs, 0)
 
         self.episode_step += 1
         self._episode_return += reward
@@ -467,8 +405,6 @@ class AnimalAIEnv(gym.Env):
             "episode_step": self.episode_step,
             "arena_name": self.arena_name,
             "pass_mark": self.pass_mark,
-            "cleared_count": len(self._cleared_arenas),
-            "is_revisit": self._is_revisit,
             "velocity": self._agent_velocity,
             "agent_xyz": self._agent_xyz,
         }
@@ -477,15 +413,8 @@ class AnimalAIEnv(gym.Env):
             # Pass-mark bonus: reward crossing the clear threshold, penalize missing it.
             # Computed from the pre-bonus return, then folded into this tick's reward.
             reward += 1.0 if success else -1.0
-            self._arena_attempts[self.arena_name] += 1
-            self._arena_successes[self.arena_name] += int(success)
-            if self._is_revisit:
-                advanced = False
-            else:
-                advanced = self._on_episode_end(success)
             info["success"] = bool(success)
-            info["advanced"] = advanced
-            info["cleared_count"] = len(self._cleared_arenas)
+            info.update(self._record_episode_end(success))
         return self._latest_image, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
@@ -499,19 +428,211 @@ class AnimalAIEnv(gym.Env):
             self._aai = None
 
 
+class AnimalAIEnv(_AnimalAIBase):
+    """Success-driven progression/revisit curriculum over all 900 arenas.
+
+    A pointer walks the flat, sorted list of every XX-YY-ZZ arena. On success
+    the current yaml is added to `_cleared_arenas` and the pointer advances
+    past any yamls already cleared. On failure the pointer stays. Each reset
+    alternates between progression and revisit modes once any arena has been
+    cleared. Revisits sample a cleared arena with probability
+    softmax(failure_rate / revisit_temperature).
+    """
+
+    def __init__(
+        self,
+        resolution: int,
+        seed: int,
+        base_port: int,
+        revisit_temperature: float,
+    ):
+        super().__init__(resolution=resolution, seed=seed, base_port=base_port)
+        self.revisit_temperature = revisit_temperature
+        self._next_yaml_idx = 0
+        self._cleared_arenas: set[str] = set()
+        self._is_revisit = False
+        # Per-arena episode counts over every attempt (progression and revisit).
+        self._arena_attempts: dict[str, int] = dict.fromkeys(self._all_arenas, 0)
+        self._arena_successes: dict[str, int] = dict.fromkeys(self._all_arenas, 0)
+
+    def _current_progression_stem(self) -> str:
+        idx = min(self._next_yaml_idx, len(self._all_arenas) - 1)
+        return self._all_arenas[idx]
+
+    def _current_yaml_path(self) -> str:
+        return str(self.competition_dir / f"{self._current_progression_stem()}.yaml")
+
+    def _advance_progression(self) -> None:
+        """Move the progression pointer past any yamls already in cleared."""
+        n = len(self._all_arenas)
+        while (
+            self._next_yaml_idx < n
+            and self._all_arenas[self._next_yaml_idx] in self._cleared_arenas
+        ):
+            self._next_yaml_idx += 1
+
+    def _success_rate(self, arena_stem: str) -> float:
+        """Success rate over all attempts. Cleared arenas always have >=1 attempt."""
+        return self._arena_successes[arena_stem] / self._arena_attempts[arena_stem]
+
+    def get_curriculum_state(self) -> dict:
+        """Curriculum snapshot for resume: per-arena attempt/success counts
+        (attempted arenas only) plus the progression/revisit alternation flag."""
+        attempts = {k: v for k, v in self._arena_attempts.items() if v > 0}
+        successes = {k: self._arena_successes[k] for k in attempts}
+        return {
+            "arena_attempts": attempts,
+            "arena_successes": successes,
+            "is_revisit": self._is_revisit,
+        }
+
+    def set_curriculum_state(
+        self, arena_attempts: dict, arena_successes: dict, is_revisit: bool
+    ) -> None:
+        """Restore the curriculum from a previous run. Cleared arenas and the
+        progression pointer are recomputed from the success counts (an arena is
+        cleared iff it has ever succeeded). Arena names unknown to the current
+        competition directory are ignored."""
+        known = set(self._all_arenas)
+        self._arena_attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
+        self._arena_successes.update({k: int(v) for k, v in arena_successes.items() if k in known})
+        self._is_revisit = bool(is_revisit)
+        self._cleared_arenas = {k for k, v in self._arena_successes.items() if v > 0}
+        self._next_yaml_idx = 0
+        self._advance_progression()
+
+    def _select_arena_yaml(self) -> str:
+        """Curriculum arena choice: alternate progression / revisit each reset."""
+        all_done = self._next_yaml_idx >= len(self._all_arenas)
+        if not self._cleared_arenas:
+            self._is_revisit = False
+        elif all_done:
+            self._is_revisit = True
+        else:
+            self._is_revisit = not self._is_revisit
+        if not self._is_revisit:
+            return self._current_yaml_path()
+        stems = sorted(self._cleared_arenas)
+        failures = np.array([1.0 - self._success_rate(stem) for stem in stems], dtype=np.float64)
+        logits = failures / self.revisit_temperature
+        weights = np.exp(logits - logits.max())
+        probs = weights / weights.sum()
+        arena_stem = stems[int(self.np_random.choice(len(stems), p=probs))]
+        return str(self.competition_dir / f"{arena_stem}.yaml")
+
+    def _on_forced_reset(self) -> None:
+        self._is_revisit = False
+
+    def _on_step(self) -> None:
+        pass
+
+    def _record_episode_end(self, success: bool) -> dict:
+        self._arena_attempts[self.arena_name] += 1
+        self._arena_successes[self.arena_name] += int(success)
+        if self._is_revisit:
+            advanced = False
+        else:
+            before = self._next_yaml_idx
+            if success:
+                self._cleared_arenas.add(self.arena_name)
+                self._advance_progression()
+            advanced = self._next_yaml_idx != before
+        return {"advanced": advanced, "cleared_count": len(self._cleared_arenas)}
+
+    def _reset_info_fields(self) -> dict:
+        return {"cleared_count": len(self._cleared_arenas), "is_revisit": self._is_revisit}
+
+    def _render_header_text(self) -> str:
+        tag = " R" if self._is_revisit else ""
+        return (
+            f"{self.arena_name}  cleared:{len(self._cleared_arenas)}/{len(self._all_arenas)}{tag}"
+        )
+
+
+class AnimalAIStagedEnv(_AnimalAIBase):
+    """Cumulative 11-stage curriculum reproducing the Animal-AI Environment
+    paper's Testbed protocol (Section 4.1.3).
+
+    Stage i (0-indexed, 0..9) trains on `train_variant_count` of the 3
+    variants of every task in levels 1..(i+1). Each of the first 9 stages
+    runs for `steps_per_stage` steps; the final stage (index 9, all 10
+    levels) then runs for the remainder of `step_limit` (the paper's "extra
+    5M steps on the last stage" is simply the tail of this same phase, since
+    the arena set does not change again). Training only ever samples the
+    reserved `train_variant_count` variants per task -- the remaining
+    variants (and, if `train_variant_count == 1`, the majority of the
+    Testbed) are held out for the frozen 900-arena evaluation sweep in
+    scripts/test_trained_agent.py.
+    """
+
+    def __init__(
+        self,
+        resolution: int,
+        seed: int,
+        base_port: int,
+        train_variant_count: int,
+        steps_per_stage: int,
+    ):
+        super().__init__(resolution=resolution, seed=seed, base_port=base_port)
+        n_variants = self.arena_sets.shape[2]
+        if not (1 <= train_variant_count < n_variants):
+            raise ValueError(
+                f"train_variant_count must be in [1, {n_variants - 1}], got {train_variant_count}"
+            )
+        self.train_variant_count = train_variant_count
+        self.steps_per_stage = steps_per_stage
+        self._stage_arenas: list[list[str]] = self._build_stage_arenas()
+        self._global_step = 0
+
+    def _build_stage_arenas(self) -> list[list[str]]:
+        n_levels, n_tasks, _n_variants = self.arena_sets.shape
+        stages = []
+        for stage_i in range(n_levels):
+            arenas = [
+                self.arena_sets[lv, tk, vr]
+                for lv in range(stage_i + 1)
+                for tk in range(n_tasks)
+                for vr in range(self.train_variant_count)
+            ]
+            stages.append(arenas)
+        return stages
+
+    def set_global_step(self, global_step: int) -> None:
+        """Resume hook: called once after loading a checkpoint (see
+        scripts/train.py's analogous `set_curriculum_state` for AnimalAIEnv)."""
+        self._global_step = int(global_step)
+
+    def _current_stage_index(self) -> int:
+        n_stages = len(self._stage_arenas)
+        return min(self._global_step // self.steps_per_stage, n_stages - 1)
+
+    def _select_arena_yaml(self) -> str:
+        stage = self._current_stage_index()
+        arenas = self._stage_arenas[stage]
+        arena_stem = arenas[int(self.np_random.integers(len(arenas)))]
+        return str(self.competition_dir / f"{arena_stem}.yaml")
+
+    def _on_forced_reset(self) -> None:
+        pass
+
+    def _on_step(self) -> None:
+        self._global_step += 1
+
+    def _record_episode_end(self, success: bool) -> dict:
+        return {"stage": self._current_stage_index(), "global_step": self._global_step}
+
+    def _reset_info_fields(self) -> dict:
+        return {"stage": self._current_stage_index(), "global_step": self._global_step}
+
+    def _render_header_text(self) -> str:
+        return (
+            f"{self.arena_name}  stage:{self._current_stage_index() + 1}/{len(self._stage_arenas)}"
+            f"  step:{self._global_step}"
+        )
+
+
 if __name__ == "__main__":
-    bin_path = Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64"
-    competition = (
-        Path(__file__).resolve().parents[3] / "external" / "animal-ai" / "configs" / "competition"
-    )
-    env = AnimalAIEnv(
-        binary_path=str(bin_path),
-        competition_dir=str(competition),
-        prompt="Find and reach the green goal sphere; avoid red zones and yellow goals.",
-        resolution=96,
-        seed=0,
-        base_port=5005,
-    )
+    env = AnimalAIEnv(resolution=96, seed=0, base_port=5005, revisit_temperature=1.0)
     for ep in range(8):
         obs, info = env.reset(seed=ep, options=None)
         print(

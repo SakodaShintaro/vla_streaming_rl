@@ -310,6 +310,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         score_list = list(resume_state["score_list"])
         best_score_per_arena = dict(resume_state["best_score_per_arena"])
         print(f"Resumed from {args.resume_dir}: global_step={global_step} episode_id={episode_id}")
+        set_global_step = getattr(env.unwrapped, "set_global_step", None)
+        if set_global_step is not None:
+            set_global_step(global_step)
 
     while True:
         # Stop when the env has dispensed every scenario in a fixed playlist

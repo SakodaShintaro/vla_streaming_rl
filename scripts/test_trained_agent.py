@@ -88,12 +88,17 @@ def main(args: DictConfig, result_dir: Path) -> None:
     print(f"Running {len(arena_stems)} arenas, 1 episode each.")
 
     result_path = result_dir / "test_result.tsv"
+    level_attempts: dict[str, int] = {}
+    level_successes: dict[str, int] = {}
     with open(result_path, "w") as f:
         f.write("arena\tsuccess\tscore\n")
         success_count = 0
         for i, arena_stem in enumerate(arena_stems):
             success, score = run_arena(agent, env, seed, arena_stem)
             success_count += int(success)
+            level = arena_stem.split("-")[0]
+            level_attempts[level] = level_attempts.get(level, 0) + 1
+            level_successes[level] = level_successes.get(level, 0) + int(success)
             f.write(f"{arena_stem}\t{int(success)}\t{score:.6f}\n")
             f.flush()
             print(
@@ -101,7 +106,14 @@ def main(args: DictConfig, result_dir: Path) -> None:
             )
 
     print(f"Cleared {success_count}/{len(arena_stems)} arenas.")
-    (result_dir / "summary.txt").write_text(f"cleared: {success_count}/{len(arena_stems)}\n")
+    summary_lines = [f"cleared: {success_count}/{len(arena_stems)}"]
+    for level in sorted(level_attempts):
+        n_success = level_successes[level]
+        n_attempt = level_attempts[level]
+        summary_lines.append(
+            f"level {level}: {n_success}/{n_attempt} ({n_success / n_attempt:.1%})"
+        )
+    (result_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n")
 
     env.close()
 
