@@ -117,11 +117,10 @@ def _paper_curriculum_stages() -> list[list[Arena]]:
     alone repeats across stage dirs for unrelated tasks.
     """
     stage_dirs = sorted(PAPER_CURRICULUM_DIR.glob("stage*"))
-    if not stage_dirs:
-        raise ValueError(
-            f"no stageNN directories under {PAPER_CURRICULUM_DIR}; "
-            "run scripts/split_paper_curriculum.py first"
-        )
+    assert stage_dirs, (
+        f"no stageNN directories under {PAPER_CURRICULUM_DIR}; "
+        "run scripts/split_paper_curriculum.py first"
+    )
     cumulative: list[Arena] = []
     stages: list[list[Arena]] = []
     for level, stage_dir in enumerate(stage_dirs, start=1):
@@ -136,8 +135,7 @@ def _paper_curriculum_stages() -> list[list[Arena]]:
 def _competition_arenas() -> list[Arena]:
     """The 900 Testbed arenas, named by their XX-YY-ZZ (level-task-variant) stem."""
     paths = sorted(COMPETITION_DIR.glob("*.yaml"))
-    if not paths:
-        raise ValueError(f"no arena yamls under {COMPETITION_DIR}")
+    assert paths, f"no arena yamls under {COMPETITION_DIR}"
     return [Arena(path, path.stem) for path in paths]
 
 
@@ -346,8 +344,7 @@ def build_selector(
         ),
         "eval": lambda: SequentialSelector(),
     }
-    if mode not in builders:
-        raise ValueError(f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}")
+    assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"
     return builders[mode]()
 
 
