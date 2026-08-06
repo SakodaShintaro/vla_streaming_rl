@@ -26,26 +26,19 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     return action_array, len(matches) > 0
 
 
-def make_animalai_env(resolution: int, revisit_temperature: float) -> gym.Env:
-    from vla_streaming_rl.envs.animalai_env import AnimalAIEnv
+def make_animalai_env(
+    resolution: int, mode: str, steps_per_stage: int, revisit_temperature: float
+) -> gym.Env:
+    """`mode` selects staged / success / eval; see animalai_env's module docstring."""
+    from vla_streaming_rl.envs.animalai_env import AnimalAIEnv, build_selector
 
-    return AnimalAIEnv(
-        resolution=resolution,
-        seed=0,
-        base_port=5005,
-        revisit_temperature=revisit_temperature,
-    )
-
-
-def make_animalai_staged_env(resolution: int, steps_per_stage: int) -> gym.Env:
-    from vla_streaming_rl.envs.animalai_env import AnimalAIStagedEnv
-
-    return AnimalAIStagedEnv(
-        resolution=resolution,
-        seed=0,
-        base_port=5005,
+    selector = build_selector(
+        mode=mode,
         steps_per_stage=steps_per_stage,
+        revisit_temperature=revisit_temperature,
+        seed=0,
     )
+    return AnimalAIEnv(resolution=resolution, seed=0, base_port=5005, selector=selector)
 
 
 def make_carla_env(

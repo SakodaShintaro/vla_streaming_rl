@@ -8,6 +8,10 @@ together with the agent's true arena position (``info["agent_xyz"]``). Also
 renders the same panel video train.py writes, for visual sanity-checking.
 Saves everything to ``probe_data.npz``; run scripts/compute_linear_probe.py
 on that file to fit and evaluate the probe.
+
+``ARENA_STEM`` names a competition arena, so run this with
+``env=animalai env_factory.mode=eval`` (the env resolves a pinned arena
+against the arenas its selector serves).
 """
 
 import logging

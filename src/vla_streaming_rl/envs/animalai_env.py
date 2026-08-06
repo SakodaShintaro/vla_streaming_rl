@@ -8,16 +8,24 @@ as a single-agent gym.Env. The native AAI action is MultiDiscrete([3, 3]):
 We expose this as Box(-1, 1, shape=(2,)) for parity with the project's other
 environments (CARLA, GUI games), discretising with a +/-1/3 dead-zone.
 
-Two curricula are provided, both built on the shared ``_AnimalAIBase``:
-  - ``AnimalAIEnv``: success-driven progression/revisit curriculum that walks
-    every one of the 900 Testbed arenas.
-  - ``AnimalAIStagedEnv``: the cumulative 11-stage curriculum from the
-    Animal-AI Environment paper (Testbed section), trained on a subset of
-    each task's 3 variants and evaluated on all 900 by sweeping
-    ``_all_arenas`` with a frozen policy (see scripts/test_trained_agent.py).
+Everything about talking to Unity lives in `AnimalAIEnv`. The only thing that
+differs between the three ways we run Animal-AI is *which arena each episode
+loads*, so that is factored out into an `ArenaSelector`, picked by the
+`mode` config field (see `build_selector`):
+
+  - "staged"  training on configs/paper_curriculum_split/ with the paper's
+              cumulative 11-stage curriculum (`StagedSelector`).
+  - "success" training on the same arenas, ordered by which ones the agent
+              has already passed (`SuccessDrivenSelector`).
+  - "eval"    every configs/competition/ arena once, in order -- the
+              900-arena Testbed sweep (`SequentialSelector`).
+
+Training and evaluation therefore never share an arena: paper_curriculum_split
+holds the paper's own training arenas, competition holds the Testbed.
 """
 
 import random
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -27,6 +35,9 @@ import yaml
 from animalai import AnimalAIEnvironment
 from gymnasium import spaces
 from mlagents_envs.base_env import ActionTuple
+
+PAPER_CURRICULUM_DIR = Path("./external/animal-ai/configs/paper_curriculum_split")
+COMPETITION_DIR = Path("./external/animal-ai/configs/competition")
 
 
 def _to_discrete(value: float) -> int:
@@ -56,7 +67,7 @@ for _tag in ("!ArenaConfig", "!Arena", "!Item", "!Vector3", "!RGB"):
     _AAILoader.add_constructor(_tag, _aai_tag_constructor)
 
 
-def _parse_arena(yaml_path: str) -> tuple[float, list[dict]]:
+def _parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
     """Return (pass_mark, items) from an Animal-AI arena yaml.
 
     Each item dict carries one (position, size, rotation) triple in arena
@@ -64,7 +75,7 @@ def _parse_arena(yaml_path: str) -> tuple[float, list[dict]]:
     multiple positions are expanded into multiple item dicts; if `sizes` is
     shorter than `positions` the last given size is reused (AAI's convention).
     """
-    cfg = yaml.load(Path(yaml_path).read_text(), Loader=_AAILoader)
+    cfg = yaml.load(yaml_path.read_text(), Loader=_AAILoader)
     arena = cfg["arenas"][0]
     pass_mark = float(arena.get("pass_mark", 0))
     items_out: list[dict] = []
@@ -89,28 +100,255 @@ def _parse_arena(yaml_path: str) -> tuple[float, list[dict]]:
     return pass_mark, items_out
 
 
-def _discover_arena_sets(competition_dir: Path) -> np.ndarray:
-    """Return a 3D ndarray of arena name stems, axes [level, task, variant].
+@dataclass(frozen=True)
+class Arena:
+    """One arena yaml plus the label it is reported under (info, logs, render)."""
 
-    The Animal-AI Olympics directory contains files named XX-YY-ZZ.yaml where
-    XX = level (01..10), YY = task (01..30), ZZ = variant (01..03). Filenames
-    map directly: arena_sets[level_idx, task_idx, variant_idx] == "XX-YY-ZZ".
-    Assumes the (level, task, variant) grid is dense.
+    path: Path
+    name: str
+
+
+def _paper_curriculum_stages() -> list[list[Arena]]:
+    """Cumulative arena list per curriculum stage.
+
+    scripts/split_paper_curriculum.py writes only each stage's *new* 30 arenas
+    into stageNN/, so stage i's arena set is stage00..stageNN(i) concatenated.
+    Arenas are labelled "L{level}-{index}" (e.g. L5-023) because the filename
+    alone repeats across stage dirs for unrelated tasks.
     """
-    by_key: dict[tuple[int, int, int], str] = {}
-    for p in competition_dir.glob("*.yaml"):
-        parts = p.stem.split("-")
-        if len(parts) == 3 and all(part.isdigit() for part in parts):
-            by_key[(int(parts[0]), int(parts[1]), int(parts[2]))] = p.stem
-    levels = sorted({k[0] for k in by_key})
-    tasks = sorted({k[1] for k in by_key})
-    variants = sorted({k[2] for k in by_key})
-    arr = np.empty((len(levels), len(tasks), len(variants)), dtype=object)
-    for i, lv in enumerate(levels):
-        for j, tk in enumerate(tasks):
-            for k, vr in enumerate(variants):
-                arr[i, j, k] = by_key[(lv, tk, vr)]
-    return arr
+    stage_dirs = sorted(PAPER_CURRICULUM_DIR.glob("stage*"))
+    if not stage_dirs:
+        raise ValueError(
+            f"no stageNN directories under {PAPER_CURRICULUM_DIR}; "
+            "run scripts/split_paper_curriculum.py first"
+        )
+    cumulative: list[Arena] = []
+    stages: list[list[Arena]] = []
+    for level, stage_dir in enumerate(stage_dirs, start=1):
+        cumulative = cumulative + [
+            Arena(path, f"L{level}-{path.stem.removeprefix('arena')}")
+            for path in sorted(stage_dir.glob("arena*.yaml"))
+        ]
+        stages.append(cumulative)
+    return stages
+
+
+def _competition_arenas() -> list[Arena]:
+    """The 900 Testbed arenas, named by their XX-YY-ZZ (level-task-variant) stem."""
+    paths = sorted(COMPETITION_DIR.glob("*.yaml"))
+    if not paths:
+        raise ValueError(f"no arena yamls under {COMPETITION_DIR}")
+    return [Arena(path, path.stem) for path in paths]
+
+
+class ArenaSelector:
+    """Picks the arena each episode runs, and owns whatever progress that
+    choice depends on.
+
+    `arenas` is every arena this selector can serve: `AnimalAIEnv` boots Unity
+    on the first of them and resolves `options={"arena_stem": ...}` against
+    their names.
+    """
+
+    arenas: list[Arena]
+
+    @property
+    def is_exhausted(self) -> bool:
+        """True once there is nothing left to run (finite sweeps only)."""
+        return False
+
+    def next_arena(self, global_step: int) -> Arena:
+        raise NotImplementedError
+
+    def on_episode_end(self, arena: Arena, success: bool) -> None:
+        """Progress bookkeeping. Selectors without progress do nothing."""
+
+    def info(self, global_step: int) -> dict:
+        """Selector-specific fields merged into each reset/step info dict."""
+        return {}
+
+    def status(self, global_step: int) -> str:
+        """One-line progress summary drawn on the top-down render."""
+        raise NotImplementedError
+
+    def state(self) -> dict:
+        """Resume snapshot; selectors without progress restore to a fresh run."""
+        return {"arena_attempts": {}, "arena_successes": {}, "is_revisit": False}
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
+        """Restore a `state()` snapshot. Selectors without progress ignore it."""
+
+
+class StagedSelector(ArenaSelector):
+    """The paper's cumulative curriculum (Animal-AI paper, Section 4.1.3).
+
+    11 stages of `steps_per_stage` steps each. Stage i (1..10) samples
+    uniformly from every arena of levels 1..i, growing 30 -> 300 arenas.
+    Stage 11 repeats stage 10's full set and runs until train.py's step_limit
+    ends the run -- the paper's "further five million steps on the last stage".
+    """
+
+    def __init__(self, steps_per_stage: int, seed: int):
+        stages = _paper_curriculum_stages()
+        self._stages = stages + [stages[-1]]
+        self.arenas = stages[-1]
+        self.steps_per_stage = steps_per_stage
+        self._rng = np.random.default_rng(seed)
+
+    def _stage_index(self, global_step: int) -> int:
+        return min(global_step // self.steps_per_stage, len(self._stages) - 1)
+
+    def next_arena(self, global_step: int) -> Arena:
+        stage_arenas = self._stages[self._stage_index(global_step)]
+        return stage_arenas[int(self._rng.integers(len(stage_arenas)))]
+
+    def info(self, global_step: int) -> dict:
+        return {"stage": self._stage_index(global_step) + 1}
+
+    def status(self, global_step: int) -> str:
+        return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}"
+
+
+class SuccessDrivenSelector(ArenaSelector):
+    """Progression/revisit over the paper curriculum arenas, level order.
+
+    A pointer walks the arena list; an arena becomes "cleared" the first time
+    it is passed, and the pointer skips anything already cleared. Once
+    anything is cleared, resets alternate progression and revisit; revisits
+    sample a cleared arena with probability softmax(failure_rate /
+    `revisit_temperature`), so the shakiest cleared arenas come back most
+    often and a lower temperature concentrates harder on them.
+    """
+
+    def __init__(self, revisit_temperature: float, seed: int):
+        self.arenas = _paper_curriculum_stages()[-1]
+        self.revisit_temperature = revisit_temperature
+        self._by_name = {arena.name: arena for arena in self.arenas}
+        self._rng = np.random.default_rng(seed)
+        self._next_index = 0
+        self._cleared: set[str] = set()
+        self._attempts = dict.fromkeys(self._by_name, 0)
+        self._successes = dict.fromkeys(self._by_name, 0)
+        self._is_revisit = False
+        self._advanced = False
+
+    def _skip_cleared(self) -> None:
+        while (
+            self._next_index < len(self.arenas)
+            and self.arenas[self._next_index].name in self._cleared
+        ):
+            self._next_index += 1
+
+    def _pick_revisit_mode(self) -> bool:
+        if not self._cleared:
+            return False
+        if self._next_index >= len(self.arenas):
+            return True
+        return not self._is_revisit
+
+    def _sample_cleared(self) -> Arena:
+        names = sorted(self._cleared)
+        failure_rate = np.array(
+            [1.0 - self._successes[name] / self._attempts[name] for name in names]
+        )
+        logits = failure_rate / self.revisit_temperature
+        weights = np.exp(logits - logits.max())
+        index = self._rng.choice(len(names), p=weights / weights.sum())
+        return self._by_name[names[int(index)]]
+
+    def next_arena(self, global_step: int) -> Arena:
+        self._is_revisit = self._pick_revisit_mode()
+        if self._is_revisit:
+            return self._sample_cleared()
+        return self.arenas[min(self._next_index, len(self.arenas) - 1)]
+
+    def on_episode_end(self, arena: Arena, success: bool) -> None:
+        self._attempts[arena.name] += 1
+        self._successes[arena.name] += int(success)
+        before = self._next_index
+        if success and not self._is_revisit:
+            self._cleared.add(arena.name)
+            self._skip_cleared()
+        self._advanced = self._next_index != before
+
+    def info(self, global_step: int) -> dict:
+        return {
+            "cleared_count": len(self._cleared),
+            "is_revisit": self._is_revisit,
+            "advanced": self._advanced,
+        }
+
+    def status(self, global_step: int) -> str:
+        revisit_tag = " R" if self._is_revisit else ""
+        return f"cleared:{len(self._cleared)}/{len(self.arenas)}{revisit_tag}"
+
+    def state(self) -> dict:
+        attempts = {name: n for name, n in self._attempts.items() if n > 0}
+        return {
+            "arena_attempts": attempts,
+            "arena_successes": {name: self._successes[name] for name in attempts},
+            "is_revisit": self._is_revisit,
+        }
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
+        # An arena is cleared iff it has ever succeeded, so the pointer is
+        # rebuilt from the counts rather than stored. Unknown names (a
+        # different arena set) are dropped.
+        known = set(self._by_name)
+        self._attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
+        self._successes.update({k: int(v) for k, v in arena_successes.items() if k in known})
+        self._is_revisit = bool(is_revisit)
+        self._cleared = {name for name, n in self._successes.items() if n > 0}
+        self._next_index = 0
+        self._skip_cleared()
+
+
+class SequentialSelector(ArenaSelector):
+    """Every competition arena exactly once, in filename order.
+
+    This is the paper's Testbed evaluation protocol: one episode per arena,
+    pass/fail by that arena's pass mark (see scripts/test_trained_agent.py,
+    which loops until `is_exhausted`).
+    """
+
+    def __init__(self):
+        self.arenas = _competition_arenas()
+        self._next_index = 0
+
+    @property
+    def is_exhausted(self) -> bool:
+        return self._next_index >= len(self.arenas)
+
+    def next_arena(self, global_step: int) -> Arena:
+        arena = self.arenas[self._next_index]
+        self._next_index += 1
+        return arena
+
+    def info(self, global_step: int) -> dict:
+        return {"arena_index": self._next_index - 1, "arena_total": len(self.arenas)}
+
+    def status(self, global_step: int) -> str:
+        return f"{self._next_index}/{len(self.arenas)}"
+
+
+def build_selector(
+    mode: str, steps_per_stage: int, revisit_temperature: float, seed: int
+) -> ArenaSelector:
+    """Build the arena selector named by `mode` (see the module docstring).
+
+    Every mode's parameters are always supplied; a mode ignores the ones that
+    do not apply to it.
+    """
+    builders = {
+        "staged": lambda: StagedSelector(steps_per_stage=steps_per_stage, seed=seed),
+        "success": lambda: SuccessDrivenSelector(
+            revisit_temperature=revisit_temperature, seed=seed
+        ),
+        "eval": lambda: SequentialSelector(),
+    }
+    if mode not in builders:
+        raise ValueError(f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}")
+    return builders[mode]()
 
 
 # RGB colors (matplotlib-style) for each AAI item type when drawn top-down.
@@ -137,35 +375,84 @@ _ITEM_COLORS: dict[str, tuple[int, int, int]] = {
 _DEFAULT_ITEM_COLOR: tuple[int, int, int] = (180, 180, 180)
 _AGENT_COLOR: tuple[int, int, int] = (40, 80, 220)
 _ARENA_SIZE_M = 40.0  # standard Animal-AI arena is 40 m square
+_RENDER_SIZE_PX = 256
+_HEADER_HEIGHT_PX = 22
 
 
-class _AnimalAIBase(gym.Env):
-    """Shared Unity lifecycle, observation decoding, and pass-mark reward
-    logic for every Animal-AI curriculum variant.
+def _draw_header(text: str) -> np.ndarray:
+    header = np.full((_HEADER_HEIGHT_PX, _RENDER_SIZE_PX, 3), 215, dtype=np.uint8)
+    font_scale = 0.45
+    max_width = _RENDER_SIZE_PX - 8
+    (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
+    # Shrink rather than let a long status run off the right edge.
+    font_scale *= min(1.0, max_width / width)
+    cv2.putText(
+        header, text, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (20, 20, 20), 1, cv2.LINE_AA
+    )
+    return header
 
-    Subclasses implement:
-      - `_select_arena_yaml()`: which arena to load on a (non-forced) reset.
-      - `_on_forced_reset()`: hook run when `options["arena_stem"]` bypasses
-        the curriculum (used by the eval sweep over all 900 arenas).
-      - `_on_step()`: hook run on every `step()` call, before episode-end
-        bookkeeping (e.g. to advance a global step counter).
-      - `_record_episode_end(success)`: curriculum bookkeeping on episode end;
-        returns extra `info` fields.
-      - `_reset_info_fields()`: extra `info` fields to attach on reset.
-      - `_render_header_text()`: one-line status string drawn on the top-down
-        render.
+
+def _render_topdown(
+    items: list[dict], agent_xyz: tuple[float, float, float] | None, header_text: str
+) -> np.ndarray:
+    scale = _RENDER_SIZE_PX / _ARENA_SIZE_M
+    canvas = np.full((_RENDER_SIZE_PX, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
+
+    # Flip z so the +z arena axis points up in the image (Unity-editor-like).
+    def to_px(x: float, z: float) -> tuple[int, int]:
+        return int(round(x * scale)), int(round((_ARENA_SIZE_M - z) * scale))
+
+    cv2.rectangle(canvas, (0, 0), (_RENDER_SIZE_PX - 1, _RENDER_SIZE_PX - 1), (60, 60, 60), 2)
+
+    for item in items:
+        if item["name"] == "Agent":
+            continue
+        # x or z = -1 in the yaml means Unity randomizes the position at
+        # reset; we don't know the actual location, so skip drawing.
+        if item["x"] < 0 or item["z"] < 0:
+            continue
+        cx, cy = to_px(item["x"], item["z"])
+        color = _ITEM_COLORS.get(item["name"], _DEFAULT_ITEM_COLOR)
+        # Goals are spherical in the Unity scene; draw as circles so they
+        # are visually distinct from rectangular zones/walls/boxes.
+        if "Goal" in item["name"]:
+            radius = max(int(0.5 * item["size_x"] * scale), 3)
+            cv2.circle(canvas, (cx, cy), radius, color, cv2.FILLED)
+            cv2.circle(canvas, (cx, cy), radius, (20, 20, 20), 1)
+            continue
+        sx_px = max(item["size_x"] * scale, 3.0)
+        sz_px = max(item["size_z"] * scale, 3.0)
+        # Unity Y-axis rotation is CW from above (in left-handed world);
+        # our z-flipped image preserves "north up" so we pass the raw angle
+        # to cv2 (positive cv2 angle is CW in image after the z flip).
+        rect = ((float(cx), float(cy)), (sx_px, sz_px), item["rotation"])
+        box = np.intp(cv2.boxPoints(rect))
+        transparent = "Transparent" in item["name"]
+        cv2.drawContours(canvas, [box], 0, color, 1 if transparent else cv2.FILLED)
+
+    if agent_xyz is not None:
+        ax, _ay, az = agent_xyz
+        apx, apy = to_px(ax, az)
+        radius = max(int(0.6 * scale), 4)
+        cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
+        cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
+
+    return np.vstack([_draw_header(header_text), canvas])
+
+
+class AnimalAIEnv(gym.Env):
+    """Animal-AI environment with continuous Box action space.
+
+    `selector` decides which arena each episode loads; see the module
+    docstring for the three of them.
     """
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
-    def __init__(self, resolution: int, seed: int, base_port: int):
+    def __init__(self, resolution: int, seed: int, base_port: int, selector: ArenaSelector):
         super().__init__()
-        self.competition_dir = Path("./external/animal-ai/configs/competition")
-        self.arena_sets = _discover_arena_sets(self.competition_dir)
-        if self.arena_sets.size == 0:
-            raise ValueError(f"no XX-YY-ZZ.yaml files found under {self.competition_dir}")
-        # Flat sorted list of every yaml stem (all 900 Testbed arenas).
-        self._all_arenas: list[str] = sorted(self.arena_sets.flatten().tolist())
+        self.selector = selector
+        self._arena_by_name = {arena.name: arena for arena in selector.arenas}
         self.prompt = "Find and reach the green goal sphere; avoid red zones and yellow goals."
 
         self.binary_path = str(Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64")
@@ -183,42 +470,37 @@ class _AnimalAIBase(gym.Env):
         self._aai: AnimalAIEnvironment | None = None
         self._behavior_name: str | None = None
         self._latest_image: np.ndarray | None = None
+        self.global_step = 0
         self.episode_step = 0
-        self._episode_return = 0.0
         self.arena_name: str = ""
         self.pass_mark: float = 0.0
+        self._arena: Arena | None = None
         self._arena_items: list[dict] = []
+        self._episode_return = 0.0
         # (x, y, z) agent position in arena coords; populated each step from
         # the AAI vector observation. None before the first reset.
         self._agent_xyz: tuple[float, float, float] | None = None
         # (vx, vy, vz) agent velocity from the AAI vector observation.
         self._agent_velocity: np.ndarray = np.zeros(3, dtype=np.float32)
 
-    def _select_arena_yaml(self) -> str:
-        raise NotImplementedError
+    def set_global_step(self, global_step: int) -> None:
+        """Resume hook: restore the step counter the curriculum schedules on."""
+        self.global_step = int(global_step)
 
-    def _on_forced_reset(self) -> None:
-        raise NotImplementedError
+    def get_curriculum_state(self) -> dict:
+        return self.selector.state()
 
-    def _on_step(self) -> None:
-        raise NotImplementedError
-
-    def _record_episode_end(self, success: bool) -> dict:
-        raise NotImplementedError
-
-    def _reset_info_fields(self) -> dict:
-        raise NotImplementedError
-
-    def _render_header_text(self) -> str:
-        raise NotImplementedError
+    def set_curriculum_state(
+        self, arena_attempts: dict, arena_successes: dict, is_revisit: bool
+    ) -> None:
+        self.selector.load_state(arena_attempts, arena_successes, is_revisit)
 
     def _ensure_started(self):
         if self._aai is not None:
             return
-        boot_yaml = str(self.competition_dir / f"{self._all_arenas[0]}.yaml")
         self._aai = AnimalAIEnvironment(
             file_name=self.binary_path,
-            arenas_configurations=boot_yaml,
+            arenas_configurations=str(self.selector.arenas[0].path),
             seed=self.seed_value,
             play=False,
             useCamera=True,
@@ -241,18 +523,15 @@ class _AnimalAIBase(gym.Env):
         # AAI emits float32 in [0, 1] with shape (3, H, W).
         return (obs_chw_float.transpose(1, 2, 0) * 255.0).astype(np.uint8)
 
-    @staticmethod
-    def _extract_agent_xyz(obs_list, idx: int) -> tuple[float, float, float]:
-        # Vector obs layout (useCamera=True, useRayCasts=False): obs[1][idx] is
-        # [health, vx, vy, vz, x, y, z].
-        vec = obs_list[1][idx]
-        return float(vec[4]), float(vec[5]), float(vec[6])
-
-    @staticmethod
-    def _extract_agent_velocity(obs_list, idx: int) -> np.ndarray:
-        # Same vector obs layout: obs[1][idx][1:4] is (vx, vy, vz).
-        vec = obs_list[1][idx]
-        return np.array([float(vec[1]), float(vec[2]), float(vec[3])], dtype=np.float32)
+    def _read_observation(self, steps) -> None:
+        # Vector obs layout (useCamera=True, useRayCasts=False): steps.obs[1][0]
+        # is [health, vx, vy, vz, x, y, z].
+        vec = steps.obs[1][0]
+        self._latest_image = self._decode_obs(steps.obs[0][0])
+        self._agent_xyz = (float(vec[4]), float(vec[5]), float(vec[6]))
+        self._agent_velocity = np.array(
+            [float(vec[1]), float(vec[2]), float(vec[3])], dtype=np.float32
+        )
 
     def _build_prompt(self) -> str:
         """Task text plus the current scalar observations, so a language-conditioned
@@ -265,168 +544,86 @@ class _AnimalAIBase(gym.Env):
             f"Pass mark: {self.pass_mark:+.2f}."
         )
 
-    def _render_topdown(self) -> np.ndarray:
-        img_size = 256
-        scale = img_size / _ARENA_SIZE_M
-        canvas = np.full((img_size, img_size, 3), 240, dtype=np.uint8)
+    def _build_info(self) -> dict:
+        info = {
+            "task_prompt": self._build_prompt(),
+            "arena_name": self.arena_name,
+            "arena_yaml": str(self._arena.path),
+            "pass_mark": self.pass_mark,
+            "episode_step": self.episode_step,
+            "velocity": self._agent_velocity,
+            "agent_xyz": self._agent_xyz,
+        }
+        info.update(self.selector.info(self.global_step))
+        return info
 
-        # Flip z so the +z arena axis points up in the image (Unity-editor-like).
-        def to_px(x: float, z: float) -> tuple[int, int]:
-            return int(round(x * scale)), int(round((_ARENA_SIZE_M - z) * scale))
-
-        cv2.rectangle(canvas, (0, 0), (img_size - 1, img_size - 1), (60, 60, 60), 2)
-
-        for item in self._arena_items:
-            if item["name"] == "Agent":
-                continue
-            # x or z = -1 in the yaml means Unity randomizes the position at
-            # reset; we don't know the actual location, so skip drawing.
-            if item["x"] < 0 or item["z"] < 0:
-                continue
-            cx, cy = to_px(item["x"], item["z"])
-            color = _ITEM_COLORS.get(item["name"], _DEFAULT_ITEM_COLOR)
-            # Goals are spherical in the Unity scene; draw as circles so they
-            # are visually distinct from rectangular zones/walls/boxes.
-            if "Goal" in item["name"]:
-                radius = max(int(0.5 * item["size_x"] * scale), 3)
-                cv2.circle(canvas, (cx, cy), radius, color, cv2.FILLED)
-                cv2.circle(canvas, (cx, cy), radius, (20, 20, 20), 1)
-                continue
-            sx_px = max(item["size_x"] * scale, 3.0)
-            sz_px = max(item["size_z"] * scale, 3.0)
-            # Unity Y-axis rotation is CW from above (in left-handed world);
-            # our z-flipped image preserves "north up" so we pass the raw angle
-            # to cv2 (positive cv2 angle is CW in image after the z flip).
-            rect = ((float(cx), float(cy)), (sx_px, sz_px), item["rotation"])
-            box = np.intp(cv2.boxPoints(rect))
-            transparent = "Transparent" in item["name"]
-            thickness = 1 if transparent else cv2.FILLED
-            cv2.drawContours(canvas, [box], 0, color, thickness)
-
-        if self._agent_xyz is not None:
-            ax, _ay, az = self._agent_xyz
-            apx, apy = to_px(ax, az)
-            radius = max(int(0.6 * scale), 4)
-            cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
-            cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
-
-        header_height = 22
-        header = np.full((header_height, img_size, 3), 215, dtype=np.uint8)
-        if self.arena_name:
-            text = self._render_header_text()
-            max_text_width = img_size - 8
-            font_scale = 0.45
-            (text_width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
-            if text_width > max_text_width:
-                font_scale *= max_text_width / text_width
-            cv2.putText(
-                header,
-                text,
-                (4, 16),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
-                (20, 20, 20),
-                1,
-                cv2.LINE_AA,
-            )
-        return np.vstack([header, canvas])
-
-    def reset(
-        self,
-        seed: int | None,
-        options: dict | None,
-    ) -> tuple[np.ndarray, dict]:
+    def reset(self, seed: int | None, options: dict | None) -> tuple[np.ndarray, dict]:
         super().reset(seed=seed)
         self._ensure_started()
 
-        # `options={"arena_stem": ...}` bypasses the curriculum entirely
-        # (used by scripts/test_trained_agent.py to sweep every arena exactly
-        # once with a frozen policy).
-        forced_stem = (
-            options["arena_stem"] if options is not None and "arena_stem" in options else None
+        # `options={"arena_stem": name}` pins one arena instead of asking the
+        # selector (scripts/collect_probe_data.py repeats a single arena).
+        forced_name = options["arena_stem"] if options is not None else None
+        self._arena = (
+            self._arena_by_name[forced_name]
+            if forced_name is not None
+            else self.selector.next_arena(self.global_step)
         )
-        if forced_stem is not None:
-            self._on_forced_reset()
-            arena_yaml = str(self.competition_dir / f"{forced_stem}.yaml")
-        else:
-            arena_yaml = self._select_arena_yaml()
 
-        self.arena_name = Path(arena_yaml).stem
-        self.pass_mark, self._arena_items = _parse_arena(arena_yaml)
-        self._aai.reset(arenas_configurations=arena_yaml)
+        self.arena_name = self._arena.name
+        self.pass_mark, self._arena_items = _parse_arena(self._arena.path)
+        self._aai.reset(arenas_configurations=str(self._arena.path))
         self.episode_step = 0
         self._episode_return = 0.0
 
         decision_steps, _ = self._aai.get_steps(self._behavior_name)
-        self._latest_image = self._decode_obs(decision_steps.obs[0][0])
-        self._agent_xyz = self._extract_agent_xyz(decision_steps.obs, 0)
-        self._agent_velocity = self._extract_agent_velocity(decision_steps.obs, 0)
-        info = {
-            "task_prompt": self._build_prompt(),
-            "arena_yaml": arena_yaml,
-            "arena_name": self.arena_name,
-            "pass_mark": self.pass_mark,
-            "velocity": self._agent_velocity,
-            "agent_xyz": self._agent_xyz,
-        }
-        info.update(self._reset_info_fields())
-        return self._latest_image, info
+        self._read_observation(decision_steps)
+        return self._latest_image, self._build_info()
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
-        self._on_step()
+        self.global_step += 1
         a = np.asarray(action, dtype=np.float32)
-        discrete = np.array(
-            [[_to_discrete(float(a[0])), _to_discrete(float(a[1]))]], dtype=np.int32
-        )
         action_tuple = ActionTuple(
             continuous=np.zeros((1, 0), dtype=np.float32),
-            discrete=discrete,
+            discrete=np.array(
+                [[_to_discrete(float(a[0])), _to_discrete(float(a[1]))]], dtype=np.int32
+            ),
         )
         self._aai.set_actions(self._behavior_name, action_tuple)
         self._aai.step()
 
         decision_steps, terminal_steps = self._aai.get_steps(self._behavior_name)
         episode_over = len(terminal_steps) > 0
-        if episode_over:
-            # `interrupted` is AAI's max-step (arena `t`) timeout, i.e. a time
-            # limit rather than a real terminal (goal reached / death zone).
-            interrupted = bool(terminal_steps.interrupted[0])
-            reward = float(terminal_steps.reward[0])
-            obs_source = terminal_steps
-        else:
-            interrupted = False
-            reward = float(decision_steps.reward[0])
-            obs_source = decision_steps
-        self._latest_image = self._decode_obs(obs_source.obs[0][0])
-        self._agent_xyz = self._extract_agent_xyz(obs_source.obs, 0)
-        self._agent_velocity = self._extract_agent_velocity(obs_source.obs, 0)
+        # `interrupted` is AAI's max-step (arena `t`) timeout, i.e. a time
+        # limit rather than a real terminal (goal reached / death zone).
+        interrupted = episode_over and bool(terminal_steps.interrupted[0])
+        steps = terminal_steps if episode_over else decision_steps
+        reward = float(steps.reward[0])
+        self._read_observation(steps)
 
         self.episode_step += 1
         self._episode_return += reward
         terminated = episode_over and not interrupted
-        truncated = episode_over and interrupted
+        truncated = interrupted
 
-        info = {
-            "task_prompt": self._build_prompt(),
-            "episode_step": self.episode_step,
-            "arena_name": self.arena_name,
-            "pass_mark": self.pass_mark,
-            "velocity": self._agent_velocity,
-            "agent_xyz": self._agent_xyz,
-        }
-        if terminated or truncated:
-            success = self._episode_return >= self.pass_mark
-            # Pass-mark bonus: reward crossing the clear threshold, penalize missing it.
-            # Computed from the pre-bonus return, then folded into this tick's reward.
-            reward += 1.0 if success else -1.0
-            info["success"] = bool(success)
-            info.update(self._record_episode_end(success))
+        if not episode_over:
+            return self._latest_image, reward, terminated, truncated, self._build_info()
+
+        success = self._episode_return >= self.pass_mark
+        # Pass-mark bonus: reward crossing the clear threshold, penalize missing it.
+        # Computed from the pre-bonus return, then folded into this tick's reward.
+        reward += 1.0 if success else -1.0
+        # Before _build_info, so the selector reports post-episode progress.
+        self.selector.on_episode_end(self._arena, success)
+        info = self._build_info()
+        info["success"] = bool(success)
         return self._latest_image, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
         if self.render_mode != "rgb_array":
             return None
-        return self._render_topdown()
+        header = f"{self.arena_name}  {self.selector.status(self.global_step)}"
+        return _render_topdown(self._arena_items, self._agent_xyz, header)
 
     def close(self):
         if self._aai is not None:
@@ -434,228 +631,21 @@ class _AnimalAIBase(gym.Env):
             self._aai = None
 
 
-class AnimalAIEnv(_AnimalAIBase):
-    """Success-driven progression/revisit curriculum over all 900 arenas.
-
-    A pointer walks the flat, sorted list of every XX-YY-ZZ arena. On success
-    the current yaml is added to `_cleared_arenas` and the pointer advances
-    past any yamls already cleared. On failure the pointer stays. Each reset
-    alternates between progression and revisit modes once any arena has been
-    cleared. Revisits sample a cleared arena with probability
-    softmax(failure_rate / revisit_temperature).
-    """
-
-    def __init__(
-        self,
-        resolution: int,
-        seed: int,
-        base_port: int,
-        revisit_temperature: float,
-    ):
-        super().__init__(resolution=resolution, seed=seed, base_port=base_port)
-        self.revisit_temperature = revisit_temperature
-        self._next_yaml_idx = 0
-        self._cleared_arenas: set[str] = set()
-        self._is_revisit = False
-        # Per-arena episode counts over every attempt (progression and revisit).
-        self._arena_attempts: dict[str, int] = dict.fromkeys(self._all_arenas, 0)
-        self._arena_successes: dict[str, int] = dict.fromkeys(self._all_arenas, 0)
-
-    def _current_progression_stem(self) -> str:
-        idx = min(self._next_yaml_idx, len(self._all_arenas) - 1)
-        return self._all_arenas[idx]
-
-    def _current_yaml_path(self) -> str:
-        return str(self.competition_dir / f"{self._current_progression_stem()}.yaml")
-
-    def _advance_progression(self) -> None:
-        """Move the progression pointer past any yamls already in cleared."""
-        n = len(self._all_arenas)
-        while (
-            self._next_yaml_idx < n
-            and self._all_arenas[self._next_yaml_idx] in self._cleared_arenas
-        ):
-            self._next_yaml_idx += 1
-
-    def _success_rate(self, arena_stem: str) -> float:
-        """Success rate over all attempts. Cleared arenas always have >=1 attempt."""
-        return self._arena_successes[arena_stem] / self._arena_attempts[arena_stem]
-
-    def get_curriculum_state(self) -> dict:
-        """Curriculum snapshot for resume: per-arena attempt/success counts
-        (attempted arenas only) plus the progression/revisit alternation flag."""
-        attempts = {k: v for k, v in self._arena_attempts.items() if v > 0}
-        successes = {k: self._arena_successes[k] for k in attempts}
-        return {
-            "arena_attempts": attempts,
-            "arena_successes": successes,
-            "is_revisit": self._is_revisit,
-        }
-
-    def set_curriculum_state(
-        self, arena_attempts: dict, arena_successes: dict, is_revisit: bool
-    ) -> None:
-        """Restore the curriculum from a previous run. Cleared arenas and the
-        progression pointer are recomputed from the success counts (an arena is
-        cleared iff it has ever succeeded). Arena names unknown to the current
-        competition directory are ignored."""
-        known = set(self._all_arenas)
-        self._arena_attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
-        self._arena_successes.update({k: int(v) for k, v in arena_successes.items() if k in known})
-        self._is_revisit = bool(is_revisit)
-        self._cleared_arenas = {k for k, v in self._arena_successes.items() if v > 0}
-        self._next_yaml_idx = 0
-        self._advance_progression()
-
-    def _select_arena_yaml(self) -> str:
-        """Curriculum arena choice: alternate progression / revisit each reset."""
-        all_done = self._next_yaml_idx >= len(self._all_arenas)
-        if not self._cleared_arenas:
-            self._is_revisit = False
-        elif all_done:
-            self._is_revisit = True
-        else:
-            self._is_revisit = not self._is_revisit
-        if not self._is_revisit:
-            return self._current_yaml_path()
-        stems = sorted(self._cleared_arenas)
-        failures = np.array([1.0 - self._success_rate(stem) for stem in stems], dtype=np.float64)
-        logits = failures / self.revisit_temperature
-        weights = np.exp(logits - logits.max())
-        probs = weights / weights.sum()
-        arena_stem = stems[int(self.np_random.choice(len(stems), p=probs))]
-        return str(self.competition_dir / f"{arena_stem}.yaml")
-
-    def _on_forced_reset(self) -> None:
-        self._is_revisit = False
-
-    def _on_step(self) -> None:
-        pass
-
-    def _record_episode_end(self, success: bool) -> dict:
-        self._arena_attempts[self.arena_name] += 1
-        self._arena_successes[self.arena_name] += int(success)
-        if self._is_revisit:
-            advanced = False
-        else:
-            before = self._next_yaml_idx
-            if success:
-                self._cleared_arenas.add(self.arena_name)
-                self._advance_progression()
-            advanced = self._next_yaml_idx != before
-        return {"advanced": advanced, "cleared_count": len(self._cleared_arenas)}
-
-    def _reset_info_fields(self) -> dict:
-        return {"cleared_count": len(self._cleared_arenas), "is_revisit": self._is_revisit}
-
-    def _render_header_text(self) -> str:
-        tag = " R" if self._is_revisit else ""
-        return (
-            f"{self.arena_name}  cleared:{len(self._cleared_arenas)}/{len(self._all_arenas)}{tag}"
-        )
-
-
-class AnimalAIStagedEnv(_AnimalAIBase):
-    """Cumulative 10-stage Testbed curriculum (paper Section 4.1.3), on the
-    paper's own training arenas (Kinds-of-Intelligence-CFI/aai3-paper-
-    experiments, split by scripts/split_paper_curriculum.py into
-    paper_curriculum_split/). These don't overlap with the 900 official
-    Testbed configs used for eval.
-
-    Stage i (0..9) trains on levels 1..(i+1)'s arenas. Each stage runs for
-    `steps_per_stage` steps; once the last stage (index 9, all 10 levels) is
-    reached, its arena set stays in use for the rest of training (scripts/
-    train.py's own step_limit stops training -- the paper's "further five
-    million steps on the last stage" is just the tail of that same phase).
-    """
-
-    # Tasks per level in the Animal-AI Testbed (Table 2) -- also how many new
-    # arenas scripts/split_paper_curriculum.py writes into each stageNN dir.
-    _TASKS_PER_LEVEL = 30
-
-    def __init__(self, resolution: int, seed: int, base_port: int, steps_per_stage: int):
-        super().__init__(resolution=resolution, seed=seed, base_port=base_port)
-        self.steps_per_stage = steps_per_stage
-        self._stage_arenas: list[list[str]] = self._discover_stage_arenas()
-        self._current_arena_origin_stage: int | None = None
-        self._global_step = 0
-
-    def _discover_stage_arenas(self) -> list[list[str]]:
-        """Cumulative arena list per stage.
-
-        Each stageNN directory (see scripts/split_paper_curriculum.py) holds
-        only that stage's *new* arenas, so stage i's training set is the
-        concatenation of stage00..stageNN(i)'s arenas, not stageNN(i) alone.
-        """
-        split_dir = Path("external/animal-ai/configs/paper_curriculum_split")
-        stage_dirs = sorted(split_dir.glob("stage*"))
-        if not stage_dirs:
-            raise ValueError(
-                f"no stageNN directories found under {split_dir}; "
-                "run scripts/split_paper_curriculum.py first"
-            )
-        cumulative: list[str] = []
-        stages: list[list[str]] = []
-        for stage_dir in stage_dirs:
-            new_arenas = sorted(str(p) for p in stage_dir.glob("arena*.yaml"))
-            cumulative = cumulative + new_arenas
-            stages.append(cumulative)
-        return stages
-
-    def set_global_step(self, global_step: int) -> None:
-        """Resume hook: called once after loading a checkpoint (see
-        scripts/train.py's analogous `set_curriculum_state` for AnimalAIEnv)."""
-        self._global_step = int(global_step)
-
-    def _current_stage_index(self) -> int:
-        n_stages = len(self._stage_arenas)
-        return min(self._global_step // self.steps_per_stage, n_stages - 1)
-
-    def _select_arena_yaml(self) -> str:
-        stage = self._current_stage_index()
-        arenas = self._stage_arenas[stage]
-        index = int(self.np_random.integers(len(arenas)))
-        self._current_arena_origin_stage = index // self._TASKS_PER_LEVEL
-        return arenas[index]
-
-    def _on_forced_reset(self) -> None:
-        self._current_arena_origin_stage = None
-
-    def _on_step(self) -> None:
-        self._global_step += 1
-
-    def _record_episode_end(self, success: bool) -> dict:
-        return {"stage": self._current_stage_index(), "global_step": self._global_step}
-
-    def _reset_info_fields(self) -> dict:
-        return {"stage": self._current_stage_index(), "global_step": self._global_step}
-
-    def _render_header_text(self) -> str:
-        origin = (
-            f"L{self._current_arena_origin_stage + 1}-{self.arena_name}"
-            if self._current_arena_origin_stage is not None
-            else self.arena_name
-        )
-        return f"{origin}  stage:{self._current_stage_index() + 1}/{len(self._stage_arenas)}  step:{self._global_step}"
-
-
 if __name__ == "__main__":
-    env = AnimalAIEnv(resolution=96, seed=0, base_port=5005, revisit_temperature=1.0)
-    for ep in range(8):
-        obs, info = env.reset(seed=ep, options=None)
-        print(
-            f"ep={ep} arena={info['arena_name']} "
-            f"revisit={info['is_revisit']} cleared={info['cleared_count']}"
-        )
+    env = AnimalAIEnv(
+        resolution=96,
+        seed=0,
+        base_port=5005,
+        selector=StagedSelector(steps_per_stage=2_000_000, seed=0),
+    )
+    for episode in range(8):
+        obs, info = env.reset(seed=episode, options=None)
+        print(f"ep={episode} arena={info['arena_name']} stage={info['stage']}")
         total_reward = 0.0
-        for i in range(20):
-            action = env.action_space.sample()
-            obs, reward, terminated, truncated, info = env.step(action)
+        for _ in range(20):
+            obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
             total_reward += reward
             if terminated or truncated:
                 break
-        print(
-            f"  return={total_reward:.4f} success={info.get('success')} "
-            f"advanced={info.get('advanced')}"
-        )
+        print(f"  return={total_reward:.4f} success={info.get('success')}")
     env.close()

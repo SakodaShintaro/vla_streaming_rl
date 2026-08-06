@@ -1,16 +1,29 @@
 # @package _global_
 env_id: AnimalAI-v0
-step_limit: 2_000_000
+# Only bounds the two training modes. "eval" instead ends when all 900 arenas
+# have run (scripts/test_trained_agent.py loops until the env is exhausted).
+# For "staged": stages 1-10 take steps_per_stage each and stage 11 runs out the
+# remainder, so the paper's 2M x 10 + 5M = 25M is step_limit == 12.5 x
+# steps_per_stage; the values below keep that ratio at 1/1000 scale.
+step_limit: 25_000
 image_save_interval: 20
 
-# Curriculum: each reset has 50% chance of trying the next uncleared yaml in
-# index order (progression) and 50% chance of picking a random already-cleared
-# yaml (revisit). A yaml is "cleared" the first time the agent succeeds on it.
-# Revisits sample a cleared yaml with probability softmax(failure_rate /
-# revisit_temperature); lower temperature concentrates on the worst arenas.
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_env
   # - resolution: square camera height/width (kept divisible by the VAE stride 8).
   resolution: 96
-  # - revisit_temperature: softmax temperature over per-arena failure rate.
+  # - mode: which arenas each episode is drawn from, and in what order.
+  #     staged  : train on external/animal-ai/configs/paper_curriculum_split/
+  #               with the Animal-AI paper's cumulative 11-stage curriculum.
+  #     success : train on the same arenas, alternating between the next
+  #               uncleared one and revisiting one already passed.
+  #     eval    : run each of the 900 external/animal-ai/configs/competition/
+  #               arenas once, in order (the paper's Testbed protocol).
+  #   Training arenas and competition arenas are disjoint, so "eval" never
+  #   scores an arena either training mode has seen.
+  mode: staged
+  # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
+  steps_per_stage: 2_000
+  # - revisit_temperature ("success"): softmax temperature over per-arena
+  #   failure rate; lower concentrates revisits on the weakest arenas.
   revisit_temperature: 1.0

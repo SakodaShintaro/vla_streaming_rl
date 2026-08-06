@@ -3,7 +3,9 @@
 
 Loads a trained checkpoint (weights only), then sweeps every XX-YY-ZZ.yaml
 arena under external/animal-ai/configs/competition/ in order, one episode
-each, with the network in eval mode and no optimizer step ever taken.
+each, with the network in eval mode and no optimizer step ever taken. The
+sweep order and its end come from the env's SequentialSelector, so run this
+with `env=animalai env_factory.mode=eval`.
 """
 
 import logging
@@ -42,8 +44,10 @@ def load_checkpoint_weights(checkpoint_dir: Path, network: torch.nn.Module) -> N
     print(f"Loaded {len(trainable_state)} weight tensors from {checkpoint_path}")
 
 
-def run_arena(agent, env, seed: int, arena_stem: str) -> tuple[bool, float]:
-    obs, reset_info = env.reset(seed=seed, options={"arena_stem": arena_stem})
+def run_arena(agent, env, seed: int) -> tuple[str, bool, float]:
+    """Play the next arena the env serves; return its (name, passed, score)."""
+    obs, reset_info = env.reset(seed=seed, options=None)
+    arena_name = reset_info["arena_name"]
     result = agent.select_action(0, obs, 0.0, False, False, reset_info)
     action = result.action
 
@@ -56,7 +60,7 @@ def run_arena(agent, env, seed: int, arena_stem: str) -> tuple[bool, float]:
 
     score = env_info["episode"]["r"]
     success = bool(score >= env_info["pass_mark"])
-    return success, score
+    return arena_name, success, score
 
 
 def main(args: DictConfig, result_dir: Path) -> None:
@@ -84,8 +88,9 @@ def main(args: DictConfig, result_dir: Path) -> None:
     load_checkpoint_weights(Path(args.resume_dir), network)
     network.eval()
 
-    arena_stems = env.unwrapped._all_arenas
-    print(f"Running {len(arena_stems)} arenas, 1 episode each.")
+    selector = env.unwrapped.selector
+    arena_count = len(selector.arenas)
+    print(f"Running {arena_count} arenas, 1 episode each.")
 
     result_path = result_dir / "test_result.tsv"
     level_attempts: dict[str, int] = {}
@@ -93,20 +98,20 @@ def main(args: DictConfig, result_dir: Path) -> None:
     with open(result_path, "w") as f:
         f.write("arena\tsuccess\tscore\n")
         success_count = 0
-        for i, arena_stem in enumerate(arena_stems):
-            success, score = run_arena(agent, env, seed, arena_stem)
+        while not selector.is_exhausted:
+            arena_name, success, score = run_arena(agent, env, seed)
             success_count += int(success)
-            level = arena_stem.split("-")[0]
+            # Competition arenas are named XX-YY-ZZ (level-task-variant).
+            level = arena_name.split("-")[0]
             level_attempts[level] = level_attempts.get(level, 0) + 1
             level_successes[level] = level_successes.get(level, 0) + int(success)
-            f.write(f"{arena_stem}\t{int(success)}\t{score:.6f}\n")
+            f.write(f"{arena_name}\t{int(success)}\t{score:.6f}\n")
             f.flush()
-            print(
-                f"[{i + 1}/{len(arena_stems)}] {arena_stem}\tsuccess={int(success)}\tscore={score:.2f}"
-            )
+            done = sum(level_attempts.values())
+            print(f"[{done}/{arena_count}] {arena_name}\tsuccess={int(success)}\tscore={score:.2f}")
 
-    print(f"Cleared {success_count}/{len(arena_stems)} arenas.")
-    summary_lines = [f"cleared: {success_count}/{len(arena_stems)}"]
+    print(f"Cleared {success_count}/{arena_count} arenas.")
+    summary_lines = [f"cleared: {success_count}/{arena_count}"]
     for level in sorted(level_attempts):
         n_success = level_successes[level]
         n_attempt = level_attempts[level]
