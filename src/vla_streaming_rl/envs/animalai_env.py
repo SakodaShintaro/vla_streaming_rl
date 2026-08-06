@@ -313,12 +313,18 @@ class _AnimalAIBase(gym.Env):
         header_height = 22
         header = np.full((header_height, img_size, 3), 215, dtype=np.uint8)
         if self.arena_name:
+            text = self._render_header_text()
+            max_text_width = img_size - 8
+            font_scale = 0.45
+            (text_width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
+            if text_width > max_text_width:
+                font_scale *= max_text_width / text_width
             cv2.putText(
                 header,
-                self._render_header_text(),
+                text,
                 (4, 16),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
+                font_scale,
                 (20, 20, 20),
                 1,
                 cv2.LINE_AA,
@@ -550,51 +556,44 @@ class AnimalAIEnv(_AnimalAIBase):
 
 
 class AnimalAIStagedEnv(_AnimalAIBase):
-    """Cumulative 11-stage curriculum reproducing the Animal-AI Environment
-    paper's Testbed protocol (Section 4.1.3).
+    """Cumulative 10-stage Testbed curriculum (paper Section 4.1.3), on the
+    paper's own training arenas (Kinds-of-Intelligence-CFI/aai3-paper-
+    experiments, split by scripts/split_paper_curriculum.py into
+    paper_curriculum_split/). These don't overlap with the 900 official
+    Testbed configs used for eval.
 
-    Stage i (0-indexed, 0..9) trains on `train_variant_count` of the 3
-    variants of every task in levels 1..(i+1). Each of the first 9 stages
-    runs for `steps_per_stage` steps; the final stage (index 9, all 10
-    levels) then runs for the remainder of `step_limit` (the paper's "extra
-    5M steps on the last stage" is simply the tail of this same phase, since
-    the arena set does not change again). Training only ever samples the
-    reserved `train_variant_count` variants per task -- the remaining
-    variants (and, if `train_variant_count == 1`, the majority of the
-    Testbed) are held out for the frozen 900-arena evaluation sweep in
-    scripts/test_trained_agent.py.
+    Stage i (0..9) trains on levels 1..(i+1)'s arenas. Each stage runs for
+    `steps_per_stage` steps; once the last stage (index 9, all 10 levels) is
+    reached, its arena set stays in use for the rest of training (scripts/
+    train.py's own step_limit stops training -- the paper's "further five
+    million steps on the last stage" is just the tail of that same phase).
     """
 
-    def __init__(
-        self,
-        resolution: int,
-        seed: int,
-        base_port: int,
-        train_variant_count: int,
-        steps_per_stage: int,
-    ):
+    def __init__(self, resolution: int, seed: int, base_port: int, steps_per_stage: int):
         super().__init__(resolution=resolution, seed=seed, base_port=base_port)
-        n_variants = self.arena_sets.shape[2]
-        if not (1 <= train_variant_count < n_variants):
-            raise ValueError(
-                f"train_variant_count must be in [1, {n_variants - 1}], got {train_variant_count}"
-            )
-        self.train_variant_count = train_variant_count
         self.steps_per_stage = steps_per_stage
-        self._stage_arenas: list[list[str]] = self._build_stage_arenas()
+        self._stage_arenas: list[list[str]] = self._discover_stage_arenas()
         self._global_step = 0
 
-    def _build_stage_arenas(self) -> list[list[str]]:
-        n_levels, n_tasks, _n_variants = self.arena_sets.shape
-        stages = []
-        for stage_i in range(n_levels):
-            arenas = [
-                self.arena_sets[lv, tk, vr]
-                for lv in range(stage_i + 1)
-                for tk in range(n_tasks)
-                for vr in range(self.train_variant_count)
-            ]
-            stages.append(arenas)
+    def _discover_stage_arenas(self) -> list[list[str]]:
+        """Cumulative arena list per stage.
+
+        Each stageNN directory (see scripts/split_paper_curriculum.py) holds
+        only that stage's *new* arenas, so stage i's training set is the
+        concatenation of stage00..stageNN(i)'s arenas, not stageNN(i) alone.
+        """
+        split_dir = Path("external/animal-ai/configs/paper_curriculum_split")
+        stage_dirs = sorted(split_dir.glob("stage*"))
+        if not stage_dirs:
+            raise ValueError(
+                f"no stageNN directories found under {split_dir}; "
+                "run scripts/split_paper_curriculum.py first"
+            )
+        cumulative: list[str] = []
+        stages: list[list[str]] = []
+        for stage_dir in stage_dirs:
+            cumulative = cumulative + sorted(str(p) for p in stage_dir.glob("arena*.yaml"))
+            stages.append(cumulative)
         return stages
 
     def set_global_step(self, global_step: int) -> None:
@@ -609,8 +608,7 @@ class AnimalAIStagedEnv(_AnimalAIBase):
     def _select_arena_yaml(self) -> str:
         stage = self._current_stage_index()
         arenas = self._stage_arenas[stage]
-        arena_stem = arenas[int(self.np_random.integers(len(arenas)))]
-        return str(self.competition_dir / f"{arena_stem}.yaml")
+        return arenas[int(self.np_random.integers(len(arenas)))]
 
     def _on_forced_reset(self) -> None:
         pass

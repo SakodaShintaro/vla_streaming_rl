@@ -27,6 +27,6 @@ uv run python scripts/train.py \
   batch_size=16 \
   actor_lr=1e-5 \
   critic_lr=1e-5 \
-  env=animalai \
+  env=animalai_staged \
   exp_name=${exp_name} \
   resume_dir=null \

@@ -15,6 +15,4 @@ env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_staged_env
   # - resolution: square camera height/width (kept divisible by the VAE stride 8).
   resolution: 96
-  # - train_variant_count: how many of each task's 3 variants are trained on (1 or 2).
-  train_variant_count: 1
   steps_per_stage: 2_000

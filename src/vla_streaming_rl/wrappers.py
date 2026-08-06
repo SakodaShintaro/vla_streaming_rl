@@ -37,16 +37,13 @@ def make_animalai_env(resolution: int, revisit_temperature: float) -> gym.Env:
     )
 
 
-def make_animalai_staged_env(
-    resolution: int, train_variant_count: int, steps_per_stage: int
-) -> gym.Env:
+def make_animalai_staged_env(resolution: int, steps_per_stage: int) -> gym.Env:
     from vla_streaming_rl.envs.animalai_env import AnimalAIStagedEnv
 
     return AnimalAIStagedEnv(
         resolution=resolution,
         seed=0,
         base_port=5005,
-        train_variant_count=train_variant_count,
         steps_per_stage=steps_per_stage,
     )
 
