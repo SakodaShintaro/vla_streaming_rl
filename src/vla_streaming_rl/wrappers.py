@@ -27,13 +27,18 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
 
 
 def make_animalai_env(
-    resolution: int, mode: str, steps_per_stage: int, revisit_temperature: float
+    resolution: int,
+    mode: str,
+    train_arena_root: str,
+    steps_per_stage: int,
+    revisit_temperature: float,
 ) -> gym.Env:
     """`mode` selects staged / success / eval; see animalai_env's module docstring."""
     from vla_streaming_rl.envs.animalai_env import AnimalAIEnv, build_selector
 
     selector = build_selector(
         mode=mode,
+        train_arena_root=train_arena_root,
         steps_per_stage=steps_per_stage,
         revisit_temperature=revisit_temperature,
         seed=0,

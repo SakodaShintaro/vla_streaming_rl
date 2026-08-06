@@ -13,8 +13,8 @@ env_factory:
   # - resolution: square camera height/width (kept divisible by the VAE stride 8).
   resolution: 96
   # - mode: which arenas each episode is drawn from, and in what order.
-  #     staged  : train on external/animal-ai/configs/paper_curriculum_split/
-  #               with the Animal-AI paper's cumulative 11-stage curriculum.
+  #     staged  : train with the Animal-AI paper's cumulative 11-stage
+  #               curriculum, one stage per subdirectory of train_arena_root.
   #     success : train on the same arenas, alternating between the next
   #               uncleared one and revisiting one already passed.
   #     eval    : run each of the 900 external/animal-ai/configs/competition/
@@ -22,6 +22,12 @@ env_factory:
   #   Training arenas and competition arenas are disjoint, so "eval" never
   #   scores an arena either training mode has seen.
   mode: staged
+  # - train_arena_root: where the two training modes read their arenas from,
+  #   recursively. Point it at an augmented copy to train on a larger set; the
+  #   per-stage count then follows whatever is on disk (30 as split, 60 once
+  #   mirrored copies sit alongside). "eval" ignores this and always uses the
+  #   competition arenas, so the benchmark cannot drift.
+  train_arena_root: ./external/animal-ai/configs/paper_curriculum_split
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 2_000
   # - revisit_temperature ("success"): softmax temperature over per-arena
