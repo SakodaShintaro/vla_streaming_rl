@@ -80,7 +80,7 @@ class Vjepa2Encoder(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = F.interpolate(x, size=(self.resolution, self.resolution), mode="bilinear")
         x = (x - IMAGENET_MEAN.to(x.device)) / IMAGENET_STD.to(x.device)
-        clip = x.unsqueeze(2).repeat(1, 1, self.tubelet_size, 1, 1)  # (B, 3, T=tubelet_size, H, W)
+        clip = x.unsqueeze(1).repeat(1, self.tubelet_size, 1, 1, 1)  # (B, T=tubelet_size, 3, H, W)
         tokens = self.model(pixel_values_videos=clip).last_hidden_state  # (B, grid*grid, C)
         b, _, c = tokens.shape
         return tokens.transpose(1, 2).reshape(b, c, self.grid_size, self.grid_size)
@@ -177,3 +177,31 @@ class ImageProcessor(nn.Module):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         return self.projection(self.backbone.encode(x))  # (B, C, H, W)
+
+
+if __name__ == "__main__":
+    import time
+
+    device = "cuda"
+    measure_speed = True
+    speed_iters = 10
+    x = torch.zeros(1, 3, 96, 96, device=device)
+
+    for name, encoder_class in IMAGE_ENCODERS.items():
+        encoder = encoder_class().eval().requires_grad_(False).to(device)
+        param_num = sum(p.numel() for p in encoder.parameters())
+        with torch.inference_mode():
+            output = encoder.encode(x)
+        print(f"{name}: params={param_num:,} output_shape={tuple(output.shape)}")
+
+        if measure_speed:
+            with torch.inference_mode():
+                for _ in range(3):
+                    encoder.encode(x)
+                torch.cuda.synchronize()
+                start_time = time.perf_counter()
+                for _ in range(speed_iters):
+                    encoder.encode(x)
+                torch.cuda.synchronize()
+                elapsed_time = time.perf_counter() - start_time
+            print(f"{name}: {elapsed_time / speed_iters * 1000:.2f} ms/iter")
