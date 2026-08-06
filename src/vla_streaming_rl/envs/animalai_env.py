@@ -112,12 +112,16 @@ class Arena:
 
 def _arenas_in(directory: Path, label_root: Path) -> list[Arena]:
     """Arena yamls under `directory`, labelled by their path relative to
-    `label_root` (minus the suffix): "01-01-01" for a flat set,
-    "stage00/arena000" for a stage-split one, where the bare filename would
-    repeat across stage dirs for unrelated tasks."""
+    `label_root`: "01-01-01" for a flat set, "stage00-arena000" for a
+    stage-split one, where the bare filename would repeat across stage dirs
+    for unrelated tasks. Directories are joined with "-" rather than "/"
+    because the label is used to name per-arena files (train.py writes a
+    video per arena) and wandb metrics."""
     paths = sorted(directory.rglob("*.yaml"))
     assert paths, f"no arena yamls under {directory}"
-    return [Arena(path, str(path.relative_to(label_root).with_suffix(""))) for path in paths]
+    return [
+        Arena(path, "-".join(path.relative_to(label_root).with_suffix("").parts)) for path in paths
+    ]
 
 
 def _arenas_under(root: Path) -> list[Arena]:
@@ -209,12 +213,7 @@ class StagedSelector(ArenaSelector):
         return {"stage": self._stage_index(global_step) + 1}
 
     def status(self, global_step: int) -> str:
-        # Arena count included so a run's logs record which arena set was used
-        # (e.g. 300 as split vs 600 with mirrored copies).
-        return (
-            f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}"
-            f"  arenas:{len(self.arenas)}"
-        )
+        return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}  step:{global_step}"
 
 
 class SuccessDrivenSelector(ArenaSelector):
