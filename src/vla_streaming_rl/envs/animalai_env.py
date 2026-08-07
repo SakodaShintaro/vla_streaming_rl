@@ -148,15 +148,20 @@ def _stages_under(root: Path) -> list[list[Arena]]:
 
 
 class ArenaSelector:
-    """Picks the arena each episode runs, and owns whatever progress that
-    choice depends on.
+    """Picks the arena each episode runs, and counts how each one has gone.
 
     `arenas` is every arena this selector can serve: `AnimalAIEnv` boots Unity
     on the first of them and resolves `options={"arena_stem": ...}` against
-    their names.
+    their names. Per-arena attempt/success counts are kept for every mode, so
+    the curriculum-progress panel and the resume snapshot do not depend on
+    which selector is running.
     """
 
-    arenas: list[Arena]
+    def __init__(self, arenas: list[Arena]):
+        self.arenas = arenas
+        names = [arena.name for arena in arenas]
+        self._attempts = dict.fromkeys(names, 0)
+        self._successes = dict.fromkeys(names, 0)
 
     @property
     def is_exhausted(self) -> bool:
@@ -167,7 +172,25 @@ class ArenaSelector:
         raise NotImplementedError
 
     def on_episode_end(self, arena: Arena, success: bool) -> None:
-        """Progress bookkeeping. Selectors without progress do nothing."""
+        """Record the attempt. Curricula extend this to advance themselves."""
+        self._attempts[arena.name] += 1
+        self._successes[arena.name] += int(success)
+
+    def progress_by_group(self) -> list[tuple[str, int, int, int]]:
+        """(group, cleared, failed, untried) per arena group, in group order.
+
+        `cleared` counts arenas passed at least once, `failed` ones attempted
+        without ever passing, `untried` ones never run. The group is the arena
+        label's first "-" separated token, which is the stage directory for a
+        split curriculum ("stage00-arena000" -> "stage00") and the level for
+        the competition set ("01-01-01" -> "01").
+        """
+        counts: dict[str, list[int]] = {}
+        for arena in self.arenas:
+            group = counts.setdefault(arena.name.split("-")[0], [0, 0, 0])
+            attempts, successes = self._attempts[arena.name], self._successes[arena.name]
+            group[0 if successes else (1 if attempts else 2)] += 1
+        return [(group, *counts[group]) for group in sorted(counts)]
 
     def info(self, global_step: int) -> dict:
         """Selector-specific fields merged into each reset/step info dict."""
@@ -178,11 +201,19 @@ class ArenaSelector:
         raise NotImplementedError
 
     def state(self) -> dict:
-        """Resume snapshot; selectors without progress restore to a fresh run."""
-        return {"arena_attempts": {}, "arena_successes": {}, "is_revisit": False}
+        """Resume snapshot: attempted arenas only, so the file stays small."""
+        attempts = {name: n for name, n in self._attempts.items() if n > 0}
+        return {
+            "arena_attempts": attempts,
+            "arena_successes": {name: self._successes[name] for name in attempts},
+            "is_revisit": False,
+        }
 
     def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
-        """Restore a `state()` snapshot. Selectors without progress ignore it."""
+        """Restore a `state()` snapshot, dropping arenas this set does not have."""
+        known = set(self._attempts)
+        self._attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
+        self._successes.update({k: int(v) for k, v in arena_successes.items() if k in known})
 
 
 class StagedSelector(ArenaSelector):
@@ -197,8 +228,8 @@ class StagedSelector(ArenaSelector):
 
     def __init__(self, root: Path, steps_per_stage: int, seed: int):
         stages = _stages_under(root)
+        super().__init__(stages[-1])
         self._stages = stages + [stages[-1]]
-        self.arenas = stages[-1]
         self.steps_per_stage = steps_per_stage
         self._rng = np.random.default_rng(seed)
 
@@ -228,14 +259,12 @@ class SuccessDrivenSelector(ArenaSelector):
     """
 
     def __init__(self, root: Path, revisit_temperature: float, seed: int):
-        self.arenas = _arenas_under(root)
+        super().__init__(_arenas_under(root))
         self.revisit_temperature = revisit_temperature
         self._by_name = {arena.name: arena for arena in self.arenas}
         self._rng = np.random.default_rng(seed)
         self._next_index = 0
         self._cleared: set[str] = set()
-        self._attempts = dict.fromkeys(self._by_name, 0)
-        self._successes = dict.fromkeys(self._by_name, 0)
         self._is_revisit = False
         self._advanced = False
 
@@ -270,8 +299,7 @@ class SuccessDrivenSelector(ArenaSelector):
         return self.arenas[min(self._next_index, len(self.arenas) - 1)]
 
     def on_episode_end(self, arena: Arena, success: bool) -> None:
-        self._attempts[arena.name] += 1
-        self._successes[arena.name] += int(success)
+        super().on_episode_end(arena, success)
         before = self._next_index
         if success and not self._is_revisit:
             self._cleared.add(arena.name)
@@ -290,20 +318,12 @@ class SuccessDrivenSelector(ArenaSelector):
         return f"cleared:{len(self._cleared)}/{len(self.arenas)}{revisit_tag}"
 
     def state(self) -> dict:
-        attempts = {name: n for name, n in self._attempts.items() if n > 0}
-        return {
-            "arena_attempts": attempts,
-            "arena_successes": {name: self._successes[name] for name in attempts},
-            "is_revisit": self._is_revisit,
-        }
+        return {**super().state(), "is_revisit": self._is_revisit}
 
     def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
         # An arena is cleared iff it has ever succeeded, so the pointer is
-        # rebuilt from the counts rather than stored. Unknown names (a
-        # different arena set) are dropped.
-        known = set(self._by_name)
-        self._attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
-        self._successes.update({k: int(v) for k, v in arena_successes.items() if k in known})
+        # rebuilt from the restored counts rather than stored.
+        super().load_state(arena_attempts, arena_successes, is_revisit)
         self._is_revisit = bool(is_revisit)
         self._cleared = {name for name, n in self._successes.items() if n > 0}
         self._next_index = 0
@@ -319,7 +339,7 @@ class SequentialSelector(ArenaSelector):
     """
 
     def __init__(self, root: Path):
-        self.arenas = _arenas_under(root)
+        super().__init__(_arenas_under(root))
         self._next_index = 0
 
     @property
@@ -393,10 +413,10 @@ _RENDER_SIZE_PX = 256
 _HEADER_HEIGHT_PX = 22
 
 
-def _draw_header(text: str) -> np.ndarray:
-    header = np.full((_HEADER_HEIGHT_PX, _RENDER_SIZE_PX, 3), 215, dtype=np.uint8)
+def _draw_header(text: str, width_px: int) -> np.ndarray:
+    header = np.full((_HEADER_HEIGHT_PX, width_px, 3), 215, dtype=np.uint8)
     font_scale = 0.45
-    max_width = _RENDER_SIZE_PX - 8
+    max_width = width_px - 8
     (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
     # Shrink rather than let a long status run off the right edge.
     font_scale *= min(1.0, max_width / width)
@@ -404,6 +424,67 @@ def _draw_header(text: str) -> np.ndarray:
         header, text, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (20, 20, 20), 1, cv2.LINE_AA
     )
     return header
+
+
+_PROGRESS_ROW_PX = 22
+_PROGRESS_LABEL_PX = 76
+_PROGRESS_LEGEND_PX = 22
+# cleared / attempted-but-never-passed / never attempted.
+_PROGRESS_COLORS = ((60, 170, 60), (205, 75, 75), (205, 205, 205))
+_PROGRESS_LEGEND = ("pass", "fail", "n/a")
+
+
+def _render_progress(groups: list[tuple[str, int, int, int]]) -> np.ndarray:
+    """One stacked horizontal bar per arena group (see
+    `ArenaSelector.progress_by_group`): what share of it the agent has ever
+    passed, tried without passing, and not yet been given."""
+    height = _HEADER_HEIGHT_PX + _PROGRESS_ROW_PX * len(groups) + _PROGRESS_LEGEND_PX
+    canvas = np.full((height, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
+    passed = sum(group[1] for group in groups)
+    total = sum(sum(group[1:]) for group in groups)
+    canvas[:_HEADER_HEIGHT_PX] = _draw_header(f"passed:{passed}/{total}", _RENDER_SIZE_PX)
+
+    bar_x = _PROGRESS_LABEL_PX
+    bar_width = _RENDER_SIZE_PX - bar_x - 6
+    for row, (name, *counts) in enumerate(groups):
+        top = _HEADER_HEIGHT_PX + row * _PROGRESS_ROW_PX
+        cv2.putText(
+            canvas,
+            name,
+            (4, top + 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            (20, 20, 20),
+            1,
+            cv2.LINE_AA,
+        )
+        # Walk cumulative counts so the segments always tile the bar exactly.
+        left = bar_x
+        filled = 0
+        for count, color in zip(counts, _PROGRESS_COLORS):
+            filled += count
+            right = bar_x + round(bar_width * filled / sum(counts))
+            if right > left:
+                cv2.rectangle(canvas, (left, top + 3), (right, top + 18), color, cv2.FILLED)
+            left = right
+
+    legend_top = height - _PROGRESS_LEGEND_PX
+    for i, (label, color) in enumerate(zip(_PROGRESS_LEGEND, _PROGRESS_COLORS)):
+        swatch_x = 6 + i * 84
+        cv2.rectangle(
+            canvas, (swatch_x, legend_top + 6), (swatch_x + 14, legend_top + 16), color, cv2.FILLED
+        )
+        cv2.putText(
+            canvas,
+            label,
+            (swatch_x + 18, legend_top + 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            (20, 20, 20),
+            1,
+            cv2.LINE_AA,
+        )
+    return canvas
 
 
 def _render_topdown(
@@ -451,7 +532,7 @@ def _render_topdown(
         cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
         cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
 
-    return np.vstack([_draw_header(header_text), canvas])
+    return np.vstack([_draw_header(header_text, _RENDER_SIZE_PX), canvas])
 
 
 class AnimalAIEnv(gym.Env):
@@ -634,10 +715,16 @@ class AnimalAIEnv(gym.Env):
         return self._latest_image, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
+        """This episode's arena from above, beside the arena set's coverage."""
         if self.render_mode != "rgb_array":
             return None
         header = f"{self.arena_name}  {self.selector.status(self.global_step)}"
-        return _render_topdown(self._arena_items, self._agent_xyz, header)
+        topdown = _render_topdown(self._arena_items, self._agent_xyz, header)
+        progress = _render_progress(self.selector.progress_by_group())
+        padding = np.full(
+            (topdown.shape[0] - progress.shape[0], progress.shape[1], 3), 240, dtype=np.uint8
+        )
+        return np.hstack([topdown, np.vstack([progress, padding])])
 
     def close(self):
         if self._aai is not None:
