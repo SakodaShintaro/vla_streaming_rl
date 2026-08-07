@@ -28,6 +28,5 @@ uv run python scripts/train.py \
   actor_lr=1e-5 \
   critic_lr=1e-5 \
   env=animalai \
-  env_factory.mode=staged \
   exp_name=${exp_name} \
   resume_dir=null \

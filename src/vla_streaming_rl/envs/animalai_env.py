@@ -14,9 +14,10 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
 `mode` config field (see `build_selector`):
 
   - "staged"  training with the paper's cumulative 11-stage curriculum, one
-              stage per subdirectory of the root (`StagedSelector`).
-  - "success" training on the same arenas, ordered by which ones the agent
-              has already passed (`SuccessDrivenSelector`).
+              stage per subdirectory of the root, sampled uniformly within
+              the stage (`StagedSelector`).
+  - "success" the same stages, but sampled within the stage by how much is
+              still to be learned from each arena (`SuccessDrivenSelector`).
   - "eval"    every configs/competition/ arena once, in order -- the
               900-arena Testbed sweep (`SequentialSelector`).
 
@@ -240,9 +241,15 @@ class StagedSelector(ArenaSelector):
     def _stage_index(self, global_step: int) -> int:
         return min(global_step // self.steps_per_stage, len(self._stages) - 1)
 
-    def next_arena(self, global_step: int) -> Arena:
-        stage_arenas = self._stages[self._stage_index(global_step)]
+    def _stage_arenas(self, global_step: int) -> list[Arena]:
+        return self._stages[self._stage_index(global_step)]
+
+    def _pick_from(self, stage_arenas: list[Arena]) -> Arena:
+        """Uniformly, as the paper's curriculum does. Subclasses reweight."""
         return stage_arenas[int(self._rng.integers(len(stage_arenas)))]
+
+    def next_arena(self, global_step: int) -> Arena:
+        return self._pick_from(self._stage_arenas(global_step))
 
     def info(self, global_step: int) -> dict:
         return {"stage": self._stage_index(global_step) + 1}
@@ -251,87 +258,56 @@ class StagedSelector(ArenaSelector):
         return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}  step:{global_step}"
 
 
-class SuccessDrivenSelector(ArenaSelector):
-    """Progression/revisit over every arena under `root`, in path order.
+class SuccessDrivenSelector(StagedSelector):
+    """The same 11-stage gating, but choosing within the stage by how much is
+    still to be learned from each arena rather than uniformly.
 
-    A pointer walks the arena list; an arena becomes "cleared" the first time
-    it is passed, and the pointer skips anything already cleared. Once
-    anything is cleared, resets alternate progression and revisit; revisits
-    sample a cleared arena with probability softmax(failure_rate /
-    `revisit_temperature`), so the shakiest cleared arenas come back most
-    often and a lower temperature concentrates harder on them.
+    Arenas of the current stage never attempted go first, uniformly at random,
+    so the whole stage is seen before any of it is repeated. After that, an
+    arena's weight is the variance of the Beta(1 + successes, 1 + failures)
+    posterior over its pass probability -- largest where that probability is
+    least pinned down.
+
+    Reliably passed arenas and never-passed ones both fall away, since both
+    ends of the posterior are certain, while partly-passed ones stay high:
+    the zone of proximal development read as an information criterion. The
+    decay is only ~1/attempts though, so nothing is ever abandoned and a task
+    that becomes solvable later still comes back. `revisit_temperature`
+    sharpens (< 1) or flattens (> 1) the resulting distribution.
     """
 
-    def __init__(self, root: Path, revisit_temperature: float, seed: int):
-        super().__init__(_arenas_under(root))
+    def __init__(self, root: Path, steps_per_stage: int, revisit_temperature: float, seed: int):
+        super().__init__(root=root, steps_per_stage=steps_per_stage, seed=seed)
         self.revisit_temperature = revisit_temperature
-        self._by_name = {arena.name: arena for arena in self.arenas}
-        self._rng = np.random.default_rng(seed)
-        self._next_index = 0
-        self._cleared: set[str] = set()
-        self._is_revisit = False
-        self._advanced = False
 
-    def _skip_cleared(self) -> None:
-        while (
-            self._next_index < len(self.arenas)
-            and self.arenas[self._next_index].name in self._cleared
-        ):
-            self._next_index += 1
+    def _learning_weight(self, arena: Arena) -> float:
+        attempts, successes = self.arena_record(arena)
+        # Beta(1+s, 1+f) posterior: mean (s+1)/(n+2), variance mean(1-mean)/(n+3).
+        # The +1/+1 pseudo-counts also keep a single attempt off 0.0 / 1.0.
+        mean = (successes + 1) / (attempts + 2)
+        return mean * (1.0 - mean) / (attempts + 3)
 
-    def _pick_revisit_mode(self) -> bool:
-        if not self._cleared:
-            return False
-        if self._next_index >= len(self.arenas):
-            return True
-        return not self._is_revisit
-
-    def _sample_cleared(self) -> Arena:
-        names = sorted(self._cleared)
-        failure_rate = np.array(
-            [1.0 - self._successes[name] / self._attempts[name] for name in names]
-        )
-        logits = failure_rate / self.revisit_temperature
-        weights = np.exp(logits - logits.max())
-        index = self._rng.choice(len(names), p=weights / weights.sum())
-        return self._by_name[names[int(index)]]
-
-    def next_arena(self, global_step: int) -> Arena:
-        self._is_revisit = self._pick_revisit_mode()
-        if self._is_revisit:
-            return self._sample_cleared()
-        return self.arenas[min(self._next_index, len(self.arenas) - 1)]
-
-    def on_episode_end(self, arena: Arena, success: bool) -> None:
-        super().on_episode_end(arena, success)
-        before = self._next_index
-        if success and not self._is_revisit:
-            self._cleared.add(arena.name)
-            self._skip_cleared()
-        self._advanced = self._next_index != before
+    def _pick_from(self, stage_arenas: list[Arena]) -> Arena:
+        untried = [arena for arena in stage_arenas if self._attempts[arena.name] == 0]
+        if untried:
+            return untried[int(self._rng.integers(len(untried)))]
+        weights = np.array([self._learning_weight(arena) for arena in stage_arenas])
+        weights = weights ** (1.0 / self.revisit_temperature)
+        index = self._rng.choice(len(stage_arenas), p=weights / weights.sum())
+        return stage_arenas[int(index)]
 
     def info(self, global_step: int) -> dict:
-        return {
-            "cleared_count": len(self._cleared),
-            "is_revisit": self._is_revisit,
-            "advanced": self._advanced,
-        }
+        cleared = sum(successes > 0 for successes in self._successes.values())
+        return {**super().info(global_step), "cleared_count": cleared}
 
     def status(self, global_step: int) -> str:
-        revisit_tag = " R" if self._is_revisit else ""
-        return f"cleared:{len(self._cleared)}/{len(self.arenas)}{revisit_tag}"
-
-    def state(self) -> dict:
-        return {**super().state(), "is_revisit": self._is_revisit}
-
-    def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
-        # An arena is cleared iff it has ever succeeded, so the pointer is
-        # rebuilt from the restored counts rather than stored.
-        super().load_state(arena_attempts, arena_successes, is_revisit)
-        self._is_revisit = bool(is_revisit)
-        self._cleared = {name for name, n in self._successes.items() if n > 0}
-        self._next_index = 0
-        self._skip_cleared()
+        stage_arenas = self._stage_arenas(global_step)
+        cleared = sum(self._successes[arena.name] > 0 for arena in stage_arenas)
+        untried = sum(self._attempts[arena.name] == 0 for arena in stage_arenas)
+        return (
+            f"{super().status(global_step)}"
+            f"  cleared:{cleared}/{len(stage_arenas)} untried:{untried}"
+        )
 
 
 class SequentialSelector(ArenaSelector):
@@ -381,7 +357,10 @@ def build_selector(
             root=train_root, steps_per_stage=steps_per_stage, seed=seed
         ),
         "success": lambda: SuccessDrivenSelector(
-            root=train_root, revisit_temperature=revisit_temperature, seed=seed
+            root=train_root,
+            steps_per_stage=steps_per_stage,
+            revisit_temperature=revisit_temperature,
+            seed=seed,
         ),
         "eval": lambda: SequentialSelector(root=COMPETITION_DIR),
     }

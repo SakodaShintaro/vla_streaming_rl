@@ -14,22 +14,24 @@ env_factory:
   resolution: 96
   # - mode: which arenas each episode is drawn from, and in what order.
   #     staged  : train with the Animal-AI paper's cumulative 11-stage
-  #               curriculum, one stage per subdirectory of train_arena_root.
-  #     success : train on the same arenas, alternating between the next
-  #               uncleared one and revisiting one already passed.
+  #               curriculum, one stage per subdirectory of train_arena_root,
+  #               drawing uniformly from the arenas the stage has unlocked.
+  #     success : the same stages, but within a stage prefer the arenas there
+  #               is still most to learn from (untried ones first).
   #     eval    : run each of the 900 external/animal-ai/configs/competition/
   #               arenas once, in order (the paper's Testbed protocol).
   #   Training arenas and competition arenas are disjoint, so "eval" never
   #   scores an arena either training mode has seen.
-  mode: staged
+  mode: success
   # - train_arena_root: where the two training modes read their arenas from,
   #   recursively. Point it at an augmented copy to train on a larger set; the
   #   per-stage count then follows whatever is on disk (30 as split, 60 once
   #   mirrored copies sit alongside). "eval" ignores this and always uses the
   #   competition arenas, so the benchmark cannot drift.
   train_arena_root: ./external/animal-ai/configs/paper_curriculum_split_mirrored/
-  # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
+  # - steps_per_stage ("staged"/"success"): how long each of the 11 stages lasts.
   steps_per_stage: 20_000
-  # - revisit_temperature ("success"): softmax temperature over per-arena
-  #   failure rate; lower concentrates revisits on the weakest arenas.
+  # - revisit_temperature ("success"): sharpens (< 1) or flattens (> 1) the
+  #   Beta-posterior-variance weighting once every arena has been attempted
+  #   once
   revisit_temperature: 1.0
