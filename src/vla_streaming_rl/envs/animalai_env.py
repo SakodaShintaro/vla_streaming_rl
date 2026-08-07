@@ -596,7 +596,22 @@ class AnimalAIEnv(gym.Env):
             useCamera=True,
             resolution=self.resolution,
             useRayCasts=False,
+            # One decision per 5 Academy steps (= 5 physics steps of 0.02 s),
+            # so an arena's `t` costs t*5 physics steps and an episode advances
+            # in 0.1 s of simulated time. This is the only one of these knobs
+            # that changes what the agent experiences.
             decisionPeriod=5,
+            # Run the simulation as fast as it will go: `timescale` matches the
+            # paper's training scripts, and no frame rate cap. Neither changes
+            # the agent's experience -- the physics step is fixed at 0.02 s and
+            # decisions are counted in Academy steps, not frames -- so these
+            # only buy wall-clock speed (~9x over the default timescale=1).
+            timescale=300,
+            targetFrameRate=-1,
+            # Left at the AAI default (real time drives frame duration) as the
+            # paper's scripts had it. Setting it would only change how the same
+            # physics steps are split across frames.
+            captureFrameRate=0,
             # `--no-graphics-monitor` enables off-screen rendering on a host
             # without a window manager. `no_graphics=True` (the alternative
             # for headless) disables the renderer entirely and produces a
