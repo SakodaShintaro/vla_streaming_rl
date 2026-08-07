@@ -176,6 +176,10 @@ class ArenaSelector:
         self._attempts[arena.name] += 1
         self._successes[arena.name] += int(success)
 
+    def arena_record(self, arena: Arena) -> tuple[int, int]:
+        """(attempts, successes) so far for one arena."""
+        return self._attempts[arena.name], self._successes[arena.name]
+
     def progress_by_group(self) -> list[tuple[str, int, int, int]]:
         """(group, cleared, failed, untried) per arena group, in group order.
 
@@ -410,19 +414,29 @@ _DEFAULT_ITEM_COLOR: tuple[int, int, int] = (180, 180, 180)
 _AGENT_COLOR: tuple[int, int, int] = (40, 80, 220)
 _ARENA_SIZE_M = 40.0  # standard Animal-AI arena is 40 m square
 _RENDER_SIZE_PX = 256
-_HEADER_HEIGHT_PX = 22
+_HEADER_LINE_PX = 20
 
 
-def _draw_header(text: str, width_px: int) -> np.ndarray:
-    header = np.full((_HEADER_HEIGHT_PX, width_px, 3), 215, dtype=np.uint8)
-    font_scale = 0.45
+def _draw_header(lines: list[str], width_px: int) -> np.ndarray:
+    """Caption strip, one row per line. Splitting a long status over two lines
+    keeps the type readable where fitting it on one would shrink it away."""
+    header = np.full((_HEADER_LINE_PX * len(lines), width_px, 3), 215, dtype=np.uint8)
     max_width = width_px - 8
-    (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
-    # Shrink rather than let a long status run off the right edge.
-    font_scale *= min(1.0, max_width / width)
-    cv2.putText(
-        header, text, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (20, 20, 20), 1, cv2.LINE_AA
-    )
+    for row, text in enumerate(lines):
+        font_scale = 0.45
+        (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
+        # Shrink rather than let a long line run off the right edge.
+        font_scale *= min(1.0, max_width / width)
+        cv2.putText(
+            header,
+            text,
+            (4, _HEADER_LINE_PX * row + 14),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (20, 20, 20),
+            1,
+            cv2.LINE_AA,
+        )
     return header
 
 
@@ -438,16 +452,18 @@ def _render_progress(groups: list[tuple[str, int, int, int]]) -> np.ndarray:
     """One stacked horizontal bar per arena group (see
     `ArenaSelector.progress_by_group`): what share of it the agent has ever
     passed, tried without passing, and not yet been given."""
-    height = _HEADER_HEIGHT_PX + _PROGRESS_ROW_PX * len(groups) + _PROGRESS_LEGEND_PX
-    canvas = np.full((height, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
     passed = sum(group[1] for group in groups)
     total = sum(sum(group[1:]) for group in groups)
-    canvas[:_HEADER_HEIGHT_PX] = _draw_header(f"passed:{passed}/{total}", _RENDER_SIZE_PX)
+    header = _draw_header([f"passed:{passed}/{total}"], _RENDER_SIZE_PX)
+    header_px = header.shape[0]
+    height = header_px + _PROGRESS_ROW_PX * len(groups) + _PROGRESS_LEGEND_PX
+    canvas = np.full((height, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
+    canvas[:header_px] = header
 
     bar_x = _PROGRESS_LABEL_PX
     bar_width = _RENDER_SIZE_PX - bar_x - 6
     for row, (name, *counts) in enumerate(groups):
-        top = _HEADER_HEIGHT_PX + row * _PROGRESS_ROW_PX
+        top = header_px + row * _PROGRESS_ROW_PX
         cv2.putText(
             canvas,
             name,
@@ -488,7 +504,7 @@ def _render_progress(groups: list[tuple[str, int, int, int]]) -> np.ndarray:
 
 
 def _render_topdown(
-    items: list[dict], agent_xyz: tuple[float, float, float] | None, header_text: str
+    items: list[dict], agent_xyz: tuple[float, float, float] | None, header_lines: list[str]
 ) -> np.ndarray:
     scale = _RENDER_SIZE_PX / _ARENA_SIZE_M
     canvas = np.full((_RENDER_SIZE_PX, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
@@ -532,7 +548,7 @@ def _render_topdown(
         cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
         cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
 
-    return np.vstack([_draw_header(header_text, _RENDER_SIZE_PX), canvas])
+    return np.vstack([_draw_header(header_lines, _RENDER_SIZE_PX), canvas])
 
 
 class AnimalAIEnv(gym.Env):
@@ -718,8 +734,12 @@ class AnimalAIEnv(gym.Env):
         """This episode's arena from above, beside the arena set's coverage."""
         if self.render_mode != "rgb_array":
             return None
-        header = f"{self.arena_name}  {self.selector.status(self.global_step)}"
-        topdown = _render_topdown(self._arena_items, self._agent_xyz, header)
+        attempts, successes = self.selector.arena_record(self._arena)
+        header_lines = [
+            f"{self.arena_name}  {attempts}/{successes}",
+            self.selector.status(self.global_step),
+        ]
+        topdown = _render_topdown(self._arena_items, self._agent_xyz, header_lines)
         progress = _render_progress(self.selector.progress_by_group())
         padding = np.full(
             (topdown.shape[0] - progress.shape[0], progress.shape[1], 3), 240, dtype=np.uint8
