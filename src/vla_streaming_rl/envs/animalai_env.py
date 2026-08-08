@@ -730,7 +730,7 @@ class AnimalAIEnv(gym.Env):
             return None
         attempts, successes = self.selector.arena_record(self._arena)
         header_lines = [
-            f"{self.arena_name}  {attempts}/{successes}",
+            f"{self.arena_name}  {successes}/{attempts}",
             self.selector.status(self.global_step),
         ]
         topdown = _render_topdown(self._arena_items, self._agent_xyz, header_lines)
