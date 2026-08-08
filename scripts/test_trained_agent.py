@@ -4,10 +4,16 @@
 Loads a trained checkpoint (weights only), then sweeps every XX-YY-ZZ.yaml
 arena under external/animal-ai/configs/competition/ in order, one episode
 each, with the network in eval mode and no optimizer step ever taken. The
-sweep order and its end come from the env's SequentialSelector, so run this
-with `env=animalai env_factory.mode=eval`.
+sweep order and its end come from the env's SequentialSelector.
+
+Instead of hydra flags, this script takes the path to a single checkpoint_*.pt
+file (as saved by scripts/train.py) and reconstructs the training config from
+the wandb run recorded alongside it (<run_dir>/wandb/*/files/config.yaml), so
+running an eval never requires re-specifying agent/env/network overrides by
+hand.
 """
 
+import argparse
 import logging
 import os
 import random
@@ -20,22 +26,47 @@ warnings.filterwarnings("ignore", message=".*local_dir_use_symlinks.*")
 warnings.filterwarnings("ignore", message=".*Attempting to run cuBLAS.*")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-import hydra
+import cv2
 import numpy as np
 import torch
-from hydra.core.hydra_config import HydraConfig
+import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_agent
 from vla_streaming_rl.networks.build import build_network
+from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
 from vla_streaming_rl.wrappers import make_env
 
 torch.set_float32_matmul_precision("high")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def load_checkpoint_weights(checkpoint_dir: Path, network: torch.nn.Module) -> None:
-    checkpoint_path = checkpoint_dir / "checkpoint.pt"
+def _coerce_numeric_strings(value):
+    """YAML 1.1 leaves exponent floats like '1e-05' as strings; recover them as floats."""
+    if isinstance(value, dict):
+        return {key: _coerce_numeric_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_coerce_numeric_strings(item) for item in value]
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    return value
+
+
+def load_wandb_config(run_dir: Path) -> DictConfig:
+    """Reconstruct the resolved training config from a wandb run's config.yaml."""
+    config_paths = sorted(run_dir.glob("wandb/run-*/files/config.yaml"))
+    if not config_paths:
+        raise FileNotFoundError(f"No wandb config.yaml found under {run_dir}/wandb/")
+    raw = yaml.safe_load(config_paths[-1].read_text())
+    raw.pop("_wandb", None)
+    flat = {key: _coerce_numeric_strings(entry["value"]) for key, entry in raw.items()}
+    return OmegaConf.create(flat)
+
+
+def load_checkpoint_weights(checkpoint_path: Path, network: torch.nn.Module) -> None:
     trainable_state = torch.load(checkpoint_path, map_location="cuda")
     module = network._orig_mod if hasattr(network, "_orig_mod") else network
     missing, unexpected = module.load_state_dict(trainable_state, strict=False)
@@ -44,17 +75,38 @@ def load_checkpoint_weights(checkpoint_dir: Path, network: torch.nn.Module) -> N
     print(f"Loaded {len(trainable_state)} weight tensors from {checkpoint_path}")
 
 
-def run_arena(agent, env, seed: int) -> tuple[str, bool, float]:
+def run_arena(agent, env, seed: int, render: bool, window_name: str) -> tuple[str, bool, float]:
     """Play the next arena the env serves; return its (name, passed, score)."""
     obs, reset_info = env.reset(seed=seed, options=None)
     arena_name = reset_info["arena_name"]
     result = agent.select_action(0, obs, 0.0, False, False, reset_info)
     action = result.action
 
+    if render:
+        panels = {
+            "environment": overlay_caption(env.render(), f"{obs['language']}  reward: {0.0:+.3f}"),
+            "observation": obs["image"].copy().transpose(1, 2, 0),
+            **result.panels,
+        }
+        cv2.imshow(window_name, cv2.cvtColor(concat_labeled_images(panels), cv2.COLOR_RGB2BGR))
+        cv2.waitKey(1)
+
     while True:
         obs, reward, terminated, truncated, env_info = env.step(action)
         result = agent.select_action(0, obs, reward, terminated, truncated, env_info)
         action = result.action
+
+        if render:
+            panels = {
+                "environment": overlay_caption(
+                    env.render(), f"{obs['language']}  reward: {reward:.3f}"
+                ),
+                "observation": obs["image"].copy().transpose(1, 2, 0),
+                **result.panels,
+            }
+            cv2.imshow(window_name, cv2.cvtColor(concat_labeled_images(panels), cv2.COLOR_RGB2BGR))
+            cv2.waitKey(1)
+
         if terminated or truncated:
             break
 
@@ -63,10 +115,11 @@ def run_arena(agent, env, seed: int) -> tuple[str, bool, float]:
     return arena_name, success, score
 
 
-def main(args: DictConfig, result_dir: Path) -> None:
+def main(
+    args: DictConfig, checkpoint_path: Path, result_dir: Path, seed: int, render: bool
+) -> None:
     result_dir.mkdir(parents=True, exist_ok=True)
 
-    seed = args.seed if args.seed != -1 else np.random.randint(0, 10000)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -85,7 +138,7 @@ def main(args: DictConfig, result_dir: Path) -> None:
         device=torch.device("cuda"),
     )
     agent = build_agent(env, network, args)
-    load_checkpoint_weights(Path(args.resume_dir), network)
+    load_checkpoint_weights(checkpoint_path, network)
     network.eval()
 
     selector = env.unwrapped.selector
@@ -99,7 +152,7 @@ def main(args: DictConfig, result_dir: Path) -> None:
         f.write("arena\tsuccess\tscore\n")
         success_count = 0
         while not selector.is_exhausted:
-            arena_name, success, score = run_arena(agent, env, seed)
+            arena_name, success, score = run_arena(agent, env, seed, render, args.env_id)
             success_count += int(success)
             # Competition arenas are named XX-YY-ZZ (level-task-variant).
             level = arena_name.split("-")[0]
@@ -123,21 +176,33 @@ def main(args: DictConfig, result_dir: Path) -> None:
     env.close()
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="default")
-def hydra_main(cfg: DictConfig) -> None:
-    hydra_output_dir = Path(HydraConfig.get().runtime.output_dir)
-    os.chdir(hydra.utils.get_original_cwd())
-
-    if not os.environ.get("DISPLAY"):
-        print("Because a headless environment is detected, rendering is automatically disabled.")
-        cfg.render = 0
-
-    if cfg.resume_dir is None:
-        raise ValueError("test.py requires resume_dir to point at a trained checkpoint directory.")
-
-    print(OmegaConf.to_yaml(cfg))
-    main(cfg, hydra_output_dir)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "checkpoint",
+        type=Path,
+        help="Path to a checkpoint_<step>.pt file saved by scripts/train.py",
+    )
+    parser.add_argument("--seed", type=int, default=-1)
+    parser.add_argument("--render", action="store_true")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    hydra_main()
+    cli_args = parse_args()
+    checkpoint_path = cli_args.checkpoint.resolve()
+    run_dir = checkpoint_path.parent
+    cfg = load_wandb_config(run_dir)
+    # Always evaluate on the paper's Testbed sweep, regardless of which mode
+    # trained this checkpoint (see SequentialSelector in animalai_env.py).
+    cfg.env_factory.mode = "eval"
+
+    seed = cli_args.seed if cli_args.seed != -1 else np.random.randint(0, 10000)
+    eval_dir = run_dir / "eval" / checkpoint_path.stem
+    render = cli_args.render
+    if render and not os.environ.get("DISPLAY"):
+        print("Because a headless environment is detected, rendering is automatically disabled.")
+        render = False
+
+    print(OmegaConf.to_yaml(cfg))
+    main(cfg, checkpoint_path, eval_dir, seed, render)
