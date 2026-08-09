@@ -5,7 +5,7 @@ env_id: AnimalAI-v0
 # For "staged": stages 1-10 take steps_per_stage each and stage 11 runs out the
 # remainder, so the paper's 2M x 10 + 5M = 25M is step_limit == 12.5 x
 # steps_per_stage; the values below keep that ratio at 1/1000 scale.
-step_limit: 250_000
+step_limit: 400_000
 image_save_interval: 20
 
 env_factory:
@@ -30,7 +30,7 @@ env_factory:
   #   competition arenas, so the benchmark cannot drift.
   train_arena_root: ./external/animal-ai/configs/paper_curriculum_split_mirrored/
   # - steps_per_stage ("staged"/"success"): how long each of the 11 stages lasts.
-  steps_per_stage: 20_000
+  steps_per_stage: 40_000
   # - revisit_temperature ("success"): sharpens (< 1) or flattens (> 1) the
   #   Beta-posterior-variance weighting once every arena has been attempted
   #   once
