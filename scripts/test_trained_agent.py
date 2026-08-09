@@ -72,14 +72,43 @@ def load_checkpoint_weights(checkpoint_path: Path, network: torch.nn.Module) -> 
     missing, unexpected = module.load_state_dict(trainable_state, strict=False)
     if unexpected:
         raise ValueError(f"checkpoint parameters not found in the network: {unexpected[:5]}")
+
+    # `missing` includes two harmless cases: frozen params (never saved) and
+    # names that alias a shared tensor already restored under a different key
+    # (e.g. tied lm_head/embed_tokens, or image_processor reused by prediction_head).
+    # Resolve every trainable missing name to its tensor and flag it only if
+    # that exact tensor was never touched by any key actually in the checkpoint.
+    loaded_ids = set()
+    for name, param in module.named_parameters(remove_duplicate=False):
+        if name in trainable_state:
+            loaded_ids.add(id(param))
+    name_to_param = dict(module.named_parameters(remove_duplicate=False))
+    unaccounted_missing = [
+        name
+        for name in missing
+        if name in name_to_param
+        and name_to_param[name].requires_grad
+        and id(name_to_param[name]) not in loaded_ids
+    ]
+    if unaccounted_missing:
+        raise ValueError(
+            f"trainable network parameters not found in the checkpoint: {unaccounted_missing[:5]}"
+        )
     print(f"Loaded {len(trainable_state)} weight tensors from {checkpoint_path}")
 
 
-def run_arena(agent, env, seed: int, render: bool, window_name: str) -> tuple[str, bool, float]:
-    """Play the next arena the env serves; return its (name, passed, score)."""
+def run_arena(
+    agent, env, seed: int, render: bool, window_name: str, global_step: int
+) -> tuple[str, bool, float]:
+    """Play the next arena the env serves; return its (name, passed, score).
+
+    `global_step` must exceed the agent's `learning_starts`: StandardAgent
+    treats smaller steps as off-policy warmup and returns uniform random
+    actions instead of querying the network.
+    """
     obs, reset_info = env.reset(seed=seed, options=None)
     arena_name = reset_info["arena_name"]
-    result = agent.select_action(0, obs, 0.0, False, False, reset_info)
+    result = agent.select_action(global_step, obs, 0.0, False, False, reset_info)
     action = result.action
 
     if render:
@@ -93,7 +122,7 @@ def run_arena(agent, env, seed: int, render: bool, window_name: str) -> tuple[st
 
     while True:
         obs, reward, terminated, truncated, env_info = env.step(action)
-        result = agent.select_action(0, obs, reward, terminated, truncated, env_info)
+        result = agent.select_action(global_step, obs, reward, terminated, truncated, env_info)
         action = result.action
 
         if render:
@@ -152,7 +181,9 @@ def main(
         f.write("arena\tsuccess\tscore\n")
         success_count = 0
         while not selector.is_exhausted:
-            arena_name, success, score = run_arena(agent, env, seed, render, args.env_id)
+            arena_name, success, score = run_arena(
+                agent, env, seed, render, args.env_id, args.learning_starts + 1
+            )
             success_count += int(success)
             # Competition arenas are named XX-YY-ZZ (level-task-variant).
             level = arena_name.split("-")[0]
