@@ -335,9 +335,6 @@ class StepCountObsWrapper(gym.Wrapper):
     embedding see sane magnitudes.
     """
 
-    GLOBAL_STEP_SCALE = 1e-6
-    EPISODE_STEP_SCALE = 1e-3
-
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
         spaces = dict(env.observation_space.spaces)
@@ -353,15 +350,9 @@ class StepCountObsWrapper(gym.Wrapper):
         self.observation_space = gym.spaces.Dict(spaces)
 
     def _add_step_obs(self, obs: dict, info: dict) -> dict:
-        obs["global_step"] = np.array(
-            [info["global_step"] * self.GLOBAL_STEP_SCALE], dtype=np.float32
-        )
-        obs["episode_step"] = np.array(
-            [info["episode_step"] * self.EPISODE_STEP_SCALE], dtype=np.float32
-        )
-        obs["remaining_step"] = np.array(
-            [info["remaining_step"] * self.EPISODE_STEP_SCALE], dtype=np.float32
-        )
+        obs["global_step"] = np.array([info["global_step"]], dtype=np.float32)
+        obs["episode_step"] = np.array([info["episode_step"]], dtype=np.float32)
+        obs["remaining_step"] = np.array([info["remaining_step"]], dtype=np.float32)
         return obs
 
     def reset(self, **kwargs) -> tuple:
