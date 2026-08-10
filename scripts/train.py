@@ -566,6 +566,25 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         save_checkpoint(result_dir, network, agent)
 
     env.close()
+
+    if args.env_id == "AnimalAI-v0" and result_dir is not None:
+        from test_trained_agent import run_testbed
+
+        eval_factory = OmegaConf.merge(args.env_factory, {"mode": "eval"})
+        eval_env = make_env(args.env_id, eval_factory, result_dir=None)
+        eval_env.action_space.seed(seed)
+        network.eval()
+        testbed_metrics = run_testbed(
+            agent,
+            eval_env,
+            seed,
+            bool(args.render),
+            args.env_id,
+            global_step,
+            result_dir / "eval" / "final",
+        )
+        wandb.summary.update({f"testbed/{k}": v for k, v in testbed_metrics.items()})
+        eval_env.close()
     # env.close() auto-merges the Bench2Drive eval sweep and stashes the
     # Driving Score / Success Rate / Efficiency / Comfort summary on the
     # env. Push it into wandb.summary so the run is self-describing.

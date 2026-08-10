@@ -144,11 +144,62 @@ def run_arena(
     return arena_name, success, score
 
 
+def run_testbed(
+    agent,
+    env,
+    seed: int,
+    render: bool,
+    window_name: str,
+    global_step: int,
+    result_dir: Path,
+) -> dict[str, float]:
+    """Sweep every arena the env's SequentialSelector serves and write results.
+
+    Returns per-level pass rates plus "cleared" (overall count) so callers can
+    push them into run summaries.
+    """
+    result_dir.mkdir(parents=True, exist_ok=True)
+    selector = env.unwrapped.selector
+    arena_count = len(selector.arenas)
+    print(f"Running {arena_count} arenas, 1 episode each.")
+
+    result_path = result_dir / "test_result.tsv"
+    level_attempts: dict[str, int] = {}
+    level_successes: dict[str, int] = {}
+    with open(result_path, "w") as f:
+        f.write("arena\tsuccess\tscore\n")
+        success_count = 0
+        while not selector.is_exhausted:
+            arena_name, success, score = run_arena(
+                agent, env, seed, render, window_name, global_step
+            )
+            success_count += int(success)
+            # Competition arenas are named XX-YY-ZZ (level-task-variant).
+            level = arena_name.split("-")[0]
+            level_attempts[level] = level_attempts.get(level, 0) + 1
+            level_successes[level] = level_successes.get(level, 0) + int(success)
+            f.write(f"{arena_name}\t{int(success)}\t{score:.6f}\n")
+            f.flush()
+            done = sum(level_attempts.values())
+            print(f"[{done}/{arena_count}] {arena_name}\tsuccess={int(success)}\tscore={score:.2f}")
+
+    print(f"Cleared {success_count}/{arena_count} arenas.")
+    summary_lines = [f"cleared: {success_count}/{arena_count}"]
+    metrics: dict[str, float] = {"cleared": success_count, "arena_count": arena_count}
+    for level in sorted(level_attempts):
+        n_success = level_successes[level]
+        n_attempt = level_attempts[level]
+        summary_lines.append(
+            f"level {level}: {n_success}/{n_attempt} ({n_success / n_attempt:.1%})"
+        )
+        metrics[f"level_{level}"] = n_success / n_attempt
+    (result_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n")
+    return metrics
+
+
 def main(
     args: DictConfig, checkpoint_path: Path, result_dir: Path, seed: int, render: bool
 ) -> None:
-    result_dir.mkdir(parents=True, exist_ok=True)
-
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -170,39 +221,7 @@ def main(
     load_checkpoint_weights(checkpoint_path, network)
     network.eval()
 
-    selector = env.unwrapped.selector
-    arena_count = len(selector.arenas)
-    print(f"Running {arena_count} arenas, 1 episode each.")
-
-    result_path = result_dir / "test_result.tsv"
-    level_attempts: dict[str, int] = {}
-    level_successes: dict[str, int] = {}
-    with open(result_path, "w") as f:
-        f.write("arena\tsuccess\tscore\n")
-        success_count = 0
-        while not selector.is_exhausted:
-            arena_name, success, score = run_arena(
-                agent, env, seed, render, args.env_id, args.learning_starts + 1
-            )
-            success_count += int(success)
-            # Competition arenas are named XX-YY-ZZ (level-task-variant).
-            level = arena_name.split("-")[0]
-            level_attempts[level] = level_attempts.get(level, 0) + 1
-            level_successes[level] = level_successes.get(level, 0) + int(success)
-            f.write(f"{arena_name}\t{int(success)}\t{score:.6f}\n")
-            f.flush()
-            done = sum(level_attempts.values())
-            print(f"[{done}/{arena_count}] {arena_name}\tsuccess={int(success)}\tscore={score:.2f}")
-
-    print(f"Cleared {success_count}/{arena_count} arenas.")
-    summary_lines = [f"cleared: {success_count}/{arena_count}"]
-    for level in sorted(level_attempts):
-        n_success = level_successes[level]
-        n_attempt = level_attempts[level]
-        summary_lines.append(
-            f"level {level}: {n_success}/{n_attempt} ({n_success / n_attempt:.1%})"
-        )
-    (result_dir / "summary.txt").write_text("\n".join(summary_lines) + "\n")
+    run_testbed(agent, env, seed, render, args.env_id, args.learning_starts + 1, result_dir)
 
     env.close()
 
