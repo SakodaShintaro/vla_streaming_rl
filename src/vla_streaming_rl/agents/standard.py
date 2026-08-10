@@ -135,6 +135,9 @@ class StandardAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            global_step_obs,
+            episode_step_obs,
+            remaining_step_obs,
             task_prompt_token_ids,
         ) = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
@@ -150,6 +153,9 @@ class StandardAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            global_step_obs,
+            episode_step_obs,
+            remaining_step_obs,
         )
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -227,6 +233,9 @@ class StandardAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            global_step_obs,
+            episode_step_obs,
+            remaining_step_obs,
             task_prompt_token_ids,
         ) = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
@@ -242,6 +251,9 @@ class StandardAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            global_step_obs,
+            episode_step_obs,
+            remaining_step_obs,
         )
 
         warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
@@ -266,6 +278,9 @@ class StandardAgent(Agent):
                 velocity_z_seq=latest_data.velocity_z,
                 episode_return_seq=latest_data.episode_return,
                 pass_mark_seq=latest_data.pass_mark,
+                global_step_seq=latest_data.global_step,
+                episode_step_seq=latest_data.episode_step,
+                remaining_step_seq=latest_data.remaining_step,
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -289,7 +304,8 @@ class StandardAgent(Agent):
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
         the image tensor, the raw scalar observations (velocity_x, velocity_y,
-        velocity_z, episode_return, pass_mark; the network updates its running
+        velocity_z, episode_return, pass_mark, global_step, episode_step,
+        remaining_step; the network updates its running
         normalizer stats here) and the tokenized task prompt.
         ``info`` is unused by the obs-driven standard agent."""
         del info
@@ -297,8 +313,18 @@ class StandardAgent(Agent):
         velocity_x, velocity_y, velocity_z = obs["velocity"].astype(np.float32)
         episode_return = np.float32(obs["episode_return"][0])
         pass_mark = np.float32(obs["pass_mark"][0])
+        global_step_obs = np.float32(obs["global_step"][0])
+        episode_step_obs = np.float32(obs["episode_step"][0])
+        remaining_step_obs = np.float32(obs["remaining_step"][0])
         self.network.observe_scalar_obs(
-            velocity_x, velocity_y, velocity_z, episode_return, pass_mark
+            velocity_x,
+            velocity_y,
+            velocity_z,
+            episode_return,
+            pass_mark,
+            global_step_obs,
+            episode_step_obs,
+            remaining_step_obs,
         )
         task_prompt_token_ids = self.network.tokenize_task_prompt(obs["language"])
         return (
@@ -308,6 +334,9 @@ class StandardAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            global_step_obs,
+            episode_step_obs,
+            remaining_step_obs,
             task_prompt_token_ids,
         )
 

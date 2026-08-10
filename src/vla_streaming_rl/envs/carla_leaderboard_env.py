@@ -327,6 +327,9 @@ class CARLALeaderboardEnv(gym.Env):
 
         # Episode information
         self.episode_step = 0
+        # Steps since the env was created, never reset: it dates an experience
+        # within the run, so a sequence model can order what it reads.
+        self.global_step = 0
 
         # Vehicle physics information
         self.vehicle_physics = VehiclePhysics.create()
@@ -551,7 +554,9 @@ class CARLALeaderboardEnv(gym.Env):
                 self.runtime.route_scenario.gps_route,
                 self.runtime.route_scenario.route,
             )
-        return observation, self._build_scenario_info({"task_prompt": self._navigation_prompt()})
+        return observation, self._build_scenario_info(
+            {"task_prompt": self._navigation_prompt(), **self._step_count_info()}
+        )
 
     # ``final_eval_summary`` is populated by ``close()`` (auto-merge of the
     # 220-route sweep). Trainer reads it after env.close() for wandb
@@ -591,6 +596,13 @@ class CARLALeaderboardEnv(gym.Env):
         base["town"] = self.runtime.current_town
         base["scenarios_total"] = self.runtime.total_scenarios
         return base
+
+    def _step_count_info(self) -> dict[str, int]:
+        return {
+            "global_step": self.global_step,
+            "episode_step": self.episode_step,
+            "remaining_step": max(self.max_episode_steps - self.episode_step, 0),
+        }
 
     def step(self, action: np.ndarray) -> tuple[dict[str, any], float, bool, bool, dict[str, any]]:
         # Apply action: action[0]=steer, action[1]=gas_or_brake (same as CarRacing)
@@ -697,6 +709,7 @@ class CARLALeaderboardEnv(gym.Env):
             reward = -1.0
 
         self.episode_step += 1
+        self.global_step += 1
 
         assert self.current_image is not None
 
@@ -712,6 +725,7 @@ class CARLALeaderboardEnv(gym.Env):
         info = self._build_scenario_info(
             {
                 "task_prompt": self._navigation_prompt(),
+                **self._step_count_info(),
                 "route_completion": self.route_tracker.route_completion,
                 "driving_score": self._latest_driving_score,
                 "score_route": self._latest_score_route,

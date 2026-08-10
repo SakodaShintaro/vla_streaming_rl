@@ -74,7 +74,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
-        self.scalar_obs_dim = 5
+        self.scalar_obs_dim = 8
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
         self.encoder = SpatialTemporalEncoder(
             image_processor=self.image_processor,
@@ -156,9 +156,22 @@ class ActorCriticWithActionValue(NetworkInterface):
         velocity_z: float,
         episode_return: float,
         pass_mark: float,
+        global_step: float,
+        episode_step: float,
+        remaining_step: float,
     ) -> None:
         scalar_obs = np.array(
-            [velocity_x, velocity_y, velocity_z, episode_return, pass_mark], dtype=np.float32
+            [
+                velocity_x,
+                velocity_y,
+                velocity_z,
+                episode_return,
+                pass_mark,
+                global_step,
+                episode_step,
+                remaining_step,
+            ],
+            dtype=np.float32,
         )
         self.scalar_obs_normalizer.update(scalar_obs)
 
@@ -169,8 +182,23 @@ class ActorCriticWithActionValue(NetworkInterface):
         velocity_z: torch.Tensor,
         episode_return: torch.Tensor,
         pass_mark: torch.Tensor,
+        global_step: torch.Tensor,
+        episode_step: torch.Tensor,
+        remaining_step: torch.Tensor,
     ) -> torch.Tensor:
-        raw = torch.cat([velocity_x, velocity_y, velocity_z, episode_return, pass_mark], dim=-1)
+        raw = torch.cat(
+            [
+                velocity_x,
+                velocity_y,
+                velocity_z,
+                episode_return,
+                pass_mark,
+                global_step,
+                episode_step,
+                remaining_step,
+            ],
+            dim=-1,
+        )
         return self.scalar_obs_normalizer.normalize(raw)
 
     @torch.inference_mode()
@@ -183,6 +211,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z_seq,
             data.episode_return_seq,
             data.pass_mark_seq,
+            data.global_step_seq,
+            data.episode_step_seq,
+            data.remaining_step_seq,
         )
         x, rnn_state = self.encoder(
             data.s_seq, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
@@ -232,6 +263,9 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.velocity_z[:, self.horizon :],
                 data.episode_return[:, self.horizon :],
                 data.pass_mark[:, self.horizon :],
+                data.global_step[:, self.horizon :],
+                data.episode_step[:, self.horizon :],
+                data.remaining_step[:, self.horizon :],
             )
             next_state, _ = self.encoder.forward(
                 next_image,
@@ -254,6 +288,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z[:, : -self.horizon],
             data.episode_return[:, : -self.horizon],
             data.pass_mark[:, : -self.horizon],
+            data.global_step[:, : -self.horizon],
+            data.episode_step[:, : -self.horizon],
+            data.remaining_step[:, : -self.horizon],
         )
         curr_actions = data.actions[:, : -self.horizon]
         curr_rewards = data.rewards[:, : -self.horizon]
@@ -306,6 +343,9 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.velocity_z[:, self.horizon :],
                 data.episode_return[:, self.horizon :],
                 data.pass_mark[:, self.horizon :],
+                data.global_step[:, self.horizon :],
+                data.episode_step[:, self.horizon :],
+                data.remaining_step[:, self.horizon :],
             )
             next_state, next_rnn_state = self.encoder.forward(
                 next_image,
@@ -330,6 +370,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z[:, : -self.horizon],
             data.episode_return[:, : -self.horizon],
             data.pass_mark[:, : -self.horizon],
+            data.global_step[:, : -self.horizon],
+            data.episode_step[:, : -self.horizon],
+            data.remaining_step[:, : -self.horizon],
         )
         prev_actions = data.actions[:, : -self.horizon]
         prev_rewards = data.rewards[:, : -self.horizon]

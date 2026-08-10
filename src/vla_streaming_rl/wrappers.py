@@ -109,6 +109,8 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = TransposeAndNormalizeObs(env)
         env = ZeroObsOnDoneWrapper(env)
         env = ZeroScalarObsWrapper(env)
+        env = StepCountInfoWrapper(env, max_episode_steps=1000)
+        env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
         env = PromptWrapper(env, CAR_RACING_PROMPT)
         env = LanguageObsWrapper(env)
@@ -124,6 +126,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = hydra.utils.instantiate(env_factory, eval_output_dir=eval_output_dir)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = ZeroScalarObsWrapper(env)
+        env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 220
@@ -136,6 +139,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = TransposeAndNormalizeObs(env)
         env = VelocityObsWrapper(env)
         env = PassMarkObsWrapper(env)
+        env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
@@ -285,6 +289,77 @@ class EpisodeReturnObsWrapper(gym.Wrapper):
         self._episode_return += float(reward)
         obs["episode_return"] = np.array([self._episode_return], dtype=np.float32)
         return obs, reward, terminated, truncated, info
+
+
+class StepCountInfoWrapper(gym.Wrapper):
+    """Count the step numbers an env does not report itself.
+
+    AnimalAI and CARLA publish their own counters (their episode limit is a
+    property of the arena / route), so they need only ``StepCountObsWrapper``;
+    CarRacing's limit is the ``TimeLimit`` set in ``make_env``, so it is
+    counted here instead. ``max_episode_steps`` is in agent steps, i.e. after
+    action repeat.
+    """
+
+    def __init__(self, env: gym.Env, max_episode_steps: int) -> None:
+        super().__init__(env)
+        self.max_episode_steps = max_episode_steps
+        self.global_step = 0
+        self.episode_step = 0
+
+    def _add_info(self, info: dict) -> dict:
+        info["global_step"] = self.global_step
+        info["episode_step"] = self.episode_step
+        info["remaining_step"] = max(self.max_episode_steps - self.episode_step, 0)
+        return info
+
+    def reset(self, **kwargs) -> tuple:
+        obs, info = self.env.reset(**kwargs)
+        self.episode_step = 0
+        return obs, self._add_info(info)
+
+    def step(self, action: np.ndarray) -> tuple:
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        self.episode_step += 1
+        self.global_step += 1
+        return obs, reward, terminated, truncated, self._add_info(info)
+
+
+class StepCountObsWrapper(gym.Wrapper):
+    """Expose the env's step counters as scalar observations.
+
+    ``global_step`` tells the model *when* an experience happened, so the
+    sequence it reads carries an order across the whole run; ``episode_step``
+    and ``remaining_step`` give it the finite horizon it is acting under.
+    """
+
+    def __init__(self, env: gym.Env) -> None:
+        super().__init__(env)
+        spaces = dict(env.observation_space.spaces)
+        spaces["global_step"] = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        )
+        spaces["episode_step"] = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        )
+        spaces["remaining_step"] = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        )
+        self.observation_space = gym.spaces.Dict(spaces)
+
+    def _add_step_obs(self, obs: dict, info: dict) -> dict:
+        obs["global_step"] = np.array([info["global_step"]], dtype=np.float32)
+        obs["episode_step"] = np.array([info["episode_step"]], dtype=np.float32)
+        obs["remaining_step"] = np.array([info["remaining_step"]], dtype=np.float32)
+        return obs
+
+    def reset(self, **kwargs) -> tuple:
+        obs, info = self.env.reset(**kwargs)
+        return self._add_step_obs(obs, info), info
+
+    def step(self, action: np.ndarray) -> tuple:
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return self._add_step_obs(obs, info), reward, terminated, truncated, info
 
 
 class ZeroScalarObsWrapper(gym.ObservationWrapper):
