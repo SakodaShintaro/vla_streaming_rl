@@ -70,8 +70,12 @@ for _tag in ("!ArenaConfig", "!Arena", "!Item", "!Vector3", "!RGB"):
     _AAILoader.add_constructor(_tag, _aai_tag_constructor)
 
 
-def _parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
-    """Return (pass_mark, items) from an Animal-AI arena yaml.
+def _parse_arena(yaml_path: Path) -> tuple[float, int, list[dict]]:
+    """Return (pass_mark, episode_step_limit, items) from an Animal-AI arena yaml.
+
+    ``episode_step_limit`` is the arena's ``t``: AAI ends the episode with
+    ``interrupted`` once it is reached, so it is the horizon the agent must
+    plan against.
 
     Each item dict carries one (position, size, rotation) triple in arena
     coordinates: {name, x, z, size_x, size_z, rotation}. yaml entries with
@@ -81,6 +85,7 @@ def _parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
     cfg = yaml.load(yaml_path.read_text(), Loader=_AAILoader)
     arena = cfg["arenas"][0]
     pass_mark = float(arena.get("pass_mark", 0))
+    episode_step_limit = int(arena["t"])
     items_out: list[dict] = []
     for item in arena.get("items", []) or []:
         name = item["name"]
@@ -100,7 +105,7 @@ def _parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
                     "rotation": float(rot),
                 }
             )
-    return pass_mark, items_out
+    return pass_mark, episode_step_limit, items_out
 
 
 @dataclass(frozen=True)
@@ -564,6 +569,7 @@ class AnimalAIEnv(gym.Env):
         self.episode_step = 0
         self.arena_name: str = ""
         self.pass_mark: float = 0.0
+        self.episode_step_limit: int = 0
         self._arena: Arena | None = None
         self._arena_items: list[dict] = []
         self._episode_return = 0.0
@@ -646,8 +652,14 @@ class AnimalAIEnv(gym.Env):
             f"{self.prompt} "
             f"Velocity: ({vx:+.2f}, {vy:+.2f}, {vz:+.2f}). "
             f"Return so far: {self._episode_return:+.2f}. "
-            f"Pass mark: {self.pass_mark:+.2f}."
+            f"Pass mark: {self.pass_mark:+.2f}. "
+            f"Global step: {self.global_step}. "
+            f"Episode step: {self.episode_step}/{self.episode_step_limit} "
+            f"({self._remaining_step()} left)."
         )
+
+    def _remaining_step(self) -> int:
+        return max(self.episode_step_limit - self.episode_step, 0)
 
     def _build_info(self) -> dict:
         info = {
@@ -655,7 +667,10 @@ class AnimalAIEnv(gym.Env):
             "arena_name": self.arena_name,
             "arena_yaml": str(self._arena.path),
             "pass_mark": self.pass_mark,
+            "global_step": self.global_step,
             "episode_step": self.episode_step,
+            "episode_step_limit": self.episode_step_limit,
+            "remaining_step": self._remaining_step(),
             "velocity": self._agent_velocity,
             "agent_xyz": self._agent_xyz,
         }
@@ -676,7 +691,7 @@ class AnimalAIEnv(gym.Env):
         )
 
         self.arena_name = self._arena.name
-        self.pass_mark, self._arena_items = _parse_arena(self._arena.path)
+        self.pass_mark, self.episode_step_limit, self._arena_items = _parse_arena(self._arena.path)
         self._aai.reset(arenas_configurations=str(self._arena.path))
         self.episode_step = 0
         self._episode_return = 0.0

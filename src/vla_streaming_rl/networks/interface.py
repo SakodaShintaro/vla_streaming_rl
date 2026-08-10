@@ -39,6 +39,9 @@ class InferInput:
     velocity_z_seq: torch.Tensor  # (B, T, 1)
     episode_return_seq: torch.Tensor  # (B, T, 1)
     pass_mark_seq: torch.Tensor  # (B, T, 1)
+    global_step_seq: torch.Tensor  # (B, T, 1)
+    episode_step_seq: torch.Tensor  # (B, T, 1)
+    remaining_step_seq: torch.Tensor  # (B, T, 1)
 
 
 @dataclass
