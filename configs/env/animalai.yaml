@@ -22,7 +22,7 @@ env_factory:
   #               arenas once, in order (the paper's Testbed protocol).
   #   Training arenas and competition arenas are disjoint, so "eval" never
   #   scores an arena either training mode has seen.
-  mode: success
+  mode: staged
   # - train_arena_root: where the two training modes read their arenas from,
   #   recursively. Point it at an augmented copy to train on a larger set; the
   #   per-stage count then follows whatever is on disk (30 as split, 60 once
