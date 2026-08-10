@@ -331,8 +331,6 @@ class StepCountObsWrapper(gym.Wrapper):
     ``global_step`` tells the model *when* an experience happened, so the
     sequence it reads carries an order across the whole run; ``episode_step``
     and ``remaining_step`` give it the finite horizon it is acting under.
-    All three are scaled to O(1) so the running normalizer and the Fourier
-    embedding see sane magnitudes.
     """
 
     def __init__(self, env: gym.Env) -> None:

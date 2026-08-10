@@ -573,6 +573,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         eval_factory = OmegaConf.merge(args.env_factory, {"mode": "eval"})
         eval_env = make_env(args.env_id, eval_factory, result_dir=None)
         eval_env.action_space.seed(seed)
+        # A fresh env starts its counter at 0, but the network reads the global
+        # step as an observation and was trained at this run's values.
+        eval_env.unwrapped.set_global_step(global_step)
         network.eval()
         testbed_metrics = run_testbed(
             agent,

@@ -14,6 +14,7 @@ hand.
 """
 
 import argparse
+import json
 import logging
 import os
 import random
@@ -66,6 +67,13 @@ def load_wandb_config(run_dir: Path) -> DictConfig:
     return OmegaConf.create(flat)
 
 
+def load_global_step(run_dir: Path) -> int:
+    """The training step the checkpoint was written at, from train_state.json."""
+    train_state_path = run_dir / "train_state.json"
+    assert train_state_path.exists(), f"{train_state_path} not found"
+    return int(json.loads(train_state_path.read_text())["global_step"])
+
+
 def load_checkpoint_weights(checkpoint_path: Path, network: torch.nn.Module) -> None:
     trainable_state = torch.load(checkpoint_path, map_location="cuda")
     module = network._orig_mod if hasattr(network, "_orig_mod") else network
@@ -102,9 +110,10 @@ def run_arena(
 ) -> tuple[str, bool, float]:
     """Play the next arena the env serves; return its (name, passed, score).
 
-    `global_step` must exceed the agent's `learning_starts`: StandardAgent
-    treats smaller steps as off-policy warmup and returns uniform random
-    actions instead of querying the network.
+    `global_step` is the training step the checkpoint was written at. It gates
+    StandardAgent's off-policy warmup (below `learning_starts` it returns
+    uniform random actions instead of querying the network), which a trained
+    checkpoint is always past.
     """
     obs, reset_info = env.reset(seed=seed, options=None)
     arena_name = reset_info["arena_name"]
@@ -207,8 +216,13 @@ def main(
     torch.backends.cudnn.deterministic = True
     torch.cuda.set_device(0)
 
+    global_step = load_global_step(checkpoint_path.parent)
+
     env = make_env(args.env_id, args.env_factory, result_dir=None)
     env.action_space.seed(seed)
+    # The network reads the global step as an observation, so a fresh env's 0
+    # would be far outside anything the checkpoint was trained at.
+    env.unwrapped.set_global_step(global_step)
 
     network = build_network(
         args,
@@ -221,7 +235,7 @@ def main(
     load_checkpoint_weights(checkpoint_path, network)
     network.eval()
 
-    run_testbed(agent, env, seed, render, args.env_id, args.learning_starts + 1, result_dir)
+    run_testbed(agent, env, seed, render, args.env_id, global_step, result_dir)
 
     env.close()
 
