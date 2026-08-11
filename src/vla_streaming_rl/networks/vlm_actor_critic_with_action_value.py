@@ -249,7 +249,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        state, action, _, actor_activation, critic_out = self._infer(data.s_seq, data.task_prompts)
+        state, action, actor_activation, critic_out = self._infer(data.s_seq, data.task_prompts)
 
         next_image_latent, next_reward_latent, predictor_activation = (
             self.prediction_head.predict_next_state(
@@ -285,9 +285,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             data.task_prompt_token_ids[:, -self.horizon - 1]
         )
 
-        _, _, _, _, next_critic_out = self._infer(
-            data.observations[:, self.horizon :], next_prompts
-        )
+        _, _, _, next_critic_out = self._infer(data.observations[:, self.horizon :], next_prompts)
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(
@@ -335,7 +333,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             data.task_prompt_token_ids[:, -self.horizon - 1]
         )
 
-        next_state, next_action, _, actor_activation, critic_out = self._infer(
+        next_state, next_action, actor_activation, critic_out = self._infer(
             data.observations[:, self.horizon :], next_prompts
         )
         critic_activation = critic_out.activation
@@ -636,7 +634,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             text_q = self._compute_q(state, text_action)
             use_text = text_q > diff_q + self.text_q_margin
             action = torch.where(use_text.unsqueeze(-1).unsqueeze(-1), text_action, diff_action)
-            q = torch.where(use_text, text_q, diff_q)
             print(
                 f"[ActionSelect] diff_q={diff_q.item():.3f}, text_q={text_q.item():.3f}, "
                 f"use_text={use_text.item()}, parse_success={parse_success}, "
@@ -644,10 +641,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             )
         else:
             action = diff_action
-            q = diff_q
 
         critic_out = self.value_head(state, action)
-        return state, action, q, actor_activation, critic_out
+        return state, action, actor_activation, critic_out
 
     def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
         """Reshape and project state for StatePredictionHead context."""
