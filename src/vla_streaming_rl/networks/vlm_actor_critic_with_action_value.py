@@ -533,7 +533,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state = state.transpose(1, 2)  # (B, num_state_queries, state_out_dim)
         return state.flatten(start_dim=1), outputs.past_key_values
 
-    def _generate_text_and_extend_kv(self, prompt: str, vlm_past_kv, max_new_tokens: int):
+    def _generate_text_and_extend_kv(self, vlm_past_kv, max_new_tokens: int):
         """Generate text via manual forward loop (supports batched KV cache).
 
         Uses greedy decoding (argmax) with manual model.forward() calls
@@ -544,15 +544,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         kv_len = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[2]
         eos_token_id = tokenizer.eos_token_id
 
-        if prompt:
-            prompt_ids = tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-            B = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[0]
-            next_ids = prompt_ids.expand(B, -1)  # (B, prompt_len)
-            cur_pos = kv_len
-        else:
-            next_ids = self._last_input_ids[:, -1:].to(self.device)  # (B, 1)
-            B = next_ids.shape[0]
-            cur_pos = kv_len - 1  # re-feed last cached token
+        next_ids = self._last_input_ids[:, -1:].to(self.device)  # (B, 1)
+        B = next_ids.shape[0]
+        cur_pos = kv_len - 1  # re-feed last cached token
 
         # rope_deltas from the initial VLM forward (accounts for image token positions)
         rope_deltas = self._get_vlm_model_inner().rope_deltas  # (B, 1)
@@ -584,7 +578,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             cur_pos = cur_pos + seq_len
 
             # Skip collecting tokens on seed step (step 0 when no prompt)
-            if step == 0 and not prompt:
+            if step == 0:
                 next_ids = outputs.logits[:, -1:, :].argmax(dim=-1)
                 continue
 
@@ -621,13 +615,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         mode = self.text_action_mode
 
         if mode == "high_level":
-            generated_text, _ = self._generate_text_and_extend_kv(
-                "", vlm_past_kv, max_new_tokens=30
-            )
+            generated_text, _ = self._generate_text_and_extend_kv(vlm_past_kv, max_new_tokens=30)
             print(f"[HighLevel] {generated_text}")
         elif mode == "text_action":
             generated_text, _ = self._generate_text_and_extend_kv(
-                "", vlm_past_kv, max_new_tokens=self.max_new_tokens
+                vlm_past_kv, max_new_tokens=self.max_new_tokens
             )
             print(f"[TextAction] {generated_text}")
         elif mode == "pi_fast":
