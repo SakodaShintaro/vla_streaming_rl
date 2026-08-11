@@ -114,6 +114,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             device=device,
         )
         self.device = device
+        # The VLM weights are frozen either way (LoRA adds its own trainable weights,
+        # ``load_model`` freezes everything otherwise). Gradients must still flow
+        # *through* its activations whenever a trainable module sits upstream of the
+        # LLM: LoRA weights, or the recurrent temporal adapters inside the ViT.
+        self.backprop_through_vlm = self.use_lora or image_mode == "recurrent"
 
         # VLM config
         vlm_cfg = self.vlm_model.config.text_config
@@ -549,16 +554,20 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         inputs = self._input_cache(obs, task_prompts)
         inputs_embeds, rnn_state = self._build_inputs_embeds(inputs, rnn_state)
 
-        # When the VLM weights themselves are frozen we can save a lot of memory
-        # by skipping autograd through them.
-        with nullcontext() if self.use_lora else torch.no_grad():
+        # Autograd through the LLM is only needed when something upstream of it is
+        # trainable (LoRA weights, or the recurrent temporal adapters in the ViT).
+        # Otherwise skipping it saves a lot of activation memory.
+        with nullcontext() if self.backprop_through_vlm else torch.no_grad():
             outputs = self._vlm_language_forward(inputs, inputs_embeds)
 
         # Store last input_id for text generation seeding
         self._last_input_ids = inputs["input_ids"]
 
         # Compute state representation: softmax-weighted sum across embedding + each layer's hidden states
-        stacked = torch.stack([h.to(torch.float32).detach() for h in outputs.hidden_states], dim=0)
+        # No detach: when ``backprop_through_vlm`` is False the forward above already
+        # ran under no_grad, and when it is True the gradient must reach the trainable
+        # modules upstream (LoRA weights / recurrent temporal adapters).
+        stacked = torch.stack([h.to(torch.float32) for h in outputs.hidden_states], dim=0)
         weights = F.softmax(self.layer_logits, dim=0)
         hidden = (weights.view(-1, 1, 1, 1) * stacked).sum(dim=0)
 

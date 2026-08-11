@@ -59,6 +59,11 @@ def load_model(
         )
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
+    else:
+        # Without LoRA the VLM (ViT + LLM) is a frozen feature extractor: activations
+        # still carry gradient to whatever is attached to it (e.g. the recurrent
+        # temporal adapters inside the ViT), but its own weights are never updated.
+        model.requires_grad_(False)
 
     processor = AutoProcessor.from_pretrained(model_id, device_map=device)
 
