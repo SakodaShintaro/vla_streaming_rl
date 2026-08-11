@@ -14,6 +14,8 @@ critic_arch: dueling
 image_encoder_type: qwen
 # Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
 image_encoder_output_dim: 16
+temporal_model_type: gru
+policy_type: diffusion
 predictor_hidden_dim: 512
 predictor_block_num: 2
 predictor_step_num: 1

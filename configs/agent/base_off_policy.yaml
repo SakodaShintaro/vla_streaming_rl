@@ -1,8 +1,6 @@
 # @package _global_
 agent_type: standard
 learning_mode: off_policy
-temporal_model_type: gru
-policy_type: diffusion
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
