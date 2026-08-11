@@ -162,6 +162,7 @@ def build_network(
             predictor_block_num=args.predictor_block_num,
             sparsity=args.sparsity,
             image_mode=args.image_mode,
+            temporal_model_type=args.temporal_model_type,
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,
             image_encoder_type=args.image_encoder_type,

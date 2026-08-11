@@ -42,8 +42,7 @@ class VLMInputCache:
     ) -> None:
         if len(observation_shape) != 3:
             raise ValueError(f"observation_shape must be (C, H, W); got {tuple(observation_shape)}")
-        if image_mode not in ("mem", "sequence"):
-            raise ValueError(f"Unknown image_mode: {image_mode}")
+        assert image_mode in ("mem", "sequence", "recurrent"), f"Unknown image_mode: {image_mode}"
         self.tokenizer = processor.tokenizer
         self.image_processor = processor.image_processor
         self.image_token = processor.image_token  # e.g. '<|image_pad|>'
@@ -51,9 +50,9 @@ class VLMInputCache:
         self.seq_len = seq_len
         self.device = device
         self.image_mode = image_mode
-        # mem: only the last frame appears in the LLM prompt (1 image).
+        # mem / recurrent: only the last frame appears in the LLM prompt (1 image).
         # sequence: every frame appears in order (T images).
-        self.num_prompt_images = 1 if image_mode == "mem" else seq_len
+        self.num_prompt_images = seq_len if image_mode == "sequence" else 1
 
         # --- Image grid cache: feed a dummy through image_processor once to
         #     pin down image_grid_thw. With fixed observation dims this is

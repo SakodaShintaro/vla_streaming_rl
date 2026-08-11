@@ -21,6 +21,7 @@ from .modules.head_output import HeadOutput
 from .modules.image_processor import ImageProcessor
 from .modules.policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
 from .modules.prediction_head import StatePredictionHead
+from .modules.recurrent_video_encoder import RecurrentVideoEncoder
 from .modules.reward_processor import RewardProcessor
 from .modules.value_head import DistributionalValueHead
 from .modules.video_encoder import VideoEncoder
@@ -75,13 +76,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         predictor_block_num: int,
         sparsity: float,
         image_mode: str,
+        temporal_model_type: str,
         predictor_type: str,
         policy_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
     ) -> None:
         super().__init__()
-        assert image_mode in ("mem", "sequence"), f"Unknown image_mode: {image_mode}"
+        assert image_mode in ("mem", "sequence", "recurrent"), f"Unknown image_mode: {image_mode}"
         self.seq_len = seq_len
         self.horizon = horizon
         self.action_dim = action_space_shape[0]
@@ -208,7 +210,26 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             image_mode=self.image_mode,
         )
 
+        # recurrent mode: same skeleton as ``mem``, but the ViT's temporal mixing is
+        # recurrent and the history lives in ``rnn_state`` carried across steps.
+        vision_cfg = self.vlm_model.config.vision_config
+        merge_length = self.processor.image_processor.merge_size**2
+        self.recurrent_video_encoder = (
+            RecurrentVideoEncoder(
+                hidden_dim=vision_cfg.hidden_size,
+                n_head=vision_cfg.num_heads,
+                num_patches=self._input_cache.num_image_tokens * merge_length,
+                depth=vision_cfg.depth,
+                seq_len=seq_len,
+                temporal_model_type=temporal_model_type,
+            ).to(device)
+            if self.image_mode == "recurrent"
+            else None
+        )
+
     def init_state(self) -> torch.Tensor:
+        if self.image_mode == "recurrent":
+            return self.recurrent_video_encoder.init_state()
         return self._dummy_state.clone()
 
     def observe_scalar_obs(
@@ -249,7 +270,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        state, action, actor_activation, critic_out = self._infer(data.s_seq, data.task_prompts)
+        state, action, actor_activation, critic_out, rnn_state = self._infer(
+            data.s_seq, data.task_prompts, data.rnn_state
+        )
 
         next_image_latent, next_reward_latent, predictor_activation = (
             self.prediction_head.predict_next_state(
@@ -270,7 +293,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return InferResult(
             action=action,
             value_report=self.value_head.value_report(critic_out.output),
-            rnn_state=data.rnn_state,
+            rnn_state=rnn_state,
             next_image_latent=next_image_latent,
             next_reward_latent=next_reward_latent,
             activations=activations,
@@ -285,7 +308,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             data.task_prompt_token_ids[:, -self.horizon - 1]
         )
 
-        _, _, _, next_critic_out = self._infer(data.observations[:, self.horizon :], next_prompts)
+        _, _, _, next_critic_out, _ = self._infer(
+            data.observations[:, self.horizon :], next_prompts, data.rnn_state[:, self.horizon]
+        )
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(
@@ -293,7 +318,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
         curr_obs = data.observations[:, : -self.horizon]
-        state, _ = self._forward_state(curr_obs, curr_prompts)
+        state, _, _ = self._forward_state(curr_obs, curr_prompts, data.rnn_state[:, 0])
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
 
         # Critic loss
@@ -333,8 +358,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             data.task_prompt_token_ids[:, -self.horizon - 1]
         )
 
-        next_state, next_action, actor_activation, critic_out = self._infer(
-            data.observations[:, self.horizon :], next_prompts
+        next_state, next_action, actor_activation, critic_out, next_rnn_state = self._infer(
+            data.observations[:, self.horizon :], next_prompts, data.rnn_state[:, self.horizon]
         )
         critic_activation = critic_out.activation
         chunk_rewards = data.rewards[:, -self.horizon :]
@@ -344,7 +369,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
         curr_obs = data.observations[:, : -self.horizon]
-        state, _ = self._forward_state(curr_obs, curr_prompts)
+        state, _, _ = self._forward_state(curr_obs, curr_prompts, data.rnn_state[:, 0])
         action_chunk = data.actions[:, -self.horizon :]
 
         # Critic loss
@@ -397,7 +422,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         infer_result = InferResult(
             action=next_action,
             value_report=self.value_head.value_report(critic_out.output),
-            rnn_state=self._dummy_state.clone(),
+            rnn_state=next_rnn_state,
             next_image_latent=next_image_latent,
             next_reward_latent=next_reward_latent,
             activations=activations,
@@ -436,10 +461,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             return self.vlm_model.model.model
         return self.vlm_model.model
 
-    def _build_inputs_embeds(self, inputs: dict) -> torch.Tensor:
+    def _build_inputs_embeds(
+        self, inputs: dict, rnn_state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build inputs_embeds and scatter image embeddings into <image_pad> positions.
 
-        Two image paths share the same scatter step but differ in what gets scattered:
+        Three image paths share the same scatter step but differ in what gets scattered:
 
         - mem mode: only the last frame appears in the LLM context. ``VideoEncoder``
           processes all frames jointly (with causal temporal attention) and returns
@@ -448,6 +475,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
           The VLM's stock vision encoder processes each frame independently and
           returns merged tokens for all frames, concatenated in the same order as
           the <image_pad> placeholders.
+        - recurrent mode: like mem, only the last frame enters the LLM context, but
+          the history is mixed by ``RecurrentVideoEncoder`` and summarised into
+          ``rnn_state``, which is carried across steps and returned updated.
         """
         vlm_inner = self._get_vlm_model_inner()
         inputs_embeds = vlm_inner.get_input_embeddings()(inputs["input_ids"])
@@ -460,6 +490,15 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             pixel_values = inputs["all_pixel_values"].type(visual.dtype)
             vision_output = visual(pixel_values, grid_thw=inputs["all_image_grid_thw"])
             image_embeds = vision_output.pooler_output
+        elif self.image_mode == "recurrent":
+            image_embeds, rnn_state = self.recurrent_video_encoder(
+                self._get_visual(),
+                inputs["all_pixel_values"],
+                inputs["all_image_grid_thw"],
+                batch_size,
+                seq_len,
+                rnn_state,
+            )
         else:
             image_embeds = self.video_encoder(
                 self._get_visual(),
@@ -474,7 +513,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         image_mask = (inputs["input_ids"] == image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-        return inputs_embeds
+        return inputs_embeds, rnn_state
 
     def _vlm_language_forward(self, inputs: dict, inputs_embeds: torch.Tensor):
         """Run the VLM language model with pre-built inputs_embeds (no pixel_values)."""
@@ -504,11 +543,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return self.vlm_model.forward(**forward_kwargs)
 
     def _forward_state(
-        self, obs: torch.Tensor, task_prompts: list[str]
-    ) -> tuple[torch.Tensor, object]:
-        """Run VLM forward and return (state, past_key_values)."""
+        self, obs: torch.Tensor, task_prompts: list[str], rnn_state: torch.Tensor
+    ) -> tuple[torch.Tensor, object, torch.Tensor]:
+        """Run VLM forward and return (state, past_key_values, rnn_state)."""
         inputs = self._input_cache(obs, task_prompts)
-        inputs_embeds = self._build_inputs_embeds(inputs)
+        inputs_embeds, rnn_state = self._build_inputs_embeds(inputs, rnn_state)
 
         # When the VLM weights themselves are frozen we can save a lot of memory
         # by skipping autograd through them.
@@ -529,7 +568,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state = state.transpose(1, 2)  # (B, state_out_dim, T)
         state = F.adaptive_avg_pool1d(state, self.num_state_queries)
         state = state.transpose(1, 2)  # (B, num_state_queries, state_out_dim)
-        return state.flatten(start_dim=1), outputs.past_key_values
+        return state.flatten(start_dim=1), outputs.past_key_values, rnn_state
 
     def _generate_text_and_extend_kv(self, vlm_past_kv, max_new_tokens: int):
         """Generate text via manual forward loop (supports batched KV cache).
@@ -607,9 +646,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def _infer(
-        self, obs: torch.Tensor, task_prompts: list[str]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
-        state, vlm_past_kv = self._forward_state(obs, task_prompts)
+        self, obs: torch.Tensor, task_prompts: list[str], rnn_state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput, torch.Tensor]:
+        state, vlm_past_kv, rnn_state = self._forward_state(obs, task_prompts, rnn_state)
         mode = self.text_action_mode
 
         if mode == "high_level":
@@ -643,7 +682,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             action = diff_action
 
         critic_out = self.value_head(state, action)
-        return state, action, actor_activation, critic_out
+        return state, action, actor_activation, critic_out, rnn_state
 
     def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
         """Reshape and project state for StatePredictionHead context."""

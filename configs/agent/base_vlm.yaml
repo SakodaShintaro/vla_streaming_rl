@@ -15,4 +15,7 @@ text_q_margin: 1.0
 #              only the last-frame embedding is injected into the LLM context).
 #   sequence : standard multi-image prompt <image_1>...<image_T>; each frame goes
 #              through the VLM's vision encoder independently, all frames injected.
-image_mode: sequence
+#   recurrent: like mem, but the ViT's temporal mixing is a recurrent layer
+#              (temporal_model_type, e.g. gru) whose state is carried across steps in
+#              rnn_state, so history is not limited to the seq_len window.
+image_mode: recurrent
