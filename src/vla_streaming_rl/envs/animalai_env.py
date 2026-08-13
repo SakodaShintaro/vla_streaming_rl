@@ -18,8 +18,12 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
               the stage (`StagedSelector`).
   - "success" the same stages, but sampled within the stage by how much is
               still to be learned from each arena (`SuccessDrivenSelector`).
+  - "sequential" no curriculum: every arena under the root in path (file name)
+              order, wrapping around forever (`SequentialSelector`, cycling).
+              For a training set that is one flat directory, not a stage split.
   - "eval"    every configs/competition/ arena once, in order -- the
-              900-arena Testbed sweep (`SequentialSelector`).
+              900-arena Testbed sweep (the same `SequentialSelector`, not
+              cycling, so it ends).
 
 Which arenas a selector serves is just a root directory it reads recursively,
 so an augmented training set is a matter of pointing at a different root. The
@@ -316,31 +320,53 @@ class SuccessDrivenSelector(StagedSelector):
 
 
 class SequentialSelector(ArenaSelector):
-    """Every arena under `root` exactly once, in path order.
+    """Every arena under `root` in path (file name) order.
 
-    Over COMPETITION_DIR this is the paper's Testbed evaluation protocol: one
-    episode per arena, pass/fail by that arena's pass mark (see
-    scripts/test_trained_agent.py, which loops until `is_exhausted`).
+    `cycle` is what separates the two ways this is used:
+
+      - False: one pass, then `is_exhausted`. Over COMPETITION_DIR this is the
+        paper's Testbed protocol -- one episode per arena, pass/fail by that
+        arena's pass mark (scripts/test_trained_agent.py loops until exhausted).
+      - True: wrap back to the first arena instead of ending, so the set is
+        replayed until train.py's step_limit stops the run. This is the
+        curriculum-free training mode, for an arena set that is one flat
+        directory rather than a stage split.
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, cycle: bool):
         super().__init__(_arenas_under(root))
+        self.cycle = cycle
         self._next_index = 0
 
     @property
     def is_exhausted(self) -> bool:
-        return self._next_index >= len(self.arenas)
+        return not self.cycle and self._next_index >= len(self.arenas)
 
     def next_arena(self, global_step: int) -> Arena:
-        arena = self.arenas[self._next_index]
+        arena = self.arenas[self._next_index % len(self.arenas)]
         self._next_index += 1
         return arena
 
     def info(self, global_step: int) -> dict:
-        return {"arena_index": self._next_index - 1, "arena_total": len(self.arenas)}
+        return {
+            "arena_index": (self._next_index - 1) % len(self.arenas),
+            "arena_total": len(self.arenas),
+            "lap": (self._next_index - 1) // len(self.arenas),
+        }
 
     def status(self, global_step: int) -> str:
-        return f"{self._next_index}/{len(self.arenas)}"
+        cleared = sum(successes > 0 for successes in self._successes.values())
+        return (
+            f"{(self._next_index - 1) % len(self.arenas) + 1}/{len(self.arenas)}"
+            f"  lap:{(self._next_index - 1) // len(self.arenas) + 1}"
+            f"  cleared:{cleared}/{len(self.arenas)}  step:{global_step}"
+        )
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
+        """Resume where the run left off: one episode per arena visit, so the
+        total attempt count is exactly how far into the order we are."""
+        super().load_state(arena_attempts, arena_successes, is_revisit)
+        self._next_index = sum(self._attempts.values())
 
 
 def build_selector(
@@ -367,7 +393,8 @@ def build_selector(
             revisit_temperature=revisit_temperature,
             seed=seed,
         ),
-        "eval": lambda: SequentialSelector(root=COMPETITION_DIR),
+        "sequential": lambda: SequentialSelector(root=train_root, cycle=True),
+        "eval": lambda: SequentialSelector(root=COMPETITION_DIR, cycle=False),
     }
     assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"
     return builders[mode]()

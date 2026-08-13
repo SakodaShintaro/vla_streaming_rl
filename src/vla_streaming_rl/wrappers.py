@@ -33,7 +33,6 @@ def make_animalai_env(
     steps_per_stage: int,
     revisit_temperature: float,
 ) -> gym.Env:
-    """`mode` selects staged / success / eval; see animalai_env's module docstring."""
     from vla_streaming_rl.envs.animalai_env import AnimalAIEnv, build_selector
 
     selector = build_selector(
