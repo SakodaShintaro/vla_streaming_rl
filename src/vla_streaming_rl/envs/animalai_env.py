@@ -16,8 +16,9 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
   - "staged"  training with the paper's cumulative 11-stage curriculum, one
               stage per subdirectory of the root, sampled uniformly within
               the stage (`StagedSelector`).
-  - "success" the same stages, but sampled within the stage by how much is
-              still to be learned from each arena (`SuccessDrivenSelector`).
+  - "success" the same stages, but advanced by clearing them rather than by
+              step count, alternating unsolved-arena draws with failure-rate
+              softmax draws (`SuccessDrivenSelector`).
   - "sequential" no curriculum: every arena under the root in path (file name)
               order, wrapping around forever (`SequentialSelector`, cycling).
               For a training set that is one flat directory, not a stage split.
@@ -268,65 +269,81 @@ class StagedSelector(ArenaSelector):
 
 
 class SuccessDrivenSelector(ArenaSelector):
-    """The same 11-stage gating as `StagedSelector`, but choosing within the
-    stage by how much is still to be learned from each arena rather than
-    uniformly.
+    """The same stages as `StagedSelector`, but gated on what has been solved
+    rather than on the step count, and alternating between two draws.
 
-    Arenas of the current stage never attempted go first, uniformly at random,
-    so the whole stage is seen before any of it is repeated. After that, an
-    arena's weight is the variance of the Beta(1 + successes, 1 + failures)
-    posterior over its pass probability -- largest where that probability is
-    least pinned down.
+    The stage is the first one still holding an arena that has never been
+    passed; once every arena of a stage is passed the next stage opens, so the
+    curriculum advances at the pace the agent actually learns. Because the
+    stages are cumulative, the current stage's arena list is also every arena
+    seen so far.
 
-    Reliably passed arenas and never-passed ones both fall away, since both
-    ends of the posterior are certain, while partly-passed ones stay high:
-    the zone of proximal development read as an information criterion. The
-    decay is only ~1/attempts though, so nothing is ever abandoned and a task
-    that becomes solvable later still comes back. `revisit_temperature`
-    sharpens (< 1) or flattens (> 1) the resulting distribution.
+    Trials alternate:
+
+      - odd trials draw uniformly from the arenas of the current stage that
+        have not been passed yet, so the unsolved edge of the curriculum gets
+        half of all episodes;
+      - even trials draw from every arena unlocked so far by a softmax over
+        each arena's failure rate (failures / attempts, an unattempted arena
+        counting as 1.0), so solved arenas keep being revisited in proportion
+        to how badly they still go and nothing is ever abandoned.
+
+    `revisit_temperature` is that softmax's temperature: < 1 sharpens it
+    towards the worst arenas, > 1 flattens it towards uniform.
+
+    Which trial is next and which stage is open both follow from the
+    attempt/success counts, so a resumed run continues where it left off
+    without any extra state.
     """
 
-    def __init__(self, root: Path, steps_per_stage: int, revisit_temperature: float, seed: int):
+    def __init__(self, root: Path, revisit_temperature: float, seed: int):
         stages = _stages_under(root)
         super().__init__(stages[-1])
-        self._stages = stages + [stages[-1]]
-        self.steps_per_stage = steps_per_stage
+        self._stages = stages
         self.revisit_temperature = revisit_temperature
         self._rng = np.random.default_rng(seed)
 
-    def _stage_index(self, global_step: int) -> int:
-        return min(global_step // self.steps_per_stage, len(self._stages) - 1)
+    def _stage_index(self) -> int:
+        """The first stage with an arena that has never been passed; the last
+        stage once everything is passed."""
+        for index, stage_arenas in enumerate(self._stages):
+            if any(self._successes[arena.name] == 0 for arena in stage_arenas):
+                return index
+        return len(self._stages) - 1
 
-    def _stage_arenas(self, global_step: int) -> list[Arena]:
-        return self._stages[self._stage_index(global_step)]
-
-    def _learning_weight(self, arena: Arena) -> float:
+    def _failure_rate(self, arena: Arena) -> float:
         attempts, successes = self.arena_record(arena)
-        # Beta(1+s, 1+f) posterior: mean (s+1)/(n+2), variance mean(1-mean)/(n+3).
-        # The +1/+1 pseudo-counts also keep a single attempt off 0.0 / 1.0.
-        mean = (successes + 1) / (attempts + 2)
-        return mean * (1.0 - mean) / (attempts + 3)
+        if attempts == 0:
+            return 1.0
+        return 1.0 - successes / attempts
+
+    def _softmax_pick(self, arenas: list[Arena]) -> Arena:
+        logits = np.array([self._failure_rate(arena) for arena in arenas])
+        logits = logits / self.revisit_temperature
+        weights = np.exp(logits - logits.max())
+        index = self._rng.choice(len(arenas), p=weights / weights.sum())
+        return arenas[int(index)]
 
     def next_arena(self, global_step: int) -> Arena:
-        stage_arenas = self._stage_arenas(global_step)
-        untried = [arena for arena in stage_arenas if self._attempts[arena.name] == 0]
-        if untried:
-            return untried[int(self._rng.integers(len(untried)))]
-        weights = np.array([self._learning_weight(arena) for arena in stage_arenas])
-        weights = weights ** (1.0 / self.revisit_temperature)
-        index = self._rng.choice(len(stage_arenas), p=weights / weights.sum())
-        return stage_arenas[int(index)]
+        stage_arenas = self._stages[self._stage_index()]
+        is_odd_trial = sum(self._attempts.values()) % 2 == 0
+        unsolved = [arena for arena in stage_arenas if self._successes[arena.name] == 0]
+        # The stage only lacks unsolved arenas once the whole set is passed,
+        # and then there is no next stage to move to, so fall back to softmax.
+        if is_odd_trial and unsolved:
+            return unsolved[int(self._rng.integers(len(unsolved)))]
+        return self._softmax_pick(stage_arenas)
 
     def info(self, global_step: int) -> dict:
         cleared = sum(successes > 0 for successes in self._successes.values())
-        return {"stage": self._stage_index(global_step) + 1, "cleared_count": cleared}
+        return {"stage": self._stage_index() + 1, "cleared_count": cleared}
 
     def status(self, global_step: int) -> str:
-        stage_arenas = self._stage_arenas(global_step)
+        stage_arenas = self._stages[self._stage_index()]
         cleared = sum(self._successes[arena.name] > 0 for arena in stage_arenas)
         untried = sum(self._attempts[arena.name] == 0 for arena in stage_arenas)
         return (
-            f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}"
+            f"stage:{self._stage_index() + 1}/{len(self._stages)}"
             f"  step:{global_step}"
             f"  cleared:{cleared}/{len(stage_arenas)} untried:{untried}"
         )
@@ -430,10 +447,7 @@ def build_selector(
             root=train_root, steps_per_stage=steps_per_stage, seed=seed
         ),
         "success": lambda: SuccessDrivenSelector(
-            root=train_root,
-            steps_per_stage=steps_per_stage,
-            revisit_temperature=revisit_temperature,
-            seed=seed,
+            root=train_root, revisit_temperature=revisit_temperature, seed=seed
         ),
         "sequential": lambda: SequentialSelector(root=train_root, cycle=True),
         "random": lambda: RandomSelector(root=train_root, seed=seed),
