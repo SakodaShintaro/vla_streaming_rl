@@ -11,7 +11,7 @@ image_save_interval: 20
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_env
   # - resolution: square camera height/width (kept divisible by the VAE stride 8).
-  resolution: 96
+  resolution: 224
   # - mode: which arenas each episode is drawn from, and in what order.
   #     staged  : train with the Animal-AI paper's cumulative 11-stage
   #               curriculum, one stage per subdirectory of train_arena_root,
@@ -32,7 +32,7 @@ env_factory:
   #               arenas once, in order (the paper's Testbed protocol).
   #   Training arenas and competition arenas are disjoint, so "eval" never
   #   scores an arena either training mode has seen.
-  mode: success
+  mode: sequential
   # - train_arena_root: where the two training modes read their arenas from,
   #   recursively. Point it at an augmented copy to train on a larger set; the
   #   per-stage count then follows whatever is on disk (30 as split, 60 once

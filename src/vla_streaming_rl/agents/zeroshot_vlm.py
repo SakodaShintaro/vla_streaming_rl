@@ -90,6 +90,7 @@ class ZeroShotVLMAgent(Agent):
         model_id: str,
         seq_len: int,
         max_new_tokens: int,
+        reasoning_max_tokens: int,
         image_side: int,
         temperature: float,
     ) -> None:
@@ -103,6 +104,15 @@ class ZeroShotVLMAgent(Agent):
         self.format_hint = build_format_hint(action_spec)
         self.seq_len = seq_len
         self.max_new_tokens = max_new_tokens
+        # The protocol already asks for the chain of thought in <reasoning>, so a
+        # Qwen model's own thinking is a second, hidden copy of it that eats the
+        # same token budget: with no cap it routinely burns the whole budget and
+        # returns an empty `content` (finish_reason=length). 0 turns it off.
+        self.reasoning = (
+            {"enabled": False}
+            if reasoning_max_tokens == 0
+            else {"max_tokens": reasoning_max_tokens}
+        )
         self.image_side = image_side
         self.temperature = temperature
 
@@ -143,6 +153,7 @@ class ZeroShotVLMAgent(Agent):
             messages=messages,
             max_tokens=self.max_new_tokens,
             temperature=self.temperature,
+            extra_body={"reasoning": self.reasoning},
         )
         api_msec = (time.time() - request_start) * 1000
 

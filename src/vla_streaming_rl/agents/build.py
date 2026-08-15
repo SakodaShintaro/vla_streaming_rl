@@ -15,6 +15,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             model_id=args.openrouter_model_id,
             seq_len=args.seq_len,
             max_new_tokens=args.max_new_tokens,
+            reasoning_max_tokens=args.reasoning_max_tokens,
             image_side=args.image_side,
             temperature=args.temperature,
         )

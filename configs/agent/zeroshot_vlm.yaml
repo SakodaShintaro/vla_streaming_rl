@@ -33,7 +33,12 @@ learning_mode: streaming
 openrouter_model_id: qwen/qwen3.7-flash
 # Past (image, response) turns replayed as in-context history (0 = memoryless).
 seq_len: 4
-max_new_tokens: 1024
+max_new_tokens: 2048
+# Cap on the model's own hidden thinking (OpenRouter `reasoning`). The prompt
+# already asks for the chain of thought inside <reasoning>, so the hidden copy
+# only competes for max_new_tokens: with no cap the budget runs out before
+# <answer> and the response comes back empty. 0 disables thinking entirely.
+reasoning_max_tokens: 0
 # Observations are tiny (96x96); they are resized to this square before being
 # sent. Larger costs image tokens and latency without adding information.
 image_side: 224
