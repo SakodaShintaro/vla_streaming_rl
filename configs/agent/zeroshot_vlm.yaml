@@ -1,0 +1,23 @@
+# @package _global_
+# Zero-shot baseline: a hosted VLM on OpenRouter drives the env directly, with
+# no training. Only the keys below matter; the inherited training knobs are kept
+# so the trainer's config surface stays identical across agents.
+#   OPENROUTER_API_KEY must be set in the environment.
+defaults:
+  - base_network
+  - base_off_policy
+  - base_streaming
+  - base_vlm
+  - _self_
+
+agent_type: zeroshot_vlm
+learning_mode: streaming
+# OpenRouter model slug, e.g. google/gemini-3.1-pro-preview, openai/gpt-5.2.
+openrouter_model_id: anthropic/claude-opus-5
+# Past (image, response) turns replayed as in-context history (0 = memoryless).
+seq_len: 4
+max_new_tokens: 1024
+# Observations are tiny (96x96); they are resized to this square before being
+# sent. Larger costs image tokens and latency without adding information.
+image_side: 224
+temperature: 0.0

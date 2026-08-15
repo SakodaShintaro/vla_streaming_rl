@@ -16,6 +16,9 @@ CAR_RACING_PROMPT = (
 )
 
 
+CAR_RACING_ACTION_SPEC = "steer=<value>, accel=<value> where each <value> is a float in [-1, 1]"
+
+
 def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     pattern = r"(?:t\d+:\s*)?steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)"
     matches = re.findall(pattern, action_text)
@@ -24,6 +27,49 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
         action_array[i, 0] = np.clip(float(matches[i][0]), -1.0, 1.0)
         action_array[i, 1] = np.clip(float(matches[i][1]), -1.0, 1.0)
     return action_array, len(matches) > 0
+
+
+# Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
+# / back) and one rotation (noop / right / left) per tick. The env exposes it as
+# Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
+# named action maps onto the extreme Box value that survives that dead-zone.
+_ANIMALAI_MOVE = {"stand still": 0.0, "walk forward": 1.0, "walk backward": -1.0}
+_ANIMALAI_ROTATE = {"no turn": 0.0, "turn right": 1.0, "turn left": -1.0}
+
+ANIMALAI_PROMPT = (
+    "You control the agent in Animal-AI (first-person view). "
+    "Find and reach the green or yellow goal sphere; avoid red zones. "
+    "Action space: one move and one rotation, applied on the same tick, "
+    "written as `<move>, <rotation>`. "
+    f"The move is one of: {', '.join(_ANIMALAI_MOVE)}. "
+    f"The rotation is one of: {', '.join(_ANIMALAI_ROTATE)}. "
+    "For example `walk forward, no turn` goes straight ahead, "
+    "`stand still, turn left` turns on the spot, and "
+    "`walk forward, turn right` walks while turning. "
+)
+ANIMALAI_ACTION_SPEC = (
+    "`<move>, <rotation>` -- exactly one move out of "
+    f"{{{', '.join(_ANIMALAI_MOVE)}}} and one rotation out of "
+    f"{{{', '.join(_ANIMALAI_ROTATE)}}}, separated by a comma and a space, "
+    "with no other words"
+)
+
+# The phrase pair exactly as specified. Anything else is a format violation and
+# is reported as such rather than repaired here.
+_ANIMALAI_ACTION_RE = re.compile(
+    f"({'|'.join(_ANIMALAI_MOVE)}), ({'|'.join(_ANIMALAI_ROTATE)})", re.IGNORECASE
+)
+
+
+def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
+    """Decode the `<move>, <rotation>` phrase pair into the Box action that the
+    env discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair."""
+    match = _ANIMALAI_ACTION_RE.fullmatch(action_text.strip())
+    if match is None:
+        return np.zeros((0, 2), dtype=np.float32), False
+    move, rotation = (group.lower() for group in match.groups())
+    action_array = np.array([[_ANIMALAI_MOVE[move], _ANIMALAI_ROTATE[rotation]]], dtype=np.float32)
+    return action_array, True
 
 
 def make_animalai_env(
@@ -115,6 +161,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
+        env.unwrapped.action_spec = CAR_RACING_ACTION_SPEC
         return env
 
     elif env_id == "CARLA-Leaderboard-v0":
@@ -133,6 +180,9 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
 
     elif env_id == "AnimalAI-v0":
         env = hydra.utils.instantiate(env_factory)
+        # The env composes its own task prompt (it appends live scalars), so the
+        # action encoding is injected by replacing the task text it starts from.
+        env.unwrapped.prompt = ANIMALAI_PROMPT
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)
@@ -143,6 +193,8 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = EpisodeReturnObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
+        env.unwrapped.parse_action_text = _animalai_parse_action
+        env.unwrapped.action_spec = ANIMALAI_ACTION_SPEC
         return env
 
     else:
