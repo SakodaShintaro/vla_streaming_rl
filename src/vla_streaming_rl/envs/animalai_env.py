@@ -21,6 +21,8 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
   - "sequential" no curriculum: every arena under the root in path (file name)
               order, wrapping around forever (`SequentialSelector`, cycling).
               For a training set that is one flat directory, not a stage split.
+  - "random"  no curriculum: every episode draws uniformly at random from all
+              arenas under the root (`RandomSelector`).
   - "eval"    every configs/competition/ arena once, in order -- the
               900-arena Testbed sweep (the same `SequentialSelector`, not
               cycling, so it ends).
@@ -369,6 +371,35 @@ class SequentialSelector(ArenaSelector):
         self._next_index = sum(self._attempts.values())
 
 
+class RandomSelector(ArenaSelector):
+    """Every episode drawn uniformly at random from all arenas under `root`.
+
+    No curriculum and no ordering: unlike `SequentialSelector(cycle=True)` an
+    arena can repeat before the whole set has been seen, and unlike
+    `StagedSelector` nothing is withheld -- the full set is available from the
+    first episode. The curriculum-free baseline the staged modes are compared
+    against. Runs forever, so train.py's step_limit ends the run.
+    """
+
+    def __init__(self, root: Path, seed: int):
+        super().__init__(_arenas_under(root))
+        self._rng = np.random.default_rng(seed)
+
+    def next_arena(self, global_step: int) -> Arena:
+        return self.arenas[int(self._rng.integers(len(self.arenas)))]
+
+    def info(self, global_step: int) -> dict:
+        cleared = sum(successes > 0 for successes in self._successes.values())
+        return {"arena_total": len(self.arenas), "cleared_count": cleared}
+
+    def status(self, global_step: int) -> str:
+        cleared = sum(successes > 0 for successes in self._successes.values())
+        untried = sum(attempts == 0 for attempts in self._attempts.values())
+        return (
+            f"random  cleared:{cleared}/{len(self.arenas)}  untried:{untried}  step:{global_step}"
+        )
+
+
 def build_selector(
     mode: str, train_arena_root: str, steps_per_stage: int, revisit_temperature: float, seed: int
 ) -> ArenaSelector:
@@ -394,6 +425,7 @@ def build_selector(
             seed=seed,
         ),
         "sequential": lambda: SequentialSelector(root=train_root, cycle=True),
+        "random": lambda: RandomSelector(root=train_root, seed=seed),
         "eval": lambda: SequentialSelector(root=COMPETITION_DIR, cycle=False),
     }
     assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"

@@ -22,17 +22,20 @@ env_factory:
   #               name order, wrapping back to the first once the last has run,
   #               until step_limit. For a flat arena directory with no stage
   #               subdirectories (steps_per_stage is ignored).
+  #     random  : no curriculum. Every episode draws uniformly at random from
+  #               all arenas under train_arena_root, with no ordering and
+  #               nothing withheld (steps_per_stage is ignored).
   #     eval    : run each of the 900 external/animal-ai/configs/competition/
   #               arenas once, in order (the paper's Testbed protocol).
   #   Training arenas and competition arenas are disjoint, so "eval" never
   #   scores an arena either training mode has seen.
-  mode: staged
+  mode: random
   # - train_arena_root: where the two training modes read their arenas from,
   #   recursively. Point it at an augmented copy to train on a larger set; the
   #   per-stage count then follows whatever is on disk (30 as split, 60 once
   #   mirrored copies sit alongside). "eval" ignores this and always uses the
   #   competition arenas, so the benchmark cannot drift.
-  train_arena_root: ./external/animal-ai/configs/paper_curriculum_split
+  train_arena_root: ./external/animal-ai/configs/paper_curriculum_split_mirrored
   # - steps_per_stage ("staged"/"success"): how long each of the 11 stages lasts.
   steps_per_stage: 40_000
   # - revisit_temperature ("success"): sharpens (< 1) or flattens (> 1) the
