@@ -41,7 +41,7 @@ class InferInput:
     pass_mark_seq: torch.Tensor  # (B, T, 1)
     global_step_seq: torch.Tensor  # (B, T, 1)
     episode_step_seq: torch.Tensor  # (B, T, 1)
-    remaining_step_seq: torch.Tensor  # (B, T, 1)
+    health_seq: torch.Tensor  # (B, T, 1)
 
 
 @dataclass

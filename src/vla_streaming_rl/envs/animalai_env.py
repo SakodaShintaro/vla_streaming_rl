@@ -76,12 +76,14 @@ for _tag in ("!ArenaConfig", "!Arena", "!Item", "!Vector3", "!RGB"):
     _AAILoader.add_constructor(_tag, _aai_tag_constructor)
 
 
-def _parse_arena(yaml_path: Path) -> tuple[float, int, list[dict]]:
-    """Return (pass_mark, episode_step_limit, items) from an Animal-AI arena yaml.
+def _parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
+    """Return (pass_mark, items) from an Animal-AI arena yaml.
 
-    ``episode_step_limit`` is the arena's ``t``: AAI ends the episode with
-    ``interrupted`` once it is reached, so it is the horizon the agent must
-    plan against.
+    The arena's ``t`` is deliberately not read: it is not a step cap but the
+    decay rate of the agent's health, and collecting a reward refills that
+    health, so an episode routinely runs well past ``t`` steps. What is left of
+    the episode is the health value in the AAI vector observation, not a step
+    count, so that is what the agent is given (see `_read_observation`).
 
     Each item dict carries one (position, size, rotation) triple in arena
     coordinates: {name, x, z, size_x, size_z, rotation}. yaml entries with
@@ -91,7 +93,6 @@ def _parse_arena(yaml_path: Path) -> tuple[float, int, list[dict]]:
     cfg = yaml.load(yaml_path.read_text(), Loader=_AAILoader)
     arena = cfg["arenas"][0]
     pass_mark = float(arena.get("pass_mark", 0))
-    episode_step_limit = int(arena["t"])
     items_out: list[dict] = []
     for item in arena.get("items", []) or []:
         name = item["name"]
@@ -111,7 +112,7 @@ def _parse_arena(yaml_path: Path) -> tuple[float, int, list[dict]]:
                     "rotation": float(rot),
                 }
             )
-    return pass_mark, episode_step_limit, items_out
+    return pass_mark, items_out
 
 
 @dataclass(frozen=True)
@@ -628,7 +629,6 @@ class AnimalAIEnv(gym.Env):
         self.episode_step = 0
         self.arena_name: str = ""
         self.pass_mark: float = 0.0
-        self.episode_step_limit: int = 0
         self._arena: Arena | None = None
         self._arena_items: list[dict] = []
         self._episode_return = 0.0
@@ -637,6 +637,10 @@ class AnimalAIEnv(gym.Env):
         self._agent_xyz: tuple[float, float, float] | None = None
         # (vx, vy, vz) agent velocity from the AAI vector observation.
         self._agent_velocity: np.ndarray = np.zeros(3, dtype=np.float32)
+        # Agent health from the AAI vector observation: it decays at a rate set
+        # by the arena's `t`, refills whenever a reward is collected, and the
+        # episode ends when it hits 0 -- the real "time left" of the episode.
+        self._agent_health: float = 0.0
 
     def set_global_step(self, global_step: int) -> None:
         """Resume hook: restore the step counter the curriculum schedules on."""
@@ -698,6 +702,7 @@ class AnimalAIEnv(gym.Env):
         # is [health, vx, vy, vz, x, y, z].
         vec = steps.obs[1][0]
         self._latest_image = self._decode_obs(steps.obs[0][0])
+        self._agent_health = float(vec[0])
         self._agent_xyz = (float(vec[4]), float(vec[5]), float(vec[6]))
         self._agent_velocity = np.array(
             [float(vec[1]), float(vec[2]), float(vec[3])], dtype=np.float32
@@ -712,13 +717,10 @@ class AnimalAIEnv(gym.Env):
             f"Velocity: ({vx:+.2f}, {vy:+.2f}, {vz:+.2f}). "
             f"Return so far: {self._episode_return:+.2f}. "
             f"Pass mark: {self.pass_mark:+.2f}. "
+            f"Health: {self._agent_health:.2f}. "
             f"Global step: {self.global_step}. "
-            f"Episode step: {self.episode_step}/{self.episode_step_limit} "
-            f"({self._remaining_step()} left)."
+            f"Episode step: {self.episode_step}."
         )
-
-    def _remaining_step(self) -> int:
-        return max(self.episode_step_limit - self.episode_step, 0)
 
     def _build_info(self) -> dict:
         info = {
@@ -728,8 +730,7 @@ class AnimalAIEnv(gym.Env):
             "pass_mark": self.pass_mark,
             "global_step": self.global_step,
             "episode_step": self.episode_step,
-            "episode_step_limit": self.episode_step_limit,
-            "remaining_step": self._remaining_step(),
+            "health": self._agent_health,
             "velocity": self._agent_velocity,
             "agent_xyz": self._agent_xyz,
         }
@@ -750,7 +751,7 @@ class AnimalAIEnv(gym.Env):
         )
 
         self.arena_name = self._arena.name
-        self.pass_mark, self.episode_step_limit, self._arena_items = _parse_arena(self._arena.path)
+        self.pass_mark, self._arena_items = _parse_arena(self._arena.path)
         self._aai.reset(arenas_configurations=str(self._arena.path))
         self.episode_step = 0
         self._episode_return = 0.0
@@ -773,7 +774,7 @@ class AnimalAIEnv(gym.Env):
 
         decision_steps, terminal_steps = self._aai.get_steps(self._behavior_name)
         episode_over = len(terminal_steps) > 0
-        # `interrupted` is AAI's max-step (arena `t`) timeout, i.e. a time
+        # `interrupted` is AAI running the agent's health down to 0, i.e. a time
         # limit rather than a real terminal (goal reached / death zone).
         interrupted = episode_over and bool(terminal_steps.interrupted[0])
         steps = terminal_steps if episode_over else decision_steps

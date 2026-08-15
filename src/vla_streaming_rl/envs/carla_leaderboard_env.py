@@ -601,7 +601,6 @@ class CARLALeaderboardEnv(gym.Env):
         return {
             "global_step": self.global_step,
             "episode_step": self.episode_step,
-            "remaining_step": max(self.max_episode_steps - self.episode_step, 0),
         }
 
     def step(self, action: np.ndarray) -> tuple[dict[str, any], float, bool, bool, dict[str, any]]:

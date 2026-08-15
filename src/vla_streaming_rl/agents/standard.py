@@ -137,7 +137,7 @@ class StandardAgent(Agent):
             pass_mark,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
             task_prompt_token_ids,
         ) = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
@@ -155,7 +155,7 @@ class StandardAgent(Agent):
             pass_mark,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
         )
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -235,7 +235,7 @@ class StandardAgent(Agent):
             pass_mark,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
             task_prompt_token_ids,
         ) = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
@@ -253,7 +253,7 @@ class StandardAgent(Agent):
             pass_mark,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
         )
 
         warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
@@ -280,7 +280,7 @@ class StandardAgent(Agent):
                 pass_mark_seq=latest_data.pass_mark,
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
-                remaining_step_seq=latest_data.remaining_step,
+                health_seq=latest_data.health,
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -305,8 +305,8 @@ class StandardAgent(Agent):
         """Turn the raw observation into what the replay buffer stores this tick:
         the image tensor, the raw scalar observations (velocity_x, velocity_y,
         velocity_z, episode_return, pass_mark, global_step, episode_step,
-        remaining_step; the network updates its running
-        normalizer stats here) and the tokenized task prompt.
+        health; the network updates its running normalizer stats here) and the
+        tokenized task prompt.
         ``info`` is unused by the obs-driven standard agent."""
         del info
         image = torch.from_numpy(obs["image"]).to(self.device)
@@ -315,7 +315,7 @@ class StandardAgent(Agent):
         pass_mark = np.float32(obs["pass_mark"][0])
         global_step_obs = np.float32(obs["global_step"][0])
         episode_step_obs = np.float32(obs["episode_step"][0])
-        remaining_step_obs = np.float32(obs["remaining_step"][0])
+        health_obs = np.float32(obs["health"][0])
         self.network.observe_scalar_obs(
             velocity_x,
             velocity_y,
@@ -324,7 +324,7 @@ class StandardAgent(Agent):
             pass_mark,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
         )
         task_prompt_token_ids = self.network.tokenize_task_prompt(obs["language"])
         return (
@@ -336,7 +336,7 @@ class StandardAgent(Agent):
             pass_mark,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
             task_prompt_token_ids,
         )
 

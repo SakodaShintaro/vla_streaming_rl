@@ -158,7 +158,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         pass_mark: float,
         global_step: float,
         episode_step: float,
-        remaining_step: float,
+        health: float,
     ) -> None:
         scalar_obs = np.array(
             [
@@ -169,7 +169,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 pass_mark,
                 global_step,
                 episode_step,
-                remaining_step,
+                health,
             ],
             dtype=np.float32,
         )
@@ -184,7 +184,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         pass_mark: torch.Tensor,
         global_step: torch.Tensor,
         episode_step: torch.Tensor,
-        remaining_step: torch.Tensor,
+        health: torch.Tensor,
     ) -> torch.Tensor:
         raw = torch.cat(
             [
@@ -195,7 +195,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 pass_mark,
                 global_step,
                 episode_step,
-                remaining_step,
+                health,
             ],
             dim=-1,
         )
@@ -213,7 +213,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.pass_mark_seq,
             data.global_step_seq,
             data.episode_step_seq,
-            data.remaining_step_seq,
+            data.health_seq,
         )
         x, rnn_state = self.encoder(
             data.s_seq, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
@@ -265,7 +265,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.pass_mark[:, self.horizon :],
                 data.global_step[:, self.horizon :],
                 data.episode_step[:, self.horizon :],
-                data.remaining_step[:, self.horizon :],
+                data.health[:, self.horizon :],
             )
             next_state, _ = self.encoder.forward(
                 next_image,
@@ -290,7 +290,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.pass_mark[:, : -self.horizon],
             data.global_step[:, : -self.horizon],
             data.episode_step[:, : -self.horizon],
-            data.remaining_step[:, : -self.horizon],
+            data.health[:, : -self.horizon],
         )
         curr_actions = data.actions[:, : -self.horizon]
         curr_rewards = data.rewards[:, : -self.horizon]
@@ -345,7 +345,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.pass_mark[:, self.horizon :],
                 data.global_step[:, self.horizon :],
                 data.episode_step[:, self.horizon :],
-                data.remaining_step[:, self.horizon :],
+                data.health[:, self.horizon :],
             )
             next_state, next_rnn_state = self.encoder.forward(
                 next_image,
@@ -372,7 +372,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.pass_mark[:, : -self.horizon],
             data.global_step[:, : -self.horizon],
             data.episode_step[:, : -self.horizon],
-            data.remaining_step[:, : -self.horizon],
+            data.health[:, : -self.horizon],
         )
         prev_actions = data.actions[:, : -self.horizon]
         prev_rewards = data.rewards[:, : -self.horizon]
