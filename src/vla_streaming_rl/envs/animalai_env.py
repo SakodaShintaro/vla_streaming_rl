@@ -256,12 +256,9 @@ class StagedSelector(ArenaSelector):
     def _stage_arenas(self, global_step: int) -> list[Arena]:
         return self._stages[self._stage_index(global_step)]
 
-    def _pick_from(self, stage_arenas: list[Arena]) -> Arena:
-        """Uniformly, as the paper's curriculum does. Subclasses reweight."""
-        return stage_arenas[int(self._rng.integers(len(stage_arenas)))]
-
     def next_arena(self, global_step: int) -> Arena:
-        return self._pick_from(self._stage_arenas(global_step))
+        stage_arenas = self._stage_arenas(global_step)
+        return stage_arenas[int(self._rng.integers(len(stage_arenas)))]
 
     def info(self, global_step: int) -> dict:
         return {"stage": self._stage_index(global_step) + 1}
@@ -270,9 +267,10 @@ class StagedSelector(ArenaSelector):
         return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}  step:{global_step}"
 
 
-class SuccessDrivenSelector(StagedSelector):
-    """The same 11-stage gating, but choosing within the stage by how much is
-    still to be learned from each arena rather than uniformly.
+class SuccessDrivenSelector(ArenaSelector):
+    """The same 11-stage gating as `StagedSelector`, but choosing within the
+    stage by how much is still to be learned from each arena rather than
+    uniformly.
 
     Arenas of the current stage never attempted go first, uniformly at random,
     so the whole stage is seen before any of it is repeated. After that, an
@@ -289,8 +287,18 @@ class SuccessDrivenSelector(StagedSelector):
     """
 
     def __init__(self, root: Path, steps_per_stage: int, revisit_temperature: float, seed: int):
-        super().__init__(root=root, steps_per_stage=steps_per_stage, seed=seed)
+        stages = _stages_under(root)
+        super().__init__(stages[-1])
+        self._stages = stages + [stages[-1]]
+        self.steps_per_stage = steps_per_stage
         self.revisit_temperature = revisit_temperature
+        self._rng = np.random.default_rng(seed)
+
+    def _stage_index(self, global_step: int) -> int:
+        return min(global_step // self.steps_per_stage, len(self._stages) - 1)
+
+    def _stage_arenas(self, global_step: int) -> list[Arena]:
+        return self._stages[self._stage_index(global_step)]
 
     def _learning_weight(self, arena: Arena) -> float:
         attempts, successes = self.arena_record(arena)
@@ -299,7 +307,8 @@ class SuccessDrivenSelector(StagedSelector):
         mean = (successes + 1) / (attempts + 2)
         return mean * (1.0 - mean) / (attempts + 3)
 
-    def _pick_from(self, stage_arenas: list[Arena]) -> Arena:
+    def next_arena(self, global_step: int) -> Arena:
+        stage_arenas = self._stage_arenas(global_step)
         untried = [arena for arena in stage_arenas if self._attempts[arena.name] == 0]
         if untried:
             return untried[int(self._rng.integers(len(untried)))]
@@ -310,14 +319,15 @@ class SuccessDrivenSelector(StagedSelector):
 
     def info(self, global_step: int) -> dict:
         cleared = sum(successes > 0 for successes in self._successes.values())
-        return {**super().info(global_step), "cleared_count": cleared}
+        return {"stage": self._stage_index(global_step) + 1, "cleared_count": cleared}
 
     def status(self, global_step: int) -> str:
         stage_arenas = self._stage_arenas(global_step)
         cleared = sum(self._successes[arena.name] > 0 for arena in stage_arenas)
         untried = sum(self._attempts[arena.name] == 0 for arena in stage_arenas)
         return (
-            f"{super().status(global_step)}"
+            f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}"
+            f"  step:{global_step}"
             f"  cleared:{cleared}/{len(stage_arenas)} untried:{untried}"
         )
 
