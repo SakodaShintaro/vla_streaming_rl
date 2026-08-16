@@ -39,13 +39,16 @@ _ANSWER_PANEL_SHAPE = (96, 384, 3)
 
 
 def build_format_hint(action_spec: str) -> str:
+    """The response protocol. Every generated token is latency (one request per
+    env step), so the model is asked for a short justification and the action,
+    and nothing else -- no scene description, no restating of the task."""
     return (
-        "Use the following structured response format. "
-        "First, describe what you see in the current image inside <perception>...</perception>. "
-        "Then, lay out your strategy step by step inside <reasoning>...</reasoning>, "
-        "justifying the action you intend to take based on the current image and the "
-        "previous reward (if shown). "
-        f"Finally, output the action inside <answer>...</answer> using the format: {action_spec}. "
+        "Reply with exactly two sections and no other text. "
+        "First, in AT MOST two short sentences inside <think>...</think>, "
+        "say what in the current image decides your next action, taking the previous "
+        "reward (if shown) into account. Do not describe the scene in general, do not "
+        "restate the task, and do not repeat your earlier reasoning. "
+        f"Then output the action inside <answer>...</answer> using the format: {action_spec}. "
         "The text inside <answer> must contain ONLY the action -- no commentary, no labels."
     )
 
@@ -61,23 +64,26 @@ def encode_image(image: np.ndarray, image_side: int) -> str:
 
 
 class ZeroShotVLMAgent(Agent):
-    """Zero-shot VLM controller following the Odysseus structured CoT protocol.
+    """Zero-shot VLM controller driven by a short structured CoT protocol.
 
     At each step the current observation is sent to the model as a user turn;
-    the model is prompted to produce three XML-style sections in order:
+    the model is prompted to produce two XML-style sections in order:
 
-      ``<perception>...</perception>`` -- describe the visual state of the scene,
-      grounding nearby obstacles, agent location, and interactive elements.
+      ``<reasoning>...</reasoning>`` -- at most two sentences on what in the
+      current image decides the next action.
 
-      ``<reasoning>...</reasoning>`` -- lay out a step-by-step strategy that
-      justifies the next action.
-
-      ``<answer>...</answer>`` -- emit the textual action that the env's
+      ``<answer>...</answer>`` -- the textual action that the env's
       ``parse_action_text`` decodes into an action vector.
 
-    The most recent ``seq_len`` turns of the current episode (image, assistant
-    response, reward observed AFTER that response) are kept in a FIFO and
-    prepended to the chat as in-context history.
+    Latency is one API round trip per env step and scales with the tokens
+    generated, so the protocol buys only the justification that changes the
+    action: a scene description (the original Odysseus ``<perception>`` section)
+    tripled the output for no measured benefit.
+
+    The most recent ``seq_len`` turns of the current episode (image, the ACTION
+    taken, reward observed AFTER it) are kept in a FIFO and prepended to the chat
+    as in-context history. The reasoning is deliberately not kept: replaying it
+    made the model copy its own earlier thoughts instead of reading the frame.
 
     A response that does not follow the format is a failure of the model and is
     reported as one (``parse_failed`` in the metrics); nothing is recovered from
