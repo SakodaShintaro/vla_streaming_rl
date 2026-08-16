@@ -1,0 +1,48 @@
+# @package _global_
+# The Animal-AI Olympics winning agent (ported from ~/work/rl_animal): recurrent
+# PPO over a Fixup residual tower. It shares nothing with the standard agent
+# beyond the Agent interface -- no replay buffer, no actor/critic optimizer
+# split, no action chunking -- so this config stands alone rather than layering
+# on base_network / base_off_policy / base_streaming.
+agent_type: animal_ppo
+network_class: animal_ppo
+learning_mode: on_policy
+
+# PPO. steps_num transitions are collected before each update; it has to be a
+# multiple of seq_len, and minibatch_size a multiple of seq_len that divides it.
+steps_num: 256
+minibatch_size: 64
+mini_epochs: 4
+# The window the LSTM is unrolled over during the update: the recurrent state is
+# carried forward across the whole run, but gradients stop after seq_len steps.
+seq_len: 2
+lam: 0.9
+learning_rate: 1e-4
+e_clip: 0.2
+entropy_coef: 0.01
+critic_coef: 1.0
+clip_value: 1
+normalize_advantage: 1
+max_grad_norm: 0.5
+
+# The velocity/clock vector the dense branch reads. The z component is the one
+# the original network was trained on divided by 16. The original's fourth
+# element was the arena time still to run; this env does not expose an episode
+# length, so health -- which drains over an episode the same way -- takes that
+# slot, divided by the value it starts at.
+velocity_scale: [1.0, 1.0, 16.0]
+health_scale: 100.0
+
+# The reward the update is trained on. The score that gets logged stays the
+# arena's own reward -- only the returns the critic fits see these.
+reward_bonus: 0.5
+ramps_coef: 0.01
+back_move_coef: 0.001
+
+# Read by scripts/train.py for every agent.
+use_prompt: 0
+use_feedback: 0
+# Unused here (there is no replay buffer and no warmup), but debug mode assigns
+# them, so they have to exist.
+learning_starts: 0
+buffer_size: 0

@@ -40,8 +40,9 @@ class Agent(ABC):
                 raise TypeError(f"{cls.__name__} may not override final method {name!r} of Agent")
 
     def __init__(self, learning_mode: str, horizon: int) -> None:
-        if learning_mode not in ("off_policy", "streaming"):
-            raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
+        assert learning_mode in ("off_policy", "on_policy", "streaming"), (
+            f"Unknown learning_mode: {learning_mode!r}"
+        )
         self.learning_mode = learning_mode
         self.horizon = int(horizon)
 
@@ -68,6 +69,8 @@ class Agent(ABC):
     ) -> StepResult:
         if self.learning_mode == "off_policy":
             return self._step_offpolicy(global_step, obs, reward, terminated, truncated, info)
+        if self.learning_mode == "on_policy":
+            return self._step_onpolicy(global_step, obs, reward, terminated, truncated, info)
         return self._step_streaming(global_step, obs, reward, terminated, truncated, info)
 
     @final
@@ -103,7 +106,21 @@ class Agent(ABC):
         step_result.metrics.update(train_metrics)
         return step_result
 
-    @abstractmethod
+    def _step_onpolicy(
+        self,
+        global_step: int,
+        obs: dict[str, Any],
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        info: dict,
+    ) -> StepResult:
+        """Learning-mode hook: the agent buffers its own on-policy rollout and
+        updates from it when the rollout is full. Only agents that declare
+        ``learning_mode='on_policy'`` reach this, so it is a hook rather than
+        part of the abstract contract every agent has to satisfy."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement on_policy learning")
+
     def _step_streaming(
         self,
         global_step: int,
@@ -112,10 +129,21 @@ class Agent(ABC):
         terminated: bool,
         truncated: bool,
         info: dict,
-    ) -> StepResult: ...
+    ) -> StepResult:
+        """Learning-mode hook: inference and the update share one forward pass
+        on every tick. See ``_step_onpolicy`` for why this is not abstract."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement streaming learning")
 
     @abstractmethod
     def on_episode_end(self, score: float, feedback_text: str) -> dict: ...
+
+    @abstractmethod
+    def optimizer_state_dict(self) -> dict:
+        """Optimizer states to checkpoint. The trainer stores and restores this
+        verbatim, so an agent is free to hold one optimizer or several."""
+
+    @abstractmethod
+    def load_optimizer_state_dict(self, state: dict) -> None: ...
 
     @abstractmethod
     def _preprocess(self, obs: dict[str, Any], info: dict): ...

@@ -128,11 +128,7 @@ def save_checkpoint(result_dir: Path, network, agent) -> None:
         if param.requires_grad
     }
     torch.save(trainable_state, result_dir / "checkpoint.pt")
-    optimizer_state = {
-        "actor": agent.actor_optimizer.state_dict(),
-        "critic": agent.critic_optimizer.state_dict(),
-    }
-    torch.save(optimizer_state, result_dir / "optimizer.pt")
+    torch.save(agent.optimizer_state_dict(), result_dir / "optimizer.pt")
 
 
 def write_arena_stats(path: Path, curriculum: dict, best_score_per_arena: dict) -> None:
@@ -178,9 +174,7 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
 
     optimizer_path = resume_dir / "optimizer.pt"
     if optimizer_path.exists():
-        optimizer_state = torch.load(optimizer_path, map_location="cuda")
-        agent.actor_optimizer.load_state_dict(optimizer_state["actor"])
-        agent.critic_optimizer.load_state_dict(optimizer_state["critic"])
+        agent.load_optimizer_state_dict(torch.load(optimizer_path, map_location="cuda"))
         print(f"Resume: loaded optimizer states from {optimizer_path}")
     else:
         print(f"Resume: {optimizer_path} not found, optimizers start fresh")

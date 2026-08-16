@@ -73,6 +73,16 @@ def build_network(
     parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
     device: torch.device,
 ) -> nn.Module:
+    # The PPO network has its own value head baked in and reads no critic
+    # config, so it is settled before the shared value-head factory is built.
+    if args.network_class == "animal_ppo":
+        from vla_streaming_rl.networks.animal_ppo import AnimalPPONetwork
+
+        # scaled velocity (vx, vy, vz) plus the health that stands in for the clock
+        return AnimalPPONetwork(observation_space_shape=observation_space_shape, vels_size=4).to(
+            device
+        )
+
     # One factory for every network: all critic config comes from ``args`` and is
     # bound here, leaving ``in_channels`` and ``action_dim`` for the network to
     # supply at call time (see ``_build_value_head``).

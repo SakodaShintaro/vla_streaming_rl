@@ -239,6 +239,13 @@ class ZeroShotVLMAgent(Agent):
         self.step_in_episode = 0
         return {}
 
+    def optimizer_state_dict(self) -> dict:
+        # the baseline queries a hosted model; there is nothing to optimize
+        return {}
+
+    def load_optimizer_state_dict(self, state: dict) -> None:
+        del state
+
     def _preprocess(self, obs: dict[str, Any], info: dict) -> str:
         del info
         return encode_image(obs["image"], self.image_side)
