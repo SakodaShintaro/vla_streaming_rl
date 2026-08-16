@@ -114,7 +114,13 @@ def save_episode_data(
 
 
 def save_checkpoint(result_dir: Path, network, agent) -> None:
-    """Save trainable weights (checkpoint.pt) and optimizer states (optimizer.pt)."""
+    """Save trainable weights (checkpoint.pt) and optimizer states (optimizer.pt).
+
+    A no-op for the zero-shot VLM baseline, which carries no network and so has
+    nothing to checkpoint."""
+    if network is None:
+        return
+
     module = network._orig_mod if hasattr(network, "_orig_mod") else network
     trainable_state = {
         name: param.detach().cpu()
@@ -286,17 +292,24 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     time_limit_sec = args.time_limit_hour * 3600
     checkpoint_interval = max(1, step_limit // 10)
 
-    network = build_network(
-        args,
-        observation_space_shape=env.observation_space["image"].shape,
-        action_space_shape=env.action_space.shape,
-        parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
-        device=torch.device("cuda"),
+    # The zero-shot VLM baseline is not trained, so it has no network to build
+    # and nothing to optimize.
+    trains_a_network = args.agent_type != "zeroshot_vlm"
+    network = (
+        build_network(
+            args,
+            observation_space_shape=env.observation_space["image"].shape,
+            action_space_shape=env.action_space.shape,
+            parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
+            device=torch.device("cuda"),
+        )
+        if trains_a_network
+        else None
     )
 
     agent = build_agent(env, network, args)
 
-    parameter_count = sum(p.numel() for p in agent.network.parameters())
+    parameter_count = sum(p.numel() for p in agent.network.parameters()) if trains_a_network else 0
     print(f"Parameter count: {parameter_count:,}")
 
     episode_id = 0
@@ -576,7 +589,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         # A fresh env starts its counter at 0, but the network reads the global
         # step as an observation and was trained at this run's values.
         eval_env.unwrapped.set_global_step(global_step)
-        network.eval()
+        if network is not None:
+            network.eval()
         testbed_metrics = run_testbed(
             agent,
             eval_env,

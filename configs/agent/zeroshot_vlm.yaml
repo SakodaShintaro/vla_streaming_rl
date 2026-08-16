@@ -1,0 +1,48 @@
+# @package _global_
+# Zero-shot baseline: a hosted VLM on OpenRouter drives the env directly, with
+# no training. Only the keys below matter; the inherited training knobs are kept
+# so the trainer's config surface stays identical across agents.
+#   OPENROUTER_API_KEY must be set in the environment.
+defaults:
+  - base_network
+  - base_off_policy
+  - base_streaming
+  - base_vlm
+  - _self_
+
+agent_type: zeroshot_vlm
+learning_mode: streaming
+# OpenRouter model
+# model                                               context   $in/Mtok  $out/Mtok
+# qwen/qwen3.7-flash                                1,000,000      0.030      0.130
+# qwen/qwen3.5-flash-02-23                          1,000,000      0.065      0.260
+# qwen/qwen3.5-9b                                     262,144      0.100      0.150
+# qwen/qwen3.6-35b-a3b                                262,144      0.150      1.000
+# qwen/qwen3.6-flash                                1,000,000      0.188      1.125
+# qwen/qwen3.5-27b                                    262,144      0.195      1.560
+# qwen/qwen3.5-35b-a3b                                262,144      0.225      1.800
+# qwen/qwen3.5-plus-02-15                           1,000,000      0.260      1.560
+# qwen/qwen3.5-122b-a10b                              262,144      0.290      2.400
+# qwen/qwen3.5-plus-20260420                        1,000,000      0.300      1.800
+# qwen/qwen3.7-plus                                 1,000,000      0.320      1.280
+# qwen/qwen3.6-plus                                 1,000,000      0.325      1.950
+# qwen/qwen3.5-397b-a17b                              262,144      0.390      2.340
+# qwen/qwen3.8-27b                                    262,144      0.450      3.200
+# qwen/qwen3.6-27b                                    262,144      0.600      3.600
+# qwen/qwen3.8-max                                  1,000,000      2.000      6.000
+openrouter_model_id: qwen/qwen3.7-flash
+# Past (image, response) turns replayed as in-context history (0 = memoryless).
+seq_len: 4
+max_new_tokens: 2048
+# Cap on the model's own hidden thinking (OpenRouter `reasoning`). The prompt
+# already asks for the chain of thought inside <reasoning>, so the hidden copy
+# only competes for max_new_tokens: with no cap the budget runs out before
+# <answer> and the response comes back empty. 0 disables thinking entirely.
+reasoning_max_tokens: 0
+# Observations are tiny (96x96); they are resized to this square before being
+# sent. Larger costs image tokens and latency without adding information.
+image_side: 224
+temperature: 0.5
+# Retries the OpenAI SDK makes per request (exponential backoff). A run is one
+# API call per env step, so an upstream 429 / 5xx must not abort it.
+api_max_retries: 16
