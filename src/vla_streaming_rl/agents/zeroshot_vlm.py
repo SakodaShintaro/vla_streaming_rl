@@ -33,9 +33,16 @@ ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 # format, so the history stays an honest record of what was actually executed.
 NO_ACTION = "(no valid action; the previous action was repeated)"
 
-# Fixed size so the render strip keeps a constant frame size across a run
-# (the stable-panel contract in ``StepResult``).
-_ANSWER_PANEL_SHAPE = (96, 384, 3)
+# The render panel is text only, so it is a zero-height image whose caption band
+# is the whole panel. The band reserves a fixed number of lines, so the panel
+# keeps a constant size across a run (the stable-panel contract in
+# ``StepResult``); only the width is chosen here. Text past the band's line
+# budget is dropped, so the decoded action leads and the raw response follows.
+_OUTPUT_PANEL_WIDTH = 512
+
+
+def _text_panel(text: str, width: int) -> np.ndarray:
+    return overlay_caption(np.zeros((0, width, 3), dtype=np.uint8), text)
 
 
 def build_format_hint(action_spec: str) -> str:
@@ -69,21 +76,22 @@ class ZeroShotVLMAgent(Agent):
     At each step the current observation is sent to the model as a user turn;
     the model is prompted to produce two XML-style sections in order:
 
-      ``<reasoning>...</reasoning>`` -- at most two sentences on what in the
-      current image decides the next action.
+      ``<think>...</think>`` -- at most two sentences on what in the current
+      image decides the next action.
 
       ``<answer>...</answer>`` -- the textual action that the env's
       ``parse_action_text`` decodes into an action vector.
 
     Latency is one API round trip per env step and scales with the tokens
     generated, so the protocol buys only the justification that changes the
-    action: a scene description (the original Odysseus ``<perception>`` section)
-    tripled the output for no measured benefit.
+    action: a full scene description (the ``<perception>`` section of the
+    original Odysseus protocol) tripled the output for no measured benefit.
 
     The most recent ``seq_len`` turns of the current episode (image, the ACTION
     taken, reward observed AFTER it) are kept in a FIFO and prepended to the chat
-    as in-context history. The reasoning is deliberately not kept: replaying it
-    made the model copy its own earlier thoughts instead of reading the frame.
+    as in-context history. The <think> section is deliberately not kept:
+    replaying it made the model copy its own earlier thoughts instead of reading
+    the frame.
 
     A response that does not follow the format is a failure of the model and is
     reported as one (``parse_failed`` in the metrics); nothing is recovered from
@@ -122,7 +130,7 @@ class ZeroShotVLMAgent(Agent):
         self.format_hint = build_format_hint(action_spec)
         self.seq_len = seq_len
         self.max_new_tokens = max_new_tokens
-        # The protocol already asks for the chain of thought in <reasoning>, so a
+        # The protocol already asks for the chain of thought in <think>, so a
         # Qwen model's own thinking is a second, hidden copy of it that eats the
         # same token budget: with no cap it routinely burns the whole budget and
         # returns an empty `content` (finish_reason=length). 0 turns it off.
@@ -181,10 +189,10 @@ class ZeroShotVLMAgent(Agent):
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
         action, parse_ok = self._parse_action(answer_text)
 
-        # Only the action goes into the history, not the perception / reasoning
-        # that produced it: replaying the full response made the model copy its
-        # own earlier thoughts verbatim instead of reading the current frame,
-        # and it was half the prompt.
+        # Only the action goes into the history, not the <think> section that
+        # produced it: replaying the full response made the model copy its own
+        # earlier thoughts verbatim instead of reading the current frame, and it
+        # was half the prompt.
         if self.seq_len > 0:
             self.history.append((image_url, answer_text if parse_ok else NO_ACTION, None))
         self.last_action = action
@@ -206,7 +214,11 @@ class ZeroShotVLMAgent(Agent):
             "vlm/prompt_tokens": float(completion.usage.prompt_tokens),
             "vlm/completion_tokens": float(completion.usage.completion_tokens),
         }
-        panels = {"answer": self._answer_panel(answer_text, parse_ok, choice.finish_reason)}
+        caption = (
+            f"answer: {answer_text!r}  parse: {'ok' if parse_ok else 'failed'}  "
+            f"finish: {choice.finish_reason}  ||  {response_text}"
+        )
+        panels = {"output": _text_panel(caption, _OUTPUT_PANEL_WIDTH)}
         return StepResult(action=action, metrics=metrics, panels=panels)
 
     def _step_streaming(
@@ -275,13 +287,3 @@ class ZeroShotVLMAgent(Agent):
             content.append({"type": "text", "text": f"Previous reward: {reward:+.3f}"})
         content.append({"type": "image_url", "image_url": {"url": image_url}})
         return content
-
-    @staticmethod
-    def _answer_panel(answer_text: str, parse_ok: bool, finish_reason: str) -> np.ndarray:
-        """What the model answered, next to the frame it answered it for."""
-        canvas = np.zeros(_ANSWER_PANEL_SHAPE, dtype=np.uint8)
-        caption = (
-            f"answer: {answer_text!r}  parse: {'ok' if parse_ok else 'failed'}  "
-            f"finish: {finish_reason}"
-        )
-        return overlay_caption(canvas, caption)
