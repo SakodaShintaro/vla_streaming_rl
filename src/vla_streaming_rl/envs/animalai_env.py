@@ -632,7 +632,9 @@ class AnimalAIEnv(gym.Env):
         super().__init__()
         self.selector = selector
         self._arena_by_name = {arena.name: arena for arena in selector.arenas}
-        self.prompt = "Find and reach the green goal sphere; avoid red zones and yellow goals."
+        self.prompt = (
+            "Find and reach the green or yellow goal sphere; avoid red zones and red goals."
+        )
 
         self.binary_path = str(Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64")
         self.resolution = resolution
