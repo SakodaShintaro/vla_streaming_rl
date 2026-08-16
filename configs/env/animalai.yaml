@@ -38,7 +38,7 @@ env_factory:
   #   per-stage count then follows whatever is on disk (30 as split, 60 once
   #   mirrored copies sit alongside). "eval" ignores this and always uses the
   #   competition arenas, so the benchmark cannot drift.
-  train_arena_root: ./external/animal-ai/configs/paper_curriculum_split_mirrored
+  train_arena_root: ./external/animal-ai/configs/paper_curriculum_split
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 40_000
   # - revisit_temperature ("success"): temperature of the even-trial failure

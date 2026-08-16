@@ -29,6 +29,10 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
+# Stands in for the assistant turn of a step whose response did not follow the
+# format, so the history stays an honest record of what was actually executed.
+NO_ACTION = "(no valid action; the previous action was repeated)"
+
 # Fixed size so the render strip keeps a constant frame size across a run
 # (the stable-panel contract in ``StepResult``).
 _ANSWER_PANEL_SHAPE = (96, 384, 3)
@@ -93,9 +97,17 @@ class ZeroShotVLMAgent(Agent):
         reasoning_max_tokens: int,
         image_side: int,
         temperature: float,
+        api_max_retries: int,
     ) -> None:
         super().__init__(learning_mode="streaming", horizon=1)
-        self.client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=os.environ["OPENROUTER_API_KEY"])
+        # One API call per env step means a single upstream hiccup (a shared-pool
+        # 429, a 5xx) would otherwise abort a run that is minutes deep. The SDK
+        # retries those with exponential backoff; only give it room to.
+        self.client = OpenAI(
+            base_url=OPENROUTER_BASE_URL,
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            max_retries=api_max_retries,
+        )
         self.model_id = model_id
 
         self.action_space = action_space
@@ -163,8 +175,12 @@ class ZeroShotVLMAgent(Agent):
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
         action, parse_ok = self._parse_action(answer_text)
 
+        # Only the action goes into the history, not the perception / reasoning
+        # that produced it: replaying the full response made the model copy its
+        # own earlier thoughts verbatim instead of reading the current frame,
+        # and it was half the prompt.
         if self.seq_len > 0:
-            self.history.append((image_url, response_text, None))
+            self.history.append((image_url, answer_text if parse_ok else NO_ACTION, None))
         self.last_action = action
         self.step_in_episode += 1
 

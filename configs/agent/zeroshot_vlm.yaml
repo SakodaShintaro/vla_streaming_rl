@@ -42,4 +42,7 @@ reasoning_max_tokens: 0
 # Observations are tiny (96x96); they are resized to this square before being
 # sent. Larger costs image tokens and latency without adding information.
 image_side: 224
-temperature: 0.0
+temperature: 0.5
+# Retries the OpenAI SDK makes per request (exponential backoff). A run is one
+# API call per env step, so an upstream 429 / 5xx must not abort it.
+api_max_retries: 16
