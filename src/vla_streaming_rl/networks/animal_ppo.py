@@ -112,7 +112,14 @@ class LayerNormLSTMCell(nn.Module):
         return outputs, torch.cat([cell, hidden], dim=1)
 
 
-class AnimalPPONetwork(nn.Module):
+class AnimalBackbone(nn.Module):
+    """Everything the winning network is below its heads: the residual tower, the
+    dense branch and the LSTM. It is a class of its own so a network with other
+    heads -- see ``networks/animal_actor_critic.py`` -- reuses this body verbatim
+    instead of copying it; ``AnimalPPONetwork`` extends it rather than holding
+    one so the parameter names, and therefore existing checkpoints, are unchanged.
+    """
+
     def __init__(self, observation_space_shape: tuple[int, ...], vels_size: int) -> None:
         """``observation_space_shape`` is the (C, H, W) of the image observation and
         ``vels_size`` the width of the velocity/clock vector; both come from what
@@ -143,8 +150,6 @@ class AnimalPPONetwork(nn.Module):
         self.visual_hidden = nn.Linear(self.flat_size, HIDDEN_NODES)
         self.joint_hidden = nn.Linear(VELS_HIDDEN + HIDDEN_NODES, HIDDEN_NODES)
         self.lstm = LayerNormLSTMCell(HIDDEN_NODES, LSTM_UNITS)
-        self.value_head = nn.Linear(LSTM_UNITS, 1)
-        self.logits_head = nn.Linear(LSTM_UNITS, ACTION_NUM)
 
     def init_state(self, env_num: int, device: torch.device) -> torch.Tensor:
         return torch.zeros(env_num, 2 * LSTM_UNITS, device=device)
@@ -171,7 +176,8 @@ class AnimalPPONetwork(nn.Module):
     ) -> tuple:
         """The batch is environment-major: the entry for environment e at step t
         sits at ``e * steps_num + t``, which is what the recurrent unrolling and
-        the sequence slicing both assume."""
+        the sequence slicing both assume. Returns the ``(env_num * steps_num,
+        LSTM_UNITS)`` recurrent output and the state carried out of the batch."""
         steps_num = visual.shape[0] // env_num
         flat = self.features(visual)
         hidden = torch.cat([F.elu(self.vels_hidden(vels)), F.elu(self.visual_hidden(flat))], dim=-1)
@@ -180,6 +186,25 @@ class AnimalPPONetwork(nn.Module):
         sequence = hidden.reshape(env_num, steps_num, -1).unbind(dim=1)
         mask_sequence = dones.to(hidden.dtype).reshape(env_num, steps_num).unbind(dim=1)
         outputs, lstm_state = self.lstm(sequence, state, mask_sequence)
-        lstm_out = torch.stack(outputs, dim=1).reshape(-1, LSTM_UNITS)
 
+        return torch.stack(outputs, dim=1).reshape(-1, LSTM_UNITS), lstm_state
+
+
+class AnimalPPONetwork(AnimalBackbone):
+    """The backbone plus the two PPO heads: categorical logits and a state value."""
+
+    def __init__(self, observation_space_shape: tuple[int, ...], vels_size: int) -> None:
+        super().__init__(observation_space_shape, vels_size)
+        self.value_head = nn.Linear(LSTM_UNITS, 1)
+        self.logits_head = nn.Linear(LSTM_UNITS, ACTION_NUM)
+
+    def forward(
+        self,
+        visual: torch.Tensor,
+        vels: torch.Tensor,
+        state: torch.Tensor,
+        dones: torch.Tensor,
+        env_num: int,
+    ) -> tuple:
+        lstm_out, lstm_state = super().forward(visual, vels, state, dones, env_num)
         return self.logits_head(lstm_out), self.value_head(lstm_out), lstm_state

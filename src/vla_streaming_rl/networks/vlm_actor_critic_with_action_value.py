@@ -19,7 +19,7 @@ from .interface import (
 )
 from .modules.head_output import HeadOutput
 from .modules.image_processor import ImageProcessor
-from .modules.policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
+from .modules.policy_head import build_policy_head
 from .modules.prediction_head import StatePredictionHead
 from .modules.reward_processor import RewardProcessor
 from .modules.value_head import DistributionalValueHead
@@ -141,44 +141,20 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state_dim = num_state_queries * state_out_dim
 
         self.policy_type = policy_type
-        if self.policy_type == "diffusion":
-            self.policy_head = DiffusionPolicy(
-                state_dim=state_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                denoising_time=denoising_time,
-                sparsity=sparsity,
-                horizon=horizon,
-                denoising_steps=denoising_steps,
-                dacer_loss_weight=dacer_loss_weight,
-            )
-        elif self.policy_type == "cfgrl":
-            self.policy_head = CFGDiffusionPolicy(
-                state_dim=state_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                denoising_time=denoising_time,
-                sparsity=sparsity,
-                cfgrl_beta=1.5,
-                horizon=horizon,
-                denoising_steps=denoising_steps,
-                condition_drop_prob=0.1,
-            )
-        elif self.policy_type == "som":
-            self.policy_head = MeanFlowPolicy(
-                state_dim=state_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                horizon=horizon,
-                sparsity=sparsity,
-                som_alpha=som_alpha,
-                som_w=som_w,
-            )
-        else:
-            raise ValueError(f"Unknown policy_type: {self.policy_type}")
+        self.policy_head = build_policy_head(
+            policy_type=policy_type,
+            state_dim=state_dim,
+            action_dim=self.action_dim,
+            hidden_dim=actor_hidden_dim,
+            block_num=actor_block_num,
+            horizon=horizon,
+            sparsity=sparsity,
+            denoising_time=denoising_time,
+            denoising_steps=denoising_steps,
+            dacer_loss_weight=dacer_loss_weight,
+            som_alpha=som_alpha,
+            som_w=som_w,
+        )
 
         # Critic: Q(state, action)
         self.value_head = value_head_factory(state_dim, self.action_dim)

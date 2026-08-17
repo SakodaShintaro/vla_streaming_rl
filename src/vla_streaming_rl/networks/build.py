@@ -134,6 +134,28 @@ def build_network(
         ).to(device)
         network = torch.compile(network)
 
+    elif args.network_class == "animal_actor_critic":
+        from vla_streaming_rl.networks.animal_actor_critic import AnimalActorCriticWithActionValue
+
+        network = AnimalActorCriticWithActionValue(
+            observation_space_shape=observation_space_shape,
+            action_space_shape=action_space_shape,
+            value_head_factory=value_head_factory,
+            horizon=args.horizon,
+            policy_type=args.policy_type,
+            actor_hidden_dim=args.actor_hidden_dim,
+            actor_block_num=args.actor_block_num,
+            denoising_time=args.denoising_time,
+            denoising_steps=args.denoising_steps,
+            dacer_loss_weight=args.dacer_loss_weight,
+            som_alpha=args.som_alpha,
+            som_w=args.som_w,
+            sparsity=args.sparsity,
+            critic_loss_weight=args.critic_loss_weight,
+            detach_actor=args.detach_actor,
+            detach_critic=args.detach_critic,
+        ).to(device)
+
     elif args.network_class == "vlm_actor_critic_with_action_value":
         from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
             VLMActorCriticWithActionValue,

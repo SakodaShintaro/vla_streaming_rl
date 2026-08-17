@@ -529,3 +529,62 @@ class MeanFlowPolicy(nn.Module):
             "som_du_dt": du_dt.detach().abs().mean().item(),
         }
         return actor_loss, info_dict
+
+
+def build_policy_head(
+    *,
+    policy_type: str,
+    state_dim: int,
+    action_dim: int,
+    hidden_dim: int,
+    block_num: int,
+    horizon: int,
+    sparsity: float,
+    denoising_time: float,
+    denoising_steps: int,
+    dacer_loss_weight: float,
+    som_alpha: float,
+    som_w: float,
+) -> nn.Module:
+    """The policy head named by ``policy_type``, for a state of width ``state_dim``.
+
+    Every network picks its head the same way and differs only in what produces
+    that state, so the choice lives here rather than being repeated per network.
+    """
+    if policy_type == "diffusion":
+        return DiffusionPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dim=hidden_dim,
+            block_num=block_num,
+            denoising_time=denoising_time,
+            sparsity=sparsity,
+            horizon=horizon,
+            denoising_steps=denoising_steps,
+            dacer_loss_weight=dacer_loss_weight,
+        )
+    if policy_type == "cfgrl":
+        return CFGDiffusionPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dim=hidden_dim,
+            block_num=block_num,
+            denoising_time=denoising_time,
+            sparsity=sparsity,
+            cfgrl_beta=1.5,
+            horizon=horizon,
+            denoising_steps=denoising_steps,
+            condition_drop_prob=0.1,
+        )
+    if policy_type == "som":
+        return MeanFlowPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dim=hidden_dim,
+            block_num=block_num,
+            horizon=horizon,
+            sparsity=sparsity,
+            som_alpha=som_alpha,
+            som_w=som_w,
+        )
+    raise ValueError(f"Unknown policy_type: {policy_type}")
