@@ -83,6 +83,20 @@ def build_network(
             device
         )
 
+    if args.network_class == "animal_world_critic":
+        from vla_streaming_rl.networks.animal_world_critic import AnimalWorldCriticNetwork
+
+        return AnimalWorldCriticNetwork(
+            observation_space_shape=observation_space_shape,
+            vels_size=4,
+            latent_dim=args.wcm_latent_dim,
+            dynamics_depth=args.wcm_dynamics_depth,
+            dynamics_mlp_ratio=args.wcm_dynamics_mlp_ratio,
+            dynamics_dropout=args.wcm_dynamics_dropout,
+            sigreg_knots=args.wcm_sigreg_knots,
+            sigreg_projections=args.wcm_sigreg_projections,
+        ).to(device)
+
     # One factory for every network: all critic config comes from ``args`` and is
     # bound here, leaving ``in_channels`` and ``action_dim`` for the network to
     # supply at call time (see ``_build_value_head``).

@@ -353,7 +353,7 @@ class AnimalPPOAgent(Agent):
             total_sequences, self.seq_len
         )
 
-        losses = {"actor": [], "critic": [], "entropy": [], "kl": []}
+        losses: dict[str, list[float]] = {}
         for _ in range(self.mini_epochs):
             order = np.random.permutation(total_sequences)
             for minibatch in range(num_minibatches):
@@ -369,9 +369,27 @@ class AnimalPPOAgent(Agent):
                     len(chosen),
                 )
                 for name, value in reported.items():
+                    if name not in losses:
+                        losses[name] = []
                     losses[name].append(value)
 
         return {f"ppo/{name}": float(np.mean(values)) for name, values in losses.items()}
+
+    def _forward_minibatch(
+        self, rollout: Rollout, flat: torch.Tensor, sequences: torch.Tensor, env_num: int
+    ) -> tuple:
+        """The minibatch forward pass: the policy logits, the state values, and
+        whatever auxiliary loss the network carries beyond PPO's own -- none
+        here, and the world-critic terms in
+        :class:`~vla_streaming_rl.agents.animal_world_critic_ppo.AnimalWorldCriticPPOAgent`."""
+        logits, values, _ = self.network(
+            rollout.visual[flat],
+            rollout.vels[flat],
+            rollout.states[sequences],
+            rollout.dones[flat],
+            env_num,
+        )
+        return logits, values.squeeze(-1), torch.zeros((), device=self.device), {}
 
     def _minibatch_step(
         self,
@@ -381,14 +399,9 @@ class AnimalPPOAgent(Agent):
         sequences: torch.Tensor,
         env_num: int,
     ) -> dict:
-        logits, values, _ = self.network(
-            rollout.visual[flat],
-            rollout.vels[flat],
-            rollout.states[sequences],
-            rollout.dones[flat],
-            env_num,
+        logits, values, auxiliary_loss, auxiliary_reported = self._forward_minibatch(
+            rollout, flat, sequences, env_num
         )
-        values = values.squeeze(-1)
 
         neglogpacs = F.cross_entropy(logits, rollout.actions[flat], reduction="none")
         old_neglogpacs = rollout.neglogpacs[flat]
@@ -412,7 +425,12 @@ class AnimalPPOAgent(Agent):
         log_probabilities = F.log_softmax(logits, dim=-1)
         entropy = -(log_probabilities.exp() * log_probabilities).sum(dim=-1).mean()
 
-        loss = actor_loss + 0.5 * self.critic_coef * critic_loss - self.entropy_coef * entropy
+        loss = (
+            actor_loss
+            + 0.5 * self.critic_coef * critic_loss
+            - self.entropy_coef * entropy
+            + auxiliary_loss
+        )
 
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -427,4 +445,5 @@ class AnimalPPOAgent(Agent):
             "critic": critic_loss.item(),
             "entropy": entropy.item(),
             "kl": kl.item(),
+            **auxiliary_reported,
         }

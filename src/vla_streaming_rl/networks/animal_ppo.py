@@ -166,6 +166,24 @@ class AnimalBackbone(nn.Module):
         # channels last before flattening: the order the dense layer's weights expect
         return out.permute(0, 2, 3, 1).reshape(out.shape[0], -1)
 
+    def embed(self, visual: torch.Tensor, vels: torch.Tensor) -> tuple:
+        """The per-step visual latent the dense branch produces and the joint
+        hidden the LSTM reads. Split out of ``forward`` so a head that needs the
+        visual latent -- see ``networks/animal_world_critic.py`` -- reads it off
+        the same pass instead of running the tower twice."""
+        visual_latent = F.elu(self.visual_hidden(self.features(visual)))
+        hidden = torch.cat([F.elu(self.vels_hidden(vels)), visual_latent], dim=-1)
+        return visual_latent, F.elu(self.joint_hidden(hidden))
+
+    def recurrent(
+        self, hidden: torch.Tensor, state: torch.Tensor, dones: torch.Tensor, env_num: int
+    ) -> tuple:
+        steps_num = hidden.shape[0] // env_num
+        sequence = hidden.reshape(env_num, steps_num, -1).unbind(dim=1)
+        mask_sequence = dones.to(hidden.dtype).reshape(env_num, steps_num).unbind(dim=1)
+        outputs, lstm_state = self.lstm(sequence, state, mask_sequence)
+        return torch.stack(outputs, dim=1).reshape(-1, LSTM_UNITS), lstm_state
+
     def forward(
         self,
         visual: torch.Tensor,
@@ -178,16 +196,8 @@ class AnimalBackbone(nn.Module):
         sits at ``e * steps_num + t``, which is what the recurrent unrolling and
         the sequence slicing both assume. Returns the ``(env_num * steps_num,
         LSTM_UNITS)`` recurrent output and the state carried out of the batch."""
-        steps_num = visual.shape[0] // env_num
-        flat = self.features(visual)
-        hidden = torch.cat([F.elu(self.vels_hidden(vels)), F.elu(self.visual_hidden(flat))], dim=-1)
-        hidden = F.elu(self.joint_hidden(hidden))
-
-        sequence = hidden.reshape(env_num, steps_num, -1).unbind(dim=1)
-        mask_sequence = dones.to(hidden.dtype).reshape(env_num, steps_num).unbind(dim=1)
-        outputs, lstm_state = self.lstm(sequence, state, mask_sequence)
-
-        return torch.stack(outputs, dim=1).reshape(-1, LSTM_UNITS), lstm_state
+        _, hidden = self.embed(visual, vels)
+        return self.recurrent(hidden, state, dones, env_num)
 
 
 class AnimalPPONetwork(AnimalBackbone):
