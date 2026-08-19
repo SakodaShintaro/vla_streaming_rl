@@ -1,12 +1,6 @@
 # @package _global_
-# The recurrent PPO the Animal-AI agents run: the trainer hands the agent one
-# transition at a time and the update fires once steps_num of them are in, so
-# there is no replay buffer and no actor/critic optimizer split. What stays with
-# the agent that includes this is agent_type, network_class and seq_len.
 learning_mode: on_policy
 
-# PPO. steps_num transitions are collected before each update; it has to be a
-# multiple of seq_len, and minibatch_size a multiple of seq_len that divides it.
 steps_num: 256
 minibatch_size: 64
 mini_epochs: 4

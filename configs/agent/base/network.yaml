@@ -28,13 +28,6 @@ denoising_steps: 1
 som_alpha: 1.0
 som_w: 25.0
 
-# The WCM world-critic branch (network_class=animal_world_critic /
-# animal_world_critic_actor_critic): an action-conditioned next-latent
-# prediction and the SIGReg collapse guard, trained on the same window as the
-# actor and critic. latent_dim / dynamics_depth follow WCM's own defaults scaled
-# to this much smaller encoder, and the coefficients are WCM's next_state_weight
-# and sigreg_weight. The prediction needs step pairs, so seq_len has to be at
-# least 2.
 wcm_latent_dim: 256
 wcm_dynamics_depth: 3
 wcm_dynamics_mlp_ratio: 4.0

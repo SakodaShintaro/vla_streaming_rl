@@ -1,8 +1,4 @@
 # @package _global_
-# The Animal-AI PPO agent with WCM's world-critic objective (ported from
-# ~/work/WCM): the same recurrent PPO as agent=animal_ppo, plus an
-# action-conditioned next-latent prediction and the SIGReg collapse guard on the
-# shared representation. The wcm_* knobs live in base/network.
 defaults:
   - base/network
   - base/off_policy
@@ -13,7 +9,4 @@ defaults:
 
 agent_type: animal_world_critic_ppo
 network_class: animal_world_critic
-# Every unrolled window of n steps gives n - 1 next-state pairs, so seq_len is
-# what decides how much the world-critic loss sees; the plain PPO config's 2 is
-# the bare minimum.
 seq_len: 8

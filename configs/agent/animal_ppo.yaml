@@ -1,9 +1,4 @@
 # @package _global_
-# The Animal-AI Olympics winning agent (ported from ~/work/rl_animal): recurrent
-# PPO over a Fixup residual tower. It shares nothing with the standard agent
-# beyond the Agent interface, so base/on_policy overrides what the other bases
-# set; those are inherited only to keep the trainer's config surface identical
-# across agents.
 defaults:
   - base/network
   - base/off_policy
@@ -14,6 +9,4 @@ defaults:
 
 agent_type: animal_ppo
 network_class: animal_ppo
-# The window the LSTM is unrolled over during the update: the recurrent state is
-# carried forward across the whole run, but gradients stop after seq_len steps.
 seq_len: 2

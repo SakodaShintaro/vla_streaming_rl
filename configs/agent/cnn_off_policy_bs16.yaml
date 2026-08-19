@@ -1,6 +1,4 @@
 # @package _global_
-# The standard agent's CNN actor-critic, off-policy with a batch of 16: what
-# train_car_racing.sh used to spell out on the command line.
 defaults:
   - base/network
   - base/off_policy
