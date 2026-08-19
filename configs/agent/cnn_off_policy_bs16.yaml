@@ -1,0 +1,16 @@
+# @package _global_
+# The standard agent's CNN actor-critic, off-policy with a batch of 16: what
+# train_car_racing.sh used to spell out on the command line.
+defaults:
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
+  - _self_
+
+agent_type: standard
+network_class: actor_critic_with_action_value
+learning_mode: off_policy
+batch_size: 16
+actor_lr: 1e-5
+critic_lr: 1e-5
