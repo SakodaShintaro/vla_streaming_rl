@@ -9,4 +9,3 @@ defaults:
 
 agent_type: animal_world_critic_ppo
 network_class: animal_world_critic
-seq_len: 8

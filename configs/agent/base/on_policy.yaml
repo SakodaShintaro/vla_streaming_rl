@@ -12,6 +12,7 @@ critic_coef: 1.0
 clip_value: 1
 normalize_advantage: 1
 max_grad_norm: 0.5
+seq_len: 8
 
 # The velocity/clock vector the dense branch reads. The z component is the one
 # the original network was trained on divided by 16. The original's fourth

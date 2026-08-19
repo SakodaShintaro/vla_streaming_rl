@@ -9,4 +9,3 @@ defaults:
 
 agent_type: animal_ppo
 network_class: animal_ppo
-seq_len: 2
