@@ -1,8 +1,11 @@
 # @package _global_
-# The Animal-AI PPO agent with WCM's world-critic objective (ported from
-# ~/work/WCM): the same recurrent PPO as agent=animal_ppo, plus an
-# action-conditioned next-latent prediction and the SIGReg collapse guard on the
-# shared representation.
+defaults:
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
+  - _self_
+
 agent_type: animal_world_critic_ppo
 network_class: animal_world_critic
 learning_mode: on_policy
@@ -22,18 +25,6 @@ critic_coef: 1.0
 clip_value: 1
 normalize_advantage: 1
 max_grad_norm: 0.5
-
-# The world-critic branch. latent_dim / dynamics_depth follow WCM's defaults
-# scaled to this much smaller encoder; the loss weights are WCM's
-# next_state_weight and sigreg_weight.
-wcm_latent_dim: 256
-wcm_dynamics_depth: 3
-wcm_dynamics_mlp_ratio: 4.0
-wcm_dynamics_dropout: 0.1
-wcm_next_state_coef: 0.1
-wcm_sigreg_coef: 0.01
-wcm_sigreg_knots: 17
-wcm_sigreg_projections: 1024
 
 velocity_scale: [1.0, 1.0, 16.0]
 health_scale: 100.0

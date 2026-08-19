@@ -1,9 +1,11 @@
 # @package _global_
-# The Animal-AI Olympics winning agent (ported from ~/work/rl_animal): recurrent
-# PPO over a Fixup residual tower. It shares nothing with the standard agent
-# beyond the Agent interface -- no replay buffer, no actor/critic optimizer
-# split, no action chunking -- so this config stands alone rather than layering
-# on base/network / base/off_policy / base/streaming.
+defaults:
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
+  - _self_
+
 agent_type: animal_ppo
 network_class: animal_ppo
 learning_mode: on_policy

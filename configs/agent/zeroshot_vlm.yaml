@@ -1,8 +1,4 @@
 # @package _global_
-# Zero-shot baseline: a hosted VLM on OpenRouter drives the env directly, with
-# no training. Only the keys below matter; the inherited training knobs are kept
-# so the trainer's config surface stays identical across agents.
-#   OPENROUTER_API_KEY must be set in the environment.
 defaults:
   - base/network
   - base/off_policy
