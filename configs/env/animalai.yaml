@@ -6,7 +6,7 @@ env_id: AnimalAI-v0
 # remainder, so the paper's 2M x 10 + 5M = 25M is step_limit == 12.5 x
 # steps_per_stage; the values below keep that ratio at 1/1000 scale.
 step_limit: 400_000
-image_save_interval: 20
+image_save_interval: 40
 
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_env
