@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 agent_type: standard
-network_class: animal_world_critic_actor_critic
+network_class: animal_actor_critic
 learning_mode: off_policy
 batch_size: 16
 seq_len: 8
