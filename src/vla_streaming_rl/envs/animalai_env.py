@@ -823,6 +823,9 @@ class AnimalAIEnv(gym.Env):
         self.selector.on_episode_end(self._arena, success)
         info = self._build_info()
         info["success"] = bool(success)
+        # The arena's own return, before the pass-mark bonus above is folded in. The bonus
+        # is training signal; what the competition reports is this.
+        info["episode_return"] = self._episode_return
         return self._latest_image, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
