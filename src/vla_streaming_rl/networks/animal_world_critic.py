@@ -68,6 +68,20 @@ class SIGReg(nn.Module):
         statistic = (error @ self.weights) * latent.size(-2)
         return statistic.mean()
 
+    def loss(self, latent: torch.Tensor) -> torch.Tensor:
+        """The regularizer on a ``(..., latent_dim)`` batch of latents.
+
+        WCM takes one statistic per time index, over a batch large enough for
+        each to be a distribution of its own. The batches here are small -- one
+        sequence in streaming mode -- so every step of every sequence is instead
+        pooled into a single sample set.
+        """
+        samples = latent.reshape(-1, latent.shape[-1]).float().unsqueeze(0)
+        projections = normalized_random_projections(
+            samples.size(-1), self.num_projections, samples.device, torch.float32
+        )
+        return self(samples, projections)
+
 
 def normalized_random_projections(
     latent_dim: int, num_projections: int, device: torch.device, dtype: torch.dtype
@@ -117,14 +131,24 @@ class GatedDynamicsBlock(nn.Module):
 class ActionConditionedDynamics(nn.Module):
     """``z_(t+1) = z_t + delta(h_t, a_t)``: the visual latent is the residual
     anchor, the recurrent output supplies the history, and the action only ever
-    modulates this module -- never the value head."""
+    modulates this module -- never the value head.
+
+    ``action_encoder`` maps a step's action to one latent-sized vector, which is
+    what decides whether the actions are discrete branch indexes (an embedding
+    table) or continuous vectors (an MLP, as in WCM).
+    """
 
     def __init__(
-        self, latent_dim: int, hidden_dim: int, depth: int, action_num: int, dropout: float
+        self,
+        latent_dim: int,
+        hidden_dim: int,
+        depth: int,
+        dropout: float,
+        action_encoder: nn.Module,
     ) -> None:
         super().__init__()
         assert depth >= 1, f"dynamics_depth must be at least 1, got {depth}"
-        self.action_embedding = nn.Embedding(action_num, latent_dim)
+        self.action_encoder = action_encoder
         self.blocks = nn.ModuleList(
             GatedDynamicsBlock(latent_dim, hidden_dim, dropout) for _ in range(depth)
         )
@@ -132,7 +156,6 @@ class ActionConditionedDynamics(nn.Module):
             nn.LayerNorm(latent_dim),
             nn.Linear(latent_dim, latent_dim),
         )
-        nn.init.normal_(self.action_embedding.weight, std=0.02)
         nn.init.normal_(self.delta_head[-1].weight, std=1e-3)
         nn.init.zeros_(self.delta_head[-1].bias)
 
@@ -145,14 +168,24 @@ class ActionConditionedDynamics(nn.Module):
         assert current_state_latent.shape == context.shape, (
             f"Current-state/context shapes differ: {current_state_latent.shape} vs {context.shape}"
         )
-        assert actions.shape == context.shape[:-1], (
-            f"Actions must be {context.shape[:-1]} branch indexes, got {actions.shape}"
+        action_latent = self.action_encoder(actions)
+        assert action_latent.shape == context.shape, (
+            f"Encoded actions must be {context.shape}, got {action_latent.shape}"
         )
-        action_latent = self.action_embedding(actions)
         hidden = context
         for block in self.blocks:
             hidden = block(hidden, action_latent)
         return current_state_latent + self.delta_head(hidden)
+
+
+def next_state_prediction_loss(
+    predicted: torch.Tensor, target: torch.Tensor, valid: torch.Tensor
+) -> torch.Tensor:
+    """Mean squared error over the ``valid`` step pairs of ``(B, T, latent_dim)``
+    predictions; ``valid`` is ``(B, T, 1)`` and drops the pairs that cross an
+    episode boundary."""
+    squared = (predicted - target).square() * valid
+    return squared.sum() / valid.sum().clamp_min(1.0) / predicted.shape[-1]
 
 
 class AnimalWorldCriticNetwork(AnimalPPONetwork):
@@ -186,12 +219,14 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
             nn.LayerNorm(LSTM_UNITS),
             nn.Linear(LSTM_UNITS, latent_dim),
         )
+        action_embedding = nn.Embedding(ACTION_NUM, latent_dim)
+        nn.init.normal_(action_embedding.weight, std=0.02)
         self.dynamics = ActionConditionedDynamics(
             latent_dim=latent_dim,
             hidden_dim=int(latent_dim * dynamics_mlp_ratio),
             depth=dynamics_depth,
-            action_num=ACTION_NUM,
             dropout=dynamics_dropout,
+            action_encoder=action_embedding,
         )
         self.sigreg = SIGReg(sigreg_knots, sigreg_projections)
 
@@ -221,10 +256,4 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
         return self.dynamics(state_latent, context_latent, actions)
 
     def sigreg_loss(self, context_latent: torch.Tensor) -> torch.Tensor:
-        """``context_latent`` is ``(sequences, steps, latent_dim)``; one isotropy
-        statistic per step index, over the sequences in the minibatch."""
-        latent = context_latent.transpose(0, 1).float()
-        projections = normalized_random_projections(
-            latent.size(-1), self.sigreg.num_projections, latent.device, torch.float32
-        )
-        return self.sigreg(latent, projections)
+        return self.sigreg.loss(context_latent)

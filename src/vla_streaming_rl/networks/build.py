@@ -170,6 +170,38 @@ def build_network(
             detach_critic=args.detach_critic,
         ).to(device)
 
+    elif args.network_class == "animal_world_critic_actor_critic":
+        from vla_streaming_rl.networks.animal_world_critic_actor_critic import (
+            AnimalWorldCriticActorCritic,
+        )
+
+        network = AnimalWorldCriticActorCritic(
+            observation_space_shape=observation_space_shape,
+            action_space_shape=action_space_shape,
+            value_head_factory=value_head_factory,
+            horizon=args.horizon,
+            policy_type=args.policy_type,
+            actor_hidden_dim=args.actor_hidden_dim,
+            actor_block_num=args.actor_block_num,
+            denoising_time=args.denoising_time,
+            denoising_steps=args.denoising_steps,
+            dacer_loss_weight=args.dacer_loss_weight,
+            som_alpha=args.som_alpha,
+            som_w=args.som_w,
+            sparsity=args.sparsity,
+            critic_loss_weight=args.critic_loss_weight,
+            detach_actor=args.detach_actor,
+            detach_critic=args.detach_critic,
+            wcm_latent_dim=args.wcm_latent_dim,
+            wcm_dynamics_depth=args.wcm_dynamics_depth,
+            wcm_dynamics_mlp_ratio=args.wcm_dynamics_mlp_ratio,
+            wcm_dynamics_dropout=args.wcm_dynamics_dropout,
+            wcm_next_state_coef=args.wcm_next_state_coef,
+            wcm_sigreg_coef=args.wcm_sigreg_coef,
+            wcm_sigreg_knots=args.wcm_sigreg_knots,
+            wcm_sigreg_projections=args.wcm_sigreg_projections,
+        ).to(device)
+
     elif args.network_class == "vlm_actor_critic_with_action_value":
         from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
             VLMActorCriticWithActionValue,

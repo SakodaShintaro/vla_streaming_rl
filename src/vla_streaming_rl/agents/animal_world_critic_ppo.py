@@ -26,6 +26,7 @@ import torch
 from torch import nn
 
 from vla_streaming_rl.agents.animal_ppo import AnimalPPOAgent, Rollout
+from vla_streaming_rl.networks.animal_world_critic import next_state_prediction_loss
 
 
 class AnimalWorldCriticPPOAgent(AnimalPPOAgent):
@@ -107,8 +108,7 @@ class AnimalWorldCriticPPOAgent(AnimalPPOAgent):
         )
         target = state_latent[:, 1:].detach()
         valid = (fresh[:, 1:] < 0.5).to(predicted.dtype).unsqueeze(-1)
-        squared = (predicted - target).square() * valid
-        next_state_loss = squared.sum() / valid.sum().clamp_min(1.0) / predicted.shape[-1]
+        next_state_loss = next_state_prediction_loss(predicted, target, valid)
 
         sigreg_loss = self.network.sigreg_loss(context_latent)
 

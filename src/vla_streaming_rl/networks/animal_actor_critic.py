@@ -59,6 +59,31 @@ class AnimalEncoder(torch.nn.Module):
     def init_state(self) -> torch.Tensor:
         return self.backbone.init_state(1, torch.device("cpu"))
 
+    def forward_steps(
+        self,
+        images: torch.Tensor,  # (B, T, C, H, W)
+        actions: torch.Tensor,  # (B, T, action_dim)
+        rewards: torch.Tensor,  # (B, T, 1)
+        rnn_state: torch.Tensor,  # (B, 2 * LSTM_UNITS)
+        scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Every step of the window rather than only its last: the recurrent
+        output ``(B, T, LSTM_UNITS)``, the per-step visual latent
+        ``(B, T, HIDDEN_NODES)`` a world-critic head predicts -- see
+        ``networks/animal_world_critic_actor_critic.py`` -- and the state."""
+        batch_size, steps_num = images.shape[:2]
+        flat_num = batch_size * steps_num
+        visual = images.reshape(flat_num, *images.shape[2:])
+        vels = torch.cat([scalar_obs, actions, rewards], dim=-1).reshape(flat_num, -1)
+        masks = torch.zeros(flat_num, device=images.device, dtype=images.dtype)
+        visual_latent, hidden = self.backbone.embed(visual, vels)
+        lstm_out, state = self.backbone.recurrent(hidden, rnn_state, masks, batch_size)
+        return (
+            lstm_out.reshape(batch_size, steps_num, -1),
+            visual_latent.reshape(batch_size, steps_num, -1),
+            state,
+        )
+
     def forward(
         self,
         images: torch.Tensor,  # (B, T, C, H, W)
@@ -67,13 +92,8 @@ class AnimalEncoder(torch.nn.Module):
         rnn_state: torch.Tensor,  # (B, 2 * LSTM_UNITS)
         scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size, steps_num = images.shape[:2]
-        flat_num = batch_size * steps_num
-        visual = images.reshape(flat_num, *images.shape[2:])
-        vels = torch.cat([scalar_obs, actions, rewards], dim=-1).reshape(flat_num, -1)
-        masks = torch.zeros(flat_num, device=images.device, dtype=images.dtype)
-        lstm_out, state = self.backbone(visual, vels, rnn_state, masks, batch_size)
-        return lstm_out.reshape(batch_size, steps_num, -1)[:, -1], state
+        lstm_out, _, state = self.forward_steps(images, actions, rewards, rnn_state, scalar_obs)
+        return lstm_out[:, -1], state
 
 
 class AnimalActorCriticWithActionValue(NetworkInterface):
@@ -247,8 +267,22 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
             features=x,
         )
 
+    def _encode_current_window(
+        self, data: ReplayBufferData
+    ) -> tuple[torch.Tensor, torch.Tensor, dict]:
+        """The state the actor and critic read, plus whatever auxiliary loss the
+        network trains on that same window -- none here, and the world-critic
+        terms in ``networks/animal_world_critic_actor_critic.py``."""
+        curr_state, _ = self.encoder(*self._window(data, 0, -self.horizon))
+        return curr_state, torch.zeros((), device=curr_state.device), {}
+
     def _losses(
-        self, curr_state: torch.Tensor, action_chunk: torch.Tensor, target_value: torch.Tensor
+        self,
+        curr_state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        target_value: torch.Tensor,
+        auxiliary_loss: torch.Tensor,
+        auxiliary_info: dict,
     ) -> tuple[LossResult, torch.Tensor, float]:
         """The training loss, plus the two quantities the eligibility-trace
         critic step needs on its own: the actor-only loss and the TD error."""
@@ -261,8 +295,11 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss
-        info_dict = {f"losses/{key}": value for key, value in {**critic_info, **actor_info}.items()}
+        total_loss = self.critic_loss_weight * critic_loss + actor_loss + auxiliary_loss
+        info_dict = {
+            f"losses/{key}": value
+            for key, value in {**critic_info, **actor_info, **auxiliary_info}.items()
+        }
         return LossResult(loss=total_loss, info=info_dict), actor_loss, critic_info["delta"]
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -275,8 +312,14 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
             next_output, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
         )
 
-        curr_state, _ = self.encoder(*self._window(data, 0, -self.horizon))
-        loss_result, _, _ = self._losses(curr_state, data.actions[:, -self.horizon :], target_value)
+        curr_state, auxiliary_loss, auxiliary_info = self._encode_current_window(data)
+        loss_result, _, _ = self._losses(
+            curr_state,
+            data.actions[:, -self.horizon :],
+            target_value,
+            auxiliary_loss,
+            auxiliary_info,
+        )
         return loss_result
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
@@ -290,9 +333,11 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
             next_q_out.output, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
         )
 
-        prev_state, _ = self.encoder(*self._window(data, 0, -self.horizon))
+        prev_state, auxiliary_loss, auxiliary_info = self._encode_current_window(data)
         action_chunk = data.actions[:, -self.horizon :]
-        loss_result, actor_loss, delta = self._losses(prev_state, action_chunk, target_value)
+        loss_result, actor_loss, delta = self._losses(
+            prev_state, action_chunk, target_value, auxiliary_loss, auxiliary_info
+        )
 
         # -Q(s, a) for the eligibility-trace critic step, detached from the encoder.
         et_critic_out = self.value_head(prev_state.detach(), action_chunk.detach())
