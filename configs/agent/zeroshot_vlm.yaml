@@ -4,10 +4,10 @@
 # so the trainer's config surface stays identical across agents.
 #   OPENROUTER_API_KEY must be set in the environment.
 defaults:
-  - base_network
-  - base_off_policy
-  - base_streaming
-  - base_vlm
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
   - _self_
 
 agent_type: zeroshot_vlm

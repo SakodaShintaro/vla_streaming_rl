@@ -8,10 +8,10 @@
 #   vlm_off_policy_bs16 : learning_mode=off_policy batch_size=16 actor_lr=1e-5 critic_lr=1e-5
 #   vlm_streaming       : (defaults, no override)
 defaults:
-  - base_network
-  - base_off_policy
-  - base_streaming
-  - base_vlm
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
   - _self_
 
 agent_type: standard

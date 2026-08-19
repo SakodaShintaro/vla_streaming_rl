@@ -1,0 +1,11 @@
+# @package _global_
+# The standard agent's VLM actor-critic, off-policy with a batch of 16: what
+# train_animalai.sh used to spell out on the command line.
+defaults:
+  - standard
+  - _self_
+
+learning_mode: off_policy
+batch_size: 16
+actor_lr: 1e-5
+critic_lr: 1e-5

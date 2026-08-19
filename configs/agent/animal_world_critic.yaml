@@ -1,0 +1,14 @@
+# @package _global_
+# The standard agent on the Animal-AI backbone with WCM's world-critic branch,
+# off-policy. The next-latent prediction needs step pairs inside the window, so
+# seq_len is raised past the default of 1; the wcm_* knobs live in base/network.
+defaults:
+  - standard
+  - _self_
+
+network_class: animal_world_critic_actor_critic
+learning_mode: off_policy
+batch_size: 16
+seq_len: 4
+actor_lr: 1e-5
+critic_lr: 1e-5
