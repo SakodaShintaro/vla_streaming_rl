@@ -52,9 +52,6 @@ class AnimalWorldCriticPPOAgent(AnimalPPOAgent):
         max_grad_norm: float,
         velocity_scale: list[float],
         health_scale: float,
-        reward_bonus: float,
-        ramps_coef: float,
-        back_move_coef: float,
         next_state_coef: float,
         sigreg_coef: float,
     ) -> None:
@@ -78,9 +75,6 @@ class AnimalWorldCriticPPOAgent(AnimalPPOAgent):
             max_grad_norm=max_grad_norm,
             velocity_scale=velocity_scale,
             health_scale=health_scale,
-            reward_bonus=reward_bonus,
-            ramps_coef=ramps_coef,
-            back_move_coef=back_move_coef,
         )
         assert seq_len >= 2, (
             f"seq_len {seq_len} leaves no next-state pair for the world-critic loss"

@@ -32,6 +32,12 @@ class StepResult:
     panels: dict[str, np.ndarray]
 
 
+def no_reward_shaping(reward: float, obs: dict, episode_done: bool) -> float:
+    """The reward shaper of an environment whose reward is trained on as it comes."""
+    del obs, episode_done
+    return reward
+
+
 class Agent(ABC):
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)

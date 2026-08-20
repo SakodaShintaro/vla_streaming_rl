@@ -24,6 +24,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, optim
 
+from vla_streaming_rl.agents.animal_reward import shape_animal_reward
 from vla_streaming_rl.agents.base import Agent, StepResult
 
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward /
@@ -154,9 +155,6 @@ class AnimalPPOAgent(Agent):
         max_grad_norm: float,
         velocity_scale: list[float],
         health_scale: float,
-        reward_bonus: float,
-        ramps_coef: float,
-        back_move_coef: float,
     ) -> None:
         super().__init__(learning_mode=learning_mode, horizon=horizon)
         assert steps_num % seq_len == 0, f"steps_num {steps_num} is not a multiple of {seq_len}"
@@ -187,9 +185,6 @@ class AnimalPPOAgent(Agent):
 
         self.velocity_scale = np.asarray(velocity_scale, dtype=np.float32)
         self.health_scale = health_scale
-        self.reward_bonus = reward_bonus
-        self.ramps_coef = ramps_coef
-        self.back_move_coef = back_move_coef
 
         self.rnn_state = self.network.init_state(1, self.device)
         self.buffer = RolloutBuffer()
@@ -209,8 +204,8 @@ class AnimalPPOAgent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step
-        visual, vels, velocity = self._preprocess(obs, info)
-        shaped = self._shape_reward(reward, velocity)
+        visual, vels = self._preprocess(obs, info)
+        shaped = shape_animal_reward(reward, obs, terminated or truncated)
         # this observation is the outcome of the action chosen on the previous
         # tick, so that transition can only be completed now
         self.buffer.add(self.pending, shaped)
@@ -250,7 +245,7 @@ class AnimalPPOAgent(Agent):
         same boundary rule, and the action chosen on a terminal observation is
         dropped simply by never being buffered."""
         del global_step, reward
-        visual, vels, _ = self._preprocess(obs, info)
+        visual, vels = self._preprocess(obs, info)
         fresh = self._episode_boundary(terminated, truncated)
         return StepResult(action=self._act(visual, vels, fresh), metrics={}, panels={})
 
@@ -306,9 +301,8 @@ class AnimalPPOAgent(Agent):
         return self._to_env_action(self.pending.action)
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
-        """The image as the wrappers already produce it, the velocity/clock
-        vector the dense branch reads, and the raw velocity the reward shaping
-        reads.
+        """The image as the wrappers already produce it, and the velocity/clock
+        vector the dense branch reads.
 
         The original counted the arena's own ``t`` down and fed the remainder;
         this env does not expose an episode length, so health takes that slot.
@@ -320,19 +314,7 @@ class AnimalPPOAgent(Agent):
         velocity = obs["velocity"].astype(np.float32)
         clock = obs["health"].astype(np.float32) / self.health_scale
         vels = np.concatenate([velocity / self.velocity_scale, clock]).astype(np.float32)
-        return visual, torch.from_numpy(vels).to(self.device), velocity
-
-    def _shape_reward(self, reward: float, velocity: np.ndarray) -> float:
-        """Reaching a goal is worth more than the arena says, climbing is
-        encouraged and walking backwards is discouraged."""
-        if reward > 0.1:
-            reward += self.reward_bonus
-        if velocity[1] > 0.01:
-            reward += velocity[1] * self.ramps_coef
-        if velocity[2] < 0:
-            reward += velocity[2] * self.back_move_coef
-
-        return float(reward)
+        return visual, torch.from_numpy(vels).to(self.device)
 
     def _to_env_action(self, net_action: int) -> np.ndarray:
         return np.array(
