@@ -27,6 +27,6 @@ def shape_animal_reward(reward: float, obs: dict, episode_done: bool) -> float:
         reward += float(velocity[2]) * BACK_MOVE_COEF
     if episode_done:
         # obs carries the arena's own return including this tick, on the pass mark's scale
-        cleared = float(obs["episode_return"]) >= float(obs["pass_mark"])
+        cleared = obs["episode_return"].item() >= obs["pass_mark"].item()
         reward += PASS_MARK_BONUS if cleared else -PASS_MARK_BONUS
     return reward
