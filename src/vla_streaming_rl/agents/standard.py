@@ -38,6 +38,7 @@ class StandardAgent(Agent):
         buffer_device: str,
         max_prompt_tokens: int,
         pad_token_id: int,
+        reward_shaper,
     ) -> None:
         super().__init__(learning_mode=learning_mode, horizon=horizon)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -52,6 +53,9 @@ class StandardAgent(Agent):
         self.action_scale = (action_space.high - action_space.low) / 2.0
         self.action_bias = (action_space.high + action_space.low) / 2.0
         self.reward_processor = RewardProcessor("scaling", 1.0)
+        # What the agent trains on, against what the env reported. See
+        # agents/animal_reward.py.
+        self.reward_shaper = reward_shaper
         self.normalizing_by_return = normalizing_by_return
 
         self.learning_starts = learning_starts
@@ -120,6 +124,7 @@ class StandardAgent(Agent):
     ) -> StepResult:
         metrics = {}
         episode_done = terminated or truncated
+        reward = self.reward_shaper(reward, obs, episode_done)
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
@@ -228,6 +233,7 @@ class StandardAgent(Agent):
     ) -> StepResult:
         metrics = {}
         episode_done = terminated or truncated
+        reward = self.reward_shaper(reward, obs, episode_done)
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0

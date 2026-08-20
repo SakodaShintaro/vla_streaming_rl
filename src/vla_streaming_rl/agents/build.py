@@ -3,6 +3,9 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
+from vla_streaming_rl.agents.animal_reward import shape_animal_reward
+from vla_streaming_rl.agents.base import no_reward_shaping
+
 
 def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
     if args.agent_type == "zeroshot_vlm":
@@ -44,9 +47,6 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             max_grad_norm=args.max_grad_norm,
             velocity_scale=list(args.velocity_scale),
             health_scale=args.health_scale,
-            reward_bonus=args.reward_bonus,
-            ramps_coef=args.ramps_coef,
-            back_move_coef=args.back_move_coef,
             next_state_coef=args.wcm_next_state_coef,
             sigreg_coef=args.wcm_sigreg_coef,
         )
@@ -74,9 +74,6 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             max_grad_norm=args.max_grad_norm,
             velocity_scale=list(args.velocity_scale),
             health_scale=args.health_scale,
-            reward_bonus=args.reward_bonus,
-            ramps_coef=args.ramps_coef,
-            back_move_coef=args.back_move_coef,
         )
 
     from vla_streaming_rl.agents.standard import StandardAgent
@@ -103,4 +100,5 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
         buffer_device=args.buffer_device,
         max_prompt_tokens=args.max_prompt_tokens,
         pad_token_id=args.pad_token_id,
+        reward_shaper=(shape_animal_reward if args.env_id == "AnimalAI-v0" else no_reward_shaping),
     )

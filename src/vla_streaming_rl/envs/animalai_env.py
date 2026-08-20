@@ -816,16 +816,10 @@ class AnimalAIEnv(gym.Env):
             return self._latest_image, reward, terminated, truncated, self._build_info()
 
         success = self._episode_return >= self.pass_mark
-        # Pass-mark bonus: reward crossing the clear threshold, penalize missing it.
-        # Computed from the pre-bonus return, then folded into this tick's reward.
-        reward += 1.0 if success else -1.0
         # Before _build_info, so the selector reports post-episode progress.
         self.selector.on_episode_end(self._arena, success)
         info = self._build_info()
         info["success"] = bool(success)
-        # The arena's own return, before the pass-mark bonus above is folded in. The bonus
-        # is training signal; what the competition reports is this.
-        info["episode_return"] = self._episode_return
         return self._latest_image, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
