@@ -21,6 +21,64 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             api_max_retries=args.api_max_retries,
         )
 
+    if args.agent_type == "animal_world_critic_ppo":
+        from vla_streaming_rl.agents.animal_world_critic_ppo import AnimalWorldCriticPPOAgent
+
+        return AnimalWorldCriticPPOAgent(
+            action_space=env.action_space,
+            network=network,
+            learning_mode=args.learning_mode,
+            horizon=args.horizon,
+            steps_num=args.steps_num,
+            minibatch_size=args.minibatch_size,
+            mini_epochs=args.mini_epochs,
+            seq_len=args.seq_len,
+            gamma=args.gamma,
+            lam=args.lam,
+            learning_rate=args.learning_rate,
+            e_clip=args.e_clip,
+            entropy_coef=args.entropy_coef,
+            critic_coef=args.critic_coef,
+            clip_value=args.clip_value,
+            normalize_advantage=args.normalize_advantage,
+            max_grad_norm=args.max_grad_norm,
+            velocity_scale=list(args.velocity_scale),
+            health_scale=args.health_scale,
+            reward_bonus=args.reward_bonus,
+            ramps_coef=args.ramps_coef,
+            back_move_coef=args.back_move_coef,
+            next_state_coef=args.wcm_next_state_coef,
+            sigreg_coef=args.wcm_sigreg_coef,
+        )
+
+    if args.agent_type == "animal_ppo":
+        from vla_streaming_rl.agents.animal_ppo import AnimalPPOAgent
+
+        return AnimalPPOAgent(
+            action_space=env.action_space,
+            network=network,
+            learning_mode=args.learning_mode,
+            horizon=args.horizon,
+            steps_num=args.steps_num,
+            minibatch_size=args.minibatch_size,
+            mini_epochs=args.mini_epochs,
+            seq_len=args.seq_len,
+            gamma=args.gamma,
+            lam=args.lam,
+            learning_rate=args.learning_rate,
+            e_clip=args.e_clip,
+            entropy_coef=args.entropy_coef,
+            critic_coef=args.critic_coef,
+            clip_value=args.clip_value,
+            normalize_advantage=args.normalize_advantage,
+            max_grad_norm=args.max_grad_norm,
+            velocity_scale=list(args.velocity_scale),
+            health_scale=args.health_scale,
+            reward_bonus=args.reward_bonus,
+            ramps_coef=args.ramps_coef,
+            back_move_coef=args.back_move_coef,
+        )
+
     from vla_streaming_rl.agents.standard import StandardAgent
 
     return StandardAgent(

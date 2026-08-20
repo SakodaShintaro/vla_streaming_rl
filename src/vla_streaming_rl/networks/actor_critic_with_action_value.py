@@ -15,11 +15,7 @@ from vla_streaming_rl.networks.interface import (
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
-from vla_streaming_rl.networks.modules.policy_head import (
-    CFGDiffusionPolicy,
-    DiffusionPolicy,
-    MeanFlowPolicy,
-)
+from vla_streaming_rl.networks.modules.policy_head import build_policy_head
 from vla_streaming_rl.networks.modules.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
@@ -89,44 +85,20 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         self.horizon = horizon
         self.policy_type = policy_type
-        if self.policy_type == "diffusion":
-            self.policy_head = DiffusionPolicy(
-                state_dim=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                denoising_time=denoising_time,
-                sparsity=sparsity,
-                horizon=horizon,
-                denoising_steps=denoising_steps,
-                dacer_loss_weight=dacer_loss_weight,
-            )
-        elif self.policy_type == "cfgrl":
-            self.policy_head = CFGDiffusionPolicy(
-                state_dim=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                denoising_time=denoising_time,
-                sparsity=sparsity,
-                cfgrl_beta=1.5,
-                horizon=horizon,
-                denoising_steps=denoising_steps,
-                condition_drop_prob=0.1,
-            )
-        elif self.policy_type == "som":
-            self.policy_head = MeanFlowPolicy(
-                state_dim=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                horizon=horizon,
-                sparsity=sparsity,
-                som_alpha=som_alpha,
-                som_w=som_w,
-            )
-        else:
-            raise ValueError(f"Unknown policy_type: {self.policy_type}")
+        self.policy_head = build_policy_head(
+            policy_type=policy_type,
+            state_dim=self.encoder.output_dim,
+            action_dim=self.action_dim,
+            hidden_dim=actor_hidden_dim,
+            block_num=actor_block_num,
+            horizon=horizon,
+            sparsity=sparsity,
+            denoising_time=denoising_time,
+            denoising_steps=denoising_steps,
+            dacer_loss_weight=dacer_loss_weight,
+            som_alpha=som_alpha,
+            som_w=som_w,
+        )
 
         self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)
         self.prediction_head = StatePredictionHead(

@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - agent: standard
+  - agent: vlm_streaming
   - env: car_racing
 
 hydra:

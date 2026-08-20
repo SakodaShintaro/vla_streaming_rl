@@ -14,7 +14,7 @@ command:
   - run
   - python
   - ${program}
-  - agent=standard
+  - agent=vlm_streaming
   - network_class=actor_critic_with_action_value
   - learning_mode=off_policy
   - batch_size=16

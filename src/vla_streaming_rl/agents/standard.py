@@ -204,6 +204,16 @@ class StandardAgent(Agent):
         del score, feedback_text
         return {}
 
+    def optimizer_state_dict(self) -> dict:
+        return {
+            "actor": self.actor_optimizer.state_dict(),
+            "critic": self.critic_optimizer.state_dict(),
+        }
+
+    def load_optimizer_state_dict(self, state: dict) -> None:
+        self.actor_optimizer.load_state_dict(state["actor"])
+        self.critic_optimizer.load_state_dict(state["critic"])
+
     # --- per-tick machinery ------------------------------------------------
 
     @torch.no_grad()

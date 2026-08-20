@@ -164,8 +164,8 @@ def run_testbed(
 ) -> dict[str, float]:
     """Sweep every arena the env's SequentialSelector serves and write results.
 
-    Returns per-level pass rates plus "cleared" (overall count) so callers can
-    push them into run summaries.
+    Returns per-level pass rates plus the overall "cleared" count and
+    "success_rate" so callers can push them into run summaries.
     """
     result_dir.mkdir(parents=True, exist_ok=True)
     selector = env.unwrapped.selector
@@ -192,9 +192,14 @@ def run_testbed(
             done = sum(level_attempts.values())
             print(f"[{done}/{arena_count}] {arena_name}\tsuccess={int(success)}\tscore={score:.2f}")
 
-    print(f"Cleared {success_count}/{arena_count} arenas.")
-    summary_lines = [f"cleared: {success_count}/{arena_count}"]
-    metrics: dict[str, float] = {"cleared": success_count, "arena_count": arena_count}
+    success_rate = success_count / arena_count
+    print(f"Cleared {success_count}/{arena_count} arenas ({success_rate:.1%}).")
+    summary_lines = [f"cleared: {success_count}/{arena_count} ({success_rate:.1%})"]
+    metrics: dict[str, float] = {
+        "cleared": success_count,
+        "arena_count": arena_count,
+        "success_rate": success_rate,
+    }
     for level in sorted(level_attempts):
         n_success = level_successes[level]
         n_attempt = level_attempts[level]

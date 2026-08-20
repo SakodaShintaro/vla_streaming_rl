@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
+  - _self_
+
+agent_type: standard
+network_class: animal_actor_critic
+learning_mode: off_policy
+batch_size: 16
+seq_len: 8
+actor_lr: 1e-5
+critic_lr: 1e-5

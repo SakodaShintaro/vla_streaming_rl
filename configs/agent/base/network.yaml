@@ -27,3 +27,12 @@ dacer_loss_weight: 0.05
 denoising_steps: 1
 som_alpha: 1.0
 som_w: 25.0
+
+wcm_latent_dim: 256
+wcm_dynamics_depth: 3
+wcm_dynamics_mlp_ratio: 4.0
+wcm_dynamics_dropout: 0.1
+wcm_next_state_coef: 0.1
+wcm_sigreg_coef: 0.01
+wcm_sigreg_knots: 17
+wcm_sigreg_projections: 1024

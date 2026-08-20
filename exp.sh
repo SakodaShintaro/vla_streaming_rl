@@ -10,7 +10,7 @@ SETUP=${1:-}
 
 case "$SETUP" in
   car_racing)
-    AGENT=standard; ENV=car_racing
+    AGENT=vlm_streaming; ENV=car_racing
     STREAM_LR="actor_lr=1e-6 critic_lr=1e-5"
     OFF16_LR="actor_lr=1e-5 critic_lr=1e-5"
     OFF1_LR="actor_lr=1e-6 critic_lr=1e-5"
