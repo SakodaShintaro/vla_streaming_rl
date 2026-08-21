@@ -9,3 +9,7 @@ defaults:
 
 agent_type: animal_world_critic_ppo
 network_class: animal_world_critic
+
+image_encoder_type: fixup
+image_encoder_output_dim: 128
+image_encoder_trainable: true

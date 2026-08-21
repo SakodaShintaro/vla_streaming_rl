@@ -79,6 +79,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         policy_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
         assert image_mode in ("mem", "sequence"), f"Unknown image_mode: {image_mode}"
@@ -97,8 +99,16 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.detach_critic = detach_critic
         self.detach_predictor = detach_predictor
 
+        # this network's spatial-temporal attention is built around the patch
+        # grid; a single pooled token would leave it nothing to attend over, so
+        # "single_token" is for the animal backbone (see ``networks/animal_ppo.py``)
+        assert image_encode_mode == "grid"
         self.image_processor = ImageProcessor(
-            observation_space_shape, image_encoder_type, image_encoder_output_dim
+            observation_space_shape,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
         )
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)

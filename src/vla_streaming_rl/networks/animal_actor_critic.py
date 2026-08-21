@@ -50,10 +50,24 @@ class AnimalEncoder(torch.nn.Module):
     """
 
     def __init__(
-        self, observation_space_shape: tuple[int, ...], action_dim: int, scalar_obs_dim: int
+        self,
+        observation_space_shape: tuple[int, ...],
+        action_dim: int,
+        scalar_obs_dim: int,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
-        self.backbone = AnimalBackbone(observation_space_shape, scalar_obs_dim + action_dim + 1)
+        self.backbone = AnimalBackbone(
+            observation_space_shape,
+            scalar_obs_dim + action_dim + 1,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
+        )
         self.output_dim = LSTM_UNITS
 
     def init_state(self) -> torch.Tensor:
@@ -116,6 +130,10 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         critic_loss_weight: float,
         detach_actor: bool,
         detach_critic: bool,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
         self.observation_space_shape = observation_space_shape
@@ -126,7 +144,15 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         self.detach_critic = detach_critic
 
         self.scalar_obs_normalizer = RunningNormalizer(SCALAR_OBS_DIM)
-        self.encoder = AnimalEncoder(observation_space_shape, self.action_dim, SCALAR_OBS_DIM)
+        self.encoder = AnimalEncoder(
+            observation_space_shape,
+            self.action_dim,
+            SCALAR_OBS_DIM,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
+        )
 
         self.policy_type = policy_type
         self.policy_head = build_policy_head(

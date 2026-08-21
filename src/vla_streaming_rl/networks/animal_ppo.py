@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: MIT
 """The Animal-AI Olympics winning network, ported from ``~/work/rl_animal``.
 
-A Fixup residual tower with channel attention, a small dense branch for the
-velocity/clock vector, and a LayerNorm LSTM shared by the policy and value
-heads. It is deliberately not a :class:`NetworkInterface`: that contract is
-built around a replay batch, while this network is driven by an on-policy PPO
-rollout, so it stays a plain ``nn.Module`` and :class:`AnimalPPOAgent` owns the
-loss.
+A visual trunk -- the original Fixup residual tower with channel attention, or
+any of the pretrained encoders in ``networks/modules/image_processor.py``, which
+is where both now live -- a small dense branch for the velocity/clock vector, and
+a LayerNorm LSTM shared by the policy and value heads. It is deliberately not a
+:class:`NetworkInterface`: that contract is built around a replay batch, while
+this network is driven by an on-policy PPO rollout, so it stays a plain
+``nn.Module`` and :class:`AnimalPPOAgent` owns the loss.
 
 The one change from the original is the image format: it takes the CHW float
 observation this repo's wrappers already produce, instead of converting uint8
@@ -17,51 +18,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
+
 ACTION_NUM = 9
-DEPTHS = (16, 32, 64, 128)
 HIDDEN_NODES = 1024
 VELS_HIDDEN = 128
 LSTM_UNITS = 512
 LAYER_NORM_EPSILON = 1e-5
-
-
-class ChannelAttention(nn.Module):
-    """The channel means through two bias-free 1x1 convolutions, squashed to a
-    per-channel gate."""
-
-    def __init__(self, depth: int) -> None:
-        super().__init__()
-        self.reduce = nn.Conv2d(depth, depth // 4, 1, bias=False)
-        self.expand = nn.Conv2d(depth // 4, depth, 1, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = x.mean(dim=(2, 3), keepdim=True)
-        out = self.expand(F.elu(self.reduce(out)))
-        return torch.sigmoid(out)
-
-
-class FixupAttentionBlock(nn.Module):
-    """A residual block with no normalization, four scalar biases and a scalar
-    multiplier, and the channel gate applied between the two convolutions."""
-
-    def __init__(self, depth: int) -> None:
-        super().__init__()
-        self.res1 = nn.Conv2d(depth, depth, 3, padding=1, bias=False)
-        self.res2 = nn.Conv2d(depth, depth, 3, padding=1, bias=False)
-        self.attention = ChannelAttention(depth)
-        self.bias0 = nn.Parameter(torch.zeros(()))
-        self.bias1 = nn.Parameter(torch.zeros(()))
-        self.bias2 = nn.Parameter(torch.zeros(()))
-        self.bias3 = nn.Parameter(torch.zeros(()))
-        self.multiplier = nn.Parameter(torch.ones(()))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = F.elu(x) + self.bias0
-        out = self.res1(out) + self.bias1
-        out = out * self.attention(out)
-        out = F.elu(out) + self.bias2
-        out = self.res2(out) * self.multiplier + self.bias3
-        return out + x
 
 
 class LayerNormLSTMCell(nn.Module):
@@ -113,38 +76,43 @@ class LayerNormLSTMCell(nn.Module):
 
 
 class AnimalBackbone(nn.Module):
-    """Everything the winning network is below its heads: the residual tower, the
+    """Everything the winning network is below its heads: the visual trunk, the
     dense branch and the LSTM. It is a class of its own so a network with other
     heads -- see ``networks/animal_actor_critic.py`` -- reuses this body verbatim
     instead of copying it; ``AnimalPPONetwork`` extends it rather than holding
     one so the parameter names, and therefore existing checkpoints, are unchanged.
+
+    The trunk is the one place that is configurable: it is an
+    :class:`ImageProcessor`, so ``image_encoder_type`` picks the original Fixup
+    tower (``"fixup"``, trained from scratch) or one of the frozen pretrained
+    encoders beside it in ``networks/modules/image_processor.py``. Whatever it
+    produces is flattened into the single visual token ``visual_hidden`` reads,
+    so ``image_encode_mode = "single_token"`` pools the image the way that
+    encoder was pretrained to instead of handing the dense layer a patch grid.
     """
 
-    def __init__(self, observation_space_shape: tuple[int, ...], vels_size: int) -> None:
+    def __init__(
+        self,
+        observation_space_shape: tuple[int, ...],
+        vels_size: int,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
+    ) -> None:
         """``observation_space_shape`` is the (C, H, W) of the image observation and
         ``vels_size`` the width of the velocity/clock vector; both come from what
         the environment produces, so neither is written out here."""
         super().__init__()
-        in_channels, height, width = observation_space_shape
-
-        self.tower = nn.ModuleList()
-        for depth in DEPTHS:
-            self.tower.append(
-                nn.ModuleDict(
-                    {
-                        "conv": nn.Conv2d(in_channels, depth, 3, padding=1),
-                        "block1": FixupAttentionBlock(depth),
-                        "block2": FixupAttentionBlock(depth),
-                    }
-                )
-            )
-            in_channels = depth
-
-        # one stride-2 max pool per stage, rounding up
-        for _ in DEPTHS:
-            height = -(-height // 2)
-            width = -(-width // 2)
-        self.flat_size = height * width * DEPTHS[-1]
+        self.image_processor = ImageProcessor(
+            observation_space_shape,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
+        )
+        channels, height, width = self.image_processor.output_shape
+        self.flat_size = channels * height * width
 
         self.vels_hidden = nn.Linear(vels_size, VELS_HIDDEN)
         self.visual_hidden = nn.Linear(self.flat_size, HIDDEN_NODES)
@@ -156,13 +124,7 @@ class AnimalBackbone(nn.Module):
 
     def features(self, visual: torch.Tensor) -> torch.Tensor:
         """``visual`` is (B, C, H, W) float, as the wrappers produce it."""
-        out = visual
-        for stage in self.tower:
-            out = stage["conv"](out)
-            out = F.max_pool2d(out, 3, 2, padding=1)
-            out = stage["block1"](out)
-            out = stage["block2"](out)
-        out = F.elu(out)
+        out = self.image_processor.encode(visual)
         # channels last before flattening: the order the dense layer's weights expect
         return out.permute(0, 2, 3, 1).reshape(out.shape[0], -1)
 
@@ -170,7 +132,7 @@ class AnimalBackbone(nn.Module):
         """The per-step visual latent the dense branch produces and the joint
         hidden the LSTM reads. Split out of ``forward`` so a head that needs the
         visual latent -- see ``networks/animal_world_critic.py`` -- reads it off
-        the same pass instead of running the tower twice."""
+        the same pass instead of running the trunk twice."""
         visual_latent = F.elu(self.visual_hidden(self.features(visual)))
         hidden = torch.cat([F.elu(self.vels_hidden(vels)), visual_latent], dim=-1)
         return visual_latent, F.elu(self.joint_hidden(hidden))
@@ -203,8 +165,23 @@ class AnimalBackbone(nn.Module):
 class AnimalPPONetwork(AnimalBackbone):
     """The backbone plus the two PPO heads: categorical logits and a state value."""
 
-    def __init__(self, observation_space_shape: tuple[int, ...], vels_size: int) -> None:
-        super().__init__(observation_space_shape, vels_size)
+    def __init__(
+        self,
+        observation_space_shape: tuple[int, ...],
+        vels_size: int,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
+    ) -> None:
+        super().__init__(
+            observation_space_shape,
+            vels_size,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
+        )
         self.value_head = nn.Linear(LSTM_UNITS, 1)
         self.logits_head = nn.Linear(LSTM_UNITS, ACTION_NUM)
 

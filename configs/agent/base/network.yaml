@@ -10,10 +10,19 @@ critic_block_num: 1
 #             up the critic norm.
 #   dueling : original LayerNorm dueling V/A critic.
 critic_arch: dueling
-# Image encoder: taesd, wan, dinov2, siglip2, vjepa2, qwen (see IMAGE_ENCODERS in image_processor.py).
+# Image encoder: fixup, taesd, wan, dinov2, siglip2, vjepa2, qwen (see IMAGE_ENCODERS in image_processor.py).
 image_encoder_type: qwen
 # Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
 image_encoder_output_dim: 16
+# grid         : one token per patch, the spatial grid the encoder produces.
+# single_token : the whole image as one token, pooled the way each backbone
+#                was trained (DINOv2 CLS, SigLIP MAP head, mean pooling for
+#                V-JEPA 2 / Qwen, the folded latent for the VAEs).
+image_encode_mode: grid
+# Whether the image encoder trains with the rest of the network. The pretrained
+# backbones are frozen feature extractors here; "fixup" has no pretrained weights
+# at all, so it needs this on (see the animal agent configs).
+image_encoder_trainable: false
 predictor_hidden_dim: 512
 predictor_block_num: 2
 predictor_step_num: 1

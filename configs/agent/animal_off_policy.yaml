@@ -16,3 +16,7 @@ critic_lr: 1e-5
 buffer_device: cpu
 buffer_size: 400_000
 learning_starts: 4_000
+
+image_encoder_type: fixup
+image_encoder_output_dim: 128
+image_encoder_trainable: true

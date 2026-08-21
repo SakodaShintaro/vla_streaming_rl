@@ -52,6 +52,10 @@ class AnimalWorldCriticActorCritic(AnimalActorCriticWithActionValue):
         critic_loss_weight: float,
         detach_actor: bool,
         detach_critic: bool,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
         wcm_latent_dim: int,
         wcm_dynamics_depth: int,
         wcm_dynamics_mlp_ratio: float,
@@ -78,6 +82,10 @@ class AnimalWorldCriticActorCritic(AnimalActorCriticWithActionValue):
             critic_loss_weight=critic_loss_weight,
             detach_actor=detach_actor,
             detach_critic=detach_critic,
+            image_encoder_type=image_encoder_type,
+            image_encoder_output_dim=image_encoder_output_dim,
+            image_encode_mode=image_encode_mode,
+            image_encoder_trainable=image_encoder_trainable,
         )
         self.wcm_next_state_coef = wcm_next_state_coef
         self.wcm_sigreg_coef = wcm_sigreg_coef

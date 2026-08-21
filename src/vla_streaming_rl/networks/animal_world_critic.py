@@ -193,7 +193,7 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
 
     ``forward`` is the parent's, so acting is unchanged and existing PPO
     checkpoints load into the body. ``forward_with_latents`` is the update path:
-    it returns, off one pass of the tower, the two latents the auxiliary losses
+    it returns, off one pass of the trunk, the two latents the auxiliary losses
     read -- the per-step visual latent that the prediction target is taken from,
     and the recurrent context the prediction is conditioned on.
     """
@@ -202,6 +202,10 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
         self,
         observation_space_shape: tuple[int, ...],
         vels_size: int,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
         latent_dim: int,
         dynamics_depth: int,
         dynamics_mlp_ratio: float,
@@ -209,7 +213,14 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
         sigreg_knots: int,
         sigreg_projections: int,
     ) -> None:
-        super().__init__(observation_space_shape, vels_size)
+        super().__init__(
+            observation_space_shape,
+            vels_size,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
+        )
         self.latent_dim = latent_dim
         self.state_projection = nn.Sequential(
             nn.LayerNorm(HIDDEN_NODES),
