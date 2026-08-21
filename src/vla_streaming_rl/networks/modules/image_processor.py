@@ -337,7 +337,9 @@ class ImageProcessor(nn.Module):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         # (B, C, H, W); H = W = 1 in the single-token mode
-        return self.projection(ENCODE_MODES[self.image_encode_mode](self.backbone, x))
+        with torch.no_grad() if not self.backbone.training else torch.enable_grad():
+            x = ENCODE_MODES[self.image_encode_mode](self.backbone, x)
+        return self.projection(x)
 
 
 if __name__ == "__main__":
