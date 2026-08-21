@@ -13,3 +13,6 @@ batch_size: 16
 seq_len: 8
 actor_lr: 1e-5
 critic_lr: 1e-5
+buffer_device: cpu
+buffer_size: 400_000
+learning_starts: 4_000
