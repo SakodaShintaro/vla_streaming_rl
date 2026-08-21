@@ -158,8 +158,11 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
         "episode_id": 0,
         "episode_count": 0,
         "score_sum_all": 0.0,
+        "success_sum_all": 0.0,
+        "success_episode_count": 0,
         "best_score": -float("inf"),
         "score_list": [],
+        "success_list": [],
         "is_revisit": False,
         "best_score_per_arena": {},
     }
@@ -276,6 +279,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     score_list = []
     score_sum_all = 0.0
     episode_count = 0
+    success_list = []
+    success_sum_all = 0.0
+    success_episode_count = 0
     best_score = -float("inf")
     best_score_per_arena: dict[str, float] = {}
     # Don't reset the env here — the first iteration of the episode loop
@@ -313,8 +319,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         episode_id = resume_state["episode_id"]
         episode_count = resume_state["episode_count"]
         score_sum_all = resume_state["score_sum_all"]
+        success_sum_all = resume_state["success_sum_all"]
+        success_episode_count = resume_state["success_episode_count"]
         best_score = resume_state["best_score"]
         score_list = list(resume_state["score_list"])
+        success_list = list(resume_state["success_list"])
         best_score_per_arena = dict(resume_state["best_score_per_arena"])
         print(f"Resumed from {args.resume_dir}: global_step={global_step} episode_id={episode_id}")
         set_global_step = getattr(env.unwrapped, "set_global_step", None)
@@ -467,6 +476,14 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         if "pass_mark" in env_info:
             success = float(score >= env_info["pass_mark"])
             data_dict["success"] = success
+            success_sum_all += success
+            success_episode_count += 1
+            success_list.append(success)
+            success_list = success_list[-eval_range:]
+            data_dict["success_episode_count"] = success_episode_count
+            data_dict["total_success_rate"] = success_sum_all / success_episode_count
+            if len(success_list) >= eval_range:
+                data_dict["recent_success_rate"] = float(np.mean(success_list))
             arena_name = env_info.get("arena_name", "")
             if arena_name:
                 data_dict[f"success/{arena_name}"] = success
@@ -482,7 +499,10 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         if result_dir is not None:
             if log_episode_writer is None:
                 log_episode_file = open(log_episode_path, "w", newline="")
-                fieldnames = list(data_dict.keys()) + ["recent_average_score"]
+                fieldnames = list(data_dict.keys()) + [
+                    "recent_average_score",
+                    "recent_success_rate",
+                ]
                 log_episode_writer = csv.DictWriter(
                     log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
                 )
@@ -557,8 +577,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 "episode_id": episode_id + 1,
                 "episode_count": episode_count,
                 "score_sum_all": float(score_sum_all),
+                "success_sum_all": float(success_sum_all),
+                "success_episode_count": success_episode_count,
                 "best_score": float(best_score),
                 "score_list": [float(s) for s in score_list],
+                "success_list": [float(s) for s in success_list],
             }
             get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
             if get_curriculum is not None:
