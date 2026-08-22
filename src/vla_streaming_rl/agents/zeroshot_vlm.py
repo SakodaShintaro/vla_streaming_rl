@@ -221,7 +221,7 @@ class ZeroShotVLMAgent(Agent):
         panels = {"output": _text_panel(caption, _OUTPUT_PANEL_WIDTH)}
         return StepResult(action=action, metrics=metrics, panels=panels)
 
-    def _step_streaming(
+    def step(
         self,
         global_step: int,
         obs: dict[str, Any],

@@ -194,7 +194,7 @@ class AnimalPPOAgent(Agent):
 
     # --- agent surface -----------------------------------------------------
 
-    def _step_onpolicy(
+    def step(
         self,
         global_step: int,
         obs: dict[str, Any],

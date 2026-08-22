@@ -6,7 +6,7 @@ Fixup residual tower with channel attention, the dense branch and the LayerNorm
 LSTM. What sits on top is not PPO's categorical logits and state value but the
 pair the standard agent trains, a diffusion policy head over an action chunk and
 a distributional Q(s, a), so this is a :class:`NetworkInterface` and
-:class:`StandardAgent` drives it in either ``off_policy`` or ``streaming`` mode.
+:class:`OffPolicyAgent` and :class:`StreamingAgent` both drive it.
 
 The two differences from ``AnimalPPONetwork``'s use of the same body:
 

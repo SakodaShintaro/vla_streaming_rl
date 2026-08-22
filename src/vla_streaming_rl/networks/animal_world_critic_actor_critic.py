@@ -3,10 +3,10 @@
 
 The same branch ``networks/animal_world_critic.py`` adds to the PPO network,
 moved onto :class:`AnimalActorCriticWithActionValue` so it runs under
-:class:`~vla_streaming_rl.agents.standard.StandardAgent` in ``off_policy`` and
-``streaming`` mode. Nothing about the objective needs on-policy data: both terms
-are self-supervised on the window itself, so replayed windows train them exactly
-as fresh ones do.
+:class:`~vla_streaming_rl.agents.off_policy.OffPolicyAgent` and
+:class:`~vla_streaming_rl.agents.streaming.StreamingAgent`. Nothing about the
+objective needs on-policy data: both terms are self-supervised on the window
+itself, so replayed windows train them exactly as fresh ones do.
 
 Two differences from the PPO port:
 

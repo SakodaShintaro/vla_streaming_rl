@@ -111,7 +111,7 @@ def run_arena(
     """Play the next arena the env serves; return its (name, passed, score).
 
     `global_step` is the training step the checkpoint was written at. It gates
-    StandardAgent's off-policy warmup (below `learning_starts` it returns
+    OffPolicyAgent's warmup (below `learning_starts` it returns
     uniform random actions instead of querying the network), which a trained
     checkpoint is always past.
     """

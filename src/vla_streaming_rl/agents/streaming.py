@@ -1,4 +1,19 @@
 # SPDX-License-Identifier: MIT
+"""Streaming learning mode: inference and the update share one forward pass.
+
+There is no replay: the buffer holds only the window the update reads (the
+latest ``seq_len + horizon`` transitions), and every time a new action chunk is
+needed the grad-enabled forward that produces it also produces the loss. With
+``use_eligibility_trace`` the critic is optimized by AdamET, which carries the
+trace across ticks and is reset on episode boundaries.
+
+The learning mode is the class and the network is a constructor argument, so
+this file is one half of the (learning mode) x (network) grid; the off-policy
+half is ``off_policy.py``. The two share no base beyond :class:`Agent`, which
+costs some repetition in the per-tick path and buys each mode being readable
+end to end in one file.
+"""
+
 from typing import Any
 
 import gymnasium as gym
@@ -13,17 +28,14 @@ from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 
 
-class StandardAgent(Agent):
+class StreamingAgent(Agent):
     def __init__(
         self,
         *,
         observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: nn.Module,
-        learning_mode: str,
         normalizing_by_return: bool,
-        learning_starts: int,
-        batch_size: int,
         max_grad_norm: float,
         use_done: bool,
         seq_len: int,
@@ -34,13 +46,12 @@ class StandardAgent(Agent):
         weight_decay: float,
         gamma: float,
         et_lambda: float,
-        buffer_size: int,
         buffer_device: str,
         max_prompt_tokens: int,
         pad_token_id: int,
         reward_shaper,
     ) -> None:
-        super().__init__(learning_mode=learning_mode, horizon=horizon)
+        super().__init__(learning_mode="streaming", horizon=horizon)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
@@ -58,8 +69,6 @@ class StandardAgent(Agent):
         self.reward_shaper = reward_shaper
         self.normalizing_by_return = normalizing_by_return
 
-        self.learning_starts = learning_starts
-        self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
         self.use_done = use_done
 
@@ -74,14 +83,14 @@ class StandardAgent(Agent):
         self.rnn_state = self.network.init_state().to(self.device)
 
         # Actor / critic optimizer split (critic == value head). The critic uses
-        # AdamET (eligibility traces) only in streaming-trace mode, AdamW
-        # otherwise; the actor is always AdamW.
+        # AdamET (eligibility traces) when the trace is on, AdamW otherwise; the
+        # actor is always AdamW.
         self.use_eligibility_trace = bool(use_eligibility_trace)
         critic_params = list(self.network.value_head.parameters())
         critic_param_ids = {id(p) for p in critic_params}
         actor_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]
         self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
-        if learning_mode == "streaming" and self.use_eligibility_trace:
+        if self.use_eligibility_trace:
             self.critic_optimizer = AdamET(
                 critic_params, lr=critic_lr, gamma=gamma, et_lambda=et_lambda
             )
@@ -90,11 +99,9 @@ class StandardAgent(Agent):
                 critic_params, lr=critic_lr, weight_decay=weight_decay
             )
 
-        # Off-policy keeps a large replay buffer; streaming keeps only the one
-        # window it trains on (the latest seq_len + horizon transition).
-        buffer_capacity = buffer_size if learning_mode == "off_policy" else seq_len + horizon
+        # Only the one window the update trains on is kept.
         self.rb = ReplayBuffer(
-            size=buffer_capacity,
+            size=seq_len + horizon,
             seq_len=self.seq_len + self.horizon,
             obs_shape=self.network.observation_space_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
@@ -113,7 +120,7 @@ class StandardAgent(Agent):
 
     # --- agent surface -----------------------------------------------------
 
-    def _step_streaming(
+    def step(
         self,
         global_step: int,
         obs: dict[str, Any],
@@ -122,6 +129,7 @@ class StandardAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
+        del global_step
         metrics = {}
         episode_done = terminated or truncated
         reward = self.reward_shaper(reward, obs, episode_done)
@@ -193,13 +201,13 @@ class StandardAgent(Agent):
             result.et_info.actor_entropy_loss.backward(retain_graph=True)
             # Critic: backward -V(s) → value_head grads only (detached from encoder).
             result.et_info.neg_value.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
             self.actor_optimizer.step()
             self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
             self._episode_reset = False
         else:
             result.loss_result.loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
             self.actor_optimizer.step()
             self.critic_optimizer.step()
 
@@ -231,6 +239,9 @@ class StandardAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
+        """Act without learning: the trainer calls this once per episode after
+        the reset, and the testbed calls it on every tick."""
+        del global_step
         metrics = {}
         episode_done = terminated or truncated
         reward = self.reward_shaper(reward, obs, episode_done)
@@ -272,9 +283,7 @@ class StandardAgent(Agent):
             health_obs,
         )
 
-        warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
-
-        if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
+        if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
             self.prev_action = action
             self.chunk_step += 1
@@ -308,13 +317,6 @@ class StandardAgent(Agent):
         action = self._to_env_action(action_chunk[0])
         self.prev_action = action
         metrics["chunk_step"] = self.chunk_step
-
-        if warmup:
-            action = self.action_space.sample()
-            self.action_chunk = None
-            self.chunk_step = 0
-            self.prev_action = action
-            metrics["chunk_step"] = self.chunk_step
         return StepResult(action=action, metrics=metrics, panels={})
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
