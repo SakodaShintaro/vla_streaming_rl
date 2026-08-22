@@ -51,7 +51,7 @@ class OffPolicyAgent(Agent):
         pad_token_id: int,
         reward_shaper,
     ) -> None:
-        super().__init__(learning_mode="off_policy", horizon=horizon)
+        super().__init__(horizon=horizon)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
@@ -263,7 +263,7 @@ class OffPolicyAgent(Agent):
         velocity_z, episode_return, pass_mark, global_step, episode_step,
         health; the network updates its running normalizer stats here) and the
         tokenized task prompt.
-        ``info`` is unused by the obs-driven standard agent."""
+        ``info`` is unused by this obs-driven agent."""
         del info
         image = torch.from_numpy(obs["image"]).to(self.device)
         velocity_x, velocity_y, velocity_z = obs["velocity"].astype(np.float32)

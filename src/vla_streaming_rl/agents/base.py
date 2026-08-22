@@ -41,16 +41,11 @@ class Agent(ABC):
     """The contract the trainer drives: ``step`` on every tick while learning,
     ``select_action`` when acting without learning.
 
-    The agent grid is orthogonal: the learning mode (off-policy / on-policy /
-    streaming) is the class, the network it optimizes is a constructor
-    argument. ``learning_mode`` is what each class declares itself to be, and
-    is metadata for logging -- nothing dispatches on it."""
+    The agent grid is orthogonal: the learning rule (off-policy / on-policy /
+    streaming) is the class, which ``agent_type`` names, and the network it
+    optimizes is a constructor argument."""
 
-    def __init__(self, learning_mode: str, horizon: int) -> None:
-        assert learning_mode in ("off_policy", "on_policy", "streaming"), (
-            f"Unknown learning_mode: {learning_mode!r}"
-        )
-        self.learning_mode = learning_mode
+    def __init__(self, horizon: int) -> None:
         self.horizon = int(horizon)
 
     @abstractmethod

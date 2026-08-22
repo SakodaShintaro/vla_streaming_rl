@@ -6,9 +6,8 @@ defaults:
   - base/vlm
   - _self_
 
-agent_type: standard
+agent_type: streaming
 network_class: vlm_actor_critic_with_action_value
-learning_mode: streaming
 batch_size: 1
 actor_lr: 1e-6
 critic_lr: 1e-6

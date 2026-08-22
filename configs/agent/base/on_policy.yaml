@@ -1,5 +1,4 @@
 # @package _global_
-learning_mode: on_policy
 
 steps_num: 6144 # 24 parallel * 256 steps per env
 minibatch_size: 1536

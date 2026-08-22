@@ -660,12 +660,7 @@ def hydra_main(cfg: DictConfig) -> None:
         print("Because a headless environment is detected, rendering is automatically disabled.")
         cfg.render = 0
 
-    # ``agent_type`` is the network-side agent family; ``learning_mode`` (when
-    # present) is the class that drives it — keep it in the run name so the
-    # off-policy and streaming runs of one family stay distinguishable.
-    learning_mode = OmegaConf.select(cfg, "learning_mode", default=None)
-    agent_tag = cfg.agent_type.upper() + (f"_{learning_mode.upper()}" if learning_mode else "")
-    exp_name = f"{agent_tag}_{cfg.exp_name}"
+    exp_name = f"{cfg.agent_type.upper()}_{cfg.exp_name}"
     seed = cfg.seed if cfg.seed != -1 else np.random.randint(0, 10000)
 
     for i in range(cfg.trial_num):

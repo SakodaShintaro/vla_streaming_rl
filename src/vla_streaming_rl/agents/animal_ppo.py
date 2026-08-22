@@ -4,7 +4,7 @@
 There it was an epoch loop over 24 parallel environments; here the trainer owns
 the loop and hands the agent one transition at a time, so the rollout is
 buffered inside the agent and the PPO update fires once ``steps_num``
-transitions are in. That is the whole of the ``on_policy`` learning mode.
+transitions are in. That is the whole of this on-policy rule.
 
 Two things the original environment did for the network live here instead,
 because this repo's Animal-AI env deliberately reports what the arena reports:
@@ -138,7 +138,6 @@ class AnimalPPOAgent(Agent):
         *,
         action_space: gym.spaces.Box,
         network: nn.Module,
-        learning_mode: str,
         horizon: int,
         steps_num: int,
         minibatch_size: int,
@@ -156,7 +155,7 @@ class AnimalPPOAgent(Agent):
         velocity_scale: list[float],
         health_scale: float,
     ) -> None:
-        super().__init__(learning_mode=learning_mode, horizon=horizon)
+        super().__init__(horizon=horizon)
         assert steps_num % seq_len == 0, f"steps_num {steps_num} is not a multiple of {seq_len}"
         assert minibatch_size % seq_len == 0, (
             f"minibatch_size {minibatch_size} is not a multiple of seq_len {seq_len}"

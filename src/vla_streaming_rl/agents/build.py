@@ -30,7 +30,6 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
         return AnimalPPOAgent(
             action_space=env.action_space,
             network=network,
-            learning_mode=args.learning_mode,
             horizon=args.horizon,
             steps_num=args.steps_num,
             minibatch_size=args.minibatch_size,
@@ -49,10 +48,9 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             health_scale=args.health_scale,
         )
 
-    assert args.agent_type == "standard", f"Unknown agent_type: {args.agent_type!r}"
     reward_shaper = shape_animal_reward if args.env_id == "AnimalAI-v0" else no_reward_shaping
 
-    if args.learning_mode == "streaming":
+    if args.agent_type == "streaming":
         from vla_streaming_rl.agents.streaming import StreamingAgent
 
         return StreamingAgent(
@@ -76,7 +74,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             reward_shaper=reward_shaper,
         )
 
-    assert args.learning_mode == "off_policy", f"Unknown learning_mode: {args.learning_mode!r}"
+    assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
     from vla_streaming_rl.agents.off_policy import OffPolicyAgent
 
     return OffPolicyAgent(

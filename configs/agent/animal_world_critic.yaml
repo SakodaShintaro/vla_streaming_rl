@@ -6,9 +6,8 @@ defaults:
   - base/vlm
   - _self_
 
-agent_type: standard
+agent_type: off_policy
 network_class: animal_world_critic_actor_critic
-learning_mode: off_policy
 batch_size: 16
 seq_len: 8
 actor_lr: 1e-5

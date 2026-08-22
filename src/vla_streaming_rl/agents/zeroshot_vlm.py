@@ -113,7 +113,7 @@ class ZeroShotVLMAgent(Agent):
         temperature: float,
         api_max_retries: int,
     ) -> None:
-        super().__init__(learning_mode="streaming", horizon=1)
+        super().__init__(horizon=1)
         # One API call per env step means a single upstream hiccup (a shared-pool
         # 429, a 5xx) would otherwise abort a run that is minutes deep. The SDK
         # retries those with exponential backoff; only give it room to.
