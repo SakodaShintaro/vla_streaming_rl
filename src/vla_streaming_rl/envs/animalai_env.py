@@ -18,7 +18,9 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
               the stage (`StagedSelector`).
   - "success" the same stages, but advanced by clearing them rather than by
               step count, alternating unsolved-arena draws with failure-rate
-              softmax draws (`SuccessDrivenSelector`).
+              softmax draws (`SuccessDrivenSelector`). "Cleared" there means
+              tried at least `SUCCESS_MODE_MIN_ATTEMPTS` times and passed on
+              at least `SUCCESS_MODE_CLEAR_RATE` of them.
   - "sequential" no curriculum: every arena under the root in path (file name)
               order, wrapping around forever (`SequentialSelector`, cycling).
               For a training set that is one flat directory, not a stage split.
@@ -194,20 +196,25 @@ class ArenaSelector:
         """(attempts, successes) so far for one arena."""
         return self._attempts[arena.name], self._successes[arena.name]
 
+    def is_cleared(self, arena: Arena) -> bool:
+        """Whether one arena counts as solved: passed at least once, unless a
+        curriculum wants a stricter bar (see `SuccessDrivenSelector`)."""
+        return self._successes[arena.name] > 0
+
     def progress_by_group(self) -> list[tuple[str, int, int, int]]:
         """(group, cleared, failed, untried) per arena group, in group order.
 
-        `cleared` counts arenas passed at least once, `failed` ones attempted
-        without ever passing, `untried` ones never run. The group is the arena
-        label's first "-" separated token, which is the stage directory for a
+        `cleared` counts arenas `is_cleared` accepts, `failed` ones attempted
+        without reaching that bar, `untried` ones never run. The group is the
+        arena label's first "-" separated token, which is the stage directory for a
         split curriculum ("stage00-arena000" -> "stage00") and the level for
         the competition set ("01-01-01" -> "01").
         """
         counts: dict[str, list[int]] = {}
         for arena in self.arenas:
             group = counts.setdefault(arena.name.split("-")[0], [0, 0, 0])
-            attempts, successes = self._attempts[arena.name], self._successes[arena.name]
-            group[0 if successes else (1 if attempts else 2)] += 1
+            attempts = self._attempts[arena.name]
+            group[0 if self.is_cleared(arena) else (1 if attempts else 2)] += 1
         return [(group, *counts[group]) for group in sorted(counts)]
 
     def info(self, global_step: int) -> dict:
@@ -219,11 +226,16 @@ class ArenaSelector:
         raise NotImplementedError
 
     def state(self) -> dict:
-        """Resume snapshot: attempted arenas only, so the file stays small."""
+        """Resume snapshot: attempted arenas only, so the file stays small.
+
+        `arena_cleared` is this selector's own `is_cleared` verdict, so what
+        train.py reports as cleared is what the running curriculum acts on."""
         attempts = {name: n for name, n in self._attempts.items() if n > 0}
+        arena_by_name = {arena.name: arena for arena in self.arenas}
         return {
             "arena_attempts": attempts,
             "arena_successes": {name: self._successes[name] for name in attempts},
+            "arena_cleared": {name: self.is_cleared(arena_by_name[name]) for name in attempts},
             "is_revisit": False,
         }
 
@@ -268,12 +280,21 @@ class StagedSelector(ArenaSelector):
         return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}  step:{global_step}"
 
 
+SUCCESS_MODE_MIN_ATTEMPTS = 5
+SUCCESS_MODE_CLEAR_RATE = 0.8
+
+
 class SuccessDrivenSelector(ArenaSelector):
     """The same stages as `StagedSelector`, but gated on what has been solved
     rather than on the step count, and alternating between two draws.
 
-    The stage is the first one still holding an arena that has never been
-    passed; once every arena of a stage is passed the next stage opens, so the
+    An arena counts as cleared once it has been attempted at least
+    `SUCCESS_MODE_MIN_ATTEMPTS` times and passed on at least
+    `SUCCESS_MODE_CLEAR_RATE` of those attempts, so a single lucky pass does
+    not retire it -- the agent has to solve it repeatably.
+
+    The stage is the first one still holding an arena that is not cleared;
+    once every arena of a stage is cleared the next stage opens, so the
     curriculum advances at the pace the agent actually learns. Because the
     stages are cumulative, the current stage's arena list is also every arena
     seen so far.
@@ -281,7 +302,7 @@ class SuccessDrivenSelector(ArenaSelector):
     Trials alternate:
 
       - odd trials draw uniformly from the arenas of the current stage that
-        have not been passed yet, so the unsolved edge of the curriculum gets
+        are not cleared yet, so the unsolved edge of the curriculum gets
         half of all episodes;
       - even trials draw from every arena unlocked so far by a softmax over
         each arena's failure rate (failures / attempts, an unattempted arena
@@ -303,11 +324,20 @@ class SuccessDrivenSelector(ArenaSelector):
         self.revisit_temperature = revisit_temperature
         self._rng = np.random.default_rng(seed)
 
+    def is_cleared(self, arena: Arena) -> bool:
+        """Passed on at least `SUCCESS_MODE_CLEAR_RATE` of the attempts, over
+        at least `SUCCESS_MODE_MIN_ATTEMPTS` of them."""
+        attempts, successes = self.arena_record(arena)
+        return (
+            attempts >= SUCCESS_MODE_MIN_ATTEMPTS
+            and successes >= SUCCESS_MODE_CLEAR_RATE * attempts
+        )
+
     def _stage_index(self) -> int:
-        """The first stage with an arena that has never been passed; the last
-        stage once everything is passed."""
+        """The first stage with an arena that is not cleared; the last stage
+        once everything is cleared."""
         for index, stage_arenas in enumerate(self._stages):
-            if any(self._successes[arena.name] == 0 for arena in stage_arenas):
+            if any(not self.is_cleared(arena) for arena in stage_arenas):
                 return index
         return len(self._stages) - 1
 
@@ -327,20 +357,20 @@ class SuccessDrivenSelector(ArenaSelector):
     def next_arena(self, global_step: int) -> Arena:
         stage_arenas = self._stages[self._stage_index()]
         is_odd_trial = sum(self._attempts.values()) % 2 == 0
-        unsolved = [arena for arena in stage_arenas if self._successes[arena.name] == 0]
-        # The stage only lacks unsolved arenas once the whole set is passed,
+        unsolved = [arena for arena in stage_arenas if not self.is_cleared(arena)]
+        # The stage only lacks unsolved arenas once the whole set is cleared,
         # and then there is no next stage to move to, so fall back to softmax.
         if is_odd_trial and unsolved:
             return unsolved[int(self._rng.integers(len(unsolved)))]
         return self._softmax_pick(stage_arenas)
 
     def info(self, global_step: int) -> dict:
-        cleared = sum(successes > 0 for successes in self._successes.values())
+        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
         return {"stage": self._stage_index() + 1, "cleared_count": cleared}
 
     def status(self, global_step: int) -> str:
         stage_arenas = self._stages[self._stage_index()]
-        cleared = sum(self._successes[arena.name] > 0 for arena in stage_arenas)
+        cleared = sum(self.is_cleared(arena) for arena in stage_arenas)
         untried = sum(self._attempts[arena.name] == 0 for arena in stage_arenas)
         return (
             f"stage:{self._stage_index() + 1}/{len(self._stages)}"
@@ -385,7 +415,7 @@ class SequentialSelector(ArenaSelector):
         }
 
     def status(self, global_step: int) -> str:
-        cleared = sum(successes > 0 for successes in self._successes.values())
+        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
         return (
             f"{(self._next_index - 1) % len(self.arenas) + 1}/{len(self.arenas)}"
             f"  lap:{(self._next_index - 1) // len(self.arenas) + 1}"
@@ -417,11 +447,11 @@ class RandomSelector(ArenaSelector):
         return self.arenas[int(self._rng.integers(len(self.arenas)))]
 
     def info(self, global_step: int) -> dict:
-        cleared = sum(successes > 0 for successes in self._successes.values())
+        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
         return {"arena_total": len(self.arenas), "cleared_count": cleared}
 
     def status(self, global_step: int) -> str:
-        cleared = sum(successes > 0 for successes in self._successes.values())
+        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
         untried = sum(attempts == 0 for attempts in self._attempts.values())
         return (
             f"random  cleared:{cleared}/{len(self.arenas)}  untried:{untried}  step:{global_step}"

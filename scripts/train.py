@@ -134,16 +134,20 @@ def save_checkpoint(result_dir: Path, network, agent) -> None:
 def write_arena_stats(path: Path, curriculum: dict, best_score_per_arena: dict) -> None:
     """Per-arena record (attempts / successes / success rate / best score).
 
+    `cleared` is the arena selector's own verdict, which depends on the mode:
+    one pass is enough for most, while "success" wants a repeatable pass rate.
+
     Human-readable, and also read back by ``load_resume_state`` on resume."""
     attempts = curriculum["arena_attempts"]
     successes = curriculum["arena_successes"]
+    cleared = curriculum["arena_cleared"]
     with open(path, "w") as f:
         f.write("arena\tattempts\tsuccesses\tsuccess_rate\tbest_score\tcleared\n")
         for arena in sorted(attempts):
             success_rate = successes[arena] / attempts[arena]
             f.write(
                 f"{arena}\t{attempts[arena]}\t{successes[arena]}\t{success_rate:.4f}"
-                f"\t{best_score_per_arena[arena]:.6f}\t{int(successes[arena] > 0)}\n"
+                f"\t{best_score_per_arena[arena]:.6f}\t{int(cleared[arena])}\n"
             )
 
 
@@ -195,14 +199,15 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
         attempts = {}
         successes = {}
         best_scores = {}
+        cleared_count = 0
         for row in arena_stats_path.read_text().splitlines()[1:]:
-            arena, n_attempt, n_success, _rate, best, _cleared = row.split("\t")
+            arena, n_attempt, n_success, _rate, best, cleared = row.split("\t")
             attempts[arena] = int(n_attempt)
             successes[arena] = int(n_success)
             best_scores[arena] = float(best)
+            cleared_count += int(cleared)
         set_curriculum(attempts, successes, state["is_revisit"])
         state["best_score_per_arena"] = best_scores
-        cleared_count = sum(n > 0 for n in successes.values())
         print(
             f"Resume: loaded {len(attempts)} arena records from {arena_stats_path} "
             f"(cleared={cleared_count})"
