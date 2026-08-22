@@ -7,7 +7,7 @@ defaults:
   - base/on_policy
   - _self_
 
-agent_type: animal_world_critic_ppo
+agent_type: animal_ppo
 network_class: animal_world_critic
 
 image_encoder_type: fixup

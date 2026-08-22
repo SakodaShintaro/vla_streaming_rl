@@ -357,32 +357,21 @@ class AnimalPPOAgent(Agent):
 
         return {f"ppo/{name}": float(np.mean(values)) for name, values in losses.items()}
 
-    def _forward_minibatch(
-        self, rollout: Rollout, flat: torch.Tensor, sequences: torch.Tensor, env_num: int
-    ) -> tuple:
-        """The minibatch forward pass: the policy logits, the state values, and
-        whatever auxiliary loss the network carries beyond PPO's own -- none
-        here, and the world-critic terms in
-        :class:`~vla_streaming_rl.agents.animal_world_critic_ppo.AnimalWorldCriticPPOAgent`."""
-        logits, values, _ = self.network(
-            rollout.visual[flat],
-            rollout.vels[flat],
-            rollout.states[sequences],
-            rollout.dones[flat],
-            env_num,
-        )
-        return logits, values.squeeze(-1), torch.zeros((), device=self.device), {}
-
     def _minibatch_step(
         self,
         rollout: Rollout,
         advantages: torch.Tensor,
         flat: torch.Tensor,
         sequences: torch.Tensor,
-        env_num: int,
+        sequence_num: int,
     ) -> dict:
-        logits, values, auxiliary_loss, auxiliary_reported = self._forward_minibatch(
-            rollout, flat, sequences, env_num
+        logits, values, auxiliary_loss, auxiliary_reported = self.network.forward_for_update(
+            rollout.visual[flat],
+            rollout.vels[flat],
+            rollout.states[sequences],
+            rollout.dones[flat],
+            rollout.actions[flat],
+            sequence_num,
         )
 
         neglogpacs = F.cross_entropy(logits, rollout.actions[flat], reduction="none")

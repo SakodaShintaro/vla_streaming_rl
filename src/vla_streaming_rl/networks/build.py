@@ -91,6 +91,11 @@ def build_network(
     if args.network_class == "animal_world_critic":
         from vla_streaming_rl.networks.animal_world_critic import AnimalWorldCriticNetwork
 
+        # a window of n steps carries n - 1 next-state pairs, so 1 trains nothing
+        assert args.seq_len >= 2, (
+            f"seq_len {args.seq_len} leaves no next-state pair for the world-critic loss"
+        )
+
         return AnimalWorldCriticNetwork(
             observation_space_shape=observation_space_shape,
             vels_size=4,
@@ -102,6 +107,8 @@ def build_network(
             dynamics_depth=args.wcm_dynamics_depth,
             dynamics_mlp_ratio=args.wcm_dynamics_mlp_ratio,
             dynamics_dropout=args.wcm_dynamics_dropout,
+            next_state_coef=args.wcm_next_state_coef,
+            sigreg_coef=args.wcm_sigreg_coef,
             sigreg_knots=args.wcm_sigreg_knots,
             sigreg_projections=args.wcm_sigreg_projections,
         ).to(device)

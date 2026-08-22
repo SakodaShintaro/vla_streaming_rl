@@ -52,8 +52,8 @@ class LayerNormLSTMCell(nn.Module):
         return (x - mean) / torch.sqrt(variance + LAYER_NORM_EPSILON) * gain + bias
 
     def forward(self, inputs: list, state: torch.Tensor, masks: list) -> tuple:
-        """``inputs`` and ``masks`` are sequences of ``(env_num, ...)`` tensors;
-        ``state`` is the ``(env_num, 2 * units)`` pair carried between batches. A
+        """``inputs`` and ``masks`` are sequences of ``(sequence_num, ...)`` tensors;
+        ``state`` is the ``(sequence_num, 2 * units)`` pair carried between batches. A
         mask of 1 means the previous step ended an episode, so the state is
         zeroed before that step is consumed."""
         cell, hidden = torch.split(state, self.units, dim=1)
@@ -119,8 +119,8 @@ class AnimalBackbone(nn.Module):
         self.joint_hidden = nn.Linear(VELS_HIDDEN + HIDDEN_NODES, HIDDEN_NODES)
         self.lstm = LayerNormLSTMCell(HIDDEN_NODES, LSTM_UNITS)
 
-    def init_state(self, env_num: int, device: torch.device) -> torch.Tensor:
-        return torch.zeros(env_num, 2 * LSTM_UNITS, device=device)
+    def init_state(self, sequence_num: int, device: torch.device) -> torch.Tensor:
+        return torch.zeros(sequence_num, 2 * LSTM_UNITS, device=device)
 
     def features(self, visual: torch.Tensor) -> torch.Tensor:
         """``visual`` is (B, C, H, W) float, as the wrappers produce it."""
@@ -138,11 +138,11 @@ class AnimalBackbone(nn.Module):
         return visual_latent, F.elu(self.joint_hidden(hidden))
 
     def recurrent(
-        self, hidden: torch.Tensor, state: torch.Tensor, dones: torch.Tensor, env_num: int
+        self, hidden: torch.Tensor, state: torch.Tensor, dones: torch.Tensor, sequence_num: int
     ) -> tuple:
-        steps_num = hidden.shape[0] // env_num
-        sequence = hidden.reshape(env_num, steps_num, -1).unbind(dim=1)
-        mask_sequence = dones.to(hidden.dtype).reshape(env_num, steps_num).unbind(dim=1)
+        steps_num = hidden.shape[0] // sequence_num
+        sequence = hidden.reshape(sequence_num, steps_num, -1).unbind(dim=1)
+        mask_sequence = dones.to(hidden.dtype).reshape(sequence_num, steps_num).unbind(dim=1)
         outputs, lstm_state = self.lstm(sequence, state, mask_sequence)
         return torch.stack(outputs, dim=1).reshape(-1, LSTM_UNITS), lstm_state
 
@@ -152,14 +152,15 @@ class AnimalBackbone(nn.Module):
         vels: torch.Tensor,
         state: torch.Tensor,
         dones: torch.Tensor,
-        env_num: int,
+        sequence_num: int,
     ) -> tuple:
-        """The batch is environment-major: the entry for environment e at step t
-        sits at ``e * steps_num + t``, which is what the recurrent unrolling and
-        the sequence slicing both assume. Returns the ``(env_num * steps_num,
+        """The batch is sequence-major: the entry for sequence s at step t sits
+        at ``s * steps_num + t``, which is what the recurrent unrolling and the
+        sequence slicing both assume. Acting is one sequence of one step, the
+        update is one per minibatch window. Returns the ``(sequence_num * steps_num,
         LSTM_UNITS)`` recurrent output and the state carried out of the batch."""
         _, hidden = self.embed(visual, vels)
-        return self.recurrent(hidden, state, dones, env_num)
+        return self.recurrent(hidden, state, dones, sequence_num)
 
 
 class AnimalPPONetwork(AnimalBackbone):
@@ -191,7 +192,28 @@ class AnimalPPONetwork(AnimalBackbone):
         vels: torch.Tensor,
         state: torch.Tensor,
         dones: torch.Tensor,
-        env_num: int,
+        sequence_num: int,
     ) -> tuple:
-        lstm_out, lstm_state = super().forward(visual, vels, state, dones, env_num)
+        lstm_out, lstm_state = super().forward(visual, vels, state, dones, sequence_num)
         return self.logits_head(lstm_out), self.value_head(lstm_out), lstm_state
+
+    def forward_for_update(
+        self,
+        visual: torch.Tensor,
+        vels: torch.Tensor,
+        state: torch.Tensor,
+        dones: torch.Tensor,
+        actions: torch.Tensor,
+        sequence_num: int,
+    ) -> tuple:
+        """The update pass, in the shape the PPO loss reads: the policy logits,
+        the state values, and whatever auxiliary loss the network carries beyond
+        PPO's own -- nothing here, the world-critic terms in
+        ``networks/animal_world_critic.py``, and the scalar each reports.
+
+        ``actions`` is what separates it from ``forward``: an auxiliary objective
+        may be action-conditioned, while the heads themselves never are.
+        """
+        del actions
+        logits, value, _ = self(visual, vels, state, dones, sequence_num)
+        return logits, value.squeeze(-1), torch.zeros((), device=value.device), {}
