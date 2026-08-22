@@ -8,6 +8,8 @@ defaults:
   - _self_
 
 agent_type: animal_ppo
+
+# [animal_ppo, animal_world_critic]
 network_class: animal_ppo
 
 image_encoder_type: fixup
