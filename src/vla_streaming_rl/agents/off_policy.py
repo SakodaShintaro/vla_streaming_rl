@@ -188,6 +188,7 @@ class OffPolicyAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            remaining_return,
             global_step_obs,
             episode_step_obs,
             health_obs,
@@ -206,6 +207,7 @@ class OffPolicyAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            remaining_return,
             global_step_obs,
             episode_step_obs,
             health_obs,
@@ -233,6 +235,7 @@ class OffPolicyAgent(Agent):
                 velocity_z_seq=latest_data.velocity_z,
                 episode_return_seq=latest_data.episode_return,
                 pass_mark_seq=latest_data.pass_mark,
+                remaining_return_seq=latest_data.remaining_return,
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
@@ -261,7 +264,8 @@ class OffPolicyAgent(Agent):
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
         the image tensor, the raw scalar observations (velocity_x, velocity_y,
-        velocity_z, episode_return, pass_mark, global_step, episode_step,
+        velocity_z, episode_return, pass_mark, remaining_return, global_step,
+        episode_step,
         health; the network updates its running normalizer stats here) and the
         tokenized task prompt.
         ``info`` is unused by this obs-driven agent."""
@@ -270,6 +274,7 @@ class OffPolicyAgent(Agent):
         velocity_x, velocity_y, velocity_z = obs["velocity"].astype(np.float32)
         episode_return = np.float32(obs["episode_return"][0])
         pass_mark = np.float32(obs["pass_mark"][0])
+        remaining_return = np.float32(obs["remaining_return"][0])
         global_step_obs = np.float32(obs["global_step"][0])
         episode_step_obs = np.float32(obs["episode_step"][0])
         health_obs = np.float32(obs["health"][0])
@@ -279,6 +284,7 @@ class OffPolicyAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            remaining_return,
             global_step_obs,
             episode_step_obs,
             health_obs,
@@ -291,6 +297,7 @@ class OffPolicyAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            remaining_return,
             global_step_obs,
             episode_step_obs,
             health_obs,

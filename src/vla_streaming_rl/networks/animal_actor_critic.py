@@ -34,7 +34,7 @@ from vla_streaming_rl.networks.modules.policy_head import build_policy_head
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
 
-SCALAR_OBS_DIM = 8
+SCALAR_OBS_DIM = 9
 
 
 class AnimalEncoder(torch.nn.Module):
@@ -184,6 +184,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         velocity_z: float,
         episode_return: float,
         pass_mark: float,
+        remaining_return: float,
         global_step: float,
         episode_step: float,
         health: float,
@@ -196,6 +197,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
                     velocity_z,
                     episode_return,
                     pass_mark,
+                    remaining_return,
                     global_step,
                     episode_step,
                     health,
@@ -211,6 +213,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         velocity_z: torch.Tensor,
         episode_return: torch.Tensor,
         pass_mark: torch.Tensor,
+        remaining_return: torch.Tensor,
         global_step: torch.Tensor,
         episode_step: torch.Tensor,
         health: torch.Tensor,
@@ -222,6 +225,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
                 velocity_z,
                 episode_return,
                 pass_mark,
+                remaining_return,
                 global_step,
                 episode_step,
                 health,
@@ -250,6 +254,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
                 data.velocity_z[:, start:stop],
                 data.episode_return[:, start:stop],
                 data.pass_mark[:, start:stop],
+                data.remaining_return[:, start:stop],
                 data.global_step[:, start:stop],
                 data.episode_step[:, start:stop],
                 data.health[:, start:stop],
@@ -266,6 +271,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
             data.velocity_z_seq,
             data.episode_return_seq,
             data.pass_mark_seq,
+            data.remaining_return_seq,
             data.global_step_seq,
             data.episode_step_seq,
             data.health_seq,

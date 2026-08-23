@@ -142,6 +142,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = HealthObsWrapper(env)
         env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
+        env = RemainingReturnObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         return env
@@ -332,6 +333,28 @@ class EpisodeReturnObsWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
+class RemainingReturnObsWrapper(gym.ObservationWrapper):
+    """Expose how much return the episode still owes its pass mark.
+
+    ``pass_mark - episode_return`` is what "am I about to clear this arena?"
+    reduces to; the two terms are already observations, but the difference is
+    the one the policy and the value head actually act on. Envs without a pass
+    mark report 0 through ``ZeroScalarObsWrapper`` instead.
+    """
+
+    def __init__(self, env: gym.Env) -> None:
+        super().__init__(env)
+        spaces = dict(env.observation_space.spaces)
+        spaces["remaining_return"] = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        )
+        self.observation_space = gym.spaces.Dict(spaces)
+
+    def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        remaining = obs["pass_mark"] - obs["episode_return"]
+        return {**obs, "remaining_return": remaining.astype(np.float32)}
+
+
 class StepCountInfoWrapper(gym.Wrapper):
     """Count the step numbers an env does not report itself.
 
@@ -401,10 +424,14 @@ class ZeroScalarObsWrapper(gym.ObservationWrapper):
         spaces["velocity"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
         spaces["pass_mark"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
         spaces["health"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
+        spaces["remaining_return"] = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        )
         self.observation_space = gym.spaces.Dict(spaces)
         self._zero_velocity = np.zeros(3, dtype=np.float32)
         self._zero_pass_mark = np.zeros(1, dtype=np.float32)
         self._zero_health = np.zeros(1, dtype=np.float32)
+        self._zero_remaining_return = np.zeros(1, dtype=np.float32)
 
     def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         return {
@@ -412,6 +439,7 @@ class ZeroScalarObsWrapper(gym.ObservationWrapper):
             "velocity": self._zero_velocity,
             "pass_mark": self._zero_pass_mark,
             "health": self._zero_health,
+            "remaining_return": self._zero_remaining_return,
         }
 
 

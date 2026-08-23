@@ -204,12 +204,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         velocity_z: float,
         episode_return: float,
         pass_mark: float,
+        remaining_return: float,
         global_step: float,
         episode_step: float,
         health: float,
     ) -> None:
         del velocity_x, velocity_y, velocity_z, episode_return, pass_mark
-        del global_step, episode_step, health
+        del remaining_return, global_step, episode_step, health
 
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
         """Tokenize a task prompt string into token IDs."""
