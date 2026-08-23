@@ -780,6 +780,7 @@ class AnimalAIEnv(gym.Env):
             f"Velocity: ({vx:+.2f}, {vy:+.2f}, {vz:+.2f}). "
             f"Return so far: {self._episode_return:+.2f}. "
             f"Pass mark: {self.pass_mark:+.2f}. "
+            f"Return needed: {self.pass_mark - self._episode_return:+.2f}. "
             f"Health: {self._agent_health:.2f}. "
             f"Global step: {self.global_step}. "
             f"Episode step: {self.episode_step}."
