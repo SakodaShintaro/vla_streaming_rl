@@ -103,6 +103,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = CarRacingActionWrapper(env)
         env = ActionRepeatWrapper(env, repeat=REPEAT)
         env = AverageRewardEarlyStopWrapper(env)
+        env = UnshapedRewardWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)
@@ -147,6 +148,21 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
 
     else:
         raise ValueError(f"Unsupported environment: {env_id}")
+
+
+class UnshapedRewardWrapper(gym.Wrapper):
+    """Publish ``info["shaped_reward"]`` for an env whose reward is trained on as it
+    comes, so every env hands the agent both numbers on the same channel."""
+
+    def reset(self, **kwargs) -> tuple:
+        obs, info = self.env.reset(**kwargs)
+        info["shaped_reward"] = 0.0
+        return obs, info
+
+    def step(self, action: np.ndarray) -> tuple:
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        info["shaped_reward"] = float(reward)
+        return obs, reward, terminated, truncated, info
 
 
 class ActionRepeatWrapper(gym.Wrapper):

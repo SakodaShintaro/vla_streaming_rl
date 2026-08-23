@@ -52,6 +52,13 @@ from mlagents_envs.base_env import ActionTuple
 COMPETITION_DIR = Path("./external/animal-ai/configs/competition")
 
 
+# Shaping coefficients.
+GOAL_BONUS = 0.5
+RAMPS_COEF = 0.01
+BACK_MOVE_COEF = 0.001
+PASS_MARK_BONUS = 1.0
+
+
 def _to_discrete(value: float) -> int:
     """Map a continuous control in [-1, 1] to AAI's {0=noop, 1, 2}."""
     if value >= 1.0 / 3.0:
@@ -778,9 +785,26 @@ class AnimalAIEnv(gym.Env):
             f"Episode step: {self.episode_step}."
         )
 
-    def _build_info(self) -> dict:
+    def _shape_reward(self, reward: float, episode_done: bool) -> float:
+        """Reaching a goal is worth more than the arena says, climbing is encouraged,
+        walking backwards is discouraged, and an episode ends with a bonus for having
+        cleared the arena's pass mark or a penalty for not."""
+        velocity = self._agent_velocity
+        if reward > 0.1:
+            reward += GOAL_BONUS
+        if velocity[1] > 0.01:
+            reward += float(velocity[1]) * RAMPS_COEF
+        if velocity[2] < 0:
+            reward += float(velocity[2]) * BACK_MOVE_COEF
+        if episode_done:
+            cleared = self._episode_return >= self.pass_mark
+            reward += PASS_MARK_BONUS if cleared else -PASS_MARK_BONUS
+        return reward
+
+    def _build_info(self, shaped_reward: float) -> dict:
         info = {
             "task_prompt": self._build_prompt(),
+            "shaped_reward": shaped_reward,
             "arena_name": self.arena_name,
             "arena_yaml": str(self._arena.path),
             "pass_mark": self.pass_mark,
@@ -814,7 +838,7 @@ class AnimalAIEnv(gym.Env):
 
         decision_steps, _ = self._aai.get_steps(self._behavior_name)
         self._read_observation(decision_steps)
-        return self._latest_image, self._build_info()
+        return self._latest_image, self._build_info(0.0)
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
         self.global_step += 1
@@ -842,13 +866,21 @@ class AnimalAIEnv(gym.Env):
         terminated = episode_over and not interrupted
         truncated = interrupted
 
+        shaped_reward = self._shape_reward(reward, terminated or truncated)
+
         if not episode_over:
-            return self._latest_image, reward, terminated, truncated, self._build_info()
+            return (
+                self._latest_image,
+                reward,
+                terminated,
+                truncated,
+                self._build_info(shaped_reward),
+            )
 
         success = self._episode_return >= self.pass_mark
         # Before _build_info, so the selector reports post-episode progress.
         self.selector.on_episode_end(self._arena, success)
-        info = self._build_info()
+        info = self._build_info(shaped_reward)
         info["success"] = bool(success)
         return self._latest_image, reward, terminated, truncated, info
 

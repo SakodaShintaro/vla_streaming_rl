@@ -24,7 +24,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn, optim
 
-from vla_streaming_rl.agents.animal_reward import shape_animal_reward
 from vla_streaming_rl.agents.base import Agent, StepResult
 
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward /
@@ -202,9 +201,9 @@ class AnimalPPOAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step
+        del global_step, reward
         visual, vels = self._preprocess(obs, info)
-        shaped = shape_animal_reward(reward, obs, terminated or truncated)
+        shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
         # tick, so that transition can only be completed now
         self.buffer.add(self.pending, shaped)

@@ -31,12 +31,6 @@ class StepResult:
     panels: dict[str, np.ndarray]
 
 
-def no_reward_shaping(reward: float, obs: dict, episode_done: bool) -> float:
-    """The reward shaper of an environment whose reward is trained on as it comes."""
-    del obs, episode_done
-    return reward
-
-
 class Agent(ABC):
     """The contract the trainer drives: ``step`` on every tick while learning,
     ``select_action`` when acting without learning.

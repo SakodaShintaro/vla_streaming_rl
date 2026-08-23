@@ -555,7 +555,11 @@ class CARLALeaderboardEnv(gym.Env):
                 self.runtime.route_scenario.route,
             )
         return observation, self._build_scenario_info(
-            {"task_prompt": self._navigation_prompt(), **self._step_count_info()}
+            {
+                "task_prompt": self._navigation_prompt(),
+                "shaped_reward": 0.0,
+                **self._step_count_info(),
+            }
         )
 
     # ``final_eval_summary`` is populated by ``close()`` (auto-merge of the
@@ -680,8 +684,9 @@ class CARLALeaderboardEnv(gym.Env):
             terminated = True
 
         # Wandering too far off-route is treated as a truncation (not a
-        # natural terminal): cut the episode and hand back a fixed -1
-        # penalty so the agent learns the boundary. Looser analogue of
+        # natural terminal): cut the episode and hand back a fixed -1 shaped
+        # reward so the agent learns the boundary, while the leaderboard
+        # reward keeps reporting the score delta. Looser analogue of
         # Bench2Drive's InRouteTest, which fails at 30 m.
         off_route_truncated = (
             self._early_off_route_m is not None
@@ -704,8 +709,7 @@ class CARLALeaderboardEnv(gym.Env):
                 self._blocked_step_counter = 0
 
         truncated = self.episode_step >= self.max_episode_steps or off_route_truncated
-        if off_route_truncated:
-            reward = -1.0
+        shaped_reward = -1.0 if off_route_truncated else reward
 
         self.episode_step += 1
         self.global_step += 1
@@ -724,6 +728,7 @@ class CARLALeaderboardEnv(gym.Env):
         info = self._build_scenario_info(
             {
                 "task_prompt": self._navigation_prompt(),
+                "shaped_reward": shaped_reward,
                 **self._step_count_info(),
                 "route_completion": self.route_tracker.route_completion,
                 "driving_score": self._latest_driving_score,

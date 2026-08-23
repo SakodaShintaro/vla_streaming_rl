@@ -3,9 +3,6 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.animal_reward import shape_animal_reward
-from vla_streaming_rl.agents.base import no_reward_shaping
-
 
 def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
     if args.agent_type == "zeroshot_vlm":
@@ -48,8 +45,6 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             health_scale=args.health_scale,
         )
 
-    reward_shaper = shape_animal_reward if args.env_id == "AnimalAI-v0" else no_reward_shaping
-
     if args.agent_type == "streaming":
         from vla_streaming_rl.agents.streaming import StreamingAgent
 
@@ -71,7 +66,6 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             buffer_device=args.buffer_device,
             max_prompt_tokens=args.max_prompt_tokens,
             pad_token_id=args.pad_token_id,
-            reward_shaper=reward_shaper,
         )
 
     assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
@@ -95,5 +89,4 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
         buffer_device=args.buffer_device,
         max_prompt_tokens=args.max_prompt_tokens,
         pad_token_id=args.pad_token_id,
-        reward_shaper=reward_shaper,
     )

@@ -49,7 +49,6 @@ class StreamingAgent(Agent):
         buffer_device: str,
         max_prompt_tokens: int,
         pad_token_id: int,
-        reward_shaper,
     ) -> None:
         super().__init__(horizon=horizon)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,9 +63,6 @@ class StreamingAgent(Agent):
         self.action_scale = (action_space.high - action_space.low) / 2.0
         self.action_bias = (action_space.high + action_space.low) / 2.0
         self.reward_processor = RewardProcessor("scaling", 1.0)
-        # What the agent trains on, against what the env reported. See
-        # agents/animal_reward.py.
-        self.reward_shaper = reward_shaper
         self.normalizing_by_return = normalizing_by_return
 
         self.max_grad_norm = max_grad_norm
@@ -129,18 +125,22 @@ class StreamingAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step
+        del global_step, reward
         metrics = {}
         episode_done = terminated or truncated
-        reward = self.reward_shaper(reward, obs, episode_done)
+        # What the agent trains on, against what the env reported as its score.
+        shaped_reward = info["shaped_reward"]
+        metrics["shaped_reward"] = shaped_reward
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
-            self.reward_processor.update(reward)
-        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+            self.reward_processor.update(shaped_reward)
+        metrics["processed_reward"] = self.reward_processor.normalize(
+            torch.tensor(shaped_reward)
+        ).item()
         (
             image,
             velocity_x,
@@ -156,7 +156,7 @@ class StreamingAgent(Agent):
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
-            reward,
+            shaped_reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
@@ -241,18 +241,22 @@ class StreamingAgent(Agent):
     ) -> StepResult:
         """Act without learning: the trainer calls this once per episode after
         the reset, and the testbed calls it on every tick."""
-        del global_step
+        del global_step, reward
         metrics = {}
         episode_done = terminated or truncated
-        reward = self.reward_shaper(reward, obs, episode_done)
+        # What the agent trains on, against what the env reported as its score.
+        shaped_reward = info["shaped_reward"]
+        metrics["shaped_reward"] = shaped_reward
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
-            self.reward_processor.update(reward)
-        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+            self.reward_processor.update(shaped_reward)
+        metrics["processed_reward"] = self.reward_processor.normalize(
+            torch.tensor(shaped_reward)
+        ).item()
         (
             image,
             velocity_x,
@@ -268,7 +272,7 @@ class StreamingAgent(Agent):
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
-            reward,
+            shaped_reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
