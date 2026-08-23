@@ -15,3 +15,6 @@ network_class: animal_ppo
 image_encoder_type: fixup
 image_encoder_output_dim: 128
 image_encoder_trainable: true
+
+# [lstm, gru]
+temporal_model_type: gru

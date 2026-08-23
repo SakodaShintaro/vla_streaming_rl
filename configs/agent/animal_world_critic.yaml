@@ -19,3 +19,6 @@ image_encoder_trainable: true
 buffer_device: cpu
 buffer_size: 400_000
 learning_starts: 4_000
+
+# [lstm, gru]
+temporal_model_type: gru

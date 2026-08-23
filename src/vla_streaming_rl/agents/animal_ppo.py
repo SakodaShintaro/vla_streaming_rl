@@ -82,7 +82,7 @@ class RolloutBuffer:
         self, last_value: float, final_done: float, gamma: float, lam: float, seq_len: int
     ) -> "Rollout":
         """Generalized advantage estimation over the collected steps. ``seq_len``
-        is the window the LSTM is unrolled over during the update: one recurrent
+        is the window the recurrent cell is unrolled over during the update: one recurrent
         state is kept per window, the one recorded at its first step."""
         steps_num = len(self)
         rewards = np.asarray(self.rewards, dtype=np.float32)

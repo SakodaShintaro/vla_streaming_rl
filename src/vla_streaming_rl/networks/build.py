@@ -86,6 +86,7 @@ def build_network(
             image_encoder_output_dim=args.image_encoder_output_dim,
             image_encode_mode=args.image_encode_mode,
             image_encoder_trainable=args.image_encoder_trainable,
+            temporal_model_type=args.temporal_model_type,
         ).to(device)
 
     if args.network_class == "animal_world_critic":
@@ -103,6 +104,7 @@ def build_network(
             image_encoder_output_dim=args.image_encoder_output_dim,
             image_encode_mode=args.image_encode_mode,
             image_encoder_trainable=args.image_encoder_trainable,
+            temporal_model_type=args.temporal_model_type,
             latent_dim=args.wcm_latent_dim,
             dynamics_depth=args.wcm_dynamics_depth,
             dynamics_mlp_ratio=args.wcm_dynamics_mlp_ratio,
@@ -190,6 +192,7 @@ def build_network(
             image_encoder_output_dim=args.image_encoder_output_dim,
             image_encode_mode=args.image_encode_mode,
             image_encoder_trainable=args.image_encoder_trainable,
+            temporal_model_type=args.temporal_model_type,
         ).to(device)
 
     elif args.network_class == "animal_world_critic_actor_critic":
@@ -218,6 +221,7 @@ def build_network(
             image_encoder_output_dim=args.image_encoder_output_dim,
             image_encode_mode=args.image_encode_mode,
             image_encoder_trainable=args.image_encoder_trainable,
+            temporal_model_type=args.temporal_model_type,
             wcm_latent_dim=args.wcm_latent_dim,
             wcm_dynamics_depth=args.wcm_dynamics_depth,
             wcm_dynamics_mlp_ratio=args.wcm_dynamics_mlp_ratio,

@@ -4,7 +4,7 @@
 A visual trunk -- the original Fixup residual tower with channel attention, or
 any of the pretrained encoders in ``networks/modules/image_processor.py``, which
 is where both now live -- a small dense branch for the velocity/clock vector, and
-a LayerNorm LSTM shared by the policy and value heads. It is deliberately not a
+a recurrent cell shared by the policy and value heads. It is deliberately not a
 :class:`NetworkInterface`: that contract is built around a replay batch, while
 this network is driven by an on-policy PPO rollout, so it stays a plain
 ``nn.Module`` and :class:`AnimalPPOAgent` owns the loss.
@@ -23,8 +23,9 @@ from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
 ACTION_NUM = 9
 HIDDEN_NODES = 1024
 VELS_HIDDEN = 128
-LSTM_UNITS = 512
+TEMPORAL_UNITS = 512
 LAYER_NORM_EPSILON = 1e-5
+TEMPORAL_MODEL_TYPES = ("lstm", "gru")
 
 
 class LayerNormLSTMCell(nn.Module):
@@ -35,6 +36,7 @@ class LayerNormLSTMCell(nn.Module):
     def __init__(self, input_size: int, units: int) -> None:
         super().__init__()
         self.units = units
+        self.state_size = 2 * units
         self.wx = nn.Parameter(torch.zeros(input_size, 4 * units))
         self.gx = nn.Parameter(torch.ones(4 * units))
         self.bx = nn.Parameter(torch.zeros(4 * units))
@@ -75,20 +77,60 @@ class LayerNormLSTMCell(nn.Module):
         return outputs, torch.cat([cell, hidden], dim=1)
 
 
+class SequenceGRUCell(nn.Module):
+    """``torch.nn.GRUCell`` behind the same interface as
+    :class:`LayerNormLSTMCell`: a sequence in, the per-step hiddens and the
+    carried state out. There is no LayerNorm variant here -- the point is to use
+    PyTorch's cell as it is -- so only the episode masking and the loop are ours.
+    """
+
+    def __init__(self, input_size: int, units: int) -> None:
+        super().__init__()
+        self.units = units
+        self.state_size = units
+        self.cell = nn.GRUCell(input_size, units)
+
+    def forward(self, inputs: list, state: torch.Tensor, masks: list) -> tuple:
+        """``inputs`` and ``masks`` are sequences of ``(sequence_num, ...)`` tensors;
+        ``state`` is the ``(sequence_num, units)`` hidden carried between batches. A
+        mask of 1 means the previous step ended an episode, so the state is
+        zeroed before that step is consumed."""
+        hidden = state
+        outputs = []
+        for x, mask in zip(inputs, masks):
+            hidden = self.cell(x, hidden * (1.0 - mask).unsqueeze(1))
+            outputs.append(hidden)
+
+        return outputs, hidden
+
+
+def build_temporal_model(temporal_model_type: str, input_size: int, units: int) -> nn.Module:
+    assert temporal_model_type in TEMPORAL_MODEL_TYPES, (
+        f"Unknown temporal_model_type: {temporal_model_type!r} "
+        f"(expected one of {TEMPORAL_MODEL_TYPES})"
+    )
+    if temporal_model_type == "lstm":
+        return LayerNormLSTMCell(input_size, units)
+    return SequenceGRUCell(input_size, units)
+
+
 class AnimalBackbone(nn.Module):
     """Everything the winning network is below its heads: the visual trunk, the
-    dense branch and the LSTM. It is a class of its own so a network with other
-    heads -- see ``networks/animal_actor_critic.py`` -- reuses this body verbatim
-    instead of copying it; ``AnimalPPONetwork`` extends it rather than holding
-    one so the parameter names, and therefore existing checkpoints, are unchanged.
+    dense branch and the recurrent cell. It is a class of its own so a network
+    with other heads -- see ``networks/animal_actor_critic.py`` -- reuses this
+    body verbatim instead of copying it.
 
-    The trunk is the one place that is configurable: it is an
+    Two things are configurable. The trunk is an
     :class:`ImageProcessor`, so ``image_encoder_type`` picks the original Fixup
     tower (``"fixup"``, trained from scratch) or one of the frozen pretrained
     encoders beside it in ``networks/modules/image_processor.py``. Whatever it
     produces is flattened into the single visual token ``visual_hidden`` reads,
     so ``image_encode_mode = "single_token"`` pools the image the way that
     encoder was pretrained to instead of handing the dense layer a patch grid.
+    And ``temporal_model_type`` picks the recurrence: the original LayerNorm
+    LSTM (``"lstm"``) or PyTorch's ``nn.GRUCell`` (``"gru"``), whose state is a
+    single hidden rather than a (cell, hidden) pair -- hence ``init_state``
+    asking the cell for its width instead of writing ``2 * TEMPORAL_UNITS``.
     """
 
     def __init__(
@@ -99,6 +141,7 @@ class AnimalBackbone(nn.Module):
         image_encoder_output_dim: int,
         image_encode_mode: str,
         image_encoder_trainable: bool,
+        temporal_model_type: str,
     ) -> None:
         """``observation_space_shape`` is the (C, H, W) of the image observation and
         ``vels_size`` the width of the velocity/clock vector; both come from what
@@ -117,10 +160,12 @@ class AnimalBackbone(nn.Module):
         self.vels_hidden = nn.Linear(vels_size, VELS_HIDDEN)
         self.visual_hidden = nn.Linear(self.flat_size, HIDDEN_NODES)
         self.joint_hidden = nn.Linear(VELS_HIDDEN + HIDDEN_NODES, HIDDEN_NODES)
-        self.lstm = LayerNormLSTMCell(HIDDEN_NODES, LSTM_UNITS)
+        self.temporal_model = build_temporal_model(
+            temporal_model_type, HIDDEN_NODES, TEMPORAL_UNITS
+        )
 
     def init_state(self, sequence_num: int, device: torch.device) -> torch.Tensor:
-        return torch.zeros(sequence_num, 2 * LSTM_UNITS, device=device)
+        return torch.zeros(sequence_num, self.temporal_model.state_size, device=device)
 
     def features(self, visual: torch.Tensor) -> torch.Tensor:
         """``visual`` is (B, C, H, W) float, as the wrappers produce it."""
@@ -130,7 +175,7 @@ class AnimalBackbone(nn.Module):
 
     def embed(self, visual: torch.Tensor, vels: torch.Tensor) -> tuple:
         """The per-step visual latent the dense branch produces and the joint
-        hidden the LSTM reads. Split out of ``forward`` so a head that needs the
+        hidden the recurrent cell reads. Split out of ``forward`` so a head that needs the
         visual latent -- see ``networks/animal_world_critic.py`` -- reads it off
         the same pass instead of running the trunk twice."""
         visual_latent = F.elu(self.visual_hidden(self.features(visual)))
@@ -143,8 +188,8 @@ class AnimalBackbone(nn.Module):
         steps_num = hidden.shape[0] // sequence_num
         sequence = hidden.reshape(sequence_num, steps_num, -1).unbind(dim=1)
         mask_sequence = dones.to(hidden.dtype).reshape(sequence_num, steps_num).unbind(dim=1)
-        outputs, lstm_state = self.lstm(sequence, state, mask_sequence)
-        return torch.stack(outputs, dim=1).reshape(-1, LSTM_UNITS), lstm_state
+        outputs, temporal_state = self.temporal_model(sequence, state, mask_sequence)
+        return torch.stack(outputs, dim=1).reshape(-1, TEMPORAL_UNITS), temporal_state
 
     def forward(
         self,
@@ -158,7 +203,7 @@ class AnimalBackbone(nn.Module):
         at ``s * steps_num + t``, which is what the recurrent unrolling and the
         sequence slicing both assume. Acting is one sequence of one step, the
         update is one per minibatch window. Returns the ``(sequence_num * steps_num,
-        LSTM_UNITS)`` recurrent output and the state carried out of the batch."""
+        TEMPORAL_UNITS)`` recurrent output and the state carried out of the batch."""
         _, hidden = self.embed(visual, vels)
         return self.recurrent(hidden, state, dones, sequence_num)
 
@@ -174,6 +219,7 @@ class AnimalPPONetwork(AnimalBackbone):
         image_encoder_output_dim: int,
         image_encode_mode: str,
         image_encoder_trainable: bool,
+        temporal_model_type: str,
     ) -> None:
         super().__init__(
             observation_space_shape,
@@ -182,9 +228,10 @@ class AnimalPPONetwork(AnimalBackbone):
             image_encoder_output_dim,
             image_encode_mode,
             image_encoder_trainable,
+            temporal_model_type,
         )
-        self.value_head = nn.Linear(LSTM_UNITS, 1)
-        self.logits_head = nn.Linear(LSTM_UNITS, ACTION_NUM)
+        self.value_head = nn.Linear(TEMPORAL_UNITS, 1)
+        self.logits_head = nn.Linear(TEMPORAL_UNITS, ACTION_NUM)
 
     def forward(
         self,
@@ -194,8 +241,8 @@ class AnimalPPONetwork(AnimalBackbone):
         dones: torch.Tensor,
         sequence_num: int,
     ) -> tuple:
-        lstm_out, lstm_state = super().forward(visual, vels, state, dones, sequence_num)
-        return self.logits_head(lstm_out), self.value_head(lstm_out), lstm_state
+        temporal_out, temporal_state = super().forward(visual, vels, state, dones, sequence_num)
+        return self.logits_head(temporal_out), self.value_head(temporal_out), temporal_state
 
     def forward_for_update(
         self,

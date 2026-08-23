@@ -5,7 +5,7 @@ WCM (arXiv 2607.29613) trains a critic whose shared representation has to
 support two objectives: an action-free value estimate over the history, and an
 action-conditioned prediction of the next latent state. The second one is what
 this file adds. The value estimate here is already action-free -- PPO's value
-head reads the LSTM output, which never sees an action -- so what is missing is
+head reads the recurrent output, which never sees an action -- so what is missing is
 the dynamics branch and the collapse guard that lets its target be the encoder's
 own latent.
 
@@ -14,7 +14,7 @@ Three pieces come across from ``world_critic/model.py``:
 - :class:`GatedDynamicsBlock`, the FiLM-modulated residual update, initialized so
   the gate starts near closed and the branch starts near identity,
 - :class:`ActionConditionedDynamics`, predicting ``z_(t+1) = z_t + delta(h_t, a_t)``
-  with the LSTM output as the history context, and
+  with the recurrent output as the history context, and
 - :class:`SIGReg`, the LeJEPA sketched isotropic-Gaussian regularizer. The
   prediction target is the encoder's own detached latent, so nothing stops the
   encoder from collapsing to a constant except this term.
@@ -36,7 +36,7 @@ from torch import nn
 from vla_streaming_rl.networks.animal_ppo import (
     ACTION_NUM,
     HIDDEN_NODES,
-    LSTM_UNITS,
+    TEMPORAL_UNITS,
     AnimalPPONetwork,
 )
 
@@ -212,6 +212,7 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
         image_encoder_output_dim: int,
         image_encode_mode: str,
         image_encoder_trainable: bool,
+        temporal_model_type: str,
         latent_dim: int,
         dynamics_depth: int,
         dynamics_mlp_ratio: float,
@@ -228,6 +229,7 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
             image_encoder_output_dim,
             image_encode_mode,
             image_encoder_trainable,
+            temporal_model_type,
         )
         self.latent_dim = latent_dim
         self.next_state_coef = next_state_coef
@@ -237,8 +239,8 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
             nn.Linear(HIDDEN_NODES, latent_dim),
         )
         self.context_projection = nn.Sequential(
-            nn.LayerNorm(LSTM_UNITS),
-            nn.Linear(LSTM_UNITS, latent_dim),
+            nn.LayerNorm(TEMPORAL_UNITS),
+            nn.Linear(TEMPORAL_UNITS, latent_dim),
         )
         action_embedding = nn.Embedding(ACTION_NUM, latent_dim)
         nn.init.normal_(action_embedding.weight, std=0.02)
@@ -261,11 +263,11 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
         sequence_num: int,
     ) -> tuple:
         visual_latent, hidden = self.embed(visual, vels)
-        lstm_out, _ = self.recurrent(hidden, state, dones, sequence_num)
+        temporal_out, _ = self.recurrent(hidden, state, dones, sequence_num)
         state_latent = self.state_projection(visual_latent).reshape(
             sequence_num, -1, self.latent_dim
         )
-        context_latent = self.context_projection(lstm_out).reshape(
+        context_latent = self.context_projection(temporal_out).reshape(
             sequence_num, -1, self.latent_dim
         )
         # the window is sequence-major, so a pair is the step and the one after
@@ -285,8 +287,8 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
             "sigreg": float(sigreg_loss.item()),
         }
         return (
-            self.logits_head(lstm_out),
-            self.value_head(lstm_out).squeeze(-1),
+            self.logits_head(temporal_out),
+            self.value_head(temporal_out).squeeze(-1),
             auxiliary_loss,
             reported,
         )
