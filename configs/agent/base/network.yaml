@@ -1,0 +1,47 @@
+# @package _global_
+encoder_block_num: 1
+actor_hidden_dim: 512
+actor_block_num: 1
+critic_hidden_dim: 1024
+critic_block_num: 1
+# Action-value critic architecture:
+#   simbav2 : SimbaV2 hyperspherical critic (arXiv:2502.15280); weights and
+#             features stay on the unit hypersphere so the TD loss cannot blow
+#             up the critic norm.
+#   dueling : original LayerNorm dueling V/A critic.
+critic_arch: dueling
+# Image encoder: fixup, taesd, wan, dinov2, siglip2, vjepa2, qwen (see IMAGE_ENCODERS in image_processor.py).
+image_encoder_type: qwen
+# Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
+image_encoder_output_dim: 16
+# grid         : one token per patch, the spatial grid the encoder produces.
+# single_token : the whole image as one token, pooled the way each backbone
+#                was trained (DINOv2 CLS, SigLIP MAP head, mean pooling for
+#                V-JEPA 2 / Qwen, the folded latent for the VAEs).
+image_encode_mode: grid
+# Whether the image encoder trains with the rest of the network. The pretrained
+# backbones are frozen feature extractors here; "fixup" has no pretrained weights
+# at all, so it needs this on (see the animal agent configs).
+image_encoder_trainable: false
+predictor_hidden_dim: 512
+predictor_block_num: 2
+predictor_step_num: 1
+predictor_type: flow_matching
+num_bins: 1
+detach_actor: 1
+detach_critic: 0
+detach_predictor: 0
+disable_state_predictor: 0
+dacer_loss_weight: 0.05
+denoising_steps: 1
+som_alpha: 1.0
+som_w: 25.0
+
+wcm_latent_dim: 256
+wcm_dynamics_depth: 3
+wcm_dynamics_mlp_ratio: 4.0
+wcm_dynamics_dropout: 0.1
+wcm_next_state_coef: 0.1
+wcm_sigreg_coef: 0.01
+wcm_sigreg_knots: 17
+wcm_sigreg_projections: 1024

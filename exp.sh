@@ -10,7 +10,7 @@ SETUP=${1:-}
 
 case "$SETUP" in
   car_racing)
-    AGENT=standard; ENV=car_racing
+    AGENT=vlm_streaming; ENV=car_racing
     STREAM_LR="actor_lr=1e-6 critic_lr=1e-5"
     OFF16_LR="actor_lr=1e-5 critic_lr=1e-5"
     OFF1_LR="actor_lr=1e-6 critic_lr=1e-5"
@@ -29,7 +29,7 @@ result_dir=~/data/$(date +%Y%m%d_%H%M%S)_${AGENT}_${ENV}
 uv run python scripts/train.py \
   agent=$AGENT \
   env=$ENV \
-  learning_mode=streaming \
+  agent_type=streaming \
   batch_size=1 \
   $STREAM_LR \
   result_dir=$result_dir \
@@ -39,7 +39,7 @@ uv run python scripts/train.py \
 uv run python scripts/train.py \
   agent=$AGENT \
   env=$ENV \
-  learning_mode=off_policy \
+  agent_type=off_policy \
   batch_size=16 \
   $OFF16_LR \
   result_dir=$result_dir \
@@ -49,7 +49,7 @@ uv run python scripts/train.py \
 uv run python scripts/train.py \
   agent=$AGENT \
   env=$ENV \
-  learning_mode=off_policy \
+  agent_type=off_policy \
   batch_size=1 \
   $OFF1_LR \
   result_dir=$result_dir \

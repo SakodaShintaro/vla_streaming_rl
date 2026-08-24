@@ -1,0 +1,24 @@
+# @package _global_
+defaults:
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
+  - _self_
+
+agent_type: off_policy
+network_class: animal_actor_critic
+batch_size: 16
+seq_len: 8
+actor_lr: 1e-5
+critic_lr: 1e-5
+buffer_device: cpu
+buffer_size: 400_000
+learning_starts: 4_000
+
+image_encoder_type: fixup
+image_encoder_output_dim: 128
+image_encoder_trainable: true
+
+# [lstm, gru]
+temporal_model_type: gru

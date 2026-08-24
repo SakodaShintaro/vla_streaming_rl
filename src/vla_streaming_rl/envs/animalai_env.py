@@ -2,11 +2,18 @@
 """Animal-AI Gymnasium environment.
 
 Wraps Animal-AI v5 (which exposes a Unity ML-Agents BehaviorSpec interface)
-as a single-agent gym.Env. The native AAI action is MultiDiscrete([3, 3]):
-    dim 0 (forward/back): 0=noop, 1=forward, 2=back
-    dim 1 (rotate):       0=noop, 1=right,   2=left
-We expose this as Box(-1, 1, shape=(2,)) for parity with the project's other
-environments (CARLA, GUI games), discretising with a +/-1/3 dead-zone.
+as a single-agent gym.Env. The action is Box(-1, 1, shape=(2,)) for parity with
+the project's other environments (CARLA, GUI games):
+    dim 0: forward (+1) / back (-1)
+    dim 1: rotate right (+1) / left (-1)
+How Unity consumes it depends on `continuous_action`:
+  - False: the official MultiDiscrete([3, 3]) branches, reached by
+           discretizing with a +/-1/3 dead-zone (0=noop, 1=forward/right,
+           2=back/left). Works with any Animal-AI binary.
+  - True:  the value is passed through as a throttle / turn rate. This needs a
+           binary rebuilt from animal-ai-unity with the hybrid action spec
+           (2 continuous actions alongside the branches); +/-1 there reproduces
+           the discrete branches exactly, so it is a strict superset.
 
 Everything about talking to Unity lives in `AnimalAIEnv`. The only thing that
 differs between the three ways we run Animal-AI is *which arena each episode
@@ -16,10 +23,19 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
   - "staged"  training with the paper's cumulative 11-stage curriculum, one
               stage per subdirectory of the root, sampled uniformly within
               the stage (`StagedSelector`).
-  - "success" the same stages, but sampled within the stage by how much is
-              still to be learned from each arena (`SuccessDrivenSelector`).
+  - "success" the same stages, but advanced by clearing them rather than by
+              step count, alternating unsolved-arena draws with failure-rate
+              softmax draws (`SuccessDrivenSelector`). "Cleared" there means
+              tried at least `SUCCESS_MODE_MIN_ATTEMPTS` times and passed on
+              at least `SUCCESS_MODE_CLEAR_RATE` of them.
+  - "sequential" no curriculum: every arena under the root in path (file name)
+              order, wrapping around forever (`SequentialSelector`, cycling).
+              For a training set that is one flat directory, not a stage split.
+  - "random"  no curriculum: every episode draws uniformly at random from all
+              arenas under the root (`RandomSelector`).
   - "eval"    every configs/competition/ arena once, in order -- the
-              900-arena Testbed sweep (`SequentialSelector`).
+              900-arena Testbed sweep (the same `SequentialSelector`, not
+              cycling, so it ends).
 
 Which arenas a selector serves is just a root directory it reads recursively,
 so an augmented training set is a matter of pointing at a different root. The
@@ -39,8 +55,41 @@ import yaml
 from animalai import AnimalAIEnvironment
 from gymnasium import spaces
 from mlagents_envs.base_env import ActionTuple
+from mlagents_envs.side_channel.environment_parameters_channel import (
+    EnvironmentParametersChannel,
+)
 
 COMPETITION_DIR = Path("./external/animal-ai/configs/competition")
+
+# Environment parameter the rebuilt binary reads to pick continuous over
+# discrete actions (see TrainingAgent.ReadAction in animal-ai-unity).
+CONTINUOUS_ACTIONS_KEY = "continuousActions"
+
+
+def _aai_environment_class(extra_args: list[str]) -> type:
+    """`AnimalAIEnvironment` subclass that actually passes `extra_args` to Unity.
+
+    `AnimalAIEnvironment.__init__` rebuilds the player's command line from
+    `executable_args` and discards whatever the caller handed it as
+    `additional_args`, so the switches the rebuilt binary reads at startup
+    (`--topDownCamera`, `--topDownResolution`) never arrive. `executable_args`
+    is a staticmethod, so the arguments are bound to a class rather than an
+    instance.
+    """
+
+    class _AnimalAIEnvironmentWithArgs(AnimalAIEnvironment):
+        @staticmethod
+        def executable_args(*args) -> list[str]:
+            return AnimalAIEnvironment.executable_args(*args) + extra_args
+
+    return _AnimalAIEnvironmentWithArgs
+
+
+# Shaping coefficients.
+GOAL_BONUS = 0.5
+RAMPS_COEF = 0.01
+BACK_MOVE_COEF = 0.001
+PASS_MARK_BONUS = 1.0
 
 
 def _to_discrete(value: float) -> int:
@@ -70,12 +119,14 @@ for _tag in ("!ArenaConfig", "!Arena", "!Item", "!Vector3", "!RGB"):
     _AAILoader.add_constructor(_tag, _aai_tag_constructor)
 
 
-def _parse_arena(yaml_path: Path) -> tuple[float, int, list[dict]]:
-    """Return (pass_mark, episode_step_limit, items) from an Animal-AI arena yaml.
+def _parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
+    """Return (pass_mark, items) from an Animal-AI arena yaml.
 
-    ``episode_step_limit`` is the arena's ``t``: AAI ends the episode with
-    ``interrupted`` once it is reached, so it is the horizon the agent must
-    plan against.
+    The arena's ``t`` is deliberately not read: it is not a step cap but the
+    decay rate of the agent's health, and collecting a reward refills that
+    health, so an episode routinely runs well past ``t`` steps. What is left of
+    the episode is the health value in the AAI vector observation, not a step
+    count, so that is what the agent is given (see `_read_observation`).
 
     Each item dict carries one (position, size, rotation) triple in arena
     coordinates: {name, x, z, size_x, size_z, rotation}. yaml entries with
@@ -85,7 +136,6 @@ def _parse_arena(yaml_path: Path) -> tuple[float, int, list[dict]]:
     cfg = yaml.load(yaml_path.read_text(), Loader=_AAILoader)
     arena = cfg["arenas"][0]
     pass_mark = float(arena.get("pass_mark", 0))
-    episode_step_limit = int(arena["t"])
     items_out: list[dict] = []
     for item in arena.get("items", []) or []:
         name = item["name"]
@@ -105,7 +155,7 @@ def _parse_arena(yaml_path: Path) -> tuple[float, int, list[dict]]:
                     "rotation": float(rot),
                 }
             )
-    return pass_mark, episode_step_limit, items_out
+    return pass_mark, items_out
 
 
 @dataclass(frozen=True)
@@ -186,20 +236,25 @@ class ArenaSelector:
         """(attempts, successes) so far for one arena."""
         return self._attempts[arena.name], self._successes[arena.name]
 
+    def is_cleared(self, arena: Arena) -> bool:
+        """Whether one arena counts as solved: passed at least once, unless a
+        curriculum wants a stricter bar (see `SuccessDrivenSelector`)."""
+        return self._successes[arena.name] > 0
+
     def progress_by_group(self) -> list[tuple[str, int, int, int]]:
         """(group, cleared, failed, untried) per arena group, in group order.
 
-        `cleared` counts arenas passed at least once, `failed` ones attempted
-        without ever passing, `untried` ones never run. The group is the arena
-        label's first "-" separated token, which is the stage directory for a
+        `cleared` counts arenas `is_cleared` accepts, `failed` ones attempted
+        without reaching that bar, `untried` ones never run. The group is the
+        arena label's first "-" separated token, which is the stage directory for a
         split curriculum ("stage00-arena000" -> "stage00") and the level for
         the competition set ("01-01-01" -> "01").
         """
         counts: dict[str, list[int]] = {}
         for arena in self.arenas:
             group = counts.setdefault(arena.name.split("-")[0], [0, 0, 0])
-            attempts, successes = self._attempts[arena.name], self._successes[arena.name]
-            group[0 if successes else (1 if attempts else 2)] += 1
+            attempts = self._attempts[arena.name]
+            group[0 if self.is_cleared(arena) else (1 if attempts else 2)] += 1
         return [(group, *counts[group]) for group in sorted(counts)]
 
     def info(self, global_step: int) -> dict:
@@ -211,11 +266,16 @@ class ArenaSelector:
         raise NotImplementedError
 
     def state(self) -> dict:
-        """Resume snapshot: attempted arenas only, so the file stays small."""
+        """Resume snapshot: attempted arenas only, so the file stays small.
+
+        `arena_cleared` is this selector's own `is_cleared` verdict, so what
+        train.py reports as cleared is what the running curriculum acts on."""
         attempts = {name: n for name, n in self._attempts.items() if n > 0}
+        arena_by_name = {arena.name: arena for arena in self.arenas}
         return {
             "arena_attempts": attempts,
             "arena_successes": {name: self._successes[name] for name in attempts},
+            "arena_cleared": {name: self.is_cleared(arena_by_name[name]) for name in attempts},
             "is_revisit": False,
         }
 
@@ -249,12 +309,9 @@ class StagedSelector(ArenaSelector):
     def _stage_arenas(self, global_step: int) -> list[Arena]:
         return self._stages[self._stage_index(global_step)]
 
-    def _pick_from(self, stage_arenas: list[Arena]) -> Arena:
-        """Uniformly, as the paper's curriculum does. Subclasses reweight."""
-        return stage_arenas[int(self._rng.integers(len(stage_arenas)))]
-
     def next_arena(self, global_step: int) -> Arena:
-        return self._pick_from(self._stage_arenas(global_step))
+        stage_arenas = self._stage_arenas(global_step)
+        return stage_arenas[int(self._rng.integers(len(stage_arenas)))]
 
     def info(self, global_step: int) -> dict:
         return {"stage": self._stage_index(global_step) + 1}
@@ -263,84 +320,182 @@ class StagedSelector(ArenaSelector):
         return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}  step:{global_step}"
 
 
-class SuccessDrivenSelector(StagedSelector):
-    """The same 11-stage gating, but choosing within the stage by how much is
-    still to be learned from each arena rather than uniformly.
+SUCCESS_MODE_MIN_ATTEMPTS = 5
+SUCCESS_MODE_CLEAR_RATE = 0.8
 
-    Arenas of the current stage never attempted go first, uniformly at random,
-    so the whole stage is seen before any of it is repeated. After that, an
-    arena's weight is the variance of the Beta(1 + successes, 1 + failures)
-    posterior over its pass probability -- largest where that probability is
-    least pinned down.
 
-    Reliably passed arenas and never-passed ones both fall away, since both
-    ends of the posterior are certain, while partly-passed ones stay high:
-    the zone of proximal development read as an information criterion. The
-    decay is only ~1/attempts though, so nothing is ever abandoned and a task
-    that becomes solvable later still comes back. `revisit_temperature`
-    sharpens (< 1) or flattens (> 1) the resulting distribution.
+class SuccessDrivenSelector(ArenaSelector):
+    """The same stages as `StagedSelector`, but gated on what has been solved
+    rather than on the step count, and alternating between two draws.
+
+    An arena counts as cleared once it has been attempted at least
+    `SUCCESS_MODE_MIN_ATTEMPTS` times and passed on at least
+    `SUCCESS_MODE_CLEAR_RATE` of those attempts, so a single lucky pass does
+    not retire it -- the agent has to solve it repeatably.
+
+    The stage is the first one still holding an arena that is not cleared;
+    once every arena of a stage is cleared the next stage opens, so the
+    curriculum advances at the pace the agent actually learns. Because the
+    stages are cumulative, the current stage's arena list is also every arena
+    seen so far.
+
+    Trials alternate:
+
+      - odd trials draw uniformly from the arenas of the current stage that
+        are not cleared yet, so the unsolved edge of the curriculum gets
+        half of all episodes;
+      - even trials draw from every arena unlocked so far by a softmax over
+        each arena's failure rate (failures / attempts, an unattempted arena
+        counting as 1.0), so solved arenas keep being revisited in proportion
+        to how badly they still go and nothing is ever abandoned.
+
+    `revisit_temperature` is that softmax's temperature: < 1 sharpens it
+    towards the worst arenas, > 1 flattens it towards uniform.
+
+    Which trial is next and which stage is open both follow from the
+    attempt/success counts, so a resumed run continues where it left off
+    without any extra state.
     """
 
-    def __init__(self, root: Path, steps_per_stage: int, revisit_temperature: float, seed: int):
-        super().__init__(root=root, steps_per_stage=steps_per_stage, seed=seed)
+    def __init__(self, root: Path, revisit_temperature: float, seed: int):
+        stages = _stages_under(root)
+        super().__init__(stages[-1])
+        self._stages = stages
         self.revisit_temperature = revisit_temperature
+        self._rng = np.random.default_rng(seed)
 
-    def _learning_weight(self, arena: Arena) -> float:
+    def is_cleared(self, arena: Arena) -> bool:
+        """Passed on at least `SUCCESS_MODE_CLEAR_RATE` of the attempts, over
+        at least `SUCCESS_MODE_MIN_ATTEMPTS` of them."""
         attempts, successes = self.arena_record(arena)
-        # Beta(1+s, 1+f) posterior: mean (s+1)/(n+2), variance mean(1-mean)/(n+3).
-        # The +1/+1 pseudo-counts also keep a single attempt off 0.0 / 1.0.
-        mean = (successes + 1) / (attempts + 2)
-        return mean * (1.0 - mean) / (attempts + 3)
+        return (
+            attempts >= SUCCESS_MODE_MIN_ATTEMPTS
+            and successes >= SUCCESS_MODE_CLEAR_RATE * attempts
+        )
 
-    def _pick_from(self, stage_arenas: list[Arena]) -> Arena:
-        untried = [arena for arena in stage_arenas if self._attempts[arena.name] == 0]
-        if untried:
-            return untried[int(self._rng.integers(len(untried)))]
-        weights = np.array([self._learning_weight(arena) for arena in stage_arenas])
-        weights = weights ** (1.0 / self.revisit_temperature)
-        index = self._rng.choice(len(stage_arenas), p=weights / weights.sum())
-        return stage_arenas[int(index)]
+    def _stage_index(self) -> int:
+        """The first stage with an arena that is not cleared; the last stage
+        once everything is cleared."""
+        for index, stage_arenas in enumerate(self._stages):
+            if any(not self.is_cleared(arena) for arena in stage_arenas):
+                return index
+        return len(self._stages) - 1
+
+    def _failure_rate(self, arena: Arena) -> float:
+        attempts, successes = self.arena_record(arena)
+        if attempts == 0:
+            return 1.0
+        return 1.0 - successes / attempts
+
+    def _softmax_pick(self, arenas: list[Arena]) -> Arena:
+        logits = np.array([self._failure_rate(arena) for arena in arenas])
+        logits = logits / self.revisit_temperature
+        weights = np.exp(logits - logits.max())
+        index = self._rng.choice(len(arenas), p=weights / weights.sum())
+        return arenas[int(index)]
+
+    def next_arena(self, global_step: int) -> Arena:
+        stage_arenas = self._stages[self._stage_index()]
+        is_odd_trial = sum(self._attempts.values()) % 2 == 0
+        unsolved = [arena for arena in stage_arenas if not self.is_cleared(arena)]
+        # The stage only lacks unsolved arenas once the whole set is cleared,
+        # and then there is no next stage to move to, so fall back to softmax.
+        if is_odd_trial and unsolved:
+            return unsolved[int(self._rng.integers(len(unsolved)))]
+        return self._softmax_pick(stage_arenas)
 
     def info(self, global_step: int) -> dict:
-        cleared = sum(successes > 0 for successes in self._successes.values())
-        return {**super().info(global_step), "cleared_count": cleared}
+        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
+        return {"stage": self._stage_index() + 1, "cleared_count": cleared}
 
     def status(self, global_step: int) -> str:
-        stage_arenas = self._stage_arenas(global_step)
-        cleared = sum(self._successes[arena.name] > 0 for arena in stage_arenas)
+        stage_arenas = self._stages[self._stage_index()]
+        cleared = sum(self.is_cleared(arena) for arena in stage_arenas)
         untried = sum(self._attempts[arena.name] == 0 for arena in stage_arenas)
         return (
-            f"{super().status(global_step)}"
+            f"stage:{self._stage_index() + 1}/{len(self._stages)}"
+            f"  step:{global_step}"
             f"  cleared:{cleared}/{len(stage_arenas)} untried:{untried}"
         )
 
 
 class SequentialSelector(ArenaSelector):
-    """Every arena under `root` exactly once, in path order.
+    """Every arena under `root` in path (file name) order.
 
-    Over COMPETITION_DIR this is the paper's Testbed evaluation protocol: one
-    episode per arena, pass/fail by that arena's pass mark (see
-    scripts/test_trained_agent.py, which loops until `is_exhausted`).
+    `cycle` is what separates the two ways this is used:
+
+      - False: one pass, then `is_exhausted`. Over COMPETITION_DIR this is the
+        paper's Testbed protocol -- one episode per arena, pass/fail by that
+        arena's pass mark (scripts/test_trained_agent.py loops until exhausted).
+      - True: wrap back to the first arena instead of ending, so the set is
+        replayed until train.py's step_limit stops the run. This is the
+        curriculum-free training mode, for an arena set that is one flat
+        directory rather than a stage split.
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, cycle: bool):
         super().__init__(_arenas_under(root))
+        self.cycle = cycle
         self._next_index = 0
 
     @property
     def is_exhausted(self) -> bool:
-        return self._next_index >= len(self.arenas)
+        return not self.cycle and self._next_index >= len(self.arenas)
 
     def next_arena(self, global_step: int) -> Arena:
-        arena = self.arenas[self._next_index]
+        arena = self.arenas[self._next_index % len(self.arenas)]
         self._next_index += 1
         return arena
 
     def info(self, global_step: int) -> dict:
-        return {"arena_index": self._next_index - 1, "arena_total": len(self.arenas)}
+        return {
+            "arena_index": (self._next_index - 1) % len(self.arenas),
+            "arena_total": len(self.arenas),
+            "lap": (self._next_index - 1) // len(self.arenas),
+        }
 
     def status(self, global_step: int) -> str:
-        return f"{self._next_index}/{len(self.arenas)}"
+        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
+        return (
+            f"{(self._next_index - 1) % len(self.arenas) + 1}/{len(self.arenas)}"
+            f"  lap:{(self._next_index - 1) // len(self.arenas) + 1}"
+            f"  cleared:{cleared}/{len(self.arenas)}  step:{global_step}"
+        )
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
+        """Resume where the run left off: one episode per arena visit, so the
+        total attempt count is exactly how far into the order we are."""
+        super().load_state(arena_attempts, arena_successes, is_revisit)
+        self._next_index = sum(self._attempts.values())
+
+
+class RandomSelector(ArenaSelector):
+    """Every episode drawn uniformly at random from all arenas under `root`.
+
+    No curriculum and no ordering: unlike `SequentialSelector(cycle=True)` an
+    arena can repeat before the whole set has been seen, and unlike
+    `StagedSelector` nothing is withheld -- the full set is available from the
+    first episode. The curriculum-free baseline the staged modes are compared
+    against. Runs forever, so train.py's step_limit ends the run.
+    """
+
+    def __init__(self, root: Path, seed: int):
+        super().__init__(_arenas_under(root))
+        self._rng = np.random.default_rng(seed)
+
+    def next_arena(self, global_step: int) -> Arena:
+        return self.arenas[int(self._rng.integers(len(self.arenas)))]
+
+    def info(self, global_step: int) -> dict:
+        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
+        return {"arena_total": len(self.arenas), "cleared_count": cleared}
+
+    def status(self, global_step: int) -> str:
+        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
+        untried = sum(attempts == 0 for attempts in self._attempts.values())
+        return (
+            f"random  cleared:{cleared}/{len(self.arenas)}  untried:{untried}  step:{global_step}"
+        )
 
 
 def build_selector(
@@ -362,12 +517,11 @@ def build_selector(
             root=train_root, steps_per_stage=steps_per_stage, seed=seed
         ),
         "success": lambda: SuccessDrivenSelector(
-            root=train_root,
-            steps_per_stage=steps_per_stage,
-            revisit_temperature=revisit_temperature,
-            seed=seed,
+            root=train_root, revisit_temperature=revisit_temperature, seed=seed
         ),
-        "eval": lambda: SequentialSelector(root=COMPETITION_DIR),
+        "sequential": lambda: SequentialSelector(root=train_root, cycle=True),
+        "random": lambda: RandomSelector(root=train_root, seed=seed),
+        "eval": lambda: SequentialSelector(root=COMPETITION_DIR, cycle=False),
     }
     assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"
     return builders[mode]()
@@ -487,9 +641,12 @@ def _render_progress(groups: list[tuple[str, int, int, int]]) -> np.ndarray:
     return canvas
 
 
-def _render_topdown(
-    items: list[dict], agent_xyz: tuple[float, float, float] | None, header_lines: list[str]
-) -> np.ndarray:
+def _fit_square(image: np.ndarray, size_px: int) -> np.ndarray:
+    """Scale a camera frame to the pane the schematic would have filled."""
+    return cv2.resize(image, (size_px, size_px), interpolation=cv2.INTER_NEAREST)
+
+
+def _render_topdown(items: list[dict], agent_xyz: tuple[float, float, float] | None) -> np.ndarray:
     scale = _RENDER_SIZE_PX / _ARENA_SIZE_M
     canvas = np.full((_RENDER_SIZE_PX, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
 
@@ -532,7 +689,7 @@ def _render_topdown(
         cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
         cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
 
-    return np.vstack([_draw_header(header_lines, _RENDER_SIZE_PX), canvas])
+    return canvas
 
 
 class AnimalAIEnv(gym.Env):
@@ -544,13 +701,28 @@ class AnimalAIEnv(gym.Env):
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
-    def __init__(self, resolution: int, seed: int, base_port: int, selector: ArenaSelector):
+    def __init__(
+        self,
+        resolution: int,
+        seed: int,
+        base_port: int,
+        binary_path: str,
+        continuous_action: bool,
+        topdown_camera: bool,
+        topdown_resolution: int,
+        selector: ArenaSelector,
+    ):
         super().__init__()
+        self.continuous_action = continuous_action
+        self.topdown_camera = topdown_camera
+        self.topdown_resolution = topdown_resolution
         self.selector = selector
         self._arena_by_name = {arena.name: arena for arena in selector.arenas}
-        self.prompt = "Find and reach the green goal sphere; avoid red zones and yellow goals."
+        self.prompt = (
+            "Find and reach the green or yellow goal sphere; avoid red zones and red goals."
+        )
 
-        self.binary_path = str(Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64")
+        self.binary_path = str(Path(binary_path).expanduser())
         self.resolution = resolution
         self.seed_value = seed
         # Add jitter so parallel envs don't fight over the same socket.
@@ -564,12 +736,18 @@ class AnimalAIEnv(gym.Env):
 
         self._aai: AnimalAIEnvironment | None = None
         self._behavior_name: str | None = None
+        # How many continuous actions the binary accepts: 0 for an official
+        # build, 2 for one rebuilt with the hybrid action spec. Read off the
+        # behavior spec at launch.
+        self._continuous_size = 0
         self._latest_image: np.ndarray | None = None
+        # The overhead camera's view, on the binaries that have one. It is not
+        # part of `observation_space`: `render` draws it, the policy never sees it.
+        self._latest_topdown_image: np.ndarray | None = None
         self.global_step = 0
         self.episode_step = 0
         self.arena_name: str = ""
         self.pass_mark: float = 0.0
-        self.episode_step_limit: int = 0
         self._arena: Arena | None = None
         self._arena_items: list[dict] = []
         self._episode_return = 0.0
@@ -578,6 +756,10 @@ class AnimalAIEnv(gym.Env):
         self._agent_xyz: tuple[float, float, float] | None = None
         # (vx, vy, vz) agent velocity from the AAI vector observation.
         self._agent_velocity: np.ndarray = np.zeros(3, dtype=np.float32)
+        # Agent health from the AAI vector observation: it decays at a rate set
+        # by the arena's `t`, refills whenever a reward is collected, and the
+        # episode ends when it hits 0 -- the real "time left" of the episode.
+        self._agent_health: float = 0.0
 
     def set_global_step(self, global_step: int) -> None:
         """Resume hook: restore the step counter the curriculum schedules on."""
@@ -594,7 +776,22 @@ class AnimalAIEnv(gym.Env):
     def _ensure_started(self):
         if self._aai is not None:
             return
-        self._aai = AnimalAIEnvironment(
+        # Queued before the constructor's first reset, which is when the
+        # channel's messages reach Unity.
+        parameters_channel = EnvironmentParametersChannel()
+        parameters_channel.set_float_parameter(
+            CONTINUOUS_ACTIONS_KEY, float(self.continuous_action)
+        )
+        environment_class = _aai_environment_class(
+            [
+                "--topDownCamera",
+                str(int(self.topdown_camera)),
+                "--topDownResolution",
+                str(self.topdown_resolution),
+            ]
+        )
+        self._aai = environment_class(
+            side_channels=[parameters_channel],
             file_name=self.binary_path,
             arenas_configurations=str(self.selector.arenas[0].path),
             seed=self.seed_value,
@@ -618,27 +815,43 @@ class AnimalAIEnv(gym.Env):
             # paper's scripts had it. Setting it would only change how the same
             # physics steps are split across frames.
             captureFrameRate=0,
-            # `--no-graphics-monitor` enables off-screen rendering on a host
-            # without a window manager. `no_graphics=True` (the alternative
-            # for headless) disables the renderer entirely and produces a
-            # solid-colour image, which is unusable for vision policies.
+            # `no_graphics=True` (the alternative for headless) disables the
+            # renderer entirely and produces a solid-color image, which is
+            # unusable for vision policies.
             no_graphics=False,
-            additional_args=["--no-graphics-monitor"],
             base_port=self.base_port,
             inference=False,
             use_YAML=True,
         )
         self._behavior_name = next(iter(self._aai.behavior_specs.keys()))
+        spec = self._aai.behavior_specs[self._behavior_name]
+        # ML-Agents sorts an agent's sensors by name, so the observations arrive
+        # as ["CameraSensor", "TopDownCameraSensor", "VectorSensor"] -- first
+        # person, overhead, scalars. The overhead camera is there only on a
+        # rebuilt binary running with topdown_camera, which leaves the scalars
+        # last either way.
+        self._observation_count = len(spec.observation_specs)
+        assert self._observation_count in (2, 3), self._observation_count
+        self._continuous_size = spec.action_spec.continuous_size
+        assert self._continuous_size == 2 or not self.continuous_action, (
+            f"{self.binary_path} exposes {self._continuous_size} continuous actions; "
+            "continuous_action=True needs a binary rebuilt from animal-ai-unity."
+        )
 
     def _decode_obs(self, obs_chw_float: np.ndarray) -> np.ndarray:
         # AAI emits float32 in [0, 1] with shape (3, H, W).
         return (obs_chw_float.transpose(1, 2, 0) * 255.0).astype(np.uint8)
 
     def _read_observation(self, steps) -> None:
-        # Vector obs layout (useCamera=True, useRayCasts=False): steps.obs[1][0]
-        # is [health, vx, vy, vz, x, y, z].
-        vec = steps.obs[1][0]
+        # Vector obs layout (useCamera=True, useRayCasts=False): the last
+        # observation is [health, vx, vy, vz, x, y, z].
+        vec = steps.obs[self._observation_count - 1][0]
         self._latest_image = self._decode_obs(steps.obs[0][0])
+        # Watched in `render`, never handed to the policy.
+        self._latest_topdown_image = (
+            self._decode_obs(steps.obs[1][0]) if self._observation_count == 3 else None
+        )
+        self._agent_health = float(vec[0])
         self._agent_xyz = (float(vec[4]), float(vec[5]), float(vec[6]))
         self._agent_velocity = np.array(
             [float(vec[1]), float(vec[2]), float(vec[3])], dtype=np.float32
@@ -653,24 +866,38 @@ class AnimalAIEnv(gym.Env):
             f"Velocity: ({vx:+.2f}, {vy:+.2f}, {vz:+.2f}). "
             f"Return so far: {self._episode_return:+.2f}. "
             f"Pass mark: {self.pass_mark:+.2f}. "
+            f"Return needed: {self.pass_mark - self._episode_return:+.2f}. "
+            f"Health: {self._agent_health:.2f}. "
             f"Global step: {self.global_step}. "
-            f"Episode step: {self.episode_step}/{self.episode_step_limit} "
-            f"({self._remaining_step()} left)."
+            f"Episode step: {self.episode_step}."
         )
 
-    def _remaining_step(self) -> int:
-        return max(self.episode_step_limit - self.episode_step, 0)
+    def _shape_reward(self, reward: float, episode_done: bool) -> float:
+        """Reaching a goal is worth more than the arena says, climbing is encouraged,
+        walking backwards is discouraged, and an episode ends with a bonus for having
+        cleared the arena's pass mark or a penalty for not."""
+        velocity = self._agent_velocity
+        if reward > 0.1:
+            reward += GOAL_BONUS
+        if velocity[1] > 0.01:
+            reward += float(velocity[1]) * RAMPS_COEF
+        if velocity[2] < 0:
+            reward += float(velocity[2]) * BACK_MOVE_COEF
+        if episode_done:
+            cleared = self._episode_return >= self.pass_mark
+            reward += PASS_MARK_BONUS if cleared else -PASS_MARK_BONUS
+        return reward
 
-    def _build_info(self) -> dict:
+    def _build_info(self, shaped_reward: float) -> dict:
         info = {
             "task_prompt": self._build_prompt(),
+            "shaped_reward": shaped_reward,
             "arena_name": self.arena_name,
             "arena_yaml": str(self._arena.path),
             "pass_mark": self.pass_mark,
             "global_step": self.global_step,
             "episode_step": self.episode_step,
-            "episode_step_limit": self.episode_step_limit,
-            "remaining_step": self._remaining_step(),
+            "health": self._agent_health,
             "velocity": self._agent_velocity,
             "agent_xyz": self._agent_xyz,
         }
@@ -691,22 +918,25 @@ class AnimalAIEnv(gym.Env):
         )
 
         self.arena_name = self._arena.name
-        self.pass_mark, self.episode_step_limit, self._arena_items = _parse_arena(self._arena.path)
+        self.pass_mark, self._arena_items = _parse_arena(self._arena.path)
         self._aai.reset(arenas_configurations=str(self._arena.path))
         self.episode_step = 0
         self._episode_return = 0.0
 
         decision_steps, _ = self._aai.get_steps(self._behavior_name)
         self._read_observation(decision_steps)
-        return self._latest_image, self._build_info()
+        return self._latest_image, self._build_info(0.0)
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
         self.global_step += 1
-        a = np.asarray(action, dtype=np.float32)
+        a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0).reshape(1, 2)
+        # Both halves go out every step; which one Unity obeys was fixed at
+        # launch by CONTINUOUS_ACTIONS_KEY. The slice is empty for an official
+        # binary, which has no continuous actions to fill.
         action_tuple = ActionTuple(
-            continuous=np.zeros((1, 0), dtype=np.float32),
+            continuous=a[:, : self._continuous_size],
             discrete=np.array(
-                [[_to_discrete(float(a[0])), _to_discrete(float(a[1]))]], dtype=np.int32
+                [[_to_discrete(float(a[0, 0])), _to_discrete(float(a[0, 1]))]], dtype=np.int32
             ),
         )
         self._aai.set_actions(self._behavior_name, action_tuple)
@@ -714,7 +944,7 @@ class AnimalAIEnv(gym.Env):
 
         decision_steps, terminal_steps = self._aai.get_steps(self._behavior_name)
         episode_over = len(terminal_steps) > 0
-        # `interrupted` is AAI's max-step (arena `t`) timeout, i.e. a time
+        # `interrupted` is AAI running the agent's health down to 0, i.e. a time
         # limit rather than a real terminal (goal reached / death zone).
         interrupted = episode_over and bool(terminal_steps.interrupted[0])
         steps = terminal_steps if episode_over else decision_steps
@@ -726,21 +956,31 @@ class AnimalAIEnv(gym.Env):
         terminated = episode_over and not interrupted
         truncated = interrupted
 
+        shaped_reward = self._shape_reward(reward, terminated or truncated)
+
         if not episode_over:
-            return self._latest_image, reward, terminated, truncated, self._build_info()
+            return (
+                self._latest_image,
+                reward,
+                terminated,
+                truncated,
+                self._build_info(shaped_reward),
+            )
 
         success = self._episode_return >= self.pass_mark
-        # Pass-mark bonus: reward crossing the clear threshold, penalize missing it.
-        # Computed from the pre-bonus return, then folded into this tick's reward.
-        reward += 1.0 if success else -1.0
         # Before _build_info, so the selector reports post-episode progress.
         self.selector.on_episode_end(self._arena, success)
-        info = self._build_info()
+        info = self._build_info(shaped_reward)
         info["success"] = bool(success)
         return self._latest_image, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
-        """This episode's arena from above, beside the arena set's coverage."""
+        """This episode's arena from above, beside the arena set's coverage.
+
+        The arena pane is the overhead camera when the binary renders one, and
+        otherwise a schematic drawn from the arena yaml -- the camera shows where
+        everything is, the schematic only where everything started.
+        """
         if self.render_mode != "rgb_array":
             return None
         attempts, successes = self.selector.arena_record(self._arena)
@@ -748,7 +988,12 @@ class AnimalAIEnv(gym.Env):
             f"{self.arena_name}  {successes}/{attempts}",
             self.selector.status(self.global_step),
         ]
-        topdown = _render_topdown(self._arena_items, self._agent_xyz, header_lines)
+        arena = (
+            _fit_square(self._latest_topdown_image, _RENDER_SIZE_PX)
+            if self._latest_topdown_image is not None
+            else _render_topdown(self._arena_items, self._agent_xyz)
+        )
+        topdown = np.vstack([_draw_header(header_lines, _RENDER_SIZE_PX), arena])
         progress = _render_progress(self.selector.progress_by_group())
         padding = np.full(
             (topdown.shape[0] - progress.shape[0], progress.shape[1], 3), 240, dtype=np.uint8
@@ -766,6 +1011,8 @@ if __name__ == "__main__":
         resolution=96,
         seed=0,
         base_port=5005,
+        binary_path="~/animalai_env/Linux/animalAI.x86_64",
+        continuous_action=False,
         selector=StagedSelector(steps_per_stage=2_000_000, seed=0),
     )
     for episode in range(8):

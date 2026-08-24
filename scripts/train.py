@@ -114,7 +114,13 @@ def save_episode_data(
 
 
 def save_checkpoint(result_dir: Path, network, agent) -> None:
-    """Save trainable weights (checkpoint.pt) and optimizer states (optimizer.pt)."""
+    """Save trainable weights (checkpoint.pt) and optimizer states (optimizer.pt).
+
+    A no-op for the zero-shot VLM baseline, which carries no network and so has
+    nothing to checkpoint."""
+    if network is None:
+        return
+
     module = network._orig_mod if hasattr(network, "_orig_mod") else network
     trainable_state = {
         name: param.detach().cpu()
@@ -122,26 +128,26 @@ def save_checkpoint(result_dir: Path, network, agent) -> None:
         if param.requires_grad
     }
     torch.save(trainable_state, result_dir / "checkpoint.pt")
-    optimizer_state = {
-        "actor": agent.actor_optimizer.state_dict(),
-        "critic": agent.critic_optimizer.state_dict(),
-    }
-    torch.save(optimizer_state, result_dir / "optimizer.pt")
+    torch.save(agent.optimizer_state_dict(), result_dir / "optimizer.pt")
 
 
 def write_arena_stats(path: Path, curriculum: dict, best_score_per_arena: dict) -> None:
     """Per-arena record (attempts / successes / success rate / best score).
 
+    `cleared` is the arena selector's own verdict, which depends on the mode:
+    one pass is enough for most, while "success" wants a repeatable pass rate.
+
     Human-readable, and also read back by ``load_resume_state`` on resume."""
     attempts = curriculum["arena_attempts"]
     successes = curriculum["arena_successes"]
+    cleared = curriculum["arena_cleared"]
     with open(path, "w") as f:
         f.write("arena\tattempts\tsuccesses\tsuccess_rate\tbest_score\tcleared\n")
         for arena in sorted(attempts):
             success_rate = successes[arena] / attempts[arena]
             f.write(
                 f"{arena}\t{attempts[arena]}\t{successes[arena]}\t{success_rate:.4f}"
-                f"\t{best_score_per_arena[arena]:.6f}\t{int(successes[arena] > 0)}\n"
+                f"\t{best_score_per_arena[arena]:.6f}\t{int(cleared[arena])}\n"
             )
 
 
@@ -156,8 +162,11 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
         "episode_id": 0,
         "episode_count": 0,
         "score_sum_all": 0.0,
+        "success_sum_all": 0.0,
+        "success_episode_count": 0,
         "best_score": -float("inf"),
         "score_list": [],
+        "success_list": [],
         "is_revisit": False,
         "best_score_per_arena": {},
     }
@@ -172,9 +181,7 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
 
     optimizer_path = resume_dir / "optimizer.pt"
     if optimizer_path.exists():
-        optimizer_state = torch.load(optimizer_path, map_location="cuda")
-        agent.actor_optimizer.load_state_dict(optimizer_state["actor"])
-        agent.critic_optimizer.load_state_dict(optimizer_state["critic"])
+        agent.load_optimizer_state_dict(torch.load(optimizer_path, map_location="cuda"))
         print(f"Resume: loaded optimizer states from {optimizer_path}")
     else:
         print(f"Resume: {optimizer_path} not found, optimizers start fresh")
@@ -192,14 +199,15 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
         attempts = {}
         successes = {}
         best_scores = {}
+        cleared_count = 0
         for row in arena_stats_path.read_text().splitlines()[1:]:
-            arena, n_attempt, n_success, _rate, best, _cleared = row.split("\t")
+            arena, n_attempt, n_success, _rate, best, cleared = row.split("\t")
             attempts[arena] = int(n_attempt)
             successes[arena] = int(n_success)
             best_scores[arena] = float(best)
+            cleared_count += int(cleared)
         set_curriculum(attempts, successes, state["is_revisit"])
         state["best_score_per_arena"] = best_scores
-        cleared_count = sum(n > 0 for n in successes.values())
         print(
             f"Resume: loaded {len(attempts)} arena records from {arena_stats_path} "
             f"(cleared={cleared_count})"
@@ -276,6 +284,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     score_list = []
     score_sum_all = 0.0
     episode_count = 0
+    success_list = []
+    success_sum_all = 0.0
+    success_episode_count = 0
     best_score = -float("inf")
     best_score_per_arena: dict[str, float] = {}
     # Don't reset the env here — the first iteration of the episode loop
@@ -286,17 +297,24 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     time_limit_sec = args.time_limit_hour * 3600
     checkpoint_interval = max(1, step_limit // 10)
 
-    network = build_network(
-        args,
-        observation_space_shape=env.observation_space["image"].shape,
-        action_space_shape=env.action_space.shape,
-        parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
-        device=torch.device("cuda"),
+    # The zero-shot VLM baseline is not trained, so it has no network to build
+    # and nothing to optimize.
+    trains_a_network = args.agent_type != "zeroshot_vlm"
+    network = (
+        build_network(
+            args,
+            observation_space_shape=env.observation_space["image"].shape,
+            action_space_shape=env.action_space.shape,
+            parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
+            device=torch.device("cuda"),
+        )
+        if trains_a_network
+        else None
     )
 
     agent = build_agent(env, network, args)
 
-    parameter_count = sum(p.numel() for p in agent.network.parameters())
+    parameter_count = sum(p.numel() for p in agent.network.parameters()) if trains_a_network else 0
     print(f"Parameter count: {parameter_count:,}")
 
     episode_id = 0
@@ -306,8 +324,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         episode_id = resume_state["episode_id"]
         episode_count = resume_state["episode_count"]
         score_sum_all = resume_state["score_sum_all"]
+        success_sum_all = resume_state["success_sum_all"]
+        success_episode_count = resume_state["success_episode_count"]
         best_score = resume_state["best_score"]
         score_list = list(resume_state["score_list"])
+        success_list = list(resume_state["success_list"])
         best_score_per_arena = dict(resume_state["best_score_per_arena"])
         print(f"Resumed from {args.resume_dir}: global_step={global_step} episode_id={episode_id}")
         set_global_step = getattr(env.unwrapped, "set_global_step", None)
@@ -460,6 +481,14 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         if "pass_mark" in env_info:
             success = float(score >= env_info["pass_mark"])
             data_dict["success"] = success
+            success_sum_all += success
+            success_episode_count += 1
+            success_list.append(success)
+            success_list = success_list[-eval_range:]
+            data_dict["success_episode_count"] = success_episode_count
+            data_dict["total_success_rate"] = success_sum_all / success_episode_count
+            if len(success_list) >= eval_range:
+                data_dict["recent_success_rate"] = float(np.mean(success_list))
             arena_name = env_info.get("arena_name", "")
             if arena_name:
                 data_dict[f"success/{arena_name}"] = success
@@ -475,7 +504,10 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         if result_dir is not None:
             if log_episode_writer is None:
                 log_episode_file = open(log_episode_path, "w", newline="")
-                fieldnames = list(data_dict.keys()) + ["recent_average_score"]
+                fieldnames = list(data_dict.keys()) + [
+                    "recent_average_score",
+                    "recent_success_rate",
+                ]
                 log_episode_writer = csv.DictWriter(
                     log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
                 )
@@ -550,8 +582,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 "episode_id": episode_id + 1,
                 "episode_count": episode_count,
                 "score_sum_all": float(score_sum_all),
+                "success_sum_all": float(success_sum_all),
+                "success_episode_count": success_episode_count,
                 "best_score": float(best_score),
                 "score_list": [float(s) for s in score_list],
+                "success_list": [float(s) for s in success_list],
             }
             get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
             if get_curriculum is not None:
@@ -576,7 +611,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         # A fresh env starts its counter at 0, but the network reads the global
         # step as an observation and was trained at this run's values.
         eval_env.unwrapped.set_global_step(global_step)
-        network.eval()
+        if network is not None:
+            network.eval()
         testbed_metrics = run_testbed(
             agent,
             eval_env,
@@ -624,12 +660,7 @@ def hydra_main(cfg: DictConfig) -> None:
         print("Because a headless environment is detected, rendering is automatically disabled.")
         cfg.render = 0
 
-    # ``agent_type`` is the agent class; ``learning_mode`` (when present) is the
-    # off_policy / streaming variant — keep it in the run name so the two stay
-    # distinguishable now that both map to the same StandardAgent class.
-    learning_mode = OmegaConf.select(cfg, "learning_mode", default=None)
-    agent_tag = cfg.agent_type.upper() + (f"_{learning_mode.upper()}" if learning_mode else "")
-    exp_name = f"{agent_tag}_{cfg.exp_name}"
+    exp_name = f"{cfg.agent_type.upper()}_{cfg.exp_name}"
     seed = cfg.seed if cfg.seed != -1 else np.random.randint(0, 10000)
 
     for i in range(cfg.trial_num):

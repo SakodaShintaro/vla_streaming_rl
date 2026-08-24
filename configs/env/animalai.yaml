@@ -6,7 +6,7 @@ env_id: AnimalAI-v0
 # remainder, so the paper's 2M x 10 + 5M = 25M is step_limit == 12.5 x
 # steps_per_stage; the values below keep that ratio at 1/1000 scale.
 step_limit: 400_000
-image_save_interval: 20
+image_save_interval: 40
 
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_env
@@ -16,22 +16,52 @@ env_factory:
   #     staged  : train with the Animal-AI paper's cumulative 11-stage
   #               curriculum, one stage per subdirectory of train_arena_root,
   #               drawing uniformly from the arenas the stage has unlocked.
-  #     success : the same stages, but within a stage prefer the arenas there
-  #               is still most to learn from (untried ones first).
+  #     success : the same stages, but a stage opens the next one once all of
+  #               its arenas have been passed (steps_per_stage is ignored);
+  #               odd trials draw uniformly from the stage's still-unsolved
+  #               arenas, even trials from every arena unlocked so far by a
+  #               softmax over their failure rates.
+  #     sequential : no curriculum. Every arena under train_arena_root in file
+  #               name order, wrapping back to the first once the last has run,
+  #               until step_limit. For a flat arena directory with no stage
+  #               subdirectories (steps_per_stage is ignored).
+  #     random  : no curriculum. Every episode draws uniformly at random from
+  #               all arenas under train_arena_root, with no ordering and
+  #               nothing withheld (steps_per_stage is ignored).
   #     eval    : run each of the 900 external/animal-ai/configs/competition/
   #               arenas once, in order (the paper's Testbed protocol).
   #   Training arenas and competition arenas are disjoint, so "eval" never
   #   scores an arena either training mode has seen.
-  mode: staged
+  mode: success
   # - train_arena_root: where the two training modes read their arenas from,
   #   recursively. Point it at an augmented copy to train on a larger set; the
   #   per-stage count then follows whatever is on disk (30 as split, 60 once
   #   mirrored copies sit alongside). "eval" ignores this and always uses the
   #   competition arenas, so the benchmark cannot drift.
-  train_arena_root: ./external/animal-ai/configs/paper_curriculum_split
-  # - steps_per_stage ("staged"/"success"): how long each of the 11 stages lasts.
+  train_arena_root: ./external/animal-ai/configs/paper_curriculum_split_mirrored
+  # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 40_000
-  # - revisit_temperature ("success"): sharpens (< 1) or flattens (> 1) the
-  #   Beta-posterior-variance weighting once every arena has been attempted
-  #   once
+  # - revisit_temperature ("success"): temperature of the even-trial failure
+  #   rate softmax; < 1 sharpens it towards the worst arenas, > 1 flattens it
+  #   towards uniform
   revisit_temperature: 1.0
+  binary_path: ~/animalai_env/4.3.2_alpha1/Linux/animalAI.x86_64
+  # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
+  #     false : discretize to the official MultiDiscrete([3, 3]) branches with a
+  #             +/-1/3 dead-zone. Works with any Animal-AI binary.
+  #     true  : pass the value through as a throttle / turn rate. Requires a
+  #             binary rebuilt from animal-ai-unity with the hybrid action spec
+  #             (branch "feat/continuous_actions"); +/-1 there matches the discrete
+  #             branches exactly, so it is a strict superset of false.
+  continuous_action: false
+  # - topdown_camera: have the binary render a second camera looking straight
+  #   down at the whole arena. It never reaches the policy (it is not part of
+  #   observation_space); `render` draws it in the pane the schematic would have
+  #   filled, so a run can be watched as it happens. Costs roughly a quarter of
+  #   the environment's throughput, so turn it off for runs nobody is watching.
+  #   Ignored by an official binary.
+  topdown_camera: true
+  # - topdown_resolution: that camera's square resolution, independent of
+  #   `resolution` since only a human looks at it. Cost grows with the pixel
+  #   count, so this is the knob to turn when the view is too slow or too coarse.
+  topdown_resolution: 96

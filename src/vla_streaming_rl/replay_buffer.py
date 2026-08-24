@@ -29,9 +29,10 @@ class ReplayBufferData:
     velocity_z: torch.Tensor  # (B, T, 1)
     episode_return: torch.Tensor  # (B, T, 1)
     pass_mark: torch.Tensor  # (B, T, 1)
+    remaining_return: torch.Tensor  # (B, T, 1)
     global_step: torch.Tensor  # (B, T, 1)
     episode_step: torch.Tensor  # (B, T, 1)
-    remaining_step: torch.Tensor  # (B, T, 1)
+    health: torch.Tensor  # (B, T, 1)
 
 
 class ReplayBuffer:
@@ -74,9 +75,10 @@ class ReplayBuffer:
         self.velocity_z = init_tensor((size, 1))
         self.episode_return = init_tensor((size, 1))
         self.pass_mark = init_tensor((size, 1))
+        self.remaining_return = init_tensor((size, 1))
         self.global_step = init_tensor((size, 1))
         self.episode_step = init_tensor((size, 1))
-        self.remaining_step = init_tensor((size, 1))
+        self.health = init_tensor((size, 1))
         self.task_prompt_token_ids = torch.full(
             (size, max_prompt_tokens),
             pad_token_id,
@@ -112,9 +114,10 @@ class ReplayBuffer:
             self.velocity_z[:curr_size].to(self.output_device, non_blocking=True),
             self.episode_return[:curr_size].to(self.output_device, non_blocking=True),
             self.pass_mark[:curr_size].to(self.output_device, non_blocking=True),
+            self.remaining_return[:curr_size].to(self.output_device, non_blocking=True),
             self.global_step[:curr_size].to(self.output_device, non_blocking=True),
             self.episode_step[:curr_size].to(self.output_device, non_blocking=True),
-            self.remaining_step[:curr_size].to(self.output_device, non_blocking=True),
+            self.health[:curr_size].to(self.output_device, non_blocking=True),
         )
 
     def add(
@@ -130,9 +133,10 @@ class ReplayBuffer:
         velocity_z: float,
         episode_return: float,
         pass_mark: float,
+        remaining_return: float,
         global_step: float,
         episode_step: float,
-        remaining_step: float,
+        health: float,
     ) -> None:
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
@@ -145,9 +149,10 @@ class ReplayBuffer:
         self.velocity_z[self.idx].fill_(velocity_z)
         self.episode_return[self.idx].fill_(episode_return)
         self.pass_mark[self.idx].fill_(pass_mark)
+        self.remaining_return[self.idx].fill_(remaining_return)
         self.global_step[self.idx].fill_(global_step)
         self.episode_step[self.idx].fill_(episode_step)
-        self.remaining_step[self.idx].fill_(remaining_step)
+        self.health[self.idx].fill_(health)
 
         self.task_prompt_token_ids[self.idx].fill_(self.pad_token_id)
         if len(task_prompt_token_ids) > self.max_prompt_tokens:
@@ -189,9 +194,10 @@ class ReplayBuffer:
             self.velocity_z[seq_indices].to(self.output_device, non_blocking=True),
             self.episode_return[seq_indices].to(self.output_device, non_blocking=True),
             self.pass_mark[seq_indices].to(self.output_device, non_blocking=True),
+            self.remaining_return[seq_indices].to(self.output_device, non_blocking=True),
             self.global_step[seq_indices].to(self.output_device, non_blocking=True),
             self.episode_step[seq_indices].to(self.output_device, non_blocking=True),
-            self.remaining_step[seq_indices].to(self.output_device, non_blocking=True),
+            self.health[seq_indices].to(self.output_device, non_blocking=True),
         )
 
     def get_latest(self, seq_len: int) -> ReplayBufferData:
@@ -215,7 +221,8 @@ class ReplayBuffer:
             self.velocity_z[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.episode_return[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.pass_mark[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.remaining_return[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.global_step[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.episode_step[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.remaining_step[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.health[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
         )

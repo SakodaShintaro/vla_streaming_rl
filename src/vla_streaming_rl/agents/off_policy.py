@@ -1,4 +1,20 @@
 # SPDX-License-Identifier: MIT
+"""Off-policy learning mode: act now, learn later from a large replay buffer.
+
+Every tick is stored; once ``learning_starts`` ticks have gone by, one gradient
+step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
+before the action of that tick is chosen. Below ``learning_starts`` the env is
+driven by uniform random actions, so the buffer fills with something other than
+an untrained policy's output while the network's recurrent state still follows
+the episode.
+
+The learning mode is the class and the network is a constructor argument, so
+this file is one half of the (learning mode) x (network) grid; the streaming
+half is ``streaming.py``. The two share no base beyond :class:`Agent`, which
+costs some repetition in the per-tick path and buys each mode being readable
+end to end in one file.
+"""
+
 from typing import Any
 
 import gymnasium as gym
@@ -8,19 +24,17 @@ from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.networks.interface import InferInput
-from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 
 
-class StandardAgent(Agent):
+class OffPolicyAgent(Agent):
     def __init__(
         self,
         *,
         observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: nn.Module,
-        learning_mode: str,
         normalizing_by_return: bool,
         learning_starts: int,
         batch_size: int,
@@ -28,18 +42,16 @@ class StandardAgent(Agent):
         use_done: bool,
         seq_len: int,
         horizon: int,
-        use_eligibility_trace: bool,
         actor_lr: float,
         critic_lr: float,
         weight_decay: float,
-        gamma: float,
-        et_lambda: float,
         buffer_size: int,
         buffer_device: str,
         max_prompt_tokens: int,
         pad_token_id: int,
+        reset_on_episode_end: bool,
     ) -> None:
-        super().__init__(learning_mode=learning_mode, horizon=horizon)
+        super().__init__(horizon=horizon, reset_on_episode_end=reset_on_episode_end)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
@@ -69,28 +81,16 @@ class StandardAgent(Agent):
         self.network = network
         self.rnn_state = self.network.init_state().to(self.device)
 
-        # Actor / critic optimizer split (critic == value head). The critic uses
-        # AdamET (eligibility traces) only in streaming-trace mode, AdamW
-        # otherwise; the actor is always AdamW.
-        self.use_eligibility_trace = bool(use_eligibility_trace)
+        # Actor / critic optimizer split (critic == value head); both AdamW,
+        # the replayed update has no trace to carry.
         critic_params = list(self.network.value_head.parameters())
         critic_param_ids = {id(p) for p in critic_params}
         actor_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]
         self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
-        if learning_mode == "streaming" and self.use_eligibility_trace:
-            self.critic_optimizer = AdamET(
-                critic_params, lr=critic_lr, gamma=gamma, et_lambda=et_lambda
-            )
-        else:
-            self.critic_optimizer = optim.AdamW(
-                critic_params, lr=critic_lr, weight_decay=weight_decay
-            )
+        self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay)
 
-        # Off-policy keeps a large replay buffer; streaming keeps only the one
-        # window it trains on (the latest seq_len + horizon transition).
-        buffer_capacity = buffer_size if learning_mode == "off_policy" else seq_len + horizon
         self.rb = ReplayBuffer(
-            size=buffer_capacity,
+            size=buffer_size,
             seq_len=self.seq_len + self.horizon,
             obs_shape=self.network.observation_space_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
@@ -103,13 +103,15 @@ class StandardAgent(Agent):
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
         self._episode_reset = False
+        # the first observation of a run starts an episode
+        self._previous_done = True
         # Shared representation fed to policy/value/prediction heads on the
         # most recent select_action inference (used by scripts/probe.py).
         self.last_features: torch.Tensor | None = None
 
     # --- agent surface -----------------------------------------------------
 
-    def _step_streaming(
+    def step(
         self,
         global_step: int,
         obs: dict[str, Any],
@@ -118,93 +120,48 @@ class StandardAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        metrics = {}
-        episode_done = terminated or truncated
-        if episode_done:
-            self.action_chunk = None
-            self.chunk_step = 0
-            self._episode_reset = self.use_done
-        metrics["action_norm"] = np.linalg.norm(self.prev_action)
-        if not self.normalizing_by_return:
-            self.reward_processor.update(reward)
-        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
-        (
-            image,
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            global_step_obs,
-            episode_step_obs,
-            remaining_step_obs,
-            task_prompt_token_ids,
-        ) = self._preprocess(obs, info)
-        normalized_action = (self.prev_action - self.action_bias) / self.action_scale
-        self.rb.add(
-            image,
-            reward,
-            episode_done if self.use_done else False,
-            self.rnn_state.squeeze(0),
-            torch.from_numpy(normalized_action).to(self.device),
-            task_prompt_token_ids,
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            global_step_obs,
-            episode_step_obs,
-            remaining_step_obs,
-        )
-        if self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self._to_env_action(self.action_chunk[self.chunk_step])
-            self.prev_action = action
-            self.chunk_step += 1
-            metrics["chunk_step"] = self.chunk_step
-            return StepResult(action=action, metrics=metrics, panels={})
-
-        # new chunk: a single grad-enabled forward yields both the action chunk
-        # and the training loss (fused inference + training).
-        data = self.rb.get_latest(self.seq_len + self.horizon)
-        data.rewards = self.reward_processor.normalize(data.rewards)
-        result = self.network.infer_and_compute_loss(data)
-
-        infer_result = result.infer_result
-        self.rnn_state = infer_result.rnn_state
-        metrics.update(infer_result.value_report)
-        action_chunk = infer_result.action[0].cpu().numpy()
-        self.action_chunk = action_chunk
-        self.chunk_step = 1
-        action = self._to_env_action(action_chunk[0])
-        self.prev_action = action
-        metrics["chunk_step"] = self.chunk_step
-        metrics.update(result.loss_result.info)
-
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        if self.use_eligibility_trace:
-            # Actor: backward actor-only loss → encoder + actor grads.
-            result.et_info.actor_entropy_loss.backward(retain_graph=True)
-            # Critic: backward -V(s) → value_head grads only (detached from encoder).
-            result.et_info.neg_value.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
-            self.actor_optimizer.step()
-            self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
-            self._episode_reset = False
-        else:
-            result.loss_result.loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+        train_metrics = {}
+        if global_step == self.learning_starts:
+            print(f"Start training at global step {global_step}.")
+        if (
+            global_step >= self.learning_starts
+            and global_step % self.horizon == 0
+            and self.rb.num_stored() >= self.batch_size + self.rb.seq_len
+        ):
+            data = self.rb.sample(self.batch_size)
+            data.rewards = self.reward_processor.normalize(data.rewards)
+            result = self.network.compute_loss(data)
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            result.loss.backward()
+            nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
             self.critic_optimizer.step()
-
-        return StepResult(action=action, metrics=metrics, panels={})
+            train_metrics = result.info
+        step_result = self.select_action(global_step, obs, reward, terminated, truncated, info)
+        step_result.metrics.update(train_metrics)
+        return step_result
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
         return {}
 
+    def optimizer_state_dict(self) -> dict:
+        return {
+            "actor": self.actor_optimizer.state_dict(),
+            "critic": self.critic_optimizer.state_dict(),
+        }
+
+    def load_optimizer_state_dict(self, state: dict) -> None:
+        self.actor_optimizer.load_state_dict(state["actor"])
+        self.critic_optimizer.load_state_dict(state["critic"])
+
     # --- per-tick machinery ------------------------------------------------
+
+    def _reset_rnn_state_if_fresh(self, episode_done: bool) -> None:
+        if self._previous_done and self.reset_on_episode_end:
+            self.rnn_state = self.network.init_state().to(self.device)
+        self._previous_done = episode_done
 
     @torch.no_grad()
     def select_action(
@@ -216,16 +173,23 @@ class StandardAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
+        del reward
         metrics = {}
         episode_done = terminated or truncated
+        # What the agent trains on, against what the env reported as its score.
+        shaped_reward = info["shaped_reward"]
+        metrics["shaped_reward"] = shaped_reward
+        self._reset_rnn_state_if_fresh(episode_done)
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
-            self.reward_processor.update(reward)
-        metrics["processed_reward"] = self.reward_processor.normalize(torch.tensor(reward)).item()
+            self.reward_processor.update(shaped_reward)
+        metrics["processed_reward"] = self.reward_processor.normalize(
+            torch.tensor(shaped_reward)
+        ).item()
         (
             image,
             velocity_x,
@@ -233,15 +197,16 @@ class StandardAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            remaining_return,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
             task_prompt_token_ids,
         ) = self._preprocess(obs, info)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
-            reward,
+            shaped_reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
@@ -251,12 +216,13 @@ class StandardAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            remaining_return,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
         )
 
-        warmup = self.learning_mode == "off_policy" and global_step < self.learning_starts
+        warmup = global_step < self.learning_starts
 
         if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -278,9 +244,10 @@ class StandardAgent(Agent):
                 velocity_z_seq=latest_data.velocity_z,
                 episode_return_seq=latest_data.episode_return,
                 pass_mark_seq=latest_data.pass_mark,
+                remaining_return_seq=latest_data.remaining_return,
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
-                remaining_step_seq=latest_data.remaining_step,
+                health_seq=latest_data.health,
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -294,6 +261,8 @@ class StandardAgent(Agent):
         metrics["chunk_step"] = self.chunk_step
 
         if warmup:
+            # The network was queried anyway so its recurrent state keeps
+            # following the episode; only the action it chose is dropped.
             action = self.action_space.sample()
             self.action_chunk = None
             self.chunk_step = 0
@@ -304,27 +273,30 @@ class StandardAgent(Agent):
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
         the image tensor, the raw scalar observations (velocity_x, velocity_y,
-        velocity_z, episode_return, pass_mark, global_step, episode_step,
-        remaining_step; the network updates its running
-        normalizer stats here) and the tokenized task prompt.
-        ``info`` is unused by the obs-driven standard agent."""
+        velocity_z, episode_return, pass_mark, remaining_return, global_step,
+        episode_step,
+        health; the network updates its running normalizer stats here) and the
+        tokenized task prompt.
+        ``info`` is unused by this obs-driven agent."""
         del info
         image = torch.from_numpy(obs["image"]).to(self.device)
         velocity_x, velocity_y, velocity_z = obs["velocity"].astype(np.float32)
         episode_return = np.float32(obs["episode_return"][0])
         pass_mark = np.float32(obs["pass_mark"][0])
+        remaining_return = np.float32(obs["remaining_return"][0])
         global_step_obs = np.float32(obs["global_step"][0])
         episode_step_obs = np.float32(obs["episode_step"][0])
-        remaining_step_obs = np.float32(obs["remaining_step"][0])
+        health_obs = np.float32(obs["health"][0])
         self.network.observe_scalar_obs(
             velocity_x,
             velocity_y,
             velocity_z,
             episode_return,
             pass_mark,
+            remaining_return,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
         )
         task_prompt_token_ids = self.network.tokenize_task_prompt(obs["language"])
         return (
@@ -334,9 +306,10 @@ class StandardAgent(Agent):
             velocity_z,
             episode_return,
             pass_mark,
+            remaining_return,
             global_step_obs,
             episode_step_obs,
-            remaining_step_obs,
+            health_obs,
             task_prompt_token_ids,
         )
 

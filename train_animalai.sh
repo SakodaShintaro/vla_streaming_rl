@@ -1,7 +1,15 @@
 #!/bin/bash
 set -eux
 
-exp_name=${1}
+# Usage: ./train_animalai.sh <agent> <exp_name>
+#
+# Every variant is one agent config; nothing else differs between them:
+#   vlm_off_policy_bs16     : standard agent, VLM actor-critic, off-policy
+#   animal_world_critic     : standard agent, Animal-AI backbone + WCM world critic, off-policy
+#   animal_ppo              : the Animal-AI Olympics winning recurrent PPO
+#   animal_world_critic_ppo : that PPO plus the WCM world-critic loss
+agent=${1}
+exp_name=${2}
 cd $(dirname $0)
 
 # Animal-AI v5 does not auto-download the Unity binary. Place the unzipped
@@ -14,6 +22,10 @@ if [ ! -x "${AAI_BINARY}" ]; then
     exit 1
 fi
 
+# The Unity player writes one CSV row per step into a queue its writer cannot
+# drain at this throughput, which puts the host out of memory after a few hours.
+# Disable it once with: uv run --with dnfile python local/patch_env_logging.py
+#
 # Off-screen rendering needs an X server (--no-graphics-monitor still requires
 # DISPLAY for the GL context). Local DISPLAY=:0 works; for true headless,
 # wrap with xvfb-run.
@@ -21,12 +33,7 @@ fi
 export DISPLAY
 
 uv run python scripts/train.py \
-  agent=standard \
-  network_class=vlm_actor_critic_with_action_value \
-  learning_mode=off_policy \
-  batch_size=16 \
-  actor_lr=1e-5 \
-  critic_lr=1e-5 \
+  agent=${agent} \
   env=animalai \
   exp_name=${exp_name} \
-  resume_dir=null \
+  resume_dir=null

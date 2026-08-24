@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: MIT
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, final
+from typing import Any
 
 import numpy as np
-from torch import nn
 
 
 @dataclass
@@ -33,17 +32,16 @@ class StepResult:
 
 
 class Agent(ABC):
-    def __init_subclass__(cls, **kwargs) -> None:
-        super().__init_subclass__(**kwargs)
-        for name, member in vars(Agent).items():
-            if getattr(member, "__final__", False) and name in cls.__dict__:
-                raise TypeError(f"{cls.__name__} may not override final method {name!r} of Agent")
+    """The contract the trainer drives: ``step`` on every tick while learning,
+    ``select_action`` when acting without learning.
 
-    def __init__(self, learning_mode: str, horizon: int) -> None:
-        if learning_mode not in ("off_policy", "streaming"):
-            raise ValueError(f"Unknown learning_mode: {learning_mode!r}")
-        self.learning_mode = learning_mode
+    The agent grid is orthogonal: the learning rule (off-policy / on-policy /
+    streaming) is the class, which ``agent_type`` names, and the network it
+    optimizes is a constructor argument."""
+
+    def __init__(self, horizon: int, reset_on_episode_end: bool) -> None:
         self.horizon = int(horizon)
+        self.reset_on_episode_end = bool(reset_on_episode_end)
 
     @abstractmethod
     def select_action(
@@ -56,7 +54,7 @@ class Agent(ABC):
         info: dict,
     ) -> StepResult: ...
 
-    @final
+    @abstractmethod
     def step(
         self,
         global_step: int,
@@ -66,56 +64,18 @@ class Agent(ABC):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        if self.learning_mode == "off_policy":
-            return self._step_offpolicy(global_step, obs, reward, terminated, truncated, info)
-        return self._step_streaming(global_step, obs, reward, terminated, truncated, info)
-
-    @final
-    def _step_offpolicy(
-        self,
-        global_step: int,
-        obs: dict[str, Any],
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        info: dict,
-    ) -> StepResult:
-        train_metrics = {}
-        if global_step == self.learning_starts:
-            print(f"Start training at global step {global_step}.")
-        if (
-            global_step >= self.learning_starts
-            and global_step % self.horizon == 0
-            and self.rb is not None
-            and self.rb.num_stored() >= self.batch_size + self.rb.seq_len
-        ):
-            data = self.rb.sample(self.batch_size)
-            data.rewards = self.reward_processor.normalize(data.rewards)
-            result = self.network.compute_loss(data)
-            self.actor_optimizer.zero_grad(set_to_none=True)
-            self.critic_optimizer.zero_grad(set_to_none=True)
-            result.loss.backward()
-            nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
-            self.actor_optimizer.step()
-            self.critic_optimizer.step()
-            train_metrics = result.info
-        step_result = self.select_action(global_step, obs, reward, terminated, truncated, info)
-        step_result.metrics.update(train_metrics)
-        return step_result
-
-    @abstractmethod
-    def _step_streaming(
-        self,
-        global_step: int,
-        obs: dict[str, Any],
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        info: dict,
-    ) -> StepResult: ...
+        """Act on this tick and learn from it, the way this learning mode learns."""
 
     @abstractmethod
     def on_episode_end(self, score: float, feedback_text: str) -> dict: ...
+
+    @abstractmethod
+    def optimizer_state_dict(self) -> dict:
+        """Optimizer states to checkpoint. The trainer stores and restores this
+        verbatim, so an agent is free to hold one optimizer or several."""
+
+    @abstractmethod
+    def load_optimizer_state_dict(self, state: dict) -> None: ...
 
     @abstractmethod
     def _preprocess(self, obs: dict[str, Any], info: dict): ...

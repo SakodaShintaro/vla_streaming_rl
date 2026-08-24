@@ -19,7 +19,7 @@ from .interface import (
 )
 from .modules.head_output import HeadOutput
 from .modules.image_processor import ImageProcessor
-from .modules.policy_head import CFGDiffusionPolicy, DiffusionPolicy, MeanFlowPolicy
+from .modules.policy_head import build_policy_head
 from .modules.prediction_head import StatePredictionHead
 from .modules.recurrent_video_encoder import RecurrentVideoEncoder
 from .modules.reward_processor import RewardProcessor
@@ -81,6 +81,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         policy_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
         assert image_mode in ("mem", "sequence", "recurrent"), f"Unknown image_mode: {image_mode}"
@@ -99,8 +101,16 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.detach_critic = detach_critic
         self.detach_predictor = detach_predictor
 
+        # this network's spatial-temporal attention is built around the patch
+        # grid; a single pooled token would leave it nothing to attend over, so
+        # "single_token" is for the animal backbone (see ``networks/animal_ppo.py``)
+        assert image_encode_mode == "grid"
         self.image_processor = ImageProcessor(
-            observation_space_shape, image_encoder_type, image_encoder_output_dim
+            observation_space_shape,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
         )
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
@@ -148,44 +158,20 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state_dim = num_state_queries * state_out_dim
 
         self.policy_type = policy_type
-        if self.policy_type == "diffusion":
-            self.policy_head = DiffusionPolicy(
-                state_dim=state_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                denoising_time=denoising_time,
-                sparsity=sparsity,
-                horizon=horizon,
-                denoising_steps=denoising_steps,
-                dacer_loss_weight=dacer_loss_weight,
-            )
-        elif self.policy_type == "cfgrl":
-            self.policy_head = CFGDiffusionPolicy(
-                state_dim=state_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                denoising_time=denoising_time,
-                sparsity=sparsity,
-                cfgrl_beta=1.5,
-                horizon=horizon,
-                denoising_steps=denoising_steps,
-                condition_drop_prob=0.1,
-            )
-        elif self.policy_type == "som":
-            self.policy_head = MeanFlowPolicy(
-                state_dim=state_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                horizon=horizon,
-                sparsity=sparsity,
-                som_alpha=som_alpha,
-                som_w=som_w,
-            )
-        else:
-            raise ValueError(f"Unknown policy_type: {self.policy_type}")
+        self.policy_head = build_policy_head(
+            policy_type=policy_type,
+            state_dim=state_dim,
+            action_dim=self.action_dim,
+            hidden_dim=actor_hidden_dim,
+            block_num=actor_block_num,
+            horizon=horizon,
+            sparsity=sparsity,
+            denoising_time=denoising_time,
+            denoising_steps=denoising_steps,
+            dacer_loss_weight=dacer_loss_weight,
+            som_alpha=som_alpha,
+            som_w=som_w,
+        )
 
         # Critic: Q(state, action)
         self.value_head = value_head_factory(state_dim, self.action_dim)
@@ -244,12 +230,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         velocity_z: float,
         episode_return: float,
         pass_mark: float,
+        remaining_return: float,
         global_step: float,
         episode_step: float,
-        remaining_step: float,
+        health: float,
     ) -> None:
         del velocity_x, velocity_y, velocity_z, episode_return, pass_mark
-        del global_step, episode_step, remaining_step
+        del remaining_return, global_step, episode_step, health
 
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
         """Tokenize a task prompt string into token IDs."""

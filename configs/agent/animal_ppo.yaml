@@ -1,0 +1,20 @@
+# @package _global_
+defaults:
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
+  - base/on_policy
+  - _self_
+
+agent_type: animal_ppo
+
+# [animal_ppo, animal_world_critic]
+network_class: animal_ppo
+
+image_encoder_type: fixup
+image_encoder_output_dim: 128
+image_encoder_trainable: true
+
+# [lstm, gru]
+temporal_model_type: gru

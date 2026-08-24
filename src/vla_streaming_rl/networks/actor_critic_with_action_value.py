@@ -15,11 +15,7 @@ from vla_streaming_rl.networks.interface import (
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
-from vla_streaming_rl.networks.modules.policy_head import (
-    CFGDiffusionPolicy,
-    DiffusionPolicy,
-    MeanFlowPolicy,
-)
+from vla_streaming_rl.networks.modules.policy_head import build_policy_head
 from vla_streaming_rl.networks.modules.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
@@ -58,6 +54,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         predictor_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
         self.sparsity = sparsity
@@ -68,13 +66,21 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.predictor_step_num = predictor_step_num
         self.observation_space_shape = observation_space_shape
 
+        # this network's spatial-temporal attention is built around the patch
+        # grid; a single pooled token would leave it nothing to attend over, so
+        # "single_token" is for the animal backbone (see ``networks/animal_ppo.py``)
+        assert image_encode_mode == "grid"
         self.image_processor = ImageProcessor(
-            observation_space_shape, image_encoder_type, image_encoder_output_dim
+            observation_space_shape,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
         )
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
-        self.scalar_obs_dim = 8
+        self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
         self.encoder = SpatialTemporalEncoder(
             image_processor=self.image_processor,
@@ -89,44 +95,20 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         self.horizon = horizon
         self.policy_type = policy_type
-        if self.policy_type == "diffusion":
-            self.policy_head = DiffusionPolicy(
-                state_dim=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                denoising_time=denoising_time,
-                sparsity=sparsity,
-                horizon=horizon,
-                denoising_steps=denoising_steps,
-                dacer_loss_weight=dacer_loss_weight,
-            )
-        elif self.policy_type == "cfgrl":
-            self.policy_head = CFGDiffusionPolicy(
-                state_dim=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                denoising_time=denoising_time,
-                sparsity=sparsity,
-                cfgrl_beta=1.5,
-                horizon=horizon,
-                denoising_steps=denoising_steps,
-                condition_drop_prob=0.1,
-            )
-        elif self.policy_type == "som":
-            self.policy_head = MeanFlowPolicy(
-                state_dim=self.encoder.output_dim,
-                action_dim=self.action_dim,
-                hidden_dim=actor_hidden_dim,
-                block_num=actor_block_num,
-                horizon=horizon,
-                sparsity=sparsity,
-                som_alpha=som_alpha,
-                som_w=som_w,
-            )
-        else:
-            raise ValueError(f"Unknown policy_type: {self.policy_type}")
+        self.policy_head = build_policy_head(
+            policy_type=policy_type,
+            state_dim=self.encoder.output_dim,
+            action_dim=self.action_dim,
+            hidden_dim=actor_hidden_dim,
+            block_num=actor_block_num,
+            horizon=horizon,
+            sparsity=sparsity,
+            denoising_time=denoising_time,
+            denoising_steps=denoising_steps,
+            dacer_loss_weight=dacer_loss_weight,
+            som_alpha=som_alpha,
+            som_w=som_w,
+        )
 
         self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)
         self.prediction_head = StatePredictionHead(
@@ -156,9 +138,10 @@ class ActorCriticWithActionValue(NetworkInterface):
         velocity_z: float,
         episode_return: float,
         pass_mark: float,
+        remaining_return: float,
         global_step: float,
         episode_step: float,
-        remaining_step: float,
+        health: float,
     ) -> None:
         scalar_obs = np.array(
             [
@@ -167,9 +150,10 @@ class ActorCriticWithActionValue(NetworkInterface):
                 velocity_z,
                 episode_return,
                 pass_mark,
+                remaining_return,
                 global_step,
                 episode_step,
-                remaining_step,
+                health,
             ],
             dtype=np.float32,
         )
@@ -182,9 +166,10 @@ class ActorCriticWithActionValue(NetworkInterface):
         velocity_z: torch.Tensor,
         episode_return: torch.Tensor,
         pass_mark: torch.Tensor,
+        remaining_return: torch.Tensor,
         global_step: torch.Tensor,
         episode_step: torch.Tensor,
-        remaining_step: torch.Tensor,
+        health: torch.Tensor,
     ) -> torch.Tensor:
         raw = torch.cat(
             [
@@ -193,9 +178,10 @@ class ActorCriticWithActionValue(NetworkInterface):
                 velocity_z,
                 episode_return,
                 pass_mark,
+                remaining_return,
                 global_step,
                 episode_step,
-                remaining_step,
+                health,
             ],
             dim=-1,
         )
@@ -211,9 +197,10 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z_seq,
             data.episode_return_seq,
             data.pass_mark_seq,
+            data.remaining_return_seq,
             data.global_step_seq,
             data.episode_step_seq,
-            data.remaining_step_seq,
+            data.health_seq,
         )
         x, rnn_state = self.encoder(
             data.s_seq, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
@@ -263,9 +250,10 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.velocity_z[:, self.horizon :],
                 data.episode_return[:, self.horizon :],
                 data.pass_mark[:, self.horizon :],
+                data.remaining_return[:, self.horizon :],
                 data.global_step[:, self.horizon :],
                 data.episode_step[:, self.horizon :],
-                data.remaining_step[:, self.horizon :],
+                data.health[:, self.horizon :],
             )
             next_state, _ = self.encoder.forward(
                 next_image,
@@ -288,9 +276,10 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z[:, : -self.horizon],
             data.episode_return[:, : -self.horizon],
             data.pass_mark[:, : -self.horizon],
+            data.remaining_return[:, : -self.horizon],
             data.global_step[:, : -self.horizon],
             data.episode_step[:, : -self.horizon],
-            data.remaining_step[:, : -self.horizon],
+            data.health[:, : -self.horizon],
         )
         curr_actions = data.actions[:, : -self.horizon]
         curr_rewards = data.rewards[:, : -self.horizon]
@@ -343,9 +332,10 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.velocity_z[:, self.horizon :],
                 data.episode_return[:, self.horizon :],
                 data.pass_mark[:, self.horizon :],
+                data.remaining_return[:, self.horizon :],
                 data.global_step[:, self.horizon :],
                 data.episode_step[:, self.horizon :],
-                data.remaining_step[:, self.horizon :],
+                data.health[:, self.horizon :],
             )
             next_state, next_rnn_state = self.encoder.forward(
                 next_image,
@@ -370,9 +360,10 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z[:, : -self.horizon],
             data.episode_return[:, : -self.horizon],
             data.pass_mark[:, : -self.horizon],
+            data.remaining_return[:, : -self.horizon],
             data.global_step[:, : -self.horizon],
             data.episode_step[:, : -self.horizon],
-            data.remaining_step[:, : -self.horizon],
+            data.health[:, : -self.horizon],
         )
         prev_actions = data.actions[:, : -self.horizon]
         prev_rewards = data.rewards[:, : -self.horizon]
