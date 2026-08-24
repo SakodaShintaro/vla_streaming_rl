@@ -2,11 +2,18 @@
 """Animal-AI Gymnasium environment.
 
 Wraps Animal-AI v5 (which exposes a Unity ML-Agents BehaviorSpec interface)
-as a single-agent gym.Env. The native AAI action is MultiDiscrete([3, 3]):
-    dim 0 (forward/back): 0=noop, 1=forward, 2=back
-    dim 1 (rotate):       0=noop, 1=right,   2=left
-We expose this as Box(-1, 1, shape=(2,)) for parity with the project's other
-environments (CARLA, GUI games), discretising with a +/-1/3 dead-zone.
+as a single-agent gym.Env. The action is Box(-1, 1, shape=(2,)) for parity with
+the project's other environments (CARLA, GUI games):
+    dim 0: forward (+1) / back (-1)
+    dim 1: rotate right (+1) / left (-1)
+How Unity consumes it depends on `continuous_action`:
+  - False: the official MultiDiscrete([3, 3]) branches, reached by
+           discretizing with a +/-1/3 dead-zone (0=noop, 1=forward/right,
+           2=back/left). Works with any Animal-AI binary.
+  - True:  the value is passed through as a throttle / turn rate. This needs a
+           binary rebuilt from animal-ai-unity with the hybrid action spec
+           (2 continuous actions alongside the branches); +/-1 there reproduces
+           the discrete branches exactly, so it is a strict superset.
 
 Everything about talking to Unity lives in `AnimalAIEnv`. The only thing that
 differs between the three ways we run Animal-AI is *which arena each episode
@@ -48,8 +55,34 @@ import yaml
 from animalai import AnimalAIEnvironment
 from gymnasium import spaces
 from mlagents_envs.base_env import ActionTuple
+from mlagents_envs.side_channel.environment_parameters_channel import (
+    EnvironmentParametersChannel,
+)
 
 COMPETITION_DIR = Path("./external/animal-ai/configs/competition")
+
+# Environment parameter the rebuilt binary reads to pick continuous over
+# discrete actions (see TrainingAgent.ReadAction in animal-ai-unity).
+CONTINUOUS_ACTIONS_KEY = "continuousActions"
+
+
+def _aai_environment_class(extra_args: list[str]) -> type:
+    """`AnimalAIEnvironment` subclass that actually passes `extra_args` to Unity.
+
+    `AnimalAIEnvironment.__init__` rebuilds the player's command line from
+    `executable_args` and discards whatever the caller handed it as
+    `additional_args`, so the switches the rebuilt binary reads at startup
+    (`--topDownCamera`, `--topDownResolution`) never arrive. `executable_args`
+    is a staticmethod, so the arguments are bound to a class rather than an
+    instance.
+    """
+
+    class _AnimalAIEnvironmentWithArgs(AnimalAIEnvironment):
+        @staticmethod
+        def executable_args(*args) -> list[str]:
+            return AnimalAIEnvironment.executable_args(*args) + extra_args
+
+    return _AnimalAIEnvironmentWithArgs
 
 
 # Shaping coefficients.
@@ -608,9 +641,12 @@ def _render_progress(groups: list[tuple[str, int, int, int]]) -> np.ndarray:
     return canvas
 
 
-def _render_topdown(
-    items: list[dict], agent_xyz: tuple[float, float, float] | None, header_lines: list[str]
-) -> np.ndarray:
+def _fit_square(image: np.ndarray, size_px: int) -> np.ndarray:
+    """Scale a camera frame to the pane the schematic would have filled."""
+    return cv2.resize(image, (size_px, size_px), interpolation=cv2.INTER_NEAREST)
+
+
+def _render_topdown(items: list[dict], agent_xyz: tuple[float, float, float] | None) -> np.ndarray:
     scale = _RENDER_SIZE_PX / _ARENA_SIZE_M
     canvas = np.full((_RENDER_SIZE_PX, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
 
@@ -653,7 +689,7 @@ def _render_topdown(
         cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
         cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
 
-    return np.vstack([_draw_header(header_lines, _RENDER_SIZE_PX), canvas])
+    return canvas
 
 
 class AnimalAIEnv(gym.Env):
@@ -665,15 +701,28 @@ class AnimalAIEnv(gym.Env):
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
-    def __init__(self, resolution: int, seed: int, base_port: int, selector: ArenaSelector):
+    def __init__(
+        self,
+        resolution: int,
+        seed: int,
+        base_port: int,
+        binary_path: str,
+        continuous_action: bool,
+        topdown_camera: bool,
+        topdown_resolution: int,
+        selector: ArenaSelector,
+    ):
         super().__init__()
+        self.continuous_action = continuous_action
+        self.topdown_camera = topdown_camera
+        self.topdown_resolution = topdown_resolution
         self.selector = selector
         self._arena_by_name = {arena.name: arena for arena in selector.arenas}
         self.prompt = (
             "Find and reach the green or yellow goal sphere; avoid red zones and red goals."
         )
 
-        self.binary_path = str(Path.home() / "animalai_env" / "Linux" / "animalAI.x86_64")
+        self.binary_path = str(Path(binary_path).expanduser())
         self.resolution = resolution
         self.seed_value = seed
         # Add jitter so parallel envs don't fight over the same socket.
@@ -687,7 +736,14 @@ class AnimalAIEnv(gym.Env):
 
         self._aai: AnimalAIEnvironment | None = None
         self._behavior_name: str | None = None
+        # How many continuous actions the binary accepts: 0 for an official
+        # build, 2 for one rebuilt with the hybrid action spec. Read off the
+        # behavior spec at launch.
+        self._continuous_size = 0
         self._latest_image: np.ndarray | None = None
+        # The overhead camera's view, on the binaries that have one. It is not
+        # part of `observation_space`: `render` draws it, the policy never sees it.
+        self._latest_topdown_image: np.ndarray | None = None
         self.global_step = 0
         self.episode_step = 0
         self.arena_name: str = ""
@@ -720,7 +776,22 @@ class AnimalAIEnv(gym.Env):
     def _ensure_started(self):
         if self._aai is not None:
             return
-        self._aai = AnimalAIEnvironment(
+        # Queued before the constructor's first reset, which is when the
+        # channel's messages reach Unity.
+        parameters_channel = EnvironmentParametersChannel()
+        parameters_channel.set_float_parameter(
+            CONTINUOUS_ACTIONS_KEY, float(self.continuous_action)
+        )
+        environment_class = _aai_environment_class(
+            [
+                "--topDownCamera",
+                str(int(self.topdown_camera)),
+                "--topDownResolution",
+                str(self.topdown_resolution),
+            ]
+        )
+        self._aai = environment_class(
+            side_channels=[parameters_channel],
             file_name=self.binary_path,
             arenas_configurations=str(self.selector.arenas[0].path),
             seed=self.seed_value,
@@ -744,27 +815,42 @@ class AnimalAIEnv(gym.Env):
             # paper's scripts had it. Setting it would only change how the same
             # physics steps are split across frames.
             captureFrameRate=0,
-            # `--no-graphics-monitor` enables off-screen rendering on a host
-            # without a window manager. `no_graphics=True` (the alternative
-            # for headless) disables the renderer entirely and produces a
-            # solid-colour image, which is unusable for vision policies.
+            # `no_graphics=True` (the alternative for headless) disables the
+            # renderer entirely and produces a solid-color image, which is
+            # unusable for vision policies.
             no_graphics=False,
-            additional_args=["--no-graphics-monitor"],
             base_port=self.base_port,
             inference=False,
             use_YAML=True,
         )
         self._behavior_name = next(iter(self._aai.behavior_specs.keys()))
+        spec = self._aai.behavior_specs[self._behavior_name]
+        # ML-Agents sorts an agent's sensors by name, so the observations arrive
+        # as ["CameraSensor", "TopDownCameraSensor", "VectorSensor"] -- first
+        # person, overhead, scalars. The overhead camera is there only on a
+        # rebuilt binary running with topdown_camera, which leaves the scalars
+        # last either way.
+        self._observation_count = len(spec.observation_specs)
+        assert self._observation_count in (2, 3), self._observation_count
+        self._continuous_size = spec.action_spec.continuous_size
+        assert self._continuous_size == 2 or not self.continuous_action, (
+            f"{self.binary_path} exposes {self._continuous_size} continuous actions; "
+            "continuous_action=True needs a binary rebuilt from animal-ai-unity."
+        )
 
     def _decode_obs(self, obs_chw_float: np.ndarray) -> np.ndarray:
         # AAI emits float32 in [0, 1] with shape (3, H, W).
         return (obs_chw_float.transpose(1, 2, 0) * 255.0).astype(np.uint8)
 
     def _read_observation(self, steps) -> None:
-        # Vector obs layout (useCamera=True, useRayCasts=False): steps.obs[1][0]
-        # is [health, vx, vy, vz, x, y, z].
-        vec = steps.obs[1][0]
+        # Vector obs layout (useCamera=True, useRayCasts=False): the last
+        # observation is [health, vx, vy, vz, x, y, z].
+        vec = steps.obs[self._observation_count - 1][0]
         self._latest_image = self._decode_obs(steps.obs[0][0])
+        # Watched in `render`, never handed to the policy.
+        self._latest_topdown_image = (
+            self._decode_obs(steps.obs[1][0]) if self._observation_count == 3 else None
+        )
         self._agent_health = float(vec[0])
         self._agent_xyz = (float(vec[4]), float(vec[5]), float(vec[6]))
         self._agent_velocity = np.array(
@@ -843,11 +929,14 @@ class AnimalAIEnv(gym.Env):
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
         self.global_step += 1
-        a = np.asarray(action, dtype=np.float32)
+        a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0).reshape(1, 2)
+        # Both halves go out every step; which one Unity obeys was fixed at
+        # launch by CONTINUOUS_ACTIONS_KEY. The slice is empty for an official
+        # binary, which has no continuous actions to fill.
         action_tuple = ActionTuple(
-            continuous=np.zeros((1, 0), dtype=np.float32),
+            continuous=a[:, : self._continuous_size],
             discrete=np.array(
-                [[_to_discrete(float(a[0])), _to_discrete(float(a[1]))]], dtype=np.int32
+                [[_to_discrete(float(a[0, 0])), _to_discrete(float(a[0, 1]))]], dtype=np.int32
             ),
         )
         self._aai.set_actions(self._behavior_name, action_tuple)
@@ -886,7 +975,12 @@ class AnimalAIEnv(gym.Env):
         return self._latest_image, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
-        """This episode's arena from above, beside the arena set's coverage."""
+        """This episode's arena from above, beside the arena set's coverage.
+
+        The arena pane is the overhead camera when the binary renders one, and
+        otherwise a schematic drawn from the arena yaml -- the camera shows where
+        everything is, the schematic only where everything started.
+        """
         if self.render_mode != "rgb_array":
             return None
         attempts, successes = self.selector.arena_record(self._arena)
@@ -894,7 +988,12 @@ class AnimalAIEnv(gym.Env):
             f"{self.arena_name}  {successes}/{attempts}",
             self.selector.status(self.global_step),
         ]
-        topdown = _render_topdown(self._arena_items, self._agent_xyz, header_lines)
+        arena = (
+            _fit_square(self._latest_topdown_image, _RENDER_SIZE_PX)
+            if self._latest_topdown_image is not None
+            else _render_topdown(self._arena_items, self._agent_xyz)
+        )
+        topdown = np.vstack([_draw_header(header_lines, _RENDER_SIZE_PX), arena])
         progress = _render_progress(self.selector.progress_by_group())
         padding = np.full(
             (topdown.shape[0] - progress.shape[0], progress.shape[1], 3), 240, dtype=np.uint8
@@ -912,6 +1011,8 @@ if __name__ == "__main__":
         resolution=96,
         seed=0,
         base_port=5005,
+        binary_path="~/animalai_env/Linux/animalAI.x86_64",
+        continuous_action=False,
         selector=StagedSelector(steps_per_stage=2_000_000, seed=0),
     )
     for episode in range(8):

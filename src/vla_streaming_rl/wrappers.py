@@ -32,6 +32,10 @@ def make_animalai_env(
     train_arena_root: str,
     steps_per_stage: int,
     revisit_temperature: float,
+    binary_path: str,
+    continuous_action: bool,
+    topdown_camera: bool,
+    topdown_resolution: int,
 ) -> gym.Env:
     from vla_streaming_rl.envs.animalai_env import AnimalAIEnv, build_selector
 
@@ -42,7 +46,16 @@ def make_animalai_env(
         revisit_temperature=revisit_temperature,
         seed=0,
     )
-    return AnimalAIEnv(resolution=resolution, seed=0, base_port=5005, selector=selector)
+    return AnimalAIEnv(
+        resolution=resolution,
+        seed=0,
+        base_port=5005,
+        binary_path=binary_path,
+        continuous_action=continuous_action,
+        topdown_camera=topdown_camera,
+        topdown_resolution=topdown_resolution,
+        selector=selector,
+    )
 
 
 def make_carla_env(
