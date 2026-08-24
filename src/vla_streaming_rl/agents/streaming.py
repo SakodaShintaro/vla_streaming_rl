@@ -49,8 +49,9 @@ class StreamingAgent(Agent):
         buffer_device: str,
         max_prompt_tokens: int,
         pad_token_id: int,
+        reset_on_episode_end: bool,
     ) -> None:
-        super().__init__(horizon=horizon)
+        super().__init__(horizon=horizon, reset_on_episode_end=reset_on_episode_end)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
@@ -110,6 +111,8 @@ class StreamingAgent(Agent):
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
         self._episode_reset = False
+        # the first observation of a run starts an episode
+        self._previous_done = True
         # Shared representation fed to policy/value/prediction heads on the
         # most recent select_action inference (used by scripts/probe.py).
         self.last_features: torch.Tensor | None = None
@@ -131,6 +134,7 @@ class StreamingAgent(Agent):
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
         metrics["shaped_reward"] = shaped_reward
+        self._reset_rnn_state_if_fresh(episode_done)
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
@@ -231,6 +235,11 @@ class StreamingAgent(Agent):
 
     # --- per-tick machinery ------------------------------------------------
 
+    def _reset_rnn_state_if_fresh(self, episode_done: bool) -> None:
+        if self._previous_done and self.reset_on_episode_end:
+            self.rnn_state = self.network.init_state().to(self.device)
+        self._previous_done = episode_done
+
     @torch.no_grad()
     def select_action(
         self,
@@ -249,6 +258,7 @@ class StreamingAgent(Agent):
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
         metrics["shaped_reward"] = shaped_reward
+        self._reset_rnn_state_if_fresh(episode_done)
         if episode_done:
             self.action_chunk = None
             self.chunk_step = 0

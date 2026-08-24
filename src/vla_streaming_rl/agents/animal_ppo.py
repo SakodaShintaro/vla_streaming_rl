@@ -153,8 +153,9 @@ class AnimalPPOAgent(Agent):
         max_grad_norm: float,
         velocity_scale: list[float],
         health_scale: float,
+        reset_on_episode_end: bool,
     ) -> None:
-        super().__init__(horizon=horizon)
+        super().__init__(horizon=horizon, reset_on_episode_end=reset_on_episode_end)
         assert steps_num % seq_len == 0, f"steps_num {steps_num} is not a multiple of {seq_len}"
         assert minibatch_size % seq_len == 0, (
             f"minibatch_size {minibatch_size} is not a multiple of seq_len {seq_len}"
@@ -282,7 +283,7 @@ class AnimalPPOAgent(Agent):
             visual.unsqueeze(0),
             vels.unsqueeze(0),
             state,
-            torch.tensor([fresh], device=self.device),
+            torch.tensor([fresh * float(self.reset_on_episode_end)], device=self.device),
             1,
         )
         action = torch.multinomial(F.softmax(logits, dim=-1), 1).squeeze(-1)
@@ -367,7 +368,7 @@ class AnimalPPOAgent(Agent):
             rollout.visual[flat],
             rollout.vels[flat],
             rollout.states[sequences],
-            rollout.dones[flat],
+            rollout.dones[flat] * float(self.reset_on_episode_end),
             rollout.actions[flat],
             sequence_num,
         )

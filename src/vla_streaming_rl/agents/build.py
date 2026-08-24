@@ -19,6 +19,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             image_side=args.image_side,
             temperature=args.temperature,
             api_max_retries=args.api_max_retries,
+            reset_on_episode_end=args.reset_on_episode_end,
         )
 
     if args.agent_type == "animal_ppo":
@@ -43,6 +44,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             max_grad_norm=args.max_grad_norm,
             velocity_scale=list(args.velocity_scale),
             health_scale=args.health_scale,
+            reset_on_episode_end=args.reset_on_episode_end,
         )
 
     if args.agent_type == "streaming":
@@ -66,6 +68,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             buffer_device=args.buffer_device,
             max_prompt_tokens=args.max_prompt_tokens,
             pad_token_id=args.pad_token_id,
+            reset_on_episode_end=args.reset_on_episode_end,
         )
 
     assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
@@ -89,4 +92,5 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
         buffer_device=args.buffer_device,
         max_prompt_tokens=args.max_prompt_tokens,
         pad_token_id=args.pad_token_id,
+        reset_on_episode_end=args.reset_on_episode_end,
     )

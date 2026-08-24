@@ -39,8 +39,9 @@ class Agent(ABC):
     streaming) is the class, which ``agent_type`` names, and the network it
     optimizes is a constructor argument."""
 
-    def __init__(self, horizon: int) -> None:
+    def __init__(self, horizon: int, reset_on_episode_end: bool) -> None:
         self.horizon = int(horizon)
+        self.reset_on_episode_end = bool(reset_on_episode_end)
 
     @abstractmethod
     def select_action(
