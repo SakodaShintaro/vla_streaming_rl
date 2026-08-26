@@ -31,7 +31,7 @@ def make_animalai_env(
     mode: str,
     train_variant: str,
     steps_per_stage: int,
-    revisit_temperature: float,
+    advance_success_rate: float,
     binary_path: str,
     continuous_action: bool,
     topdown_camera: bool,
@@ -44,7 +44,7 @@ def make_animalai_env(
         mode=mode,
         train_variant=train_variant,
         steps_per_stage=steps_per_stage,
-        revisit_temperature=revisit_temperature,
+        advance_success_rate=advance_success_rate,
         seed=0,
     )
     return AnimalAIEnv(

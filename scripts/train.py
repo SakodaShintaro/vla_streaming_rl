@@ -167,7 +167,7 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
         "best_score": -float("inf"),
         "score_list": [],
         "success_list": [],
-        "is_revisit": False,
+        "curriculum_progress": {},
         "best_score_per_arena": {},
     }
 
@@ -206,7 +206,7 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
             successes[arena] = int(n_success)
             best_scores[arena] = float(best)
             cleared_count += int(cleared)
-        set_curriculum(attempts, successes, state["is_revisit"])
+        set_curriculum(attempts, successes, state["curriculum_progress"])
         state["best_score_per_arena"] = best_scores
         print(
             f"Resume: loaded {len(attempts)} arena records from {arena_stats_path} "
@@ -495,8 +495,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 data_dict[f"episodic_return/{arena_name}"] = score
             if "cleared_count" in env_info:
                 data_dict["cleared_count"] = env_info["cleared_count"]
-                data_dict["is_revisit"] = float(env_info.get("is_revisit", False))
-                data_dict["advanced"] = float(env_info.get("advanced", False))
+                data_dict["stage"] = env_info["stage"]
+                data_dict["round_index"] = env_info["round_index"]
+                data_dict["round_success_rate"] = env_info["round_success_rate"]
+                data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
+                data_dict["advanced"] = float(env_info["advanced"])
         if len(score_list) >= eval_range:
             data_dict["recent_average_score"] = recent_average_score
         wandb.log(data_dict)
@@ -591,7 +594,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
             if get_curriculum is not None:
                 curriculum = get_curriculum()
-                train_state["is_revisit"] = curriculum["is_revisit"]
+                train_state["curriculum_progress"] = curriculum["progress"]
                 write_arena_stats(result_dir / "arena_stats.tsv", curriculum, best_score_per_arena)
             (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
 

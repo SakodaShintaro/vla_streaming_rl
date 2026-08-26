@@ -23,11 +23,10 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
   - "staged"  training with the paper's cumulative 11-stage curriculum, one
               stage per competition level, sampled uniformly within the stage
               (`StagedSelector`).
-  - "success" the same stages, but advanced by clearing them rather than by
-              step count, alternating unsolved-arena draws with failure-rate
-              softmax draws (`SuccessDrivenSelector`). "Cleared" there means
-              tried at least `SUCCESS_MODE_MIN_ATTEMPTS` times and passed on
-              at least `SUCCESS_MODE_CLEAR_RATE` of them.
+  - "success" one stage per level, advanced by clearing a round of it: the
+              stage's 30 arenas drawn without replacement, then the next stage
+              if the round's success rate reached `advance_success_rate`
+              (`SuccessDrivenSelector`).
   - "sequential" no curriculum: every training arena in label order, wrapping
               around forever (`SequentialSelector`, cycling).
   - "random"  no curriculum: every episode draws uniformly at random from the
@@ -199,19 +198,18 @@ def _training_arenas(variant: str) -> list[Arena]:
 
 
 def _training_stages(variant: str) -> list[list[Arena]]:
-    """Cumulative arena list per curriculum stage, one stage per level.
+    """The training arenas grouped into one stage per curriculum level.
 
     The Olympics levels are the paper's curriculum stages in order (01 food
-    retrieval ... 10 causal reasoning), and the stages are cumulative, so
-    stage i serves the arenas of levels 1..i.
+    retrieval ... 10 causal reasoning), and every level holds 30 tasks, so
+    each stage is 30 arenas. `StagedSelector` accumulates them; the rounds of
+    `SuccessDrivenSelector` are one stage each.
     """
     arenas = _training_arenas(variant)
-    cumulative: list[Arena] = []
-    stages: list[list[Arena]] = []
-    for level in sorted({arena.name.split("-")[0] for arena in arenas}):
-        cumulative = cumulative + [arena for arena in arenas if arena.name.split("-")[0] == level]
-        stages.append(cumulative)
-    return stages
+    return [
+        [arena for arena in arenas if arena.name.split("-")[0] == level]
+        for level in sorted({arena.name.split("-")[0] for arena in arenas})
+    ]
 
 
 def _arena_signature(path: Path) -> str:
@@ -262,6 +260,7 @@ class ArenaSelector:
 
     def __init__(self, arenas: list[Arena]):
         self.arenas = arenas
+        self._arena_by_name = {arena.name: arena for arena in arenas}
         names = [arena.name for arena in arenas]
         self._attempts = dict.fromkeys(names, 0)
         self._successes = dict.fromkeys(names, 0)
@@ -322,10 +321,15 @@ class ArenaSelector:
             "arena_attempts": attempts,
             "arena_successes": {name: self._successes[name] for name in attempts},
             "arena_cleared": {name: self.is_cleared(arena_by_name[name]) for name in attempts},
-            "is_revisit": False,
+            "progress": self.progress_state(),
         }
 
-    def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
+    def progress_state(self) -> dict:
+        """Whatever else this selector needs to resume, beyond the per-arena
+        counts. Empty for the selectors whose position follows from those."""
+        return {}
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
         """Restore a `state()` snapshot, dropping arenas this set does not have."""
         known = set(self._attempts)
         self._attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
@@ -343,9 +347,12 @@ class StagedSelector(ArenaSelector):
     """
 
     def __init__(self, variant: str, steps_per_stage: int, seed: int):
-        stages = _training_stages(variant)
-        super().__init__(stages[-1])
-        self._stages = stages + [stages[-1]]
+        levels = _training_stages(variant)
+        cumulative: list[list[Arena]] = []
+        for level_arenas in levels:
+            cumulative.append((cumulative[-1] if cumulative else []) + level_arenas)
+        super().__init__(cumulative[-1])
+        self._stages = cumulative + [cumulative[-1]]
         self.steps_per_stage = steps_per_stage
         self._rng = np.random.default_rng(seed)
 
@@ -366,103 +373,112 @@ class StagedSelector(ArenaSelector):
         return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}  step:{global_step}"
 
 
-SUCCESS_MODE_MIN_ATTEMPTS = 5
-SUCCESS_MODE_CLEAR_RATE = 0.8
-
-
 class SuccessDrivenSelector(ArenaSelector):
-    """The same stages as `StagedSelector`, but gated on what has been solved
-    rather than on the step count, and alternating between two draws.
+    """One stage per Olympics level, advanced by clearing a round of it.
 
-    An arena counts as cleared once it has been attempted at least
-    `SUCCESS_MODE_MIN_ATTEMPTS` times and passed on at least
-    `SUCCESS_MODE_CLEAR_RATE` of those attempts, so a single lucky pass does
-    not retire it -- the agent has to solve it repeatably.
+    A round is the stage's 30 arenas drawn without replacement, so every arena
+    of the stage is played exactly once before any is played again. When the
+    round ends its success rate is compared with `advance_success_rate`: at or
+    above it the next stage opens, below it the same stage runs another round.
+    At the default of 1.0 that means 30 straight passes.
 
-    The stage is the first one still holding an arena that is not cleared;
-    once every arena of a stage is cleared the next stage opens, so the
-    curriculum advances at the pace the agent actually learns. Because the
-    stages are cumulative, the current stage's arena list is also every arena
-    seen so far.
-
-    Trials alternate:
-
-      - odd trials draw uniformly from the arenas of the current stage that
-        are not cleared yet, so the unsolved edge of the curriculum gets
-        half of all episodes;
-      - even trials draw from every arena unlocked so far by a softmax over
-        each arena's failure rate (failures / attempts, an unattempted arena
-        counting as 1.0), so solved arenas keep being revisited in proportion
-        to how badly they still go and nothing is ever abandoned.
-
-    `revisit_temperature` is that softmax's temperature: < 1 sharpens it
-    towards the worst arenas, > 1 flattens it towards uniform.
-
-    Which trial is next and which stage is open both follow from the
-    attempt/success counts, so a resumed run continues where it left off
-    without any extra state.
+    Unlike `StagedSelector` the stages are not cumulative: a stage serves its
+    own level only, so the round size stays at 30 and the rate means the same
+    thing at every stage.
     """
 
-    def __init__(self, variant: str, revisit_temperature: float, seed: int):
+    def __init__(self, variant: str, advance_success_rate: float, seed: int):
         stages = _training_stages(variant)
-        super().__init__(stages[-1])
+        super().__init__([arena for stage in stages for arena in stage])
         self._stages = stages
-        self.revisit_temperature = revisit_temperature
+        self.advance_success_rate = advance_success_rate
         self._rng = np.random.default_rng(seed)
+        self._stage = 0
+        self._queue: list[str] = []
+        self._round_attempts = 0
+        self._round_successes = 0
+        self._last_round_rate = 0.0
+        self._advanced = False
 
-    def is_cleared(self, arena: Arena) -> bool:
-        """Passed on at least `SUCCESS_MODE_CLEAR_RATE` of the attempts, over
-        at least `SUCCESS_MODE_MIN_ATTEMPTS` of them."""
-        attempts, successes = self.arena_record(arena)
-        return (
-            attempts >= SUCCESS_MODE_MIN_ATTEMPTS
-            and successes >= SUCCESS_MODE_CLEAR_RATE * attempts
-        )
+    def _refill(self) -> None:
+        names = [arena.name for arena in self._stages[self._stage]]
+        order = self._rng.permutation(len(names))
+        self._queue = [names[int(i)] for i in order]
 
-    def _stage_index(self) -> int:
-        """The first stage with an arena that is not cleared; the last stage
-        once everything is cleared."""
-        for index, stage_arenas in enumerate(self._stages):
-            if any(not self.is_cleared(arena) for arena in stage_arenas):
-                return index
-        return len(self._stages) - 1
-
-    def _failure_rate(self, arena: Arena) -> float:
-        attempts, successes = self.arena_record(arena)
-        if attempts == 0:
-            return 1.0
-        return 1.0 - successes / attempts
-
-    def _softmax_pick(self, arenas: list[Arena]) -> Arena:
-        logits = np.array([self._failure_rate(arena) for arena in arenas])
-        logits = logits / self.revisit_temperature
-        weights = np.exp(logits - logits.max())
-        index = self._rng.choice(len(arenas), p=weights / weights.sum())
-        return arenas[int(index)]
+    def _round_rate(self) -> float:
+        assert self._round_attempts > 0
+        return self._round_successes / self._round_attempts
 
     def next_arena(self, global_step: int) -> Arena:
-        stage_arenas = self._stages[self._stage_index()]
-        is_odd_trial = sum(self._attempts.values()) % 2 == 0
-        unsolved = [arena for arena in stage_arenas if not self.is_cleared(arena)]
-        # The stage only lacks unsolved arenas once the whole set is cleared,
-        # and then there is no next stage to move to, so fall back to softmax.
-        if is_odd_trial and unsolved:
-            return unsolved[int(self._rng.integers(len(unsolved)))]
-        return self._softmax_pick(stage_arenas)
+        """Take the next draw of the round. Drawing is what consumes it, so an
+        episode the caller abandons still moves the round along."""
+        if not self._queue:
+            self._refill()
+        return self._arena_by_name[self._queue.pop(0)]
+
+    def on_episode_end(self, arena: Arena, success: bool) -> None:
+        super().on_episode_end(arena, success)
+        self._round_attempts += 1
+        self._round_successes += int(success)
+        self._advanced = False
+        if self._round_attempts < len(self._stages[self._stage]):
+            return
+        # The counters reset here but info() is read after this call, so the
+        # rate the decision was made on is kept rather than reported as 0/0.
+        self._last_round_rate = self._round_rate()
+        if self._last_round_rate >= self.advance_success_rate and self._stage + 1 < len(
+            self._stages
+        ):
+            self._stage += 1
+            self._advanced = True
+        self._round_attempts = 0
+        self._round_successes = 0
+        self._queue = []
 
     def info(self, global_step: int) -> dict:
-        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
-        return {"stage": self._stage_index() + 1, "cleared_count": cleared}
+        return {
+            "stage": self._stage + 1,
+            "round_index": self._round_attempts,
+            "round_success_rate": (self._round_rate() if self._round_attempts > 0 else 0.0),
+            "last_round_success_rate": self._last_round_rate,
+            "advanced": self._advanced,
+            "cleared_count": sum(self.is_cleared(arena) for arena in self.arenas),
+        }
 
     def status(self, global_step: int) -> str:
-        stage_arenas = self._stages[self._stage_index()]
-        cleared = sum(self.is_cleared(arena) for arena in stage_arenas)
-        untried = sum(self._attempts[arena.name] == 0 for arena in stage_arenas)
+        size = len(self._stages[self._stage])
+        rate = self._round_rate() if self._round_attempts > 0 else 0.0
         return (
-            f"stage:{self._stage_index() + 1}/{len(self._stages)}"
+            f"stage:{self._stage + 1}/{len(self._stages)}"
+            f"  round:{self._round_attempts}/{size} rate:{rate:.2f}"
+            f"  last:{self._last_round_rate:.2f} need:{self.advance_success_rate:.2f}"
             f"  step:{global_step}"
-            f"  cleared:{cleared}/{len(stage_arenas)} untried:{untried}"
         )
+
+    def progress_state(self) -> dict:
+        return {
+            "stage": self._stage,
+            "queue": list(self._queue),
+            "round_attempts": self._round_attempts,
+            "round_successes": self._round_successes,
+            "last_round_rate": self._last_round_rate,
+        }
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
+        """Resume mid-round: the stage, what is left of its draw order and the
+        round's tally so far all have to come back, since none of them can be
+        recovered from the per-arena totals."""
+        super().load_state(arena_attempts, arena_successes, progress)
+        if not progress:
+            return
+        self._stage = int(progress["stage"])
+        self._round_attempts = int(progress["round_attempts"])
+        self._round_successes = int(progress["round_successes"])
+        self._last_round_rate = float(progress["last_round_rate"])
+        known = set(self._attempts)
+        self._queue = [name for name in progress["queue"] if name in known]
+        if not self._queue:
+            self._refill()
 
 
 class SequentialSelector(ArenaSelector):
@@ -509,10 +525,10 @@ class SequentialSelector(ArenaSelector):
             f"  cleared:{cleared}/{len(self.arenas)}  step:{global_step}"
         )
 
-    def load_state(self, arena_attempts: dict, arena_successes: dict, is_revisit: bool) -> None:
+    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
         """Resume where the run left off: one episode per arena visit, so the
         total attempt count is exactly how far into the order we are."""
-        super().load_state(arena_attempts, arena_successes, is_revisit)
+        super().load_state(arena_attempts, arena_successes, progress)
         self._next_index = sum(self._attempts.values())
 
 
@@ -546,7 +562,7 @@ class RandomSelector(ArenaSelector):
 
 
 def build_selector(
-    mode: str, train_variant: str, steps_per_stage: int, revisit_temperature: float, seed: int
+    mode: str, train_variant: str, steps_per_stage: int, advance_success_rate: float, seed: int
 ) -> ArenaSelector:
     """Build the arena selector named by `mode` (see the module docstring).
 
@@ -563,7 +579,7 @@ def build_selector(
             variant=train_variant, steps_per_stage=steps_per_stage, seed=seed
         ),
         "success": lambda: SuccessDrivenSelector(
-            variant=train_variant, revisit_temperature=revisit_temperature, seed=seed
+            variant=train_variant, advance_success_rate=advance_success_rate, seed=seed
         ),
         "sequential": lambda: SequentialSelector(
             arenas=_training_arenas(train_variant), cycle=True
@@ -819,9 +835,9 @@ class AnimalAIEnv(gym.Env):
         return self.selector.state()
 
     def set_curriculum_state(
-        self, arena_attempts: dict, arena_successes: dict, is_revisit: bool
+        self, arena_attempts: dict, arena_successes: dict, progress: dict
     ) -> None:
-        self.selector.load_state(arena_attempts, arena_successes, is_revisit)
+        self.selector.load_state(arena_attempts, arena_successes, progress)
 
     def _ensure_started(self):
         if self._aai is not None:

@@ -16,11 +16,10 @@ env_factory:
   #     staged  : train with the Animal-AI paper's cumulative 11-stage
   #               curriculum, one stage per competition level, drawing
   #               uniformly from the arenas the stage has unlocked.
-  #     success : the same stages, but a stage opens the next one once all of
-  #               its arenas have been passed (steps_per_stage is ignored);
-  #               odd trials draw uniformly from the stage's still-unsolved
-  #               arenas, even trials from every arena unlocked so far by a
-  #               softmax over their failure rates.
+  #     success : one stage per level, advanced by clearing a round of it --
+  #               the stage's 30 arenas drawn without replacement, then the
+  #               next stage if the round's success rate reached
+  #               advance_success_rate (steps_per_stage is ignored).
   #     sequential : no curriculum. Every training arena in label order,
   #               wrapping back to the first once the last has run, until
   #               step_limit (steps_per_stage is ignored).
@@ -40,10 +39,10 @@ env_factory:
   train_variant: "01"
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 40_000
-  # - revisit_temperature ("success"): temperature of the even-trial failure
-  #   rate softmax; < 1 sharpens it towards the worst arenas, > 1 flattens it
-  #   towards uniform
-  revisit_temperature: 1.0
+  # - advance_success_rate ("success"): the share of a 30-arena round that has
+  #   to be passed for the next stage to open. 1.0 means 30 straight passes; a
+  #   round below it repeats the same stage with a fresh draw order.
+  advance_success_rate: 1.0
   binary_path: ~/animalai_env/4.3.2_alpha1/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
   #     false : discretize to the official MultiDiscrete([3, 3]) branches with a
