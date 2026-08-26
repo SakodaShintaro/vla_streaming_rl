@@ -5,9 +5,8 @@ Merges every arena YAML under ``--arena-root`` into one multi-arena
 ArenaConfig and opens it in the Unity player, where W/A/S/D drives the agent
 and R (or collecting a reward) moves on to the next arena in the file.
 
-The arenas play in sorted order, so the paper curriculum runs
-``stage00/arena000.yaml`` first and ``stage09/arena029.yaml`` last;
-``--reverse`` walks the same list backwards.
+The arenas play in sorted order, so the competition set runs ``01-01-01.yaml``
+first and ``10-30-03.yaml`` last; ``--reverse`` walks the same list backwards.
 
 Every arena's time limit is multiplied by ``--time-scale`` (100 by default) so
 a human has time to look around, and the ``blackouts`` frames of the 42 dark
@@ -55,7 +54,7 @@ from pathlib import Path
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_ARENA_ROOT = REPO_ROOT / "external/animal-ai/configs/paper_curriculum_split"
+DEFAULT_ARENA_ROOT = REPO_ROOT / "external/animal-ai/configs/competition"
 DEFAULT_BINARY = Path.home() / "animalai_env/Linux/animalAI.x86_64"
 
 # "    t: 500" / "    timeLimit: 500" -- the key name differs by AAI version,

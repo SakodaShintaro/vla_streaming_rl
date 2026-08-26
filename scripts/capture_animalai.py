@@ -7,12 +7,12 @@ settle, grab the player window, press R for the next arena. The result is one
 PNG per arena, plus contact sheets with --montage so the whole curriculum can
 be looked over at once.
 
-Point --arena-root at the competition set to sweep the 900 evaluation
-scenarios instead of the curriculum:
+--arena-root defaults to the whole 900-arena competition set; point it at a
+directory holding a subset to sweep only those:
 
     python scripts/capture_animalai.py \
-        --arena-root external/animal-ai/configs/competition \
-        --out-dir /tmp/aai_competition --montage
+        --arena-root /tmp/some_arenas \
+        --out-dir /tmp/aai_subset --montage
 
 C cycles first person -> third person -> overhead, and the player starts on
 the first of those, so --camera-presses says how many times to press it before
@@ -170,7 +170,7 @@ def main() -> None:
     assert args.arena_root.is_dir(), f"no such arena directory: {args.arena_root}"
     assert args.binary.exists(), f"Animal-AI binary not found: {args.binary}"
 
-    # Sorted order, so a contact sheet reads stage00 first.
+    # Sorted order, so a contact sheet reads level 01 first.
     paths = sorted(args.arena_root.rglob(args.pattern))
     assert paths, f"no arena matching {args.pattern} under {args.arena_root}"
     if args.limit > 0:
