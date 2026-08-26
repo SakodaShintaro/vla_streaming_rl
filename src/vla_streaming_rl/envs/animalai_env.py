@@ -24,8 +24,9 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
               stage per competition level, sampled uniformly within the stage
               (`StagedSelector`).
   - "success" one stage per level, advanced by clearing a round of it: the
-              stage's 30 arenas drawn without replacement, then the next stage
-              if the round's success rate reached `advance_success_rate`
+              stage's whole pool (30 arenas at stage 1, 60 at stage 2, up to
+              300) drawn without replacement, then the next stage if the
+              round's success rate reached `advance_success_rate`
               (`SuccessDrivenSelector`).
   - "sequential" no curriculum: every training arena in label order, wrapping
               around forever (`SequentialSelector`, cycling).
@@ -212,6 +213,18 @@ def _training_stages(variant: str) -> list[list[Arena]]:
     ]
 
 
+def _cumulative_stages(variant: str) -> list[list[Arena]]:
+    """Each stage's arena pool: its own level plus every level before it.
+
+    30 arenas at stage 1, 60 at stage 2, up to all 300 at stage 10, so a stage
+    keeps drawing on everything the curriculum has unlocked so far.
+    """
+    pools: list[list[Arena]] = []
+    for level_arenas in _training_stages(variant):
+        pools.append((pools[-1] if pools else []) + level_arenas)
+    return pools
+
+
 def _arena_signature(path: Path) -> str:
     """Digest of what makes two arena yamls the same episode.
 
@@ -347,12 +360,9 @@ class StagedSelector(ArenaSelector):
     """
 
     def __init__(self, variant: str, steps_per_stage: int, seed: int):
-        levels = _training_stages(variant)
-        cumulative: list[list[Arena]] = []
-        for level_arenas in levels:
-            cumulative.append((cumulative[-1] if cumulative else []) + level_arenas)
-        super().__init__(cumulative[-1])
-        self._stages = cumulative + [cumulative[-1]]
+        stages = _cumulative_stages(variant)
+        super().__init__(stages[-1])
+        self._stages = stages + [stages[-1]]
         self.steps_per_stage = steps_per_stage
         self._rng = np.random.default_rng(seed)
 
@@ -376,20 +386,20 @@ class StagedSelector(ArenaSelector):
 class SuccessDrivenSelector(ArenaSelector):
     """One stage per Olympics level, advanced by clearing a round of it.
 
-    A round is the stage's 30 arenas drawn without replacement, so every arena
-    of the stage is played exactly once before any is played again. When the
+    A round is the stage's whole pool drawn without replacement, so every arena
+    it has unlocked is played exactly once before any is played again. When the
     round ends its success rate is compared with `advance_success_rate`: at or
-    above it the next stage opens, below it the same stage runs another round.
-    At the default of 1.0 that means 30 straight passes.
+    above it the next stage opens, below it the same stage runs another round
+    with a fresh draw order.
 
-    Unlike `StagedSelector` the stages are not cumulative: a stage serves its
-    own level only, so the round size stays at 30 and the rate means the same
-    thing at every stage.
+    The pools are cumulative, so a round is 30 arenas at stage 1, 60 at stage
+    2 and so on up to 300, and nothing already learned is dropped. At the
+    default rate of 1.0 stage 2 therefore asks for 60 straight passes.
     """
 
     def __init__(self, variant: str, advance_success_rate: float, seed: int):
-        stages = _training_stages(variant)
-        super().__init__([arena for stage in stages for arena in stage])
+        stages = _cumulative_stages(variant)
+        super().__init__(stages[-1])
         self._stages = stages
         self.advance_success_rate = advance_success_rate
         self._rng = np.random.default_rng(seed)
@@ -451,7 +461,6 @@ class SuccessDrivenSelector(ArenaSelector):
         return (
             f"stage:{self._stage + 1}/{len(self._stages)}"
             f"  round:{self._round_attempts}/{size} rate:{rate:.2f}"
-            f"  last:{self._last_round_rate:.2f} need:{self.advance_success_rate:.2f}"
             f"  step:{global_step}"
         )
 

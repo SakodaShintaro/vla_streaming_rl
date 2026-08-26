@@ -17,7 +17,7 @@ env_factory:
   #               curriculum, one stage per competition level, drawing
   #               uniformly from the arenas the stage has unlocked.
   #     success : one stage per level, advanced by clearing a round of it --
-  #               the stage's 30 arenas drawn without replacement, then the
+  #               the stage's whole pool drawn without replacement, then the
   #               next stage if the round's success rate reached
   #               advance_success_rate (steps_per_stage is ignored).
   #     sequential : no curriculum. Every training arena in label order,
@@ -39,9 +39,10 @@ env_factory:
   train_variant: "01"
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 40_000
-  # - advance_success_rate ("success"): the share of a 30-arena round that has
-  #   to be passed for the next stage to open. 1.0 means 30 straight passes; a
-  #   round below it repeats the same stage with a fresh draw order.
+  # - advance_success_rate ("success"): the share of a round that has to be
+  #   passed for the next stage to open. Pools are cumulative, so a round is 30
+  #   arenas at stage 1 and 60 at stage 2; at 1.0 that is 30 then 60 straight
+  #   passes. A round below the rate repeats the stage with a fresh draw order.
   advance_success_rate: 1.0
   binary_path: ~/animalai_env/4.3.2_alpha1/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
