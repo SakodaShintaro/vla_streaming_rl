@@ -12,6 +12,8 @@ agent=${1}
 exp_name=${2}
 cd $(dirname $0)
 
+export GRPC_VERBOSITY=ERROR
+
 # Animal-AI v5 does not auto-download the Unity binary. Place the unzipped
 # Linux build at $HOME/animalai_env/Linux/animalAI.x86_64 (downloaded from
 # https://github.com/Kinds-of-Intelligence-CFI/animal-ai/releases).
