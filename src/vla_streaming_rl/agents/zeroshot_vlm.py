@@ -112,8 +112,9 @@ class ZeroShotVLMAgent(Agent):
         image_side: int,
         temperature: float,
         api_max_retries: int,
+        reset_on_episode_end: bool,
     ) -> None:
-        super().__init__(learning_mode="streaming", horizon=1)
+        super().__init__(horizon=1, reset_on_episode_end=reset_on_episode_end)
         # One API call per env step means a single upstream hiccup (a shared-pool
         # 429, a 5xx) would otherwise abort a run that is minutes deep. The SDK
         # retries those with exponential backoff; only give it room to.
@@ -221,7 +222,7 @@ class ZeroShotVLMAgent(Agent):
         panels = {"output": _text_panel(caption, _OUTPUT_PANEL_WIDTH)}
         return StepResult(action=action, metrics=metrics, panels=panels)
 
-    def _step_streaming(
+    def step(
         self,
         global_step: int,
         obs: dict[str, Any],
@@ -234,9 +235,10 @@ class ZeroShotVLMAgent(Agent):
 
     def on_episode_end(self, score: float, feedback_text: str) -> dict:
         del score, feedback_text
-        self.history.clear()
-        self.last_action = np.zeros(self.action_dim, dtype=np.float32)
-        self.step_in_episode = 0
+        if self.reset_on_episode_end:
+            self.history.clear()
+            self.last_action = np.zeros(self.action_dim, dtype=np.float32)
+            self.step_in_episode = 0
         return {}
 
     def optimizer_state_dict(self) -> dict:

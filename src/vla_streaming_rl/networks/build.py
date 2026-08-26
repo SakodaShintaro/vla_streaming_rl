@@ -79,20 +79,38 @@ def build_network(
         from vla_streaming_rl.networks.animal_ppo import AnimalPPONetwork
 
         # scaled velocity (vx, vy, vz) plus the health that stands in for the clock
-        return AnimalPPONetwork(observation_space_shape=observation_space_shape, vels_size=4).to(
-            device
-        )
+        return AnimalPPONetwork(
+            observation_space_shape=observation_space_shape,
+            vels_size=4,
+            image_encoder_type=args.image_encoder_type,
+            image_encoder_output_dim=args.image_encoder_output_dim,
+            image_encode_mode=args.image_encode_mode,
+            image_encoder_trainable=args.image_encoder_trainable,
+            temporal_model_type=args.temporal_model_type,
+        ).to(device)
 
     if args.network_class == "animal_world_critic":
         from vla_streaming_rl.networks.animal_world_critic import AnimalWorldCriticNetwork
 
+        # a window of n steps carries n - 1 next-state pairs, so 1 trains nothing
+        assert args.seq_len >= 2, (
+            f"seq_len {args.seq_len} leaves no next-state pair for the world-critic loss"
+        )
+
         return AnimalWorldCriticNetwork(
             observation_space_shape=observation_space_shape,
             vels_size=4,
+            image_encoder_type=args.image_encoder_type,
+            image_encoder_output_dim=args.image_encoder_output_dim,
+            image_encode_mode=args.image_encode_mode,
+            image_encoder_trainable=args.image_encoder_trainable,
+            temporal_model_type=args.temporal_model_type,
             latent_dim=args.wcm_latent_dim,
             dynamics_depth=args.wcm_dynamics_depth,
             dynamics_mlp_ratio=args.wcm_dynamics_mlp_ratio,
             dynamics_dropout=args.wcm_dynamics_dropout,
+            next_state_coef=args.wcm_next_state_coef,
+            sigreg_coef=args.wcm_sigreg_coef,
             sigreg_knots=args.wcm_sigreg_knots,
             sigreg_projections=args.wcm_sigreg_projections,
         ).to(device)
@@ -145,6 +163,8 @@ def build_network(
             predictor_type=args.predictor_type,
             image_encoder_type=args.image_encoder_type,
             image_encoder_output_dim=args.image_encoder_output_dim,
+            image_encode_mode=args.image_encode_mode,
+            image_encoder_trainable=args.image_encoder_trainable,
         ).to(device)
         network = torch.compile(network)
 
@@ -168,6 +188,11 @@ def build_network(
             critic_loss_weight=args.critic_loss_weight,
             detach_actor=args.detach_actor,
             detach_critic=args.detach_critic,
+            image_encoder_type=args.image_encoder_type,
+            image_encoder_output_dim=args.image_encoder_output_dim,
+            image_encode_mode=args.image_encode_mode,
+            image_encoder_trainable=args.image_encoder_trainable,
+            temporal_model_type=args.temporal_model_type,
         ).to(device)
 
     elif args.network_class == "animal_world_critic_actor_critic":
@@ -192,6 +217,11 @@ def build_network(
             critic_loss_weight=args.critic_loss_weight,
             detach_actor=args.detach_actor,
             detach_critic=args.detach_critic,
+            image_encoder_type=args.image_encoder_type,
+            image_encoder_output_dim=args.image_encoder_output_dim,
+            image_encode_mode=args.image_encode_mode,
+            image_encoder_trainable=args.image_encoder_trainable,
+            temporal_model_type=args.temporal_model_type,
             wcm_latent_dim=args.wcm_latent_dim,
             wcm_dynamics_depth=args.wcm_dynamics_depth,
             wcm_dynamics_mlp_ratio=args.wcm_dynamics_mlp_ratio,
@@ -244,6 +274,8 @@ def build_network(
             policy_type=args.policy_type,
             image_encoder_type=args.image_encoder_type,
             image_encoder_output_dim=args.image_encoder_output_dim,
+            image_encode_mode=args.image_encode_mode,
+            image_encoder_trainable=args.image_encoder_trainable,
         ).to(device)
 
     else:

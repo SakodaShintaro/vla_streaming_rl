@@ -54,6 +54,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         predictor_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
         self.sparsity = sparsity
@@ -64,13 +66,21 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.predictor_step_num = predictor_step_num
         self.observation_space_shape = observation_space_shape
 
+        # this network's spatial-temporal attention is built around the patch
+        # grid; a single pooled token would leave it nothing to attend over, so
+        # "single_token" is for the animal backbone (see ``networks/animal_ppo.py``)
+        assert image_encode_mode == "grid"
         self.image_processor = ImageProcessor(
-            observation_space_shape, image_encoder_type, image_encoder_output_dim
+            observation_space_shape,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
         )
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
-        self.scalar_obs_dim = 8
+        self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
         self.encoder = SpatialTemporalEncoder(
             image_processor=self.image_processor,
@@ -128,6 +138,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         velocity_z: float,
         episode_return: float,
         pass_mark: float,
+        remaining_return: float,
         global_step: float,
         episode_step: float,
         health: float,
@@ -139,6 +150,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 velocity_z,
                 episode_return,
                 pass_mark,
+                remaining_return,
                 global_step,
                 episode_step,
                 health,
@@ -154,6 +166,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         velocity_z: torch.Tensor,
         episode_return: torch.Tensor,
         pass_mark: torch.Tensor,
+        remaining_return: torch.Tensor,
         global_step: torch.Tensor,
         episode_step: torch.Tensor,
         health: torch.Tensor,
@@ -165,6 +178,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 velocity_z,
                 episode_return,
                 pass_mark,
+                remaining_return,
                 global_step,
                 episode_step,
                 health,
@@ -183,6 +197,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z_seq,
             data.episode_return_seq,
             data.pass_mark_seq,
+            data.remaining_return_seq,
             data.global_step_seq,
             data.episode_step_seq,
             data.health_seq,
@@ -235,6 +250,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.velocity_z[:, self.horizon :],
                 data.episode_return[:, self.horizon :],
                 data.pass_mark[:, self.horizon :],
+                data.remaining_return[:, self.horizon :],
                 data.global_step[:, self.horizon :],
                 data.episode_step[:, self.horizon :],
                 data.health[:, self.horizon :],
@@ -260,6 +276,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z[:, : -self.horizon],
             data.episode_return[:, : -self.horizon],
             data.pass_mark[:, : -self.horizon],
+            data.remaining_return[:, : -self.horizon],
             data.global_step[:, : -self.horizon],
             data.episode_step[:, : -self.horizon],
             data.health[:, : -self.horizon],
@@ -315,6 +332,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.velocity_z[:, self.horizon :],
                 data.episode_return[:, self.horizon :],
                 data.pass_mark[:, self.horizon :],
+                data.remaining_return[:, self.horizon :],
                 data.global_step[:, self.horizon :],
                 data.episode_step[:, self.horizon :],
                 data.health[:, self.horizon :],
@@ -342,6 +360,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.velocity_z[:, : -self.horizon],
             data.episode_return[:, : -self.horizon],
             data.pass_mark[:, : -self.horizon],
+            data.remaining_return[:, : -self.horizon],
             data.global_step[:, : -self.horizon],
             data.episode_step[:, : -self.horizon],
             data.health[:, : -self.horizon],

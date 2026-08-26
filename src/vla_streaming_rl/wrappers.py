@@ -75,20 +75,35 @@ def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
 def make_animalai_env(
     resolution: int,
     mode: str,
-    train_arena_root: str,
+    train_variant: str,
     steps_per_stage: int,
-    revisit_temperature: float,
+    advance_success_rate: float,
+    binary_path: str,
+    continuous_action: bool,
+    topdown_camera: bool,
+    topdown_resolution: int,
+    end_at_pass_mark: bool,
 ) -> gym.Env:
     from vla_streaming_rl.envs.animalai_env import AnimalAIEnv, build_selector
 
     selector = build_selector(
         mode=mode,
-        train_arena_root=train_arena_root,
+        train_variant=train_variant,
         steps_per_stage=steps_per_stage,
-        revisit_temperature=revisit_temperature,
+        advance_success_rate=advance_success_rate,
         seed=0,
     )
-    return AnimalAIEnv(resolution=resolution, seed=0, base_port=5005, selector=selector)
+    return AnimalAIEnv(
+        resolution=resolution,
+        seed=0,
+        base_port=5005,
+        binary_path=binary_path,
+        continuous_action=continuous_action,
+        topdown_camera=topdown_camera,
+        topdown_resolution=topdown_resolution,
+        end_at_pass_mark=end_at_pass_mark,
+        selector=selector,
+    )
 
 
 def make_carla_env(
@@ -149,6 +164,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = CarRacingActionWrapper(env)
         env = ActionRepeatWrapper(env, repeat=REPEAT)
         env = AverageRewardEarlyStopWrapper(env)
+        env = UnshapedRewardWrapper(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)
@@ -191,6 +207,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = HealthObsWrapper(env)
         env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
+        env = RemainingReturnObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _animalai_parse_action
@@ -199,6 +216,21 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
 
     else:
         raise ValueError(f"Unsupported environment: {env_id}")
+
+
+class UnshapedRewardWrapper(gym.Wrapper):
+    """Publish ``info["shaped_reward"]`` for an env whose reward is trained on as it
+    comes, so every env hands the agent both numbers on the same channel."""
+
+    def reset(self, **kwargs) -> tuple:
+        obs, info = self.env.reset(**kwargs)
+        info["shaped_reward"] = 0.0
+        return obs, info
+
+    def step(self, action: np.ndarray) -> tuple:
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        info["shaped_reward"] = float(reward)
+        return obs, reward, terminated, truncated, info
 
 
 class ActionRepeatWrapper(gym.Wrapper):
@@ -368,6 +400,28 @@ class EpisodeReturnObsWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
+class RemainingReturnObsWrapper(gym.ObservationWrapper):
+    """Expose how much return the episode still owes its pass mark.
+
+    ``pass_mark - episode_return`` is what "am I about to clear this arena?"
+    reduces to; the two terms are already observations, but the difference is
+    the one the policy and the value head actually act on. Envs without a pass
+    mark report 0 through ``ZeroScalarObsWrapper`` instead.
+    """
+
+    def __init__(self, env: gym.Env) -> None:
+        super().__init__(env)
+        spaces = dict(env.observation_space.spaces)
+        spaces["remaining_return"] = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        )
+        self.observation_space = gym.spaces.Dict(spaces)
+
+    def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        remaining = obs["pass_mark"] - obs["episode_return"]
+        return {**obs, "remaining_return": remaining.astype(np.float32)}
+
+
 class StepCountInfoWrapper(gym.Wrapper):
     """Count the step numbers an env does not report itself.
 
@@ -437,10 +491,14 @@ class ZeroScalarObsWrapper(gym.ObservationWrapper):
         spaces["velocity"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
         spaces["pass_mark"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
         spaces["health"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
+        spaces["remaining_return"] = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        )
         self.observation_space = gym.spaces.Dict(spaces)
         self._zero_velocity = np.zeros(3, dtype=np.float32)
         self._zero_pass_mark = np.zeros(1, dtype=np.float32)
         self._zero_health = np.zeros(1, dtype=np.float32)
+        self._zero_remaining_return = np.zeros(1, dtype=np.float32)
 
     def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         return {
@@ -448,6 +506,7 @@ class ZeroScalarObsWrapper(gym.ObservationWrapper):
             "velocity": self._zero_velocity,
             "pass_mark": self._zero_pass_mark,
             "health": self._zero_health,
+            "remaining_return": self._zero_remaining_return,
         }
 
 

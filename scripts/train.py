@@ -134,16 +134,20 @@ def save_checkpoint(result_dir: Path, network, agent) -> None:
 def write_arena_stats(path: Path, curriculum: dict, best_score_per_arena: dict) -> None:
     """Per-arena record (attempts / successes / success rate / best score).
 
+    `cleared` is the arena selector's own verdict, which depends on the mode:
+    one pass is enough for most, while "success" wants a repeatable pass rate.
+
     Human-readable, and also read back by ``load_resume_state`` on resume."""
     attempts = curriculum["arena_attempts"]
     successes = curriculum["arena_successes"]
+    cleared = curriculum["arena_cleared"]
     with open(path, "w") as f:
         f.write("arena\tattempts\tsuccesses\tsuccess_rate\tbest_score\tcleared\n")
         for arena in sorted(attempts):
             success_rate = successes[arena] / attempts[arena]
             f.write(
                 f"{arena}\t{attempts[arena]}\t{successes[arena]}\t{success_rate:.4f}"
-                f"\t{best_score_per_arena[arena]:.6f}\t{int(successes[arena] > 0)}\n"
+                f"\t{best_score_per_arena[arena]:.6f}\t{int(cleared[arena])}\n"
             )
 
 
@@ -158,9 +162,12 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
         "episode_id": 0,
         "episode_count": 0,
         "score_sum_all": 0.0,
+        "success_sum_all": 0.0,
+        "success_episode_count": 0,
         "best_score": -float("inf"),
         "score_list": [],
-        "is_revisit": False,
+        "success_list": [],
+        "curriculum_progress": {},
         "best_score_per_arena": {},
     }
 
@@ -192,14 +199,15 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
         attempts = {}
         successes = {}
         best_scores = {}
+        cleared_count = 0
         for row in arena_stats_path.read_text().splitlines()[1:]:
-            arena, n_attempt, n_success, _rate, best, _cleared = row.split("\t")
+            arena, n_attempt, n_success, _rate, best, cleared = row.split("\t")
             attempts[arena] = int(n_attempt)
             successes[arena] = int(n_success)
             best_scores[arena] = float(best)
-        set_curriculum(attempts, successes, state["is_revisit"])
+            cleared_count += int(cleared)
+        set_curriculum(attempts, successes, state["curriculum_progress"])
         state["best_score_per_arena"] = best_scores
-        cleared_count = sum(n > 0 for n in successes.values())
         print(
             f"Resume: loaded {len(attempts)} arena records from {arena_stats_path} "
             f"(cleared={cleared_count})"
@@ -276,6 +284,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     score_list = []
     score_sum_all = 0.0
     episode_count = 0
+    success_list = []
+    success_sum_all = 0.0
+    success_episode_count = 0
     best_score = -float("inf")
     best_score_per_arena: dict[str, float] = {}
     # Don't reset the env here — the first iteration of the episode loop
@@ -313,8 +324,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         episode_id = resume_state["episode_id"]
         episode_count = resume_state["episode_count"]
         score_sum_all = resume_state["score_sum_all"]
+        success_sum_all = resume_state["success_sum_all"]
+        success_episode_count = resume_state["success_episode_count"]
         best_score = resume_state["best_score"]
         score_list = list(resume_state["score_list"])
+        success_list = list(resume_state["success_list"])
         best_score_per_arena = dict(resume_state["best_score_per_arena"])
         print(f"Resumed from {args.resume_dir}: global_step={global_step} episode_id={episode_id}")
         set_global_step = getattr(env.unwrapped, "set_global_step", None)
@@ -467,14 +481,25 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         if "pass_mark" in env_info:
             success = float(score >= env_info["pass_mark"])
             data_dict["success"] = success
+            success_sum_all += success
+            success_episode_count += 1
+            success_list.append(success)
+            success_list = success_list[-eval_range:]
+            data_dict["success_episode_count"] = success_episode_count
+            data_dict["total_success_rate"] = success_sum_all / success_episode_count
+            if len(success_list) >= eval_range:
+                data_dict["recent_success_rate"] = float(np.mean(success_list))
             arena_name = env_info.get("arena_name", "")
             if arena_name:
                 data_dict[f"success/{arena_name}"] = success
                 data_dict[f"episodic_return/{arena_name}"] = score
             if "cleared_count" in env_info:
                 data_dict["cleared_count"] = env_info["cleared_count"]
-                data_dict["is_revisit"] = float(env_info.get("is_revisit", False))
-                data_dict["advanced"] = float(env_info.get("advanced", False))
+                data_dict["stage"] = env_info["stage"]
+                data_dict["round_index"] = env_info["round_index"]
+                data_dict["round_success_rate"] = env_info["round_success_rate"]
+                data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
+                data_dict["advanced"] = float(env_info["advanced"])
         if len(score_list) >= eval_range:
             data_dict["recent_average_score"] = recent_average_score
         wandb.log(data_dict)
@@ -482,7 +507,10 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         if result_dir is not None:
             if log_episode_writer is None:
                 log_episode_file = open(log_episode_path, "w", newline="")
-                fieldnames = list(data_dict.keys()) + ["recent_average_score"]
+                fieldnames = list(data_dict.keys()) + [
+                    "recent_average_score",
+                    "recent_success_rate",
+                ]
                 log_episode_writer = csv.DictWriter(
                     log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
                 )
@@ -557,13 +585,16 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 "episode_id": episode_id + 1,
                 "episode_count": episode_count,
                 "score_sum_all": float(score_sum_all),
+                "success_sum_all": float(success_sum_all),
+                "success_episode_count": success_episode_count,
                 "best_score": float(best_score),
                 "score_list": [float(s) for s in score_list],
+                "success_list": [float(s) for s in success_list],
             }
             get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
             if get_curriculum is not None:
                 curriculum = get_curriculum()
-                train_state["is_revisit"] = curriculum["is_revisit"]
+                train_state["curriculum_progress"] = curriculum["progress"]
                 write_arena_stats(result_dir / "arena_stats.tsv", curriculum, best_score_per_arena)
             (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
 
@@ -593,6 +624,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             args.env_id,
             global_step,
             result_dir / "eval" / "final",
+            args.env_factory.train_variant,
         )
         wandb.summary.update({f"testbed/{k}": v for k, v in testbed_metrics.items()})
         eval_env.close()
@@ -632,12 +664,7 @@ def hydra_main(cfg: DictConfig) -> None:
         print("Because a headless environment is detected, rendering is automatically disabled.")
         cfg.render = 0
 
-    # ``agent_type`` is the agent class; ``learning_mode`` (when present) is the
-    # off_policy / streaming variant — keep it in the run name so the two stay
-    # distinguishable now that both map to the same StandardAgent class.
-    learning_mode = OmegaConf.select(cfg, "learning_mode", default=None)
-    agent_tag = cfg.agent_type.upper() + (f"_{learning_mode.upper()}" if learning_mode else "")
-    exp_name = f"{agent_tag}_{cfg.exp_name}"
+    exp_name = f"{cfg.agent_type.upper()}_{cfg.exp_name}"
     seed = cfg.seed if cfg.seed != -1 else np.random.randint(0, 10000)
 
     for i in range(cfg.trial_num):

@@ -5,7 +5,7 @@ WCM (arXiv 2607.29613) trains a critic whose shared representation has to
 support two objectives: an action-free value estimate over the history, and an
 action-conditioned prediction of the next latent state. The second one is what
 this file adds. The value estimate here is already action-free -- PPO's value
-head reads the LSTM output, which never sees an action -- so what is missing is
+head reads the recurrent output, which never sees an action -- so what is missing is
 the dynamics branch and the collapse guard that lets its target be the encoder's
 own latent.
 
@@ -14,7 +14,7 @@ Three pieces come across from ``world_critic/model.py``:
 - :class:`GatedDynamicsBlock`, the FiLM-modulated residual update, initialized so
   the gate starts near closed and the branch starts near identity,
 - :class:`ActionConditionedDynamics`, predicting ``z_(t+1) = z_t + delta(h_t, a_t)``
-  with the LSTM output as the history context, and
+  with the recurrent output as the history context, and
 - :class:`SIGReg`, the LeJEPA sketched isotropic-Gaussian regularizer. The
   prediction target is the encoder's own detached latent, so nothing stops the
   encoder from collapsing to a constant except this term.
@@ -22,6 +22,11 @@ Three pieces come across from ``world_critic/model.py``:
 The one structural change is the action encoder: WCM's actions are continuous
 robot commands through an MLP, while Animal-AI's are one of nine discrete
 branch pairs, so an embedding table takes that slot.
+
+The dynamics loss rides on the minibatch the PPO update already runs, over the
+step pairs that stay inside one episode, so ``seq_len`` is what bounds it: a
+window of ``n`` steps contributes ``n - 1`` pairs, and it has to be raised above
+what plain PPO runs with.
 """
 
 import torch
@@ -31,7 +36,7 @@ from torch import nn
 from vla_streaming_rl.networks.animal_ppo import (
     ACTION_NUM,
     HIDDEN_NODES,
-    LSTM_UNITS,
+    TEMPORAL_UNITS,
     AnimalPPONetwork,
 )
 
@@ -192,32 +197,50 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
     """:class:`AnimalPPONetwork` plus the world-critic branch.
 
     ``forward`` is the parent's, so acting is unchanged and existing PPO
-    checkpoints load into the body. ``forward_with_latents`` is the update path:
-    it returns, off one pass of the tower, the two latents the auxiliary losses
-    read -- the per-step visual latent that the prediction target is taken from,
-    and the recurrent context the prediction is conditioned on.
+    checkpoints load into the body. Only ``forward_for_update`` differs: off one
+    pass of the trunk it reads the two latents the auxiliary losses need -- the
+    per-step visual latent the prediction target is taken from, and the recurrent
+    context the prediction is conditioned on -- and returns their loss alongside
+    the heads the PPO update already expects.
     """
 
     def __init__(
         self,
         observation_space_shape: tuple[int, ...],
         vels_size: int,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
+        temporal_model_type: str,
         latent_dim: int,
         dynamics_depth: int,
         dynamics_mlp_ratio: float,
         dynamics_dropout: float,
+        next_state_coef: float,
+        sigreg_coef: float,
         sigreg_knots: int,
         sigreg_projections: int,
     ) -> None:
-        super().__init__(observation_space_shape, vels_size)
+        super().__init__(
+            observation_space_shape,
+            vels_size,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
+            temporal_model_type,
+        )
         self.latent_dim = latent_dim
+        self.next_state_coef = next_state_coef
+        self.sigreg_coef = sigreg_coef
         self.state_projection = nn.Sequential(
             nn.LayerNorm(HIDDEN_NODES),
             nn.Linear(HIDDEN_NODES, latent_dim),
         )
         self.context_projection = nn.Sequential(
-            nn.LayerNorm(LSTM_UNITS),
-            nn.Linear(LSTM_UNITS, latent_dim),
+            nn.LayerNorm(TEMPORAL_UNITS),
+            nn.Linear(TEMPORAL_UNITS, latent_dim),
         )
         action_embedding = nn.Embedding(ACTION_NUM, latent_dim)
         nn.init.normal_(action_embedding.weight, std=0.02)
@@ -230,30 +253,42 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
         )
         self.sigreg = SIGReg(sigreg_knots, sigreg_projections)
 
-    def forward_with_latents(
+    def forward_for_update(
         self,
         visual: torch.Tensor,
         vels: torch.Tensor,
         state: torch.Tensor,
         dones: torch.Tensor,
-        env_num: int,
+        actions: torch.Tensor,
+        sequence_num: int,
     ) -> tuple:
-        """Returns ``(logits, value, lstm_state, state_latent, context_latent)``
-        for the same environment-major batch ``forward`` takes."""
         visual_latent, hidden = self.embed(visual, vels)
-        lstm_out, lstm_state = self.recurrent(hidden, state, dones, env_num)
-        return (
-            self.logits_head(lstm_out),
-            self.value_head(lstm_out),
-            lstm_state,
-            self.state_projection(visual_latent),
-            self.context_projection(lstm_out),
+        temporal_out, _ = self.recurrent(hidden, state, dones, sequence_num)
+        state_latent = self.state_projection(visual_latent).reshape(
+            sequence_num, -1, self.latent_dim
         )
+        context_latent = self.context_projection(temporal_out).reshape(
+            sequence_num, -1, self.latent_dim
+        )
+        # the window is sequence-major, so a pair is the step and the one after
+        # it; a step flagged fresh starts an episode and cuts the pair before it
+        fresh = dones.reshape(sequence_num, -1)
+        predicted = self.dynamics(
+            state_latent[:, :-1], context_latent[:, :-1], actions.reshape(sequence_num, -1)[:, :-1]
+        )
+        target = state_latent[:, 1:].detach()
+        valid = (fresh[:, 1:] < 0.5).to(predicted.dtype).unsqueeze(-1)
 
-    def predict_next_state(
-        self, state_latent: torch.Tensor, context_latent: torch.Tensor, actions: torch.Tensor
-    ) -> torch.Tensor:
-        return self.dynamics(state_latent, context_latent, actions)
-
-    def sigreg_loss(self, context_latent: torch.Tensor) -> torch.Tensor:
-        return self.sigreg.loss(context_latent)
+        next_state_loss = next_state_prediction_loss(predicted, target, valid)
+        sigreg_loss = self.sigreg.loss(context_latent)
+        auxiliary_loss = self.next_state_coef * next_state_loss + self.sigreg_coef * sigreg_loss
+        reported = {
+            "next_state": float(next_state_loss.item()),
+            "sigreg": float(sigreg_loss.item()),
+        }
+        return (
+            self.logits_head(temporal_out),
+            self.value_head(temporal_out).squeeze(-1),
+            auxiliary_loss,
+            reported,
+        )

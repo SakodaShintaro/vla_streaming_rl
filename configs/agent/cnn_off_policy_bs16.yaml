@@ -6,9 +6,8 @@ defaults:
   - base/vlm
   - _self_
 
-agent_type: standard
+agent_type: off_policy
 network_class: actor_critic_with_action_value
-learning_mode: off_policy
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5

@@ -3,10 +3,10 @@
 
 The same branch ``networks/animal_world_critic.py`` adds to the PPO network,
 moved onto :class:`AnimalActorCriticWithActionValue` so it runs under
-:class:`~vla_streaming_rl.agents.standard.StandardAgent` in ``off_policy`` and
-``streaming`` mode. Nothing about the objective needs on-policy data: both terms
-are self-supervised on the window itself, so replayed windows train them exactly
-as fresh ones do.
+:class:`~vla_streaming_rl.agents.off_policy.OffPolicyAgent` and
+:class:`~vla_streaming_rl.agents.streaming.StreamingAgent`. Nothing about the
+objective needs on-policy data: both terms are self-supervised on the window
+itself, so replayed windows train them exactly as fresh ones do.
 
 Two differences from the PPO port:
 
@@ -22,7 +22,7 @@ from torch import nn
 from vla_streaming_rl.networks.animal_actor_critic import (
     AnimalActorCriticWithActionValue,
 )
-from vla_streaming_rl.networks.animal_ppo import HIDDEN_NODES, LSTM_UNITS
+from vla_streaming_rl.networks.animal_ppo import HIDDEN_NODES, TEMPORAL_UNITS
 from vla_streaming_rl.networks.animal_world_critic import (
     ActionConditionedDynamics,
     DynamicsMLP,
@@ -52,6 +52,11 @@ class AnimalWorldCriticActorCritic(AnimalActorCriticWithActionValue):
         critic_loss_weight: float,
         detach_actor: bool,
         detach_critic: bool,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
+        temporal_model_type: str,
         wcm_latent_dim: int,
         wcm_dynamics_depth: int,
         wcm_dynamics_mlp_ratio: float,
@@ -78,6 +83,11 @@ class AnimalWorldCriticActorCritic(AnimalActorCriticWithActionValue):
             critic_loss_weight=critic_loss_weight,
             detach_actor=detach_actor,
             detach_critic=detach_critic,
+            image_encoder_type=image_encoder_type,
+            image_encoder_output_dim=image_encoder_output_dim,
+            image_encode_mode=image_encode_mode,
+            image_encoder_trainable=image_encoder_trainable,
+            temporal_model_type=temporal_model_type,
         )
         self.wcm_next_state_coef = wcm_next_state_coef
         self.wcm_sigreg_coef = wcm_sigreg_coef
@@ -86,8 +96,8 @@ class AnimalWorldCriticActorCritic(AnimalActorCriticWithActionValue):
             nn.Linear(HIDDEN_NODES, wcm_latent_dim),
         )
         self.context_projection = nn.Sequential(
-            nn.LayerNorm(LSTM_UNITS),
-            nn.Linear(LSTM_UNITS, wcm_latent_dim),
+            nn.LayerNorm(TEMPORAL_UNITS),
+            nn.Linear(TEMPORAL_UNITS, wcm_latent_dim),
         )
         dynamics_hidden_dim = int(wcm_latent_dim * wcm_dynamics_mlp_ratio)
         self.dynamics = ActionConditionedDynamics(
@@ -104,20 +114,20 @@ class AnimalWorldCriticActorCritic(AnimalActorCriticWithActionValue):
     def _encode_current_window(
         self, data: ReplayBufferData
     ) -> tuple[torch.Tensor, torch.Tensor, dict]:
-        lstm_out, visual_latent, _ = self.encoder.forward_steps(
+        temporal_out, visual_latent, _ = self.encoder.forward_steps(
             *self._window(data, 0, -self.horizon)
         )
-        assert lstm_out.shape[1] >= 2, (
-            f"The world-critic loss needs a window of at least 2 steps, got {lstm_out.shape[1]}: "
+        assert temporal_out.shape[1] >= 2, (
+            f"The world-critic loss needs a window of at least 2 steps, got {temporal_out.shape[1]}: "
             "raise seq_len"
         )
         state_latent = self.state_projection(visual_latent)
-        context_latent = self.context_projection(lstm_out)
+        context_latent = self.context_projection(temporal_out)
 
         actions = data.actions[:, 0 : -self.horizon]
         predicted = self.dynamics(state_latent[:, :-1], context_latent[:, :-1], actions[:, :-1])
         target = state_latent[:, 1:].detach()
-        dones = data.dones[:, 0 : -self.horizon].reshape(lstm_out.shape[0], -1)
+        dones = data.dones[:, 0 : -self.horizon].reshape(temporal_out.shape[0], -1)
         valid = (dones[:, :-1] < 0.5).to(predicted.dtype).unsqueeze(-1)
 
         next_state_loss = next_state_prediction_loss(predicted, target, valid)
@@ -129,4 +139,4 @@ class AnimalWorldCriticActorCritic(AnimalActorCriticWithActionValue):
             "wcm_next_state": next_state_loss.item(),
             "wcm_sigreg": sigreg_loss.item(),
         }
-        return lstm_out[:, -1], auxiliary_loss, auxiliary_info
+        return temporal_out[:, -1], auxiliary_loss, auxiliary_info

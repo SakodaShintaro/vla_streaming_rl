@@ -2,11 +2,11 @@
 """The Animal-AI backbone with a diffusion policy and an action-value head.
 
 The body is the winning network's, unchanged: :class:`AnimalBackbone` -- the
-Fixup residual tower with channel attention, the dense branch and the LayerNorm
-LSTM. What sits on top is not PPO's categorical logits and state value but the
-pair the standard agent trains, a diffusion policy head over an action chunk and
-a distributional Q(s, a), so this is a :class:`NetworkInterface` and
-:class:`StandardAgent` drives it in either ``off_policy`` or ``streaming`` mode.
+Fixup residual tower with channel attention, the dense branch and the recurrent
+cell. What sits on top is not PPO's categorical logits and state value but the
+pair the off-policy and streaming agents train, a diffusion policy head over an
+action chunk and a distributional Q(s, a), so this is a :class:`NetworkInterface` and
+:class:`OffPolicyAgent` and :class:`StreamingAgent` both drive it.
 
 The two differences from ``AnimalPPONetwork``'s use of the same body:
 
@@ -20,7 +20,7 @@ The two differences from ``AnimalPPONetwork``'s use of the same body:
 import numpy as np
 import torch
 
-from vla_streaming_rl.networks.animal_ppo import LSTM_UNITS, AnimalBackbone
+from vla_streaming_rl.networks.animal_ppo import TEMPORAL_UNITS, AnimalBackbone
 from vla_streaming_rl.networks.interface import (
     ActivationFeatures,
     EligibilityTraceInfo,
@@ -34,7 +34,7 @@ from vla_streaming_rl.networks.modules.policy_head import build_policy_head
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
 
-SCALAR_OBS_DIM = 8
+SCALAR_OBS_DIM = 9
 
 
 class AnimalEncoder(torch.nn.Module):
@@ -50,11 +50,27 @@ class AnimalEncoder(torch.nn.Module):
     """
 
     def __init__(
-        self, observation_space_shape: tuple[int, ...], action_dim: int, scalar_obs_dim: int
+        self,
+        observation_space_shape: tuple[int, ...],
+        action_dim: int,
+        scalar_obs_dim: int,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
+        temporal_model_type: str,
     ) -> None:
         super().__init__()
-        self.backbone = AnimalBackbone(observation_space_shape, scalar_obs_dim + action_dim + 1)
-        self.output_dim = LSTM_UNITS
+        self.backbone = AnimalBackbone(
+            observation_space_shape,
+            scalar_obs_dim + action_dim + 1,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
+            temporal_model_type,
+        )
+        self.output_dim = TEMPORAL_UNITS
 
     def init_state(self) -> torch.Tensor:
         return self.backbone.init_state(1, torch.device("cpu"))
@@ -64,11 +80,11 @@ class AnimalEncoder(torch.nn.Module):
         images: torch.Tensor,  # (B, T, C, H, W)
         actions: torch.Tensor,  # (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
-        rnn_state: torch.Tensor,  # (B, 2 * LSTM_UNITS)
+        rnn_state: torch.Tensor,  # (B, state_size)
         scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Every step of the window rather than only its last: the recurrent
-        output ``(B, T, LSTM_UNITS)``, the per-step visual latent
+        output ``(B, T, TEMPORAL_UNITS)``, the per-step visual latent
         ``(B, T, HIDDEN_NODES)`` a world-critic head predicts -- see
         ``networks/animal_world_critic_actor_critic.py`` -- and the state."""
         batch_size, steps_num = images.shape[:2]
@@ -77,9 +93,9 @@ class AnimalEncoder(torch.nn.Module):
         vels = torch.cat([scalar_obs, actions, rewards], dim=-1).reshape(flat_num, -1)
         masks = torch.zeros(flat_num, device=images.device, dtype=images.dtype)
         visual_latent, hidden = self.backbone.embed(visual, vels)
-        lstm_out, state = self.backbone.recurrent(hidden, rnn_state, masks, batch_size)
+        temporal_out, state = self.backbone.recurrent(hidden, rnn_state, masks, batch_size)
         return (
-            lstm_out.reshape(batch_size, steps_num, -1),
+            temporal_out.reshape(batch_size, steps_num, -1),
             visual_latent.reshape(batch_size, steps_num, -1),
             state,
         )
@@ -89,11 +105,11 @@ class AnimalEncoder(torch.nn.Module):
         images: torch.Tensor,  # (B, T, C, H, W)
         actions: torch.Tensor,  # (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
-        rnn_state: torch.Tensor,  # (B, 2 * LSTM_UNITS)
+        rnn_state: torch.Tensor,  # (B, state_size)
         scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        lstm_out, _, state = self.forward_steps(images, actions, rewards, rnn_state, scalar_obs)
-        return lstm_out[:, -1], state
+        temporal_out, _, state = self.forward_steps(images, actions, rewards, rnn_state, scalar_obs)
+        return temporal_out[:, -1], state
 
 
 class AnimalActorCriticWithActionValue(NetworkInterface):
@@ -116,6 +132,11 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         critic_loss_weight: float,
         detach_actor: bool,
         detach_critic: bool,
+        image_encoder_type: str,
+        image_encoder_output_dim: int,
+        image_encode_mode: str,
+        image_encoder_trainable: bool,
+        temporal_model_type: str,
     ) -> None:
         super().__init__()
         self.observation_space_shape = observation_space_shape
@@ -126,7 +147,16 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         self.detach_critic = detach_critic
 
         self.scalar_obs_normalizer = RunningNormalizer(SCALAR_OBS_DIM)
-        self.encoder = AnimalEncoder(observation_space_shape, self.action_dim, SCALAR_OBS_DIM)
+        self.encoder = AnimalEncoder(
+            observation_space_shape,
+            self.action_dim,
+            SCALAR_OBS_DIM,
+            image_encoder_type,
+            image_encoder_output_dim,
+            image_encode_mode,
+            image_encoder_trainable,
+            temporal_model_type,
+        )
 
         self.policy_type = policy_type
         self.policy_head = build_policy_head(
@@ -158,6 +188,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         velocity_z: float,
         episode_return: float,
         pass_mark: float,
+        remaining_return: float,
         global_step: float,
         episode_step: float,
         health: float,
@@ -170,6 +201,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
                     velocity_z,
                     episode_return,
                     pass_mark,
+                    remaining_return,
                     global_step,
                     episode_step,
                     health,
@@ -185,6 +217,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         velocity_z: torch.Tensor,
         episode_return: torch.Tensor,
         pass_mark: torch.Tensor,
+        remaining_return: torch.Tensor,
         global_step: torch.Tensor,
         episode_step: torch.Tensor,
         health: torch.Tensor,
@@ -196,6 +229,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
                 velocity_z,
                 episode_return,
                 pass_mark,
+                remaining_return,
                 global_step,
                 episode_step,
                 health,
@@ -224,6 +258,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
                 data.velocity_z[:, start:stop],
                 data.episode_return[:, start:stop],
                 data.pass_mark[:, start:stop],
+                data.remaining_return[:, start:stop],
                 data.global_step[:, start:stop],
                 data.episode_step[:, start:stop],
                 data.health[:, start:stop],
@@ -240,13 +275,14 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
             data.velocity_z_seq,
             data.episode_return_seq,
             data.pass_mark_seq,
+            data.remaining_return_seq,
             data.global_step_seq,
             data.episode_step_seq,
             data.health_seq,
         )
         x, rnn_state = self.encoder(
             data.s_seq, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
-        )  # (B, LSTM_UNITS)
+        )  # (B, TEMPORAL_UNITS)
 
         action, actor_activation = self.policy_head.get_action(x)  # (B, horizon, action_dim)
         q_out = self.value_head(x, action)

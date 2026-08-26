@@ -4,7 +4,7 @@
 There it was an epoch loop over 24 parallel environments; here the trainer owns
 the loop and hands the agent one transition at a time, so the rollout is
 buffered inside the agent and the PPO update fires once ``steps_num``
-transitions are in. That is the whole of the ``on_policy`` learning mode.
+transitions are in. That is the whole of this on-policy rule.
 
 Two things the original environment did for the network live here instead,
 because this repo's Animal-AI env deliberately reports what the arena reports:
@@ -24,7 +24,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn, optim
 
-from vla_streaming_rl.agents.animal_reward import shape_animal_reward
 from vla_streaming_rl.agents.base import Agent, StepResult
 
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward /
@@ -83,7 +82,7 @@ class RolloutBuffer:
         self, last_value: float, final_done: float, gamma: float, lam: float, seq_len: int
     ) -> "Rollout":
         """Generalized advantage estimation over the collected steps. ``seq_len``
-        is the window the LSTM is unrolled over during the update: one recurrent
+        is the window the recurrent cell is unrolled over during the update: one recurrent
         state is kept per window, the one recorded at its first step."""
         steps_num = len(self)
         rewards = np.asarray(self.rewards, dtype=np.float32)
@@ -138,7 +137,6 @@ class AnimalPPOAgent(Agent):
         *,
         action_space: gym.spaces.Box,
         network: nn.Module,
-        learning_mode: str,
         horizon: int,
         steps_num: int,
         minibatch_size: int,
@@ -155,8 +153,9 @@ class AnimalPPOAgent(Agent):
         max_grad_norm: float,
         velocity_scale: list[float],
         health_scale: float,
+        reset_on_episode_end: bool,
     ) -> None:
-        super().__init__(learning_mode=learning_mode, horizon=horizon)
+        super().__init__(horizon=horizon, reset_on_episode_end=reset_on_episode_end)
         assert steps_num % seq_len == 0, f"steps_num {steps_num} is not a multiple of {seq_len}"
         assert minibatch_size % seq_len == 0, (
             f"minibatch_size {minibatch_size} is not a multiple of seq_len {seq_len}"
@@ -194,7 +193,7 @@ class AnimalPPOAgent(Agent):
 
     # --- agent surface -----------------------------------------------------
 
-    def _step_onpolicy(
+    def step(
         self,
         global_step: int,
         obs: dict[str, Any],
@@ -203,9 +202,9 @@ class AnimalPPOAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step
+        del global_step, reward
         visual, vels = self._preprocess(obs, info)
-        shaped = shape_animal_reward(reward, obs, terminated or truncated)
+        shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
         # tick, so that transition can only be completed now
         self.buffer.add(self.pending, shaped)
@@ -284,7 +283,7 @@ class AnimalPPOAgent(Agent):
             visual.unsqueeze(0),
             vels.unsqueeze(0),
             state,
-            torch.tensor([fresh], device=self.device),
+            torch.tensor([fresh * float(self.reset_on_episode_end)], device=self.device),
             1,
         )
         action = torch.multinomial(F.softmax(logits, dim=-1), 1).squeeze(-1)
@@ -357,32 +356,21 @@ class AnimalPPOAgent(Agent):
 
         return {f"ppo/{name}": float(np.mean(values)) for name, values in losses.items()}
 
-    def _forward_minibatch(
-        self, rollout: Rollout, flat: torch.Tensor, sequences: torch.Tensor, env_num: int
-    ) -> tuple:
-        """The minibatch forward pass: the policy logits, the state values, and
-        whatever auxiliary loss the network carries beyond PPO's own -- none
-        here, and the world-critic terms in
-        :class:`~vla_streaming_rl.agents.animal_world_critic_ppo.AnimalWorldCriticPPOAgent`."""
-        logits, values, _ = self.network(
-            rollout.visual[flat],
-            rollout.vels[flat],
-            rollout.states[sequences],
-            rollout.dones[flat],
-            env_num,
-        )
-        return logits, values.squeeze(-1), torch.zeros((), device=self.device), {}
-
     def _minibatch_step(
         self,
         rollout: Rollout,
         advantages: torch.Tensor,
         flat: torch.Tensor,
         sequences: torch.Tensor,
-        env_num: int,
+        sequence_num: int,
     ) -> dict:
-        logits, values, auxiliary_loss, auxiliary_reported = self._forward_minibatch(
-            rollout, flat, sequences, env_num
+        logits, values, auxiliary_loss, auxiliary_reported = self.network.forward_for_update(
+            rollout.visual[flat],
+            rollout.vels[flat],
+            rollout.states[sequences],
+            rollout.dones[flat] * float(self.reset_on_episode_end),
+            rollout.actions[flat],
+            sequence_num,
         )
 
         neglogpacs = F.cross_entropy(logits, rollout.actions[flat], reduction="none")

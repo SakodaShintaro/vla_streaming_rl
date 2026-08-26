@@ -3,7 +3,7 @@
 
 Runs a frozen, trained policy through the same Animal-AI arena (``ARENA_STEM``)
 ``NUM_REPEATS`` times, recording at every step the representation the network
-hands to its policy/value/prediction heads (``StandardAgent.last_features``)
+hands to its policy/value/prediction heads (``last_features``)
 together with the agent's true arena position (``info["agent_xyz"]``). Also
 renders the same panel video train.py writes, for visual sanity-checking.
 Saves everything to ``probe_data.npz``; run scripts/compute_linear_probe.py

@@ -7,7 +7,6 @@ defaults:
   - _self_
 
 agent_type: zeroshot_vlm
-learning_mode: streaming
 # OpenRouter model
 # model                                               context   $in/Mtok  $out/Mtok
 # qwen/qwen3.7-flash                                1,000,000      0.030      0.130

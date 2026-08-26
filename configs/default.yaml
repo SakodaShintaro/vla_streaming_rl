@@ -35,6 +35,7 @@ horizon: 1
 buffer_device: cuda
 critic_loss_weight: 1.0
 use_done: 1
+reset_on_episode_end: true
 normalizing_by_return: 0
 image_save_interval: 100
 print_interval: 5
