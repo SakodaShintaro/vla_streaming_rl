@@ -56,6 +56,12 @@ PLAYER_WINDOW_NAME = "Animal-AI"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arena-root", type=Path, default=DEFAULT_ARENA_ROOT)
+    parser.add_argument(
+        "--pattern",
+        type=str,
+        default="*.yaml",
+        help="glob picking the arenas under --arena-root, e.g. '04-22-*.yaml' for one task",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
         "--camera-presses",
@@ -165,8 +171,8 @@ def main() -> None:
     assert args.binary.exists(), f"Animal-AI binary not found: {args.binary}"
 
     # Sorted order, so a contact sheet reads stage00 first.
-    paths = sorted(args.arena_root.rglob("*.yaml"))
-    assert paths, f"no arena YAML under {args.arena_root}"
+    paths = sorted(args.arena_root.rglob(args.pattern))
+    assert paths, f"no arena matching {args.pattern} under {args.arena_root}"
     if args.limit > 0:
         paths = paths[: args.limit]
 

@@ -5,9 +5,9 @@ Merges every arena YAML under ``--arena-root`` into one multi-arena
 ArenaConfig and opens it in the Unity player, where W/A/S/D drives the agent
 and R (or collecting a reward) moves on to the next arena in the file.
 
-The arenas are sorted by path and then reversed, so play starts at the last
-one (``stage09/arena029.yaml`` for the paper curriculum) and works backwards
-towards ``stage00/arena000.yaml``.
+The arenas play in sorted order, so the paper curriculum runs
+``stage00/arena000.yaml`` first and ``stage09/arena029.yaml`` last;
+``--reverse`` walks the same list backwards.
 
 Every arena's time limit is multiplied by ``--time-scale`` (100 by default) so
 a human has time to look around, and the ``blackouts`` frames of the 42 dark
@@ -80,6 +80,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arena-root", type=Path, default=DEFAULT_ARENA_ROOT)
     parser.add_argument(
+        "--pattern",
+        type=str,
+        default="*.yaml",
+        help="glob picking the arenas under --arena-root, e.g. '04-22-*.yaml' for one task",
+    )
+    parser.add_argument(
         "--time-scale",
         type=int,
         default=100,
@@ -96,9 +102,9 @@ def parse_args() -> argparse.Namespace:
         help="drive from Python: show the arena name, pass mark and return, and end on a pass",
     )
     parser.add_argument(
-        "--forward",
+        "--reverse",
         action="store_true",
-        help="play in sorted order (stage00 first) instead of reversed",
+        help="play the arenas from the last one backwards instead of in sorted order",
     )
     parser.add_argument(
         "--limit", type=int, default=0, help="play only the first N arenas of the order (0: all)"
@@ -350,9 +356,9 @@ def main() -> None:
     assert args.arena_root.is_dir(), f"no such arena directory: {args.arena_root}"
     assert args.binary.exists(), f"Animal-AI binary not found: {args.binary}"
 
-    paths = sorted(args.arena_root.rglob("*.yaml"))
-    assert paths, f"no arena YAML under {args.arena_root}"
-    if not args.forward:
+    paths = sorted(args.arena_root.rglob(args.pattern))
+    assert paths, f"no arena matching {args.pattern} under {args.arena_root}"
+    if args.reverse:
         paths = paths[::-1]
     if args.limit > 0:
         paths = paths[: args.limit]
