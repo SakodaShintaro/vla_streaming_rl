@@ -43,6 +43,9 @@ arenas, 30 per level) while eval sweeps all 900. Training and eval therefore
 overlap by construction -- the trained variant is scored again, and within a
 task the variants are often identical files -- so `seen_in_training` is what
 separates the held-out part of a Testbed score from the rest.
+
+`end_at_pass_mark` ends an episode as soon as a collected reward carries the
+return to the arena's pass mark, which Unity itself never does (see `step`).
 """
 
 import hashlib
@@ -170,7 +173,7 @@ class Arena:
 
 
 def _competition_arenas() -> list[Arena]:
-    """Every arena of the Olympics set, labelled by its "XX-YY-ZZ" stem.
+    """Every arena of the Olympics set, labeled by its "XX-YY-ZZ" stem.
 
     The three fields are level, task and variant, so the label carries the
     curriculum stage ("01") and the task family ("01-24") an arena belongs to.
@@ -215,7 +218,7 @@ def _arena_signature(path: Path) -> str:
     """Digest of what makes two arena yamls the same episode.
 
     Item order and mapping key order are how a file happens to be written,
-    not what it runs, so both are canonicalised away; `pass_mark` and `t`
+    not what it runs, so both are canonicalized away; `pass_mark` and `t`
     decide the episode alongside the items, so both are in. Used to find the
     eval arenas that are repeats of a training arena -- within a task family
     the variants are often the same arena written out three times, and a score
@@ -755,12 +758,14 @@ class AnimalAIEnv(gym.Env):
         continuous_action: bool,
         topdown_camera: bool,
         topdown_resolution: int,
+        end_at_pass_mark: bool,
         selector: ArenaSelector,
     ):
         super().__init__()
         self.continuous_action = continuous_action
         self.topdown_camera = topdown_camera
         self.topdown_resolution = topdown_resolution
+        self.end_at_pass_mark = end_at_pass_mark
         self.selector = selector
         self._arena_by_name = {arena.name: arena for arena in selector.arenas}
         self.prompt = (
@@ -1001,9 +1006,15 @@ class AnimalAIEnv(gym.Env):
         terminated = episode_over and not interrupted
         truncated = interrupted
 
+        # Unity never ends an arena on the pass mark, so without this an agent
+        # that has earned it keeps bleeding 1/t per step. The reward gate keeps
+        # a negative pass mark from being cleared by the first step's -1/t.
+        if self.end_at_pass_mark and not episode_over and reward > 0.0:
+            terminated = terminated or self._episode_return >= self.pass_mark
+
         shaped_reward = self._shape_reward(reward, terminated or truncated)
 
-        if not episode_over:
+        if not (episode_over or terminated):
             return (
                 self._latest_image,
                 reward,
@@ -1060,6 +1071,7 @@ if __name__ == "__main__":
         continuous_action=False,
         topdown_camera=False,
         topdown_resolution=96,
+        end_at_pass_mark=True,
         selector=StagedSelector(variant="01", steps_per_stage=2_000_000, seed=0),
     )
     for episode in range(8):

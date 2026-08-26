@@ -64,3 +64,9 @@ env_factory:
   #   `resolution` since only a human looks at it. Cost grows with the pixel
   #   count, so this is the knob to turn when the view is too slow or too coarse.
   topdown_resolution: 96
+  # - end_at_pass_mark: end the episode once a collected reward reaches the
+  #   arena's pass mark. Unity never does, so in an arena with no episode-ending
+  #   goal the agent bleeds 1/t per step until its health expires -- 1.0 of
+  #   return, enough to drop a passing score back under the mark. Applies to
+  #   eval too, so the Testbed score is not the 2019 competition's.
+  end_at_pass_mark: true

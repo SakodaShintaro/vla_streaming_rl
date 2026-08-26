@@ -153,7 +153,7 @@ def capture_window(window) -> Image.Image:
 
 
 def write_montages(shots: list[Path], out_dir: Path, per_sheet: int, width: int) -> None:
-    """Tile the screenshots into labelled contact sheets."""
+    """Tile the screenshots into labeled contact sheets."""
     for sheet_index in range(0, len(shots), per_sheet):
         page = shots[sheet_index : sheet_index + per_sheet]
         sheet = out_dir / f"montage_{sheet_index // per_sheet:03d}.png"
