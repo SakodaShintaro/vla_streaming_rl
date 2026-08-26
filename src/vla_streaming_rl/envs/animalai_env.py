@@ -21,29 +21,32 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
 `mode` config field (see `build_selector`):
 
   - "staged"  training with the paper's cumulative 11-stage curriculum, one
-              stage per subdirectory of the root, sampled uniformly within
-              the stage (`StagedSelector`).
+              stage per competition level, sampled uniformly within the stage
+              (`StagedSelector`).
   - "success" the same stages, but advanced by clearing them rather than by
               step count, alternating unsolved-arena draws with failure-rate
               softmax draws (`SuccessDrivenSelector`). "Cleared" there means
               tried at least `SUCCESS_MODE_MIN_ATTEMPTS` times and passed on
               at least `SUCCESS_MODE_CLEAR_RATE` of them.
-  - "sequential" no curriculum: every arena under the root in path (file name)
-              order, wrapping around forever (`SequentialSelector`, cycling).
-              For a training set that is one flat directory, not a stage split.
-  - "random"  no curriculum: every episode draws uniformly at random from all
-              arenas under the root (`RandomSelector`).
+  - "sequential" no curriculum: every training arena in label order, wrapping
+              around forever (`SequentialSelector`, cycling).
+  - "random"  no curriculum: every episode draws uniformly at random from the
+              whole training set (`RandomSelector`).
   - "eval"    every configs/competition/ arena once, in order -- the
               900-arena Testbed sweep (the same `SequentialSelector`, not
               cycling, so it ends).
 
-Which arenas a selector serves is just a root directory it reads recursively,
-so an augmented training set is a matter of pointing at a different root. The
-training root is configurable; "eval" is pinned to COMPETITION_DIR so the
-benchmark cannot drift (see `build_selector`). Training and evaluation
-therefore never share an arena.
+Every arena comes from configs/competition/, whose files are named
+XX-YY-ZZ.yaml for level, task and variant. Each of the 300 tasks ships three
+variants; the training modes serve one variant of each (`train_variant`: 300
+arenas, 30 per level) while eval sweeps all 900. Training and eval therefore
+overlap by construction -- the trained variant is scored again, and within a
+task the variants are often identical files -- so `seen_in_training` is what
+separates the held-out part of a Testbed score from the rest.
 """
 
+import hashlib
+import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,41 +169,82 @@ class Arena:
     name: str
 
 
-def _arenas_in(directory: Path, label_root: Path) -> list[Arena]:
-    """Arena yamls under `directory`, labelled by their path relative to
-    `label_root`: "01-01-01" for a flat set, "stage00-arena000" for a
-    stage-split one, where the bare filename would repeat across stage dirs
-    for unrelated tasks. Directories are joined with "-" rather than "/"
-    because the label is used to name per-arena files (train.py writes a
-    video per arena) and wandb metrics."""
-    paths = sorted(directory.rglob("*.yaml"))
-    assert paths, f"no arena yamls under {directory}"
-    return [
-        Arena(path, "-".join(path.relative_to(label_root).with_suffix("").parts)) for path in paths
-    ]
+def _competition_arenas() -> list[Arena]:
+    """Every arena of the Olympics set, labelled by its "XX-YY-ZZ" stem.
 
-
-def _arenas_under(root: Path) -> list[Arena]:
-    """Every arena yaml under `root`, recursively, in path order."""
-    return _arenas_in(root, root)
-
-
-def _stages_under(root: Path) -> list[list[Arena]]:
-    """Cumulative arena list per curriculum stage, one stage per subdirectory.
-
-    scripts/split_paper_curriculum.py writes only each stage's *new* arenas
-    into stageNN/, so stage i's arena set is stage00..stageNN(i) concatenated.
-    The per-stage count therefore follows whatever is on disk -- 30 arenas per
-    stage as split, 60 once mirrored copies are generated alongside them.
+    The three fields are level, task and variant, so the label carries the
+    curriculum stage ("01") and the task family ("01-24") an arena belongs to.
+    It is also what names per-arena files (train.py writes a video per arena)
+    and wandb metrics, so training and eval report the same arena under the
+    same name.
     """
-    stage_dirs = sorted(path for path in root.iterdir() if path.is_dir())
-    assert stage_dirs, f"no stage subdirectories under {root}; expected one per curriculum stage"
+    paths = sorted(COMPETITION_DIR.glob("*.yaml"))
+    assert paths, f"no arena yamls under {COMPETITION_DIR}"
+    return [Arena(path, path.stem) for path in paths]
+
+
+def _training_arenas(variant: str) -> list[Arena]:
+    """The training set: the `variant` numbered copy of every Olympics task.
+
+    Each task family XX-YY ships three variants, so one variant is one arena
+    per family -- 300 of the 900, which is the arena set the paper's
+    curriculum trains on. The other variants are what eval scores.
+    """
+    arenas = [arena for arena in _competition_arenas() if arena.name.rsplit("-", 1)[1] == variant]
+    assert arenas, f"no competition arena has variant {variant!r}"
+    return arenas
+
+
+def _training_stages(variant: str) -> list[list[Arena]]:
+    """Cumulative arena list per curriculum stage, one stage per level.
+
+    The Olympics levels are the paper's curriculum stages in order (01 food
+    retrieval ... 10 causal reasoning), and the stages are cumulative, so
+    stage i serves the arenas of levels 1..i.
+    """
+    arenas = _training_arenas(variant)
     cumulative: list[Arena] = []
     stages: list[list[Arena]] = []
-    for stage_dir in stage_dirs:
-        cumulative = cumulative + _arenas_in(stage_dir, root)
+    for level in sorted({arena.name.split("-")[0] for arena in arenas}):
+        cumulative = cumulative + [arena for arena in arenas if arena.name.split("-")[0] == level]
         stages.append(cumulative)
     return stages
+
+
+def _arena_signature(path: Path) -> str:
+    """Digest of what makes two arena yamls the same episode.
+
+    Item order and mapping key order are how a file happens to be written,
+    not what it runs, so both are canonicalised away; `pass_mark` and `t`
+    decide the episode alongside the items, so both are in. Used to find the
+    eval arenas that are repeats of a training arena -- within a task family
+    the variants are often the same arena written out three times, and a score
+    over those is not a held-out score.
+    """
+    arena = yaml.load(path.read_text(), Loader=_AAILoader)["arenas"][0]
+    pass_mark = float(arena["pass_mark"]) if "pass_mark" in arena else 0.0
+    items = arena["items"] if "items" in arena else []
+    payload = json.dumps(
+        {
+            "pass_mark": pass_mark,
+            "t": arena["t"],
+            "items": sorted(json.dumps(item, sort_keys=True) for item in items),
+        },
+        sort_keys=True,
+    )
+    return hashlib.md5(payload.encode()).hexdigest()
+
+
+def seen_in_training(variant: str) -> set[str]:
+    """Labels of the eval arenas a run trained on `variant` has already seen.
+
+    The training variant itself, plus every other variant whose arena is
+    identical to the one its family contributed to training.
+    """
+    trained = {_arena_signature(arena.path) for arena in _training_arenas(variant)}
+    return {
+        arena.name for arena in _competition_arenas() if _arena_signature(arena.path) in trained
+    }
 
 
 class ArenaSelector:
@@ -246,9 +290,8 @@ class ArenaSelector:
 
         `cleared` counts arenas `is_cleared` accepts, `failed` ones attempted
         without reaching that bar, `untried` ones never run. The group is the
-        arena label's first "-" separated token, which is the stage directory for a
-        split curriculum ("stage00-arena000" -> "stage00") and the level for
-        the competition set ("01-01-01" -> "01").
+        arena label's first "-" separated token, which is the competition
+        level ("01-01-01" -> "01") and so also the curriculum stage.
         """
         counts: dict[str, list[int]] = {}
         for arena in self.arenas:
@@ -289,15 +332,15 @@ class ArenaSelector:
 class StagedSelector(ArenaSelector):
     """The paper's cumulative curriculum (Animal-AI paper, Section 4.1.3).
 
-    One stage per subdirectory of `root`, plus a final stage repeating the
-    last one, so the 10 split stages give 11. Stage i samples uniformly from
-    every arena of stages 1..i, and runs for `steps_per_stage` steps; stage 11
-    runs until train.py's step_limit ends the run -- the paper's "further five
-    million steps on the last stage".
+    One stage per Olympics level, plus a final stage repeating the last one,
+    so the 10 levels give 11. Stage i samples uniformly from every arena of
+    stages 1..i, and runs for `steps_per_stage` steps; stage 11 runs until
+    train.py's step_limit ends the run -- the paper's "further five million
+    steps on the last stage".
     """
 
-    def __init__(self, root: Path, steps_per_stage: int, seed: int):
-        stages = _stages_under(root)
+    def __init__(self, variant: str, steps_per_stage: int, seed: int):
+        stages = _training_stages(variant)
         super().__init__(stages[-1])
         self._stages = stages + [stages[-1]]
         self.steps_per_stage = steps_per_stage
@@ -357,8 +400,8 @@ class SuccessDrivenSelector(ArenaSelector):
     without any extra state.
     """
 
-    def __init__(self, root: Path, revisit_temperature: float, seed: int):
-        stages = _stages_under(root)
+    def __init__(self, variant: str, revisit_temperature: float, seed: int):
+        stages = _training_stages(variant)
         super().__init__(stages[-1])
         self._stages = stages
         self.revisit_temperature = revisit_temperature
@@ -420,21 +463,22 @@ class SuccessDrivenSelector(ArenaSelector):
 
 
 class SequentialSelector(ArenaSelector):
-    """Every arena under `root` in path (file name) order.
+    """Every arena of `arenas` in label order.
 
     `cycle` is what separates the two ways this is used:
 
-      - False: one pass, then `is_exhausted`. Over COMPETITION_DIR this is the
-        paper's Testbed protocol -- one episode per arena, pass/fail by that
-        arena's pass mark (scripts/test_trained_agent.py loops until exhausted).
+      - False: one pass, then `is_exhausted`. Over the whole competition set
+        this is the paper's Testbed protocol -- one episode per arena, pass/fail
+        by that arena's pass mark (scripts/test_trained_agent.py loops until
+        exhausted).
       - True: wrap back to the first arena instead of ending, so the set is
         replayed until train.py's step_limit stops the run. This is the
-        curriculum-free training mode, for an arena set that is one flat
-        directory rather than a stage split.
+        curriculum-free training mode, running the training arenas in level
+        order rather than by stage.
     """
 
-    def __init__(self, root: Path, cycle: bool):
-        super().__init__(_arenas_under(root))
+    def __init__(self, arenas: list[Arena], cycle: bool):
+        super().__init__(arenas)
         self.cycle = cycle
         self._next_index = 0
 
@@ -470,7 +514,7 @@ class SequentialSelector(ArenaSelector):
 
 
 class RandomSelector(ArenaSelector):
-    """Every episode drawn uniformly at random from all arenas under `root`.
+    """Every episode drawn uniformly at random from `arenas`.
 
     No curriculum and no ordering: unlike `SequentialSelector(cycle=True)` an
     arena can repeat before the whole set has been seen, and unlike
@@ -479,8 +523,8 @@ class RandomSelector(ArenaSelector):
     against. Runs forever, so train.py's step_limit ends the run.
     """
 
-    def __init__(self, root: Path, seed: int):
-        super().__init__(_arenas_under(root))
+    def __init__(self, arenas: list[Arena], seed: int):
+        super().__init__(arenas)
         self._rng = np.random.default_rng(seed)
 
     def next_arena(self, global_step: int) -> Arena:
@@ -499,29 +543,30 @@ class RandomSelector(ArenaSelector):
 
 
 def build_selector(
-    mode: str, train_arena_root: str, steps_per_stage: int, revisit_temperature: float, seed: int
+    mode: str, train_variant: str, steps_per_stage: int, revisit_temperature: float, seed: int
 ) -> ArenaSelector:
     """Build the arena selector named by `mode` (see the module docstring).
 
-    Only the training modes take their arenas from `train_arena_root` (so an
-    augmented arena set is chosen in config, and recorded there). "eval" is
-    pinned to COMPETITION_DIR: the Testbed is a fixed benchmark, and making it
-    configurable would let a typo silently score a run on training arenas.
+    The training modes serve the `train_variant` copy of every task; "eval"
+    serves the whole competition set, the paper's fixed 900-arena Testbed.
+    Which of those the run has already trained on follows from
+    `train_variant` -- `seen_in_training` is what reports it.
 
     Every mode's parameters are always supplied; a mode ignores the ones that
     do not apply to it.
     """
-    train_root = Path(train_arena_root)
     builders = {
         "staged": lambda: StagedSelector(
-            root=train_root, steps_per_stage=steps_per_stage, seed=seed
+            variant=train_variant, steps_per_stage=steps_per_stage, seed=seed
         ),
         "success": lambda: SuccessDrivenSelector(
-            root=train_root, revisit_temperature=revisit_temperature, seed=seed
+            variant=train_variant, revisit_temperature=revisit_temperature, seed=seed
         ),
-        "sequential": lambda: SequentialSelector(root=train_root, cycle=True),
-        "random": lambda: RandomSelector(root=train_root, seed=seed),
-        "eval": lambda: SequentialSelector(root=COMPETITION_DIR, cycle=False),
+        "sequential": lambda: SequentialSelector(
+            arenas=_training_arenas(train_variant), cycle=True
+        ),
+        "random": lambda: RandomSelector(arenas=_training_arenas(train_variant), seed=seed),
+        "eval": lambda: SequentialSelector(arenas=_competition_arenas(), cycle=False),
     }
     assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"
     return builders[mode]()
@@ -1013,7 +1058,9 @@ if __name__ == "__main__":
         base_port=5005,
         binary_path="~/animalai_env/Linux/animalAI.x86_64",
         continuous_action=False,
-        selector=StagedSelector(steps_per_stage=2_000_000, seed=0),
+        topdown_camera=False,
+        topdown_resolution=96,
+        selector=StagedSelector(variant="01", steps_per_stage=2_000_000, seed=0),
     )
     for episode in range(8):
         obs, info = env.reset(seed=episode, options=None)

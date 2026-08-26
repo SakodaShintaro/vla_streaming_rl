@@ -29,7 +29,7 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
 def make_animalai_env(
     resolution: int,
     mode: str,
-    train_arena_root: str,
+    train_variant: str,
     steps_per_stage: int,
     revisit_temperature: float,
     binary_path: str,
@@ -41,7 +41,7 @@ def make_animalai_env(
 
     selector = build_selector(
         mode=mode,
-        train_arena_root=train_arena_root,
+        train_variant=train_variant,
         steps_per_stage=steps_per_stage,
         revisit_temperature=revisit_temperature,
         seed=0,

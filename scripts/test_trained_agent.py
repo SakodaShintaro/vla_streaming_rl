@@ -34,6 +34,7 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_agent
+from vla_streaming_rl.envs.animalai_env import seen_in_training
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
 from vla_streaming_rl.wrappers import make_env
@@ -161,22 +162,29 @@ def run_testbed(
     window_name: str,
     global_step: int,
     result_dir: Path,
+    train_variant: str,
 ) -> dict[str, float]:
     """Sweep every arena the env's SequentialSelector serves and write results.
 
     Returns per-level pass rates plus the overall "cleared" count and
-    "success_rate" so callers can push them into run summaries.
+    "success_rate" so callers can push them into run summaries. Training draws
+    one variant of every competition task, so part of the Testbed is arenas the
+    run has trained on; `seen_in_training` splits the sweep into that part and
+    the held-out one, and both rates are reported.
     """
     result_dir.mkdir(parents=True, exist_ok=True)
     selector = env.unwrapped.selector
     arena_count = len(selector.arenas)
+    seen = seen_in_training(train_variant)
     print(f"Running {arena_count} arenas, 1 episode each.")
 
     result_path = result_dir / "test_result.tsv"
     level_attempts: dict[str, int] = {}
     level_successes: dict[str, int] = {}
+    split_attempts = {"seen": 0, "held_out": 0}
+    split_successes = {"seen": 0, "held_out": 0}
     with open(result_path, "w") as f:
-        f.write("arena\tsuccess\tscore\n")
+        f.write("arena\tsuccess\tscore\tseen_in_training\n")
         success_count = 0
         while not selector.is_exhausted:
             arena_name, success, score = run_arena(
@@ -187,7 +195,10 @@ def run_testbed(
             level = arena_name.split("-")[0]
             level_attempts[level] = level_attempts.get(level, 0) + 1
             level_successes[level] = level_successes.get(level, 0) + int(success)
-            f.write(f"{arena_name}\t{int(success)}\t{score:.6f}\n")
+            split = "seen" if arena_name in seen else "held_out"
+            split_attempts[split] += 1
+            split_successes[split] += int(success)
+            f.write(f"{arena_name}\t{int(success)}\t{score:.6f}\t{int(arena_name in seen)}\n")
             f.flush()
             done = sum(level_attempts.values())
             print(f"[{done}/{arena_count}] {arena_name}\tsuccess={int(success)}\tscore={score:.2f}")
@@ -200,6 +211,14 @@ def run_testbed(
         "arena_count": arena_count,
         "success_rate": success_rate,
     }
+    for split in ("seen", "held_out"):
+        n_success = split_successes[split]
+        n_attempt = split_attempts[split]
+        if n_attempt == 0:
+            continue
+        summary_lines.append(f"{split}: {n_success}/{n_attempt} ({n_success / n_attempt:.1%})")
+        metrics[f"success_rate_{split}"] = n_success / n_attempt
+        metrics[f"arena_count_{split}"] = n_attempt
     for level in sorted(level_attempts):
         n_success = level_successes[level]
         n_attempt = level_attempts[level]
@@ -240,7 +259,16 @@ def main(
     load_checkpoint_weights(checkpoint_path, network)
     network.eval()
 
-    run_testbed(agent, env, seed, render, args.env_id, global_step, result_dir)
+    run_testbed(
+        agent,
+        env,
+        seed,
+        render,
+        args.env_id,
+        global_step,
+        result_dir,
+        args.env_factory.train_variant,
+    )
 
     env.close()
 
