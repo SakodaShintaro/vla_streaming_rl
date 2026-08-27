@@ -6,6 +6,8 @@ from torch import nn
 from torch.nn import functional as F
 from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb_vision
 
+from .qwen_vision import interpolated_pos_embed, rotary_pos_embed
+
 
 def _temporal_rope_cos_sin(
     num_frames: int, head_dim: int, device: torch.device, dtype: torch.dtype
@@ -127,11 +129,14 @@ class VideoEncoder(nn.Module):
 
         # --- Patch embed + position embed (same as original) ---
         hidden_states = visual.patch_embed(all_pixel_values)
-        pos_embeds = visual.fast_pos_embed_interpolate(all_image_grid_thw)
-        hidden_states = hidden_states + pos_embeds
+        # The interpolated position embedding comes back in float32 while the
+        # tower runs in its own dtype, and the sum would otherwise promote and
+        # be rejected by the next norm.
+        pos_embeds = interpolated_pos_embed(visual, all_image_grid_thw)
+        hidden_states = hidden_states + pos_embeds.to(hidden_states.dtype)
 
         # --- Rotary position embedding for spatial attention ---
-        rotary_pos_emb = visual.rot_pos_emb(all_image_grid_thw)
+        rotary_pos_emb = rotary_pos_embed(visual, all_image_grid_thw)
         total_tokens, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(total_tokens, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(total_tokens, -1)
