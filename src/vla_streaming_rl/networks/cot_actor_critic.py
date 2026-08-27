@@ -162,6 +162,9 @@ class CoTActorCritic(NetworkInterface):
             )
         }
 
+    def render_texts(self) -> dict[str, str]:
+        return {"chain_of_thought": self.cot_stream.text()}
+
     def observe_scalar_obs(
         self,
         velocity_x: float,

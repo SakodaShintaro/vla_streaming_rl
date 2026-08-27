@@ -227,7 +227,7 @@ class AnimalPPOAgent(Agent):
             self.buffer = RolloutBuffer()
             metrics.update(self._update(rollout))
 
-        return StepResult(action=action, metrics=metrics, panels={})
+        return StepResult(action=action, metrics=metrics, panels={}, texts={})
 
     @torch.no_grad()
     def select_action(
@@ -246,7 +246,7 @@ class AnimalPPOAgent(Agent):
         del global_step, reward
         visual, vels = self._preprocess(obs, info)
         fresh = self._episode_boundary(terminated, truncated)
-        return StepResult(action=self._act(visual, vels, fresh), metrics={}, panels={})
+        return StepResult(action=self._act(visual, vels, fresh), metrics={}, panels={}, texts={})
 
     def _episode_boundary(self, terminated: bool, truncated: bool) -> float:
         """1 when this observation is the first of an episode, which is what

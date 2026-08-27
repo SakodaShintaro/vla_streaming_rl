@@ -144,6 +144,11 @@ class NetworkInterface(nn.Module, abc.ABC):
         shapes on every step of a run."""
         return {}
 
+    def render_texts(self) -> dict[str, str]:
+        """Named free-form text this network contributes to the episode log,
+        the readable counterpart of ``render_panels``."""
+        return {}
+
     @abc.abstractmethod
     def init_state(self) -> torch.Tensor:
         """Initial recurrent state the agent carries between steps."""

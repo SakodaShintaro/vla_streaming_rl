@@ -234,7 +234,12 @@ class OffPolicyAgent(Agent):
             self.prev_action = action
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
-            return StepResult(action=action, metrics=metrics, panels=self.network.render_panels())
+            return StepResult(
+                action=action,
+                metrics=metrics,
+                panels=self.network.render_panels(),
+                texts=self.network.render_texts(),
+            )
 
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
@@ -274,7 +279,12 @@ class OffPolicyAgent(Agent):
             self.chunk_step = 0
             self.prev_action = action
             metrics["chunk_step"] = self.chunk_step
-        return StepResult(action=action, metrics=metrics, panels=self.network.render_panels())
+        return StepResult(
+            action=action,
+            metrics=metrics,
+            panels=self.network.render_panels(),
+            texts=self.network.render_texts(),
+        )
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

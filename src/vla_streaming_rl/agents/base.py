@@ -24,11 +24,15 @@ class StepResult:
       the SAME shapes on every step of a run (use a blank placeholder when the
       content does not exist yet, e.g. before the first prediction). The render
       frames are encoded into a single video, which requires a constant size.
+    - ``texts``: named free-form text, written to the episode's ``texts.tsv``.
+      What a panel shows as pixels this keeps as characters, so a chain of
+      thought can be read back and searched after the run.
     """
 
     action: np.ndarray
     metrics: dict[str, float]
     panels: dict[str, np.ndarray]
+    texts: dict[str, str]
 
 
 class Agent(ABC):

@@ -220,7 +220,7 @@ class ZeroShotVLMAgent(Agent):
             f"finish: {choice.finish_reason}  ||  {response_text}"
         )
         panels = {"output": _text_panel(caption, _OUTPUT_PANEL_WIDTH)}
-        return StepResult(action=action, metrics=metrics, panels=panels)
+        return StepResult(action=action, metrics=metrics, panels=panels, texts={})
 
     def step(
         self,
