@@ -45,3 +45,13 @@ wcm_next_state_coef: 0.1
 wcm_sigreg_coef: 0.01
 wcm_sigreg_knots: 17
 wcm_sigreg_projections: 1024
+
+# Chain-of-thought stream (network_class: cot_actor_critic). A frozen VLM keeps
+# one chain of thought running across environment steps: cot_tokens_num tokens
+# are generated per step and the activations feeding its lm_head join the
+# encoder's space axis. The chain restarts from the current frame on EOS or
+# after cot_max_len tokens, which is when the VLM reads a new image at all.
+cot_model_id: Qwen/Qwen3.5-0.8B
+cot_tokens_num: 4
+cot_max_len: 64
+cot_temperature: 0.7

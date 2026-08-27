@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
+  - _self_
+
+agent_type: streaming
+network_class: cot_actor_critic
+batch_size: 1
+actor_lr: 1e-6
+critic_lr: 1e-6

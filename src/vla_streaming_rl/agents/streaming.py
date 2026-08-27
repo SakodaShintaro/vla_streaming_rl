@@ -103,6 +103,7 @@ class StreamingAgent(Agent):
             obs_shape=self.network.observation_space_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
+            cot_shape=self.network.cot_shape,
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             max_prompt_tokens=max_prompt_tokens,
@@ -158,6 +159,9 @@ class StreamingAgent(Agent):
             health_obs,
             task_prompt_token_ids,
         ) = self._preprocess(obs, info)
+        # The chain of thought advances once per environment step, whether or not
+        # this tick needs a new action chunk.
+        cot_activation = self.network.advance_cot(image, obs["language"], episode_done)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -175,6 +179,7 @@ class StreamingAgent(Agent):
             global_step_obs,
             episode_step_obs,
             health_obs,
+            cot_activation,
         )
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -282,6 +287,9 @@ class StreamingAgent(Agent):
             health_obs,
             task_prompt_token_ids,
         ) = self._preprocess(obs, info)
+        # The chain of thought advances once per environment step, whether or not
+        # this tick needs a new action chunk.
+        cot_activation = self.network.advance_cot(image, obs["language"], episode_done)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -299,6 +307,7 @@ class StreamingAgent(Agent):
             global_step_obs,
             episode_step_obs,
             health_obs,
+            cot_activation,
         )
 
         if self.action_chunk is not None and self.chunk_step < self.horizon:
@@ -325,6 +334,7 @@ class StreamingAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
+                cot_activations_seq=latest_data.cot_activations,
             )
         )
         self.rnn_state = infer_result.rnn_state
