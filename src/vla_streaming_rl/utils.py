@@ -79,7 +79,7 @@ def add_text_label_on_top(image: np.ndarray, text: str) -> np.ndarray:
 
 # The AnimalAI task prompt plus its live scalars wraps to 9 lines at the render
 # width, so anything less cuts the caption off mid-sentence.
-_CAPTION_LINE_BUDGET = 10
+_CAPTION_LINE_BUDGET = 20
 
 
 def overlay_caption(image: np.ndarray, text: str) -> np.ndarray:

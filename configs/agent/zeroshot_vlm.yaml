@@ -27,7 +27,7 @@ agent_type: zeroshot_vlm
 # qwen/qwen3.8-max                                  1,000,000      2.000      6.000
 openrouter_model_id: qwen/qwen3.7-flash
 # Past (image, response) turns replayed as in-context history (0 = memoryless).
-seq_len: 1
+seq_len: 4
 max_new_tokens: 2048
 # Cap on the model's own hidden thinking (OpenRouter `reasoning`). The prompt
 # already asks for the chain of thought inside <reasoning>, so the hidden copy

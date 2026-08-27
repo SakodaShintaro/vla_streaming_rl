@@ -37,8 +37,13 @@ _ANIMALAI_MOVE = {"stand still": 0.0, "walk forward": 1.0, "walk backward": -1.0
 _ANIMALAI_ROTATE = {"no turn": 0.0, "turn right": 1.0, "turn left": -1.0}
 
 ANIMALAI_PROMPT = (
-    "You control the agent in Animal-AI (first-person view). "
-    "Find and reach the green or yellow goal sphere; avoid red zones. "
+    "You control an animal in a 3D arena, seen from its own point of view. "
+    "Touching a green sphere scores points and ends the episode, and a larger "
+    "sphere scores more. Touching a yellow sphere scores points and the episode "
+    "continues. Touching a red sphere loses points and ends the episode. "
+    "Entering a red zone ends the episode immediately. An orange zone drains "
+    "your health, and your health also drains as time passes. "
+    "What this arena asks of you follows as `Task:`. "
     "Action space: one move and one rotation, applied on the same tick, "
     "written as `<move>, <rotation>`. "
     f"The move is one of: {', '.join(_ANIMALAI_MOVE)}. "
@@ -46,6 +51,11 @@ ANIMALAI_PROMPT = (
     "For example `walk forward, no turn` goes straight ahead, "
     "`stand still, turn left` turns on the spot, and "
     "`walk forward, turn right` walks while turning. "
+    "Bring whatever you are heading for to the center of your view before you "
+    "walk forward: turn on the spot until it is centered, and only then move. "
+    "Keep your speed down -- the third velocity component reported below should "
+    "stay at about 10 or less, so stand still for a tick whenever it climbs "
+    "past that. "
 )
 ANIMALAI_ACTION_SPEC = (
     "`<move>, <rotation>` -- exactly one move out of "
