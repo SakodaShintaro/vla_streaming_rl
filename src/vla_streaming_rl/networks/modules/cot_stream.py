@@ -106,12 +106,22 @@ class CoTStream:
         self._consume(self.model(**inputs, use_cache=True, output_hidden_states=True))
 
     def _decode(self) -> None:
+        # Positions are handed in rather than left to the model, which builds them
+        # on the host and copies them across -- a transfer CUDA graph capture
+        # forbids, and this step is the one worth capturing. rope_deltas is the
+        # offset the image tokens introduced, recorded by the prefill.
+        position = self._cache.get_seq_length()
+        cache_position = torch.arange(position, position + 1, device=self.device)
+        rope_deltas = self.model.model.rope_deltas
+        position_ids = (cache_position.view(1, 1, -1) + rope_deltas.unsqueeze(0)).expand(3, -1, -1)
         self._consume(
             self.model(
                 input_ids=self._next_token,
                 past_key_values=self._cache,
                 use_cache=True,
                 output_hidden_states=True,
+                cache_position=cache_position,
+                position_ids=position_ids,
             )
         )
 
