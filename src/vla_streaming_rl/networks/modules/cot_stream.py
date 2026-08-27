@@ -19,11 +19,45 @@ into the network's ``parameters()`` and its ``state_dict()``.
 
 import torch
 from torchvision.transforms.functional import to_pil_image
+from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
 
+from .cot_static_cache import CoTStaticCache
 from .vlm_backbone import load_model
+
+# Qwen3.5 decides the linear-attention mask by reading a device value into a
+# Python ``if``, which syncs the device to the host on every forward and so bars
+# CUDA graph capture of the decode step. When no attention mask is given the
+# branch cannot change the answer -- its second term is false, so both arms
+# return None -- and short-circuiting that case removes the sync while leaving
+# every other case, padded batches included, on the original.
+assert hasattr(Qwen3_5TextModel, "_update_linear_attn_mask"), (
+    "Qwen3_5TextModel._update_linear_attn_mask is gone; this transformers "
+    "version no longer matches the patch in cot_stream.py"
+)
+_ORIGINAL_LINEAR_ATTN_MASK = Qwen3_5TextModel._update_linear_attn_mask
+
+
+def _linear_attn_mask_without_sync(self, attention_mask, cache_position):
+    if attention_mask is None:
+        return None
+    return _ORIGINAL_LINEAR_ATTN_MASK(self, attention_mask, cache_position)
+
+
+Qwen3_5TextModel._update_linear_attn_mask = _linear_attn_mask_without_sync
 
 
 class CoTStream:
+    # The cache is allocated once at a fixed length, so it has to cover the
+    # longest prompt any run will prefill: the image tokens, the chat template,
+    # the instruction and the environment's task text. At 6 attention layers and
+    # 2 key-value heads the buffer costs single-digit megabytes, so this is set
+    # far above what any environment sends rather than tuned.
+    PROMPT_BUDGET = 512
+
+    # The frame the throwaway chain used for recording is never looked at, only
+    # resized by the processor, so its size is arbitrary.
+    CAPTURE_FRAME_SIDE = 64
+
     # Written out in full rather than left to the model's own thinking mode,
     # which spends its budget restating the request ("The user wants me to...")
     # instead of the scene.
@@ -43,6 +77,7 @@ class CoTStream:
         tokens_per_step: int,
         max_len: int,
         temperature: float,
+        use_cuda_graph: bool,
         device: torch.device,
     ) -> None:
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
@@ -58,14 +93,26 @@ class CoTStream:
         self.device = device
         self.hidden_size = self.model.config.text_config.hidden_size
         self.eos_token_id = self.processor.tokenizer.eos_token_id
+        # One cache for the whole run. A new chain resets it in place rather than
+        # replacing it, so its buffers keep the addresses a graph records.
+        self._cache = CoTStaticCache(self.model.config.text_config, self.PROMPT_BUDGET + max_len)
+        # What a recorded step reads. Their contents change every step; their
+        # addresses must not, which is the whole point of recording one.
+        self._graph_token = torch.zeros(1, 1, dtype=torch.long, device=device)
+        self._graph_cache_position = torch.zeros(1, dtype=torch.long, device=device)
+        self._graph_position_ids = torch.zeros(3, 1, 1, dtype=torch.long, device=device)
+        self._graph = None
         self.reset()
+        if use_cuda_graph:
+            self._capture_decode()
 
     def reset(self) -> None:
         """Drop the chain. The next advance prefills from the frame it is given."""
-        self._cache = None
+        self._needs_prefill = True
         self._hidden = None
         self._next_token = None
         self._tokens = []
+        self._cache.reset()
 
     @torch.inference_mode()
     def advance(self, image: torch.Tensor, task_prompt: str) -> torch.Tensor:
@@ -83,7 +130,7 @@ class CoTStream:
         """
         activations = []
         while len(activations) < self.tokens_per_step:
-            if self._cache is None:
+            if self._needs_prefill:
                 self._prefill(image, task_prompt)
             activations.append(self._hidden)
             self._decode()
@@ -102,41 +149,101 @@ class CoTStream:
         )
         picture = to_pil_image(image.detach().float().clamp(0.0, 1.0).cpu())
         inputs = self.processor(text=[text], images=[picture], return_tensors="pt").to(self.device)
+        prompt_len = inputs["input_ids"].shape[1]
+        assert prompt_len + self.max_len <= self._cache.max_len, (
+            f"prompt of {prompt_len} tokens plus a {self.max_len}-token chain exceeds the "
+            f"cache length {self._cache.max_len}; raise CoTStream.PROMPT_BUDGET"
+        )
         self._tokens = []
-        self._consume(self.model(**inputs, use_cache=True, output_hidden_states=True))
+        self._cache.reset()
+        self._needs_prefill = False
+        outputs = self.model(
+            **inputs,
+            past_key_values=self._cache,
+            use_cache=True,
+            output_hidden_states=True,
+        )
+        self._cache.length = prompt_len
+        self._consume(outputs.hidden_states[-1][0, -1], outputs.logits[0, -1])
 
-    def _decode(self) -> None:
-        # Positions are handed in rather than left to the model, which builds them
-        # on the host and copies them across -- a transfer CUDA graph capture
-        # forbids, and this step is the one worth capturing. rope_deltas is the
-        # offset the image tokens introduced, recorded by the prefill.
-        position = self._cache.get_seq_length()
-        cache_position = torch.arange(position, position + 1, device=self.device)
+    @torch.inference_mode()
+    def _capture_decode(self) -> None:
+        """Record one decode step, so the steady state replays as a single call
+        instead of the ~2500 kernel launches issuing it costs.
+
+        Recording runs the step, which writes the cache and advances the
+        linear-attention state, so it happens on a throwaway chain over a blank
+        frame; the reset at the end leaves the real chain to start clean.
+        """
+        self._prefill(torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE), "")
+        self._write_step_inputs(self._cache.length)
+
+        # Capture must follow a few runs on a side stream, which is also what
+        # settles the workspaces the kernels allocate on first use.
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                self._forward_step()
+        torch.cuda.current_stream().wait_stream(stream)
+
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph):
+            outputs = self._forward_step()
+        self._graph_hidden = outputs.hidden_states[-1]
+        self._graph_logits = outputs.logits
+        self.reset()
+
+    def _write_step_inputs(self, position: int) -> None:
+        """Fill the buffers the step reads.
+
+        Positions are handed in rather than left to the model, which builds them
+        on the host and copies them across -- a transfer capture forbids.
+        rope_deltas is the offset the image tokens introduced, left by the
+        prefill; it is read here and copied, so a recorded step never sees it.
+        """
+        self._graph_token.copy_(self._next_token)
+        self._graph_cache_position.fill_(position)
         rope_deltas = self.model.model.rope_deltas
-        position_ids = (cache_position.view(1, 1, -1) + rope_deltas.unsqueeze(0)).expand(3, -1, -1)
-        self._consume(
-            self.model(
-                input_ids=self._next_token,
-                past_key_values=self._cache,
-                use_cache=True,
-                output_hidden_states=True,
-                cache_position=cache_position,
-                position_ids=position_ids,
-            )
+        self._graph_position_ids.copy_(
+            (self._graph_cache_position.view(1, 1, -1) + rope_deltas.unsqueeze(0)).expand(3, -1, -1)
         )
 
-    def _consume(self, outputs) -> None:
+    def _forward_step(self):
+        return self.model(
+            input_ids=self._graph_token,
+            past_key_values=self._cache,
+            use_cache=True,
+            output_hidden_states=True,
+            cache_position=self._graph_cache_position,
+            position_ids=self._graph_position_ids,
+        )
+
+    def _decode(self) -> None:
+        position = self._cache.length
+        self._write_step_inputs(position)
+        if self._graph is None:
+            outputs = self._forward_step()
+            hidden, logits = outputs.hidden_states[-1], outputs.logits
+        else:
+            self._graph.replay()
+            hidden, logits = self._graph_hidden, self._graph_logits
+        self._cache.length = position + 1
+        self._consume(hidden[0, -1], logits[0, -1])
+
+    def _consume(self, hidden: torch.Tensor, logits: torch.Tensor) -> None:
         """Take the position's lm_head input, sample the token it implies, and
         decide whether the chain lives on."""
-        self._cache = outputs.past_key_values
-        # hidden_states[-1] is post-final-norm, i.e. exactly what lm_head reads.
-        self._hidden = outputs.hidden_states[-1][0, -1].to(torch.bfloat16)
-        probs = torch.softmax(outputs.logits[0, -1].float() / self.temperature, dim=-1)
+        # Copied, not referenced: after a replay this is the graph's own output
+        # buffer, which the next replay overwrites while the step's earlier
+        # activations are still being collected.
+        self._hidden = hidden.to(torch.bfloat16).clone()
+        probs = torch.softmax(logits.float() / self.temperature, dim=-1)
         self._next_token = torch.multinomial(probs, 1).view(1, 1)
         self._tokens.append(self._next_token.item())
         ended = self._tokens[-1] == self.eos_token_id or len(self._tokens) >= self.max_len
         if ended:
-            self._cache = None
+            self._needs_prefill = True
 
     def text(self) -> str:
         """The chain as written so far, for logging."""

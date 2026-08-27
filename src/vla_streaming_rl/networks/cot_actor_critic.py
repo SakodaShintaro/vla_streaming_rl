@@ -75,6 +75,7 @@ class CoTActorCritic(NetworkInterface):
         cot_tokens_num: int,
         cot_max_len: int,
         cot_temperature: float,
+        cot_cuda_graph: bool,
     ) -> None:
         super().__init__()
         self.observation_space_shape = observation_space_shape
@@ -103,6 +104,7 @@ class CoTActorCritic(NetworkInterface):
             tokens_per_step=cot_tokens_num,
             max_len=cot_max_len,
             temperature=cot_temperature,
+            use_cuda_graph=cot_cuda_graph,
             device=torch.device("cuda"),
         )
         self.cot_shape = (cot_tokens_num, self.cot_stream.hidden_size)

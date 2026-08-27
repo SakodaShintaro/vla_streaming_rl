@@ -55,3 +55,8 @@ cot_model_id: Qwen/Qwen3.5-0.8B
 cot_tokens_num: 4
 cot_max_len: 64
 cot_temperature: 0.7
+# Record the decode step as a CUDA graph and replay it. At batch 1 the step is
+# ~2500 tiny kernels and the host spends longer issuing them than the GPU does
+# running them, so replaying one call is several times faster. Off falls back to
+# issuing the step normally.
+cot_cuda_graph: true

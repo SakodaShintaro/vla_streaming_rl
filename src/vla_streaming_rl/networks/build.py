@@ -262,6 +262,7 @@ def build_network(
             cot_tokens_num=args.cot_tokens_num,
             cot_max_len=args.cot_max_len,
             cot_temperature=args.cot_temperature,
+            cot_cuda_graph=args.cot_cuda_graph,
         ).to(device)
 
     elif args.network_class == "vlm_actor_critic_with_action_value":
