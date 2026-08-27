@@ -10,10 +10,7 @@ import numpy as np
 REPEAT = 4
 
 
-CAR_RACING_PROMPT = (
-    "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible. "
-    "Action space: steer [-1, +1] where -1 is full left and +1 is full right; accel [-1, +1] where positive is gas and negative is brake. "
-)
+CAR_RACING_PROMPT = "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible."
 
 
 def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:

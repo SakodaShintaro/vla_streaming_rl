@@ -24,10 +24,17 @@ from .vlm_backbone import load_model
 
 
 class CoTStream:
+    # Written out in full rather than left to the model's own thinking mode,
+    # which spends its budget restating the request ("The user wants me to...")
+    # instead of the scene.
     INSTRUCTION = (
-        "You are controlling an agent that sees the world through this camera. "
-        "Think out loud, step by step, about what you see and what the agent "
-        "should do next.\nTask: "
+        "This is what an agent sees right now. Keep up a running commentary on "
+        "its situation, in short plain sentences.\n"
+        "Say: where the agent is relative to whatever matters around it, which "
+        "way it is heading, what is about to go wrong, and what it should be "
+        "trying to do next.\n"
+        "Write the commentary only. No preamble, no restating this request, no "
+        "headings or lists, no numbers or control values."
     )
 
     def __init__(
@@ -67,7 +74,9 @@ class CoTStream:
         Args:
             image: (C, H, W) float tensor in [0, 1]; read only when the chain
                 restarts, which is what makes the chain the slow loop.
-            task_prompt: the env's language instruction, prepended to the chain.
+            task_prompt: the env's language instruction, empty where the env sets
+                none (or where ``use_prompt`` is off), leaving just the standing
+                instruction.
 
         Returns:
             (tokens_per_step, hidden_size) bfloat16.
@@ -81,14 +90,15 @@ class CoTStream:
         return torch.stack(activations)
 
     def _prefill(self, image: torch.Tensor, task_prompt: str) -> None:
-        content = [{"type": "image"}, {"type": "text", "text": self.INSTRUCTION + task_prompt}]
-        # enable_thinking leaves the <think> block open, so what the model writes
-        # is reasoning; closed, as the template defaults, the chain is just prose.
+        prompt = f"{task_prompt}\n{self.INSTRUCTION}".strip()
+        content = [{"type": "image"}, {"type": "text", "text": prompt}]
+        # Thinking off: with the <think> block left open the model spends the
+        # chain reasoning about the request rather than about the scene.
         text = self.processor.apply_chat_template(
             [{"role": "user", "content": content}],
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True,
+            enable_thinking=False,
         )
         picture = to_pil_image(image.detach().float().clamp(0.0, 1.0).cpu())
         inputs = self.processor(text=[text], images=[picture], return_tensors="pt").to(self.device)

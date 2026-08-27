@@ -147,7 +147,7 @@ class CoTActorCritic(NetworkInterface):
         self, image: torch.Tensor, task_prompt: str, episode_done: bool
     ) -> torch.Tensor:
         """This step's chain-of-thought activations. A finished episode ends the
-        chain, so the next one starts its reasoning from its own first frame."""
+        chain, so the next one starts its commentary from its own first frame."""
         if episode_done:
             self.cot_stream.reset()
         return self.cot_stream.advance(image, task_prompt)
