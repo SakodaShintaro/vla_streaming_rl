@@ -13,7 +13,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,
             action_spec=env.unwrapped.action_spec,
-            backend=build_vlm_backend(args),
+            backend=build_vlm_backend(args, env.unwrapped.action_choices),
             seq_len=args.seq_len,
             image_side=args.image_side,
             reset_on_episode_end=args.reset_on_episode_end,

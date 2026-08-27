@@ -33,11 +33,14 @@ vlm_backend: openrouter
 openrouter_model_id: qwen/qwen3.7-flash
 # Past (image, response) turns replayed as in-context history (0 = memoryless).
 seq_len: 4
+# Response budget. The local backend has none to spend: it writes the <answer>
+# opener itself and draws the action from the env's action texts, one token.
 max_new_tokens: 2048
-# Cap on the model's own hidden thinking (OpenRouter `reasoning`). The prompt
-# already asks for the chain of thought inside <reasoning>, so the hidden copy
-# only competes for max_new_tokens: with no cap the budget runs out before
-# <answer> and the response comes back empty. 0 disables thinking entirely.
+# Cap on the model's own hidden thinking (OpenRouter `reasoning`; on the local
+# backend, the chat template's own block). The prompt already asks for the chain
+# of thought inside <think>, so the hidden copy only competes for max_new_tokens:
+# with no cap the budget runs out before <answer> and the response comes back
+# empty. 0 disables thinking entirely.
 reasoning_max_tokens: 0
 # Observations are tiny (96x96); they are resized to this square before being
 # sent. Larger costs image tokens and latency without adding information.

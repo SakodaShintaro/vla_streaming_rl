@@ -33,8 +33,15 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
 # Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
 # named action maps onto the extreme Box value that survives that dead-zone.
-_ANIMALAI_MOVE = {"stand still": 0.0, "walk forward": 1.0, "walk backward": -1.0}
-_ANIMALAI_ROTATE = {"no turn": 0.0, "turn right": 1.0, "turn left": -1.0}
+# An action is a move letter followed by a rotation letter -- FN walks straight
+# ahead, NL turns on the spot, FR does both. The letters say what they mean, and
+# the position says which half they belong to, so the N the two halves share
+# reads unambiguously.
+_ANIMALAI_MOVE = {"F": 1.0, "B": -1.0, "N": 0.0}
+_ANIMALAI_ROTATE = {"R": 1.0, "L": -1.0, "N": 0.0}
+ANIMALAI_ACTION_CHOICES = [
+    move + rotation for move in _ANIMALAI_MOVE for rotation in _ANIMALAI_ROTATE
+]
 
 ANIMALAI_PROMPT = (
     "You control an animal in a 3D arena, seen from its own point of view. "
@@ -44,41 +51,37 @@ ANIMALAI_PROMPT = (
     "Entering a red zone ends the episode immediately. An orange zone drains "
     "your health, and your health also drains as time passes. "
     "What this arena asks of you follows as `Task:`. "
-    "Action space: one move and one rotation, applied on the same tick, "
-    "written as `<move>, <rotation>`. "
-    f"The move is one of: {', '.join(_ANIMALAI_MOVE)}. "
-    f"The rotation is one of: {', '.join(_ANIMALAI_ROTATE)}. "
-    "For example `walk forward, no turn` goes straight ahead, "
-    "`stand still, turn left` turns on the spot, and "
-    "`walk forward, turn right` walks while turning. "
+    "Action space: two letters, a move and a rotation applied on the same tick. "
+    "The move is F (walk forward), B (walk backward) or N (stand still). "
+    "The rotation is R (turn right), L (turn left) or N (no turn). "
+    "So FN walks straight ahead, NL turns left on the spot, FR walks while "
+    "turning right, and NN does nothing. "
     "Bring whatever you are heading for to the center of your view before you "
-    "walk forward: turn on the spot until it is centered, and only then move. "
+    "walk forward: turn on the spot (NR or NL) until it is centered, and only "
+    "then move. "
     "Keep your speed down -- the third velocity component reported below should "
-    "stay at about 10 or less, so stand still for a tick whenever it climbs "
+    "stay at about 10 or less, so stand still (NN) for a tick whenever it climbs "
     "past that. "
 )
 ANIMALAI_ACTION_SPEC = (
-    "`<move>, <rotation>` -- exactly one move out of "
-    f"{{{', '.join(_ANIMALAI_MOVE)}}} and one rotation out of "
-    f"{{{', '.join(_ANIMALAI_ROTATE)}}}, separated by a comma and a space, "
-    "with no other words"
-)
-
-# The phrase pair exactly as specified. Anything else is a format violation and
-# is reported as such rather than repaired here.
-_ANIMALAI_ACTION_RE = re.compile(
-    f"({'|'.join(_ANIMALAI_MOVE)}), ({'|'.join(_ANIMALAI_ROTATE)})", re.IGNORECASE
+    f"two letters -- one move out of {{{', '.join(_ANIMALAI_MOVE)}}} followed by one "
+    f"rotation out of {{{', '.join(_ANIMALAI_ROTATE)}}}, with no other text"
 )
 
 
 def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    """Decode the `<move>, <rotation>` phrase pair into the Box action that the
-    env discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair."""
-    match = _ANIMALAI_ACTION_RE.fullmatch(action_text.strip())
-    if match is None:
+    """Decode the move/rotation letter pair into the Box action that the env
+    discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair.
+
+    Anything but one of the nine pairs is a format violation and is reported as
+    such rather than repaired here.
+    """
+    code = action_text.strip().upper()
+    if code not in ANIMALAI_ACTION_CHOICES:
         return np.zeros((0, 2), dtype=np.float32), False
-    move, rotation = (group.lower() for group in match.groups())
-    action_array = np.array([[_ANIMALAI_MOVE[move], _ANIMALAI_ROTATE[rotation]]], dtype=np.float32)
+    action_array = np.array(
+        [[_ANIMALAI_MOVE[code[0]], _ANIMALAI_ROTATE[code[1]]]], dtype=np.float32
+    )
     return action_array, True
 
 
@@ -188,6 +191,8 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
         env.unwrapped.action_spec = CAR_RACING_ACTION_SPEC
+        # Continuous: there is no finite set of action texts to enumerate.
+        env.unwrapped.action_choices = []
         return env
 
     elif env_id == "CARLA-Leaderboard-v0":
@@ -222,6 +227,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _animalai_parse_action
         env.unwrapped.action_spec = ANIMALAI_ACTION_SPEC
+        env.unwrapped.action_choices = ANIMALAI_ACTION_CHOICES
         return env
 
     else:

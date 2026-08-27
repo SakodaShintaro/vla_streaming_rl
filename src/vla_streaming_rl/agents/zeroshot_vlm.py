@@ -20,7 +20,10 @@ from PIL import Image
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.utils import overlay_caption
 
-ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+# The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
+# the tag before writing the real section, and reading the first one then takes
+# the whole reasoning as the action.
+ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
 
 # Stands in for the assistant turn of a step whose response did not follow the
 # format, so the history stays an honest record of what was actually executed.
