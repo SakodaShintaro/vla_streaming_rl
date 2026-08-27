@@ -12,6 +12,7 @@ convention) and is not part of the public surface.
 import abc
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -135,6 +136,13 @@ class NetworkInterface(nn.Module, abc.ABC):
         carries a chain (see ``networks/cot_actor_critic.py``)."""
         del image, task_prompt, episode_done
         return torch.zeros(self.cot_shape)
+
+    def render_panels(self) -> dict[str, np.ndarray]:
+        """Named RGB panels this network contributes to the render strip. The
+        agents pass these through verbatim, so the stable-panel contract of
+        :class:`agents.base.StepResult` applies: the same keys with the same
+        shapes on every step of a run."""
+        return {}
 
     @abc.abstractmethod
     def init_state(self) -> torch.Tensor:

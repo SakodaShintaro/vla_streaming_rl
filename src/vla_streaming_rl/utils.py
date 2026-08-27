@@ -78,6 +78,47 @@ def add_text_label_on_top(image: np.ndarray, text: str) -> np.ndarray:
 
 
 _CAPTION_LINE_BUDGET = 5
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+
+def wrap_text(text: str, width: int, font_scale: float, thickness: int) -> list[str]:
+    """Greedily word-wrap ``text`` to a pixel ``width``."""
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        trial = f"{current} {word}".strip()
+        (trial_width, _), _ = cv2.getTextSize(trial, _FONT, font_scale, thickness)
+        if trial_width <= width - 10 or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def render_text_panel(text: str, width: int, height: int) -> np.ndarray:
+    """Free-form text word-wrapped onto a dark panel of exactly ``width`` x
+    ``height``.
+
+    A panel rather than a caption band, so free-form text can stand as its own
+    entry in the render strip. The size is fixed by the arguments and not by the
+    text, which is what the stable-panel contract needs; text past the last line
+    that fits is dropped.
+    """
+    font_scale = 0.45
+    thickness = 1
+    (_, text_height), baseline = cv2.getTextSize("Ag", _FONT, font_scale, thickness)
+    line_height = text_height + baseline + 4
+
+    panel = np.full((height, width, 3), (30, 30, 30), dtype=np.uint8)
+    lines = wrap_text(text, width, font_scale, thickness)[: height // line_height]
+    for i, line in enumerate(lines):
+        cv2.putText(
+            panel, line, (5, (i + 1) * line_height), _FONT, font_scale, (235, 235, 235), thickness
+        )
+    return panel
 
 
 def overlay_caption(image: np.ndarray, text: str) -> np.ndarray:
@@ -93,24 +134,11 @@ def overlay_caption(image: np.ndarray, text: str) -> np.ndarray:
     image = convert_to_uint8(image)
 
     width = image.shape[1]
-    font = cv2.FONT_HERSHEY_SIMPLEX
+    font = _FONT
     font_scale = 0.4
     thickness = 1
 
-    # Greedy word-wrap to the panel width.
-    lines: list[str] = []
-    current = ""
-    for word in text.split():
-        trial = f"{current} {word}".strip()
-        (trial_width, _), _ = cv2.getTextSize(trial, font, font_scale, thickness)
-        if trial_width <= width - 10 or not current:
-            current = trial
-        else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    lines = lines[:_CAPTION_LINE_BUDGET]
+    lines = wrap_text(text, width, font_scale, thickness)[:_CAPTION_LINE_BUDGET]
 
     (_, text_height), baseline = cv2.getTextSize("Ag", font, font_scale, thickness)
     line_height = text_height + baseline + 4

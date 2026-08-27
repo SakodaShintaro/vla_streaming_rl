@@ -58,7 +58,7 @@ class CoTStream:
         self._cache = None
         self._hidden = None
         self._next_token = None
-        self._generated = 0
+        self._tokens = []
 
     @torch.inference_mode()
     def advance(self, image: torch.Tensor, task_prompt: str) -> torch.Tensor:
@@ -82,16 +82,20 @@ class CoTStream:
 
     def _prefill(self, image: torch.Tensor, task_prompt: str) -> None:
         content = [{"type": "image"}, {"type": "text", "text": self.INSTRUCTION + task_prompt}]
+        # enable_thinking leaves the <think> block open, so what the model writes
+        # is reasoning; closed, as the template defaults, the chain is just prose.
         text = self.processor.apply_chat_template(
-            [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True
+            [{"role": "user", "content": content}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
         )
         picture = to_pil_image(image.detach().float().clamp(0.0, 1.0).cpu())
         inputs = self.processor(text=[text], images=[picture], return_tensors="pt").to(self.device)
-        self._generated = 0
+        self._tokens = []
         self._consume(self.model(**inputs, use_cache=True, output_hidden_states=True))
 
     def _decode(self) -> None:
-        self._generated += 1
         self._consume(
             self.model(
                 input_ids=self._next_token,
@@ -109,6 +113,11 @@ class CoTStream:
         self._hidden = outputs.hidden_states[-1][0, -1].to(torch.bfloat16)
         probs = torch.softmax(outputs.logits[0, -1].float() / self.temperature, dim=-1)
         self._next_token = torch.multinomial(probs, 1).view(1, 1)
-        ended = self._next_token.item() == self.eos_token_id or self._generated >= self.max_len
+        self._tokens.append(self._next_token.item())
+        ended = self._tokens[-1] == self.eos_token_id or len(self._tokens) >= self.max_len
         if ended:
             self._cache = None
+
+    def text(self) -> str:
+        """The chain as written so far, for logging."""
+        return self.processor.tokenizer.decode(self._tokens, skip_special_tokens=True).strip()

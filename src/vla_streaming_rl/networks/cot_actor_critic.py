@@ -34,11 +34,17 @@ from vla_streaming_rl.networks.modules.policy_head import build_policy_head
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
+from vla_streaming_rl.utils import render_text_panel
 
 SCALAR_OBS_DIM = 9
 
 
 class CoTActorCritic(NetworkInterface):
+    # Fixed so the render strip keeps one shape for the whole run; wide enough
+    # to read a chain of ``cot_max_len`` tokens.
+    COT_PANEL_WIDTH = 420
+    COT_PANEL_HEIGHT = 300
+
     def __init__(
         self,
         *,
@@ -145,6 +151,16 @@ class CoTActorCritic(NetworkInterface):
         if episode_done:
             self.cot_stream.reset()
         return self.cot_stream.advance(image, task_prompt)
+
+    def render_panels(self) -> dict[str, np.ndarray]:
+        """The chain as it currently stands, drawn for the render strip. It runs
+        from the frame the chain started on, so it empties whenever the chain
+        restarts."""
+        return {
+            "chain_of_thought": render_text_panel(
+                self.cot_stream.text(), self.COT_PANEL_WIDTH, self.COT_PANEL_HEIGHT
+            )
+        }
 
     def observe_scalar_obs(
         self,
