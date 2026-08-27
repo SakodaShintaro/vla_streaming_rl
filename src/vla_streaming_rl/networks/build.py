@@ -166,7 +166,6 @@ def build_network(
             image_encode_mode=args.image_encode_mode,
             image_encoder_trainable=args.image_encoder_trainable,
         ).to(device)
-        network = torch.compile(network)
 
     elif args.network_class == "animal_actor_critic":
         from vla_streaming_rl.networks.animal_actor_critic import AnimalActorCriticWithActionValue

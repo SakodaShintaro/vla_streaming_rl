@@ -164,9 +164,10 @@ class QwenImageEncoder(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = F.interpolate(x, size=(self.resolution, self.resolution), mode="bilinear")
         batch_size = x.size(0)
-        cpu_images = [x[i].detach().cpu().float() for i in range(batch_size)]
-        img_out = self.image_processor(images=cpu_images, return_tensors="pt", do_rescale=False)
-        pixel_values = img_out["pixel_values"].to(x.device).type(self.visual.dtype)
+        img_out = self.image_processor(
+            images=x, return_tensors="pt", do_rescale=False, device=x.device
+        )
+        pixel_values = img_out["pixel_values"].type(self.visual.dtype)
         image_grid_thw = img_out["image_grid_thw"].to(x.device)
 
         hidden_states = self.visual.patch_embed(pixel_values)
