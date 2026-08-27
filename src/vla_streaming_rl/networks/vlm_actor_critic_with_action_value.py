@@ -138,10 +138,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.max_prompt_tokens = max_prompt_tokens
         self.pad_token_id = pad_token_id
 
-        # Index attention layers for ``_extract_kv`` (text generation).
-        layer_types = vlm_cfg.layer_types
-        self.attn_layer_indices = [i for i, lt in enumerate(layer_types) if lt == "full_attention"]
-
         self.num_state_queries = num_state_queries
         self.video_encoder = VideoEncoder()
 
@@ -475,6 +471,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             inputs_embeds=inputs_embeds,
             attention_mask=inputs["attention_mask"],
             past_key_values=None,
+            mm_token_type_ids=inputs["mm_token_type_ids"],
         )
 
         forward_kwargs = dict(
@@ -526,7 +523,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         Returns (first_item_text, extended_kv_cache).
         """
         tokenizer = self.processor.tokenizer
-        kv_len = vlm_past_kv.key_cache[self.attn_layer_indices[0]].shape[2]
+        # How many tokens the prompt left cached. Asked of the cache rather than
+        # measured off one attention layer's key tensor, which the cache no
+        # longer exposes as a list.
+        kv_len = vlm_past_kv.get_seq_length()
         eos_token_id = tokenizer.eos_token_id
 
         next_ids = self._last_input_ids[:, -1:].to(self.device)  # (B, 1)

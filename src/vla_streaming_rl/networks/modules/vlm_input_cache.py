@@ -47,6 +47,7 @@ class VLMInputCache:
         self.tokenizer = processor.tokenizer
         self.image_processor = processor.image_processor
         self.image_token = processor.image_token  # e.g. '<|image_pad|>'
+        self.image_token_id = processor.tokenizer.convert_tokens_to_ids(processor.image_token)
         self.observation_shape = tuple(observation_shape)
         self.seq_len = seq_len
         self.device = device
@@ -135,9 +136,15 @@ class VLMInputCache:
         else:
             prompt_image_grid_thw = self.cached_prompt_image_grid_thw.repeat(B, 1)
 
+        input_ids = text_inputs["input_ids"].to(device)
         return {
-            "input_ids": text_inputs["input_ids"].to(device),
+            "input_ids": input_ids,
             "attention_mask": text_inputs["attention_mask"].to(device),
+            # Multimodal RoPE needs to know which positions are image tokens. The
+            # processor returns this alongside input_ids; building the prompt by
+            # hand means building it too, and it is exactly where the image token
+            # sits.
+            "mm_token_type_ids": (input_ids == self.image_token_id).long(),
             "image_grid_thw": prompt_image_grid_thw,
             "all_pixel_values": all_pixel_values,
             "all_image_grid_thw": all_image_grid_thw,
