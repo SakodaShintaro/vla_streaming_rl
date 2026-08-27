@@ -19,31 +19,9 @@ into the network's ``parameters()`` and its ``state_dict()``.
 
 import torch
 from torchvision.transforms.functional import to_pil_image
-from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
+from transformers import StaticCache
 
-from .cot_static_cache import CoTStaticCache
 from .vlm_backbone import load_model
-
-# Qwen3.5 decides the linear-attention mask by reading a device value into a
-# Python ``if``, which syncs the device to the host on every forward and so bars
-# CUDA graph capture of the decode step. When no attention mask is given the
-# branch cannot change the answer -- its second term is false, so both arms
-# return None -- and short-circuiting that case removes the sync while leaving
-# every other case, padded batches included, on the original.
-assert hasattr(Qwen3_5TextModel, "_update_linear_attn_mask"), (
-    "Qwen3_5TextModel._update_linear_attn_mask is gone; this transformers "
-    "version no longer matches the patch in cot_stream.py"
-)
-_ORIGINAL_LINEAR_ATTN_MASK = Qwen3_5TextModel._update_linear_attn_mask
-
-
-def _linear_attn_mask_without_sync(self, attention_mask, cache_position):
-    if attention_mask is None:
-        return None
-    return _ORIGINAL_LINEAR_ATTN_MASK(self, attention_mask, cache_position)
-
-
-Qwen3_5TextModel._update_linear_attn_mask = _linear_attn_mask_without_sync
 
 
 class CoTStream:
@@ -95,7 +73,8 @@ class CoTStream:
         self.eos_token_id = self.processor.tokenizer.eos_token_id
         # One cache for the whole run. A new chain resets it in place rather than
         # replacing it, so its buffers keep the addresses a graph records.
-        self._cache = CoTStaticCache(self.model.config.text_config, self.PROMPT_BUDGET + max_len)
+        self._cache_len = self.PROMPT_BUDGET + max_len
+        self._cache = StaticCache(config=self.model.config, max_cache_len=self._cache_len)
         # What a recorded step reads. Their contents change every step; their
         # addresses must not, which is the whole point of recording one.
         self._graph_token = torch.zeros(1, 1, dtype=torch.long, device=device)
@@ -112,6 +91,10 @@ class CoTStream:
         self._hidden = None
         self._next_token = None
         self._tokens = []
+        # Kept here rather than read back from the cache: a recorded step advances
+        # the cache inside the graph, where a host-side counter is the only thing
+        # that stays in step with it.
+        self._position = 0
         self._cache.reset()
 
     @torch.inference_mode()
@@ -150,9 +133,9 @@ class CoTStream:
         picture = to_pil_image(image.detach().float().clamp(0.0, 1.0).cpu())
         inputs = self.processor(text=[text], images=[picture], return_tensors="pt").to(self.device)
         prompt_len = inputs["input_ids"].shape[1]
-        assert prompt_len + self.max_len <= self._cache.max_len, (
+        assert prompt_len + self.max_len <= self._cache_len, (
             f"prompt of {prompt_len} tokens plus a {self.max_len}-token chain exceeds the "
-            f"cache length {self._cache.max_len}; raise CoTStream.PROMPT_BUDGET"
+            f"cache length {self._cache_len}; raise CoTStream.PROMPT_BUDGET"
         )
         self._tokens = []
         self._cache.reset()
@@ -163,10 +146,10 @@ class CoTStream:
             use_cache=True,
             output_hidden_states=True,
         )
-        self._cache.length = prompt_len
+        self._position = prompt_len
         self._consume(outputs.hidden_states[-1][0, -1], outputs.logits[0, -1])
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def _capture_decode(self) -> None:
         """Record one decode step, so the steady state replays as a single call
         instead of the ~2500 kernel launches issuing it costs.
@@ -174,9 +157,13 @@ class CoTStream:
         Recording runs the step, which writes the cache and advances the
         linear-attention state, so it happens on a throwaway chain over a blank
         frame; the reset at the end leaves the real chain to start clean.
+
+        ``no_grad`` rather than ``inference_mode``: this is where the cache
+        allocates, and a tensor born in inference mode cannot be written from
+        outside it, which is what recording then does.
         """
         self._prefill(torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE), "")
-        self._write_step_inputs(self._cache.length)
+        self._write_step_inputs(self._position)
 
         # Capture must follow a few runs on a side stream, which is also what
         # settles the workspaces the kernels allocate on first use.
@@ -220,7 +207,7 @@ class CoTStream:
         )
 
     def _decode(self) -> None:
-        position = self._cache.length
+        position = self._position
         self._write_step_inputs(position)
         if self._graph is None:
             outputs = self._forward_step()
@@ -228,7 +215,7 @@ class CoTStream:
         else:
             self._graph.replay()
             hidden, logits = self._graph_hidden, self._graph_logits
-        self._cache.length = position + 1
+        self._position = position + 1
         self._consume(hidden[0, -1], logits[0, -1])
 
     def _consume(self, hidden: torch.Tensor, logits: torch.Tensor) -> None:
