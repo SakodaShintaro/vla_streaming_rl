@@ -5,7 +5,9 @@ The chain of thought is the slow loop. It is prefilled from one frame and then
 advanced by a fixed budget of tokens per environment step, so a single line of
 reasoning spans many control ticks. When it ends -- EOS, or ``max_len`` tokens --
 the next advance prefills again from whatever frame is current, starting a fresh
-chain on a fresh image.
+chain on a fresh image. With ``carry_prev`` the chain that just ended is quoted
+into that prefill, so the new one picks up where the last left off instead of
+opening on the scene from scratch.
 
 What leaves this module is not text but the activation feeding the VLM's lm_head
 at each generated position: the state the model was in when it chose that token,
@@ -18,6 +20,8 @@ stream, stored in the replay buffer next to the image.
 Not an ``nn.Module`` on purpose: registering it would put a frozen 0.8B model
 into the network's ``parameters()`` and its ``state_dict()``.
 """
+
+import re
 
 import torch
 from torchvision.transforms.functional import to_pil_image
@@ -51,6 +55,24 @@ class CoTStream:
         "headings or lists, no numbers or control values."
     )
 
+    # Quoted into the prefill under ``carry_prev``, so a restart continues the
+    # commentary. Third person throughout: addressing the writer ("you were
+    # saying") turned a quarter of the chains into commands aimed at the agent.
+    # Stated as a delta, because told only to continue the model paraphrases what
+    # it already said and the chain stops carrying new information.
+    CARRY = (
+        "The commentary was mid-flow a moment ago, on an older frame:\n"
+        "...{previous}\n"
+        "The frame above is the current one. Carry that line forward: write what "
+        "is new or has changed since it, not what it already says."
+    )
+
+    # How much of the finished chain is quoted back. The whole chain is material
+    # to copy from -- the tail is the thought that was actually still running,
+    # and the frame supplies the rest. One sentence keeps a median 28% of the
+    # chain against 63% for two, which is the point: less to paraphrase.
+    CARRY_SENTENCES = 1
+
     def __init__(
         self,
         model_id: str,
@@ -58,6 +80,7 @@ class CoTStream:
         max_len: int,
         temperature: float,
         all_layers: bool,
+        carry_prev: bool,
         use_cuda_graph: bool,
         device: torch.device,
     ) -> None:
@@ -71,6 +94,7 @@ class CoTStream:
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len
         self.temperature = temperature
+        self.carry_prev = carry_prev
         self.device = device
         text_config = self.model.config.text_config
         self.hidden_size = text_config.hidden_size
@@ -80,7 +104,9 @@ class CoTStream:
         self.eos_token_id = self.processor.tokenizer.eos_token_id
         # One cache for the whole run. A new chain resets it in place rather than
         # replacing it, so its buffers keep the addresses a graph records.
-        self._cache_len = self.PROMPT_BUDGET + max_len
+        # A carried chain is quoted back into the prompt, so the prefill has to
+        # fit one more chain's worth of tokens on top of the standing prompt.
+        self._cache_len = self.PROMPT_BUDGET + (max_len if carry_prev else 0) + max_len
         self._cache = StaticCache(config=self.model.config, max_cache_len=self._cache_len)
         # What a recorded step reads. Their contents change every step; their
         # addresses must not, which is the whole point of recording one.
@@ -98,6 +124,7 @@ class CoTStream:
         self._hidden = None
         self._next_token = None
         self._tokens = []
+        self._prev_text = ""
         # Kept here rather than read back from the cache: a recorded step advances
         # the cache inside the graph, where a host-side counter is the only thing
         # that stays in step with it.
@@ -126,8 +153,17 @@ class CoTStream:
             self._decode()
         return torch.stack(activations)
 
+    def _tail(self, text: str) -> str:
+        """The last ``CARRY_SENTENCES`` sentences of a finished chain, which is
+        what gets quoted back. A chain cut at ``max_len`` ends mid-sentence, so
+        the final piece is usually a fragment, and continuing a fragment is
+        exactly the behavior wanted."""
+        pieces = [piece for piece in re.split(r"(?<=[.!?])\s+", text) if piece]
+        return " ".join(pieces[-self.CARRY_SENTENCES :])
+
     def _prefill(self, image: torch.Tensor, task_prompt: str) -> None:
-        prompt = f"{task_prompt}\n{self.INSTRUCTION}".strip()
+        carried = self.CARRY.format(previous=self._prev_text) if self._prev_text else ""
+        prompt = "\n".join(part for part in (task_prompt, carried, self.INSTRUCTION) if part)
         content = [{"type": "image"}, {"type": "text", "text": prompt}]
         # Thinking off: with the <think> block left open the model spends the
         # chain reasoning about the request rather than about the scene.
@@ -246,6 +282,7 @@ class CoTStream:
         self._tokens.append(self._next_token.item())
         ended = self._tokens[-1] == self.eos_token_id or len(self._tokens) >= self.max_len
         if ended:
+            self._prev_text = self._tail(self.text()) if self.carry_prev else ""
             self._needs_prefill = True
 
     def text(self) -> str:

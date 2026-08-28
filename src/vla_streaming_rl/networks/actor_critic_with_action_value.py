@@ -64,6 +64,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_max_len: int,
         cot_temperature: float,
         cot_all_layers: bool,
+        cot_carry_prev: bool,
         cot_pool: str,
         cot_cuda_graph: bool,
     ) -> None:
@@ -110,6 +111,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 max_len=cot_max_len,
                 temperature=cot_temperature,
                 all_layers=cot_all_layers,
+                carry_prev=cot_carry_prev,
                 use_cuda_graph=cot_cuda_graph,
                 device=torch.device("cuda"),
             )

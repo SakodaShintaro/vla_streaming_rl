@@ -63,6 +63,10 @@ cot_temperature: 0.7
 # cot_tokens_num=4 and buffer_size=20000 -- so it wants buffer_device: cpu. The
 # per-step transfer back is ~3 ms, about 1.5% of a training step.
 cot_all_layers: true
+# Quote the chain that just ended into the prefill that starts the next one, so
+# a restart continues the commentary instead of opening on the scene from
+# scratch. Off is the ablation: every chain sees only its own frame.
+cot_carry_prev: false
 # How a step's chain tokens reach the space axis.
 #   mean : one slot per step, whose temporal recurrence follows the chain
 #   none : one slot per token, each recurring on a stride-L phase of the chain
