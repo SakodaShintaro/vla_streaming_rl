@@ -165,6 +165,11 @@ def build_network(
             image_encoder_output_dim=args.image_encoder_output_dim,
             image_encode_mode=args.image_encode_mode,
             image_encoder_trainable=args.image_encoder_trainable,
+            cot_model_id=args.cot_model_id,
+            cot_tokens_num=args.cot_tokens_num,
+            cot_max_len=args.cot_max_len,
+            cot_temperature=args.cot_temperature,
+            cot_cuda_graph=args.cot_cuda_graph,
         ).to(device)
 
     elif args.network_class == "animal_actor_critic":
@@ -229,40 +234,6 @@ def build_network(
             wcm_sigreg_coef=args.wcm_sigreg_coef,
             wcm_sigreg_knots=args.wcm_sigreg_knots,
             wcm_sigreg_projections=args.wcm_sigreg_projections,
-        ).to(device)
-
-    elif args.network_class == "cot_actor_critic":
-        from vla_streaming_rl.networks.cot_actor_critic import CoTActorCritic
-
-        network = CoTActorCritic(
-            observation_space_shape=observation_space_shape,
-            action_space_shape=action_space_shape,
-            value_head_factory=value_head_factory,
-            seq_len=args.seq_len,
-            horizon=args.horizon,
-            encoder_block_num=args.encoder_block_num,
-            temporal_model_type=args.temporal_model_type,
-            policy_type=args.policy_type,
-            actor_hidden_dim=args.actor_hidden_dim,
-            actor_block_num=args.actor_block_num,
-            denoising_time=args.denoising_time,
-            denoising_steps=args.denoising_steps,
-            dacer_loss_weight=args.dacer_loss_weight,
-            som_alpha=args.som_alpha,
-            som_w=args.som_w,
-            sparsity=args.sparsity,
-            critic_loss_weight=args.critic_loss_weight,
-            detach_actor=args.detach_actor,
-            detach_critic=args.detach_critic,
-            image_encoder_type=args.image_encoder_type,
-            image_encoder_output_dim=args.image_encoder_output_dim,
-            image_encode_mode=args.image_encode_mode,
-            image_encoder_trainable=args.image_encoder_trainable,
-            cot_model_id=args.cot_model_id,
-            cot_tokens_num=args.cot_tokens_num,
-            cot_max_len=args.cot_max_len,
-            cot_temperature=args.cot_temperature,
-            cot_cuda_graph=args.cot_cuda_graph,
         ).to(device)
 
     elif args.network_class == "vlm_actor_critic_with_action_value":

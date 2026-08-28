@@ -52,7 +52,9 @@ wcm_sigreg_projections: 1024
 # encoder's space axis. The chain restarts from the current frame on EOS or
 # after cot_max_len tokens, which is when the VLM reads a new image at all.
 cot_model_id: Qwen/Qwen3.5-0.8B
-cot_tokens_num: 4
+# 0 = no chain, which is the plain actor-critic and the ablation a
+# chain-carrying run is measured against. The cot_* agent configs turn it on.
+cot_tokens_num: 0
 cot_max_len: 64
 cot_temperature: 0.7
 # Record the decode step as a CUDA graph and replay it. At batch 1 the step is
