@@ -36,7 +36,7 @@ class CoTStream:
     # the instruction and the environment's task text. At 6 attention layers and
     # 2 key-value heads the buffer costs single-digit megabytes, so this is set
     # far above what any environment sends rather than tuned.
-    PROMPT_BUDGET = 512
+    PROMPT_BUDGET = 1024
 
     # The frame the throwaway chain used for recording is never looked at, only
     # resized by the processor, so its size is arbitrary.
