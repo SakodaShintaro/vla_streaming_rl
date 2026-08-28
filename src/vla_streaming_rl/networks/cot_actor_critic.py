@@ -17,6 +17,7 @@ replayed update ever runs the VLM again.
 
 import numpy as np
 import torch
+from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
     ActivationFeatures,
@@ -98,16 +99,23 @@ class CoTActorCritic(NetworkInterface):
         )
         self.reward_processor = RewardProcessor(embed_dim=self.image_processor.output_shape[0])
 
+        # ``cot_tokens_num = 0`` is the ablation: the same network and the same
+        # loss with the chain's tokens taken out of the space axis, which is what
+        # isolates what the chain contributes. No chain means no VLM to load, so
+        # the width comes from the config instead of the loaded model.
+        cot_dim = AutoConfig.from_pretrained(cot_model_id).text_config.hidden_size
+        self.cot_shape = (cot_tokens_num, cot_dim)
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
-        self.cot_stream = CoTStream(
-            model_id=cot_model_id,
-            tokens_per_step=cot_tokens_num,
-            max_len=cot_max_len,
-            temperature=cot_temperature,
-            use_cuda_graph=cot_cuda_graph,
-            device=torch.device("cuda"),
-        )
-        self.cot_shape = (cot_tokens_num, self.cot_stream.hidden_size)
+        self.cot_stream = None
+        if cot_tokens_num > 0:
+            self.cot_stream = CoTStream(
+                model_id=cot_model_id,
+                tokens_per_step=cot_tokens_num,
+                max_len=cot_max_len,
+                temperature=cot_temperature,
+                use_cuda_graph=cot_cuda_graph,
+                device=torch.device("cuda"),
+            )
 
         self.scalar_obs_normalizer = RunningNormalizer(SCALAR_OBS_DIM)
         self.encoder = CoTEncoder(
@@ -119,7 +127,7 @@ class CoTActorCritic(NetworkInterface):
             scalar_obs_dim=SCALAR_OBS_DIM,
             temporal_model_type=temporal_model_type,
             cot_tokens_num=cot_tokens_num,
-            cot_dim=self.cot_stream.hidden_size,
+            cot_dim=cot_dim,
         )
 
         self.policy_type = policy_type
@@ -148,8 +156,11 @@ class CoTActorCritic(NetworkInterface):
     def advance_cot(
         self, image: torch.Tensor, task_prompt: str, episode_done: bool
     ) -> torch.Tensor:
-        """This step's chain-of-thought activations. A finished episode ends the
-        chain, so the next one starts its commentary from its own first frame."""
+        """This step's chain-of-thought activations, or nothing when the chain is
+        off. A finished episode ends the chain, so the next one starts its
+        commentary from its own first frame."""
+        if self.cot_stream is None:
+            return torch.zeros(self.cot_shape)
         if episode_done:
             self.cot_stream.reset()
         return self.cot_stream.advance(image, task_prompt)
@@ -157,7 +168,10 @@ class CoTActorCritic(NetworkInterface):
     def render_panels(self) -> dict[str, np.ndarray]:
         """The chain as it currently stands, drawn for the render strip. It runs
         from the frame the chain started on, so it empties whenever the chain
-        restarts."""
+        restarts. The ablation contributes no panel at all rather than a blank
+        one, which keeps its render strip the width of what it actually has."""
+        if self.cot_stream is None:
+            return {}
         return {
             "chain_of_thought": render_text_panel(
                 self.cot_stream.text(), self.COT_PANEL_WIDTH, self.COT_PANEL_HEIGHT
@@ -165,6 +179,8 @@ class CoTActorCritic(NetworkInterface):
         }
 
     def render_texts(self) -> dict[str, str]:
+        if self.cot_stream is None:
+            return {}
         return {"chain_of_thought": self.cot_stream.text()}
 
     def observe_scalar_obs(

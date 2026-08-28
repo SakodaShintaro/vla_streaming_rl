@@ -9,8 +9,9 @@ per-step token budget is fixed, so ``space_len`` is constant and the recurrent
 state keeps its shape however the chain restarts.
 
 The state the heads read is the whole space axis at the last step, chain tokens
-included. Dropping those tokens is exactly ``actor_critic_with_action_value``,
-which is therefore the ablation this network is measured against.
+included. ``cot_tokens_num = 0`` drops just those tokens and leaves everything
+else -- the same body, the same heads, the same loss -- which is the ablation
+this network is measured against.
 """
 
 import torch
@@ -36,10 +37,7 @@ class CoTEncoder(nn.Module):
         cot_dim: int,
     ) -> None:
         super().__init__()
-        assert cot_tokens_num >= 1, (
-            f"cot_tokens_num {cot_tokens_num} leaves no chain-of-thought tokens; "
-            "the no-chain case is network_class=actor_critic_with_action_value"
-        )
+        assert cot_tokens_num >= 0, f"cot_tokens_num must not be negative; got {cot_tokens_num}"
         self.n_layer = n_layer
         self.image_processor = image_processor
         self.reward_processor = reward_processor
