@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .image_processor import ImageProcessor
 from .reward_processor import RewardProcessor
@@ -40,6 +41,16 @@ class SpatialTemporalEncoder(nn.Module):
     recurrent state keeps its shape however the chain restarts.
     ``cot_tokens_num = 0`` leaves the axis without chain tokens, which is the
     ablation a chain-carrying run is measured against.
+
+    The chain arrives with a depth axis -- one hidden state, or every one behind
+    it -- and a learned softmax over that axis picks which depth to read, the way
+    the VLM network weights its own. ``cot_pool`` then decides how the step's
+    tokens reach the space axis. The temporal block runs one recurrence per space
+    position, so slot i of an unpooled chain holds tokens i, i+L, i+2L ... of one
+    continuous chain: a stride-L phase whose alignment shifts every restart,
+    which is not the correspondence the other tokens have. ``mean`` collapses the
+    step to a single slot whose recurrence follows the chain itself, and also
+    frees ``space_len`` -- and with it the recurrent state's shape -- from L.
     """
 
     def __init__(
@@ -52,10 +63,18 @@ class SpatialTemporalEncoder(nn.Module):
         scalar_obs_dim: int,
         temporal_model_type: str,
         cot_tokens_num: int,
+        cot_layers: int,
         cot_dim: int,
+        cot_pool: str,
     ) -> None:
         super().__init__()
         assert cot_tokens_num >= 0, f"cot_tokens_num must not be negative; got {cot_tokens_num}"
+        assert cot_pool in ("mean", "none"), f"Unknown cot_pool: {cot_pool}"
+        # Pooling leaves one slot per step; without it every token gets its own.
+        # With no chain at all there is nothing to pool, and averaging an empty
+        # axis would invent a slot full of NaN.
+        self.pool_cot = cot_pool == "mean" and cot_tokens_num > 0
+        cot_slots = 1 if self.pool_cot else cot_tokens_num
         self.n_layer = n_layer
         self.image_processor = image_processor
         self.reward_processor = reward_processor
@@ -73,11 +92,14 @@ class SpatialTemporalEncoder(nn.Module):
             + 1  # reward
             + scalar_obs_dim  # interoceptive scalars
             + 1  # register
-            + cot_tokens_num  # this step's chain-of-thought activations
+            + cot_slots  # this step's chain of thought
         )
 
         # The VLM's hidden width down to the encoder's: the only trainable thing
         # on the chain's path, since the VLM itself never learns.
+        # Input-independent logits over the chain's depth axis; the softmax over
+        # them is the weighting that picks which depth the encoder reads.
+        self.cot_layer_logits = nn.Parameter(torch.zeros(cot_layers))
         self.cot_proj = nn.Linear(cot_dim, self.hidden_image_dim)
 
         self.spatial_temporal = SpatialTemporalTransformer(
@@ -105,7 +127,7 @@ class SpatialTemporalEncoder(nn.Module):
         rewards: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)
         scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
-        cot_activations: torch.Tensor,  # (B, T, cot_tokens_num, cot_dim)
+        cot_activations: torch.Tensor,  # (B, T, cot_tokens_num, cot_layers, cot_dim)
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -128,7 +150,10 @@ class SpatialTemporalEncoder(nn.Module):
         register_token = torch.zeros(
             (B, T, 1, self.hidden_image_dim), device=images.device, dtype=images.dtype
         )
-        cot_embed = self.cot_proj(cot_activations.to(image_embed.dtype))  # [B, T, L, C']
+        weights = F.softmax(self.cot_layer_logits, dim=0)
+        cot = (cot_activations.to(image_embed.dtype) * weights.view(1, 1, 1, -1, 1)).sum(dim=3)
+        cot = cot.mean(dim=2, keepdim=True) if self.pool_cot else cot
+        cot_embed = self.cot_proj(cot)  # [B, T, cot_slots, C']
 
         all_embed = torch.cat(
             [image_embed, action_embed, reward_embed, scalar_obs_embed, register_token, cot_embed],

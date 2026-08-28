@@ -9,7 +9,9 @@ chain on a fresh image.
 
 What leaves this module is not text but the activation feeding the VLM's lm_head
 at each generated position: the state the model was in when it chose that token,
-which carries far more than the token id does. Nothing here trains and nothing
+which carries far more than the token id does. ``all_layers`` widens that to
+every hidden state behind it -- the embedding and each layer's output -- leaving
+which depth to read to a weighting the network trains, at 25x the storage. Nothing here trains and nothing
 here is differentiable, so downstream the chain is an ordinary observation
 stream, stored in the replay buffer next to the image.
 
@@ -55,6 +57,7 @@ class CoTStream:
         tokens_per_step: int,
         max_len: int,
         temperature: float,
+        all_layers: bool,
         use_cuda_graph: bool,
         device: torch.device,
     ) -> None:
@@ -69,7 +72,11 @@ class CoTStream:
         self.max_len = max_len
         self.temperature = temperature
         self.device = device
-        self.hidden_size = self.model.config.text_config.hidden_size
+        text_config = self.model.config.text_config
+        self.hidden_size = text_config.hidden_size
+        self.all_layers = all_layers
+        # The embedding plus every layer's output, or only the last one.
+        self.layers_num = text_config.num_hidden_layers + 1 if all_layers else 1
         self.eos_token_id = self.processor.tokenizer.eos_token_id
         # One cache for the whole run. A new chain resets it in place rather than
         # replacing it, so its buffers keep the addresses a graph records.
@@ -109,7 +116,7 @@ class CoTStream:
                 instruction.
 
         Returns:
-            (tokens_per_step, hidden_size) bfloat16.
+            (tokens_per_step, layers_num, hidden_size) bfloat16.
         """
         activations = []
         while len(activations) < self.tokens_per_step:
@@ -147,7 +154,7 @@ class CoTStream:
             output_hidden_states=True,
         )
         self._position = prompt_len
-        self._consume(outputs.hidden_states[-1][0, -1], outputs.logits[0, -1])
+        self._consume(self._depths(outputs.hidden_states), outputs.logits[0, -1])
 
     @torch.no_grad()
     def _capture_decode(self) -> None:
@@ -177,7 +184,9 @@ class CoTStream:
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph):
             outputs = self._forward_step()
-        self._graph_hidden = outputs.hidden_states[-1]
+        # Every hidden state the recorded step writes is kept, so a replay can
+        # read whichever depths are wanted; they live in the graph's own pool.
+        self._graph_hidden = outputs.hidden_states
         self._graph_logits = outputs.logits
         self.reset()
 
@@ -211,12 +220,19 @@ class CoTStream:
         self._write_step_inputs(position)
         if self._graph is None:
             outputs = self._forward_step()
-            hidden, logits = outputs.hidden_states[-1], outputs.logits
+            hidden_states, logits = outputs.hidden_states, outputs.logits
         else:
             self._graph.replay()
-            hidden, logits = self._graph_hidden, self._graph_logits
+            hidden_states, logits = self._graph_hidden, self._graph_logits
         self._position = position + 1
-        self._consume(hidden[0, -1], logits[0, -1])
+        self._consume(self._depths(hidden_states), logits[0, -1])
+
+    def _depths(self, hidden_states) -> torch.Tensor:
+        """This position's activations at the depths the stream keeps:
+        (layers_num, hidden_size)."""
+        if not self.all_layers:
+            return hidden_states[-1][0, -1].unsqueeze(0)
+        return torch.stack([state[0, -1] for state in hidden_states])
 
     def _consume(self, hidden: torch.Tensor, logits: torch.Tensor) -> None:
         """Take the position's lm_head input, sample the token it implies, and

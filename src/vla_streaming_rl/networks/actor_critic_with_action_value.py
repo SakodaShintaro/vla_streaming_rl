@@ -63,6 +63,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_tokens_num: int,
         cot_max_len: int,
         cot_temperature: float,
+        cot_all_layers: bool,
+        cot_pool: str,
         cot_cuda_graph: bool,
     ) -> None:
         super().__init__()
@@ -94,8 +96,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         # and the same loss with the chain's tokens taken out of the space axis,
         # which is what isolates what the chain contributes. No chain means no
         # VLM to load, so the width comes from the config, not a loaded model.
-        cot_dim = AutoConfig.from_pretrained(cot_model_id).text_config.hidden_size
-        self.cot_shape = (cot_tokens_num, cot_dim)
+        text_config = AutoConfig.from_pretrained(cot_model_id).text_config
+        cot_dim = text_config.hidden_size
+        # The embedding plus every layer's output, or only the last one.
+        cot_layers = text_config.num_hidden_layers + 1 if cot_all_layers else 1
+        self.cot_shape = (cot_tokens_num, cot_layers, cot_dim)
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
         self.cot_stream = None
         if cot_tokens_num > 0:
@@ -104,6 +109,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 tokens_per_step=cot_tokens_num,
                 max_len=cot_max_len,
                 temperature=cot_temperature,
+                all_layers=cot_all_layers,
                 use_cuda_graph=cot_cuda_graph,
                 device=torch.device("cuda"),
             )
@@ -117,7 +123,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             scalar_obs_dim=self.scalar_obs_dim,
             temporal_model_type=temporal_model_type,
             cot_tokens_num=cot_tokens_num,
+            cot_layers=cot_layers,
             cot_dim=cot_dim,
+            cot_pool=cot_pool,
         )
 
         self.horizon = horizon

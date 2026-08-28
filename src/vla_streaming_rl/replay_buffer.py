@@ -44,7 +44,7 @@ class ReplayBuffer:
         obs_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
-        cot_shape: tuple[int, int],
+        cot_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
         max_prompt_tokens: int,
