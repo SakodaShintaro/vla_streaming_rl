@@ -95,6 +95,7 @@ class OffPolicyAgent(Agent):
             obs_shape=self.network.observation_space_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
+            cot_shape=self.network.cot_shape,
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             max_prompt_tokens=max_prompt_tokens,
@@ -203,6 +204,9 @@ class OffPolicyAgent(Agent):
             health_obs,
             task_prompt_token_ids,
         ) = self._preprocess(obs, info)
+        # The chain of thought advances once per environment step, whether or not
+        # this tick needs a new action chunk.
+        cot_activation = self.network.advance_cot(image, obs["language"], episode_done)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -220,6 +224,7 @@ class OffPolicyAgent(Agent):
             global_step_obs,
             episode_step_obs,
             health_obs,
+            cot_activation,
         )
 
         warmup = global_step < self.learning_starts
@@ -229,7 +234,12 @@ class OffPolicyAgent(Agent):
             self.prev_action = action
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
-            return StepResult(action=action, metrics=metrics, panels={})
+            return StepResult(
+                action=action,
+                metrics=metrics,
+                panels=self.network.render_panels(),
+                texts=self.network.render_texts(),
+            )
 
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
@@ -248,6 +258,7 @@ class OffPolicyAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
+                cot_activations_seq=latest_data.cot_activations,
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -268,7 +279,12 @@ class OffPolicyAgent(Agent):
             self.chunk_step = 0
             self.prev_action = action
             metrics["chunk_step"] = self.chunk_step
-        return StepResult(action=action, metrics=metrics, panels={})
+        return StepResult(
+            action=action,
+            metrics=metrics,
+            panels=self.network.render_panels(),
+            texts=self.network.render_texts(),
+        )
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

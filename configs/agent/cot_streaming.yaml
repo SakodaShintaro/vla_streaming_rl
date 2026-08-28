@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - base/network
+  - base/off_policy
+  - base/streaming
+  - base/vlm
+  - _self_
+
+agent_type: streaming
+network_class: actor_critic_with_action_value
+batch_size: 1
+actor_lr: 1e-6
+critic_lr: 1e-6
+
+# The chain-carrying run of the one actor-critic. Setting cot_tokens_num back to
+# 0 is its ablation: same body, same heads, same loss, no chain on the space axis.
+cot_tokens_num: 4
+cot_carry_prev: true
+disable_state_predictor: 1

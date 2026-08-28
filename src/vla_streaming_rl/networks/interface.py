@@ -12,6 +12,7 @@ convention) and is not part of the public surface.
 import abc
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -43,6 +44,7 @@ class InferInput:
     global_step_seq: torch.Tensor  # (B, T, 1)
     episode_step_seq: torch.Tensor  # (B, T, 1)
     health_seq: torch.Tensor  # (B, T, 1)
+    cot_activations_seq: torch.Tensor  # (B, T, *cot_shape)
 
 
 @dataclass
@@ -120,6 +122,32 @@ class NetworkInterface(nn.Module, abc.ABC):
     ``state_dict()`` …); ``ABCMeta`` derives from ``type`` so there is no
     metaclass conflict.
     """
+
+    # A chain-of-thought stream is opt-in: a network that runs one declares the
+    # shape of what it hands out per step, and the agents size the replay
+    # buffer's chain field from it and store what ``advance_cot`` returns
+    # verbatim. Everything else contributes no tokens.
+    cot_shape: tuple[int, int] = (0, 0)
+
+    def advance_cot(
+        self, image: torch.Tensor, task_prompt: str, episode_done: bool
+    ) -> torch.Tensor:
+        """This step's chain-of-thought activations, empty unless the network
+        carries a chain (see ``networks/cot_actor_critic.py``)."""
+        del image, task_prompt, episode_done
+        return torch.zeros(self.cot_shape)
+
+    def render_panels(self) -> dict[str, np.ndarray]:
+        """Named RGB panels this network contributes to the render strip. The
+        agents pass these through verbatim, so the stable-panel contract of
+        :class:`agents.base.StepResult` applies: the same keys with the same
+        shapes on every step of a run."""
+        return {}
+
+    def render_texts(self) -> dict[str, str]:
+        """Named free-form text this network contributes to the episode log,
+        the readable counterpart of ``render_panels``."""
+        return {}
 
     @abc.abstractmethod
     def init_state(self) -> torch.Tensor:

@@ -3,6 +3,7 @@ from collections.abc import Callable
 
 import numpy as np
 import torch
+from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
     ActivationFeatures,
@@ -14,6 +15,7 @@ from vla_streaming_rl.networks.interface import (
     NetworkInterface,
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
+from vla_streaming_rl.networks.modules.cot_stream import CoTStream
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
 from vla_streaming_rl.networks.modules.policy_head import build_policy_head
 from vla_streaming_rl.networks.modules.prediction_head import StatePredictionHead
@@ -21,6 +23,7 @@ from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
+from vla_streaming_rl.utils import render_text_panel
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -56,6 +59,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         image_encoder_output_dim: int,
         image_encode_mode: str,
         image_encoder_trainable: bool,
+        cot_model_id: str,
+        cot_tokens_num: int,
+        cot_max_len: int,
+        cot_temperature: float,
+        cot_all_layers: bool,
+        cot_carry_prev: bool,
+        cot_pool: str,
+        cot_cuda_graph: bool,
     ) -> None:
         super().__init__()
         self.sparsity = sparsity
@@ -82,6 +93,29 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
+        # ``cot_tokens_num = 0`` is the ablation: the same body, the same heads
+        # and the same loss with the chain's tokens taken out of the space axis,
+        # which is what isolates what the chain contributes. No chain means no
+        # VLM to load, so the width comes from the config, not a loaded model.
+        text_config = AutoConfig.from_pretrained(cot_model_id).text_config
+        cot_dim = text_config.hidden_size
+        # The embedding plus every layer's output, or only the last one.
+        cot_layers = text_config.num_hidden_layers + 1 if cot_all_layers else 1
+        self.cot_shape = (cot_tokens_num, cot_layers, cot_dim)
+        # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
+        self.cot_stream = None
+        if cot_tokens_num > 0:
+            self.cot_stream = CoTStream(
+                model_id=cot_model_id,
+                tokens_per_step=cot_tokens_num,
+                max_len=cot_max_len,
+                temperature=cot_temperature,
+                all_layers=cot_all_layers,
+                carry_prev=cot_carry_prev,
+                use_cuda_graph=cot_cuda_graph,
+                device=torch.device("cuda"),
+            )
+
         self.encoder = SpatialTemporalEncoder(
             image_processor=self.image_processor,
             reward_processor=self.reward_processor,
@@ -90,7 +124,10 @@ class ActorCriticWithActionValue(NetworkInterface):
             action_dim=self.action_dim,
             scalar_obs_dim=self.scalar_obs_dim,
             temporal_model_type=temporal_model_type,
-            use_image_only=True,
+            cot_tokens_num=cot_tokens_num,
+            cot_layers=cot_layers,
+            cot_dim=cot_dim,
+            cot_pool=cot_pool,
         )
 
         self.horizon = horizon
@@ -125,8 +162,65 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.detach_predictor = detach_predictor
         self.disable_state_predictor = disable_state_predictor
 
+    # Fixed so the render strip keeps one shape for the whole run; wide enough
+    # to read a chain of ``cot_max_len`` tokens.
+    COT_PANEL_WIDTH = 420
+    COT_PANEL_HEIGHT = 300
+
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
+
+    def advance_cot(
+        self, image: torch.Tensor, task_prompt: str, episode_done: bool
+    ) -> torch.Tensor:
+        """This step's chain-of-thought activations, or nothing when the chain is
+        off. A finished episode ends the chain, so the next one starts its
+        commentary from its own first frame."""
+        if self.cot_stream is None:
+            return torch.zeros(self.cot_shape)
+        if episode_done:
+            self.cot_stream.reset()
+        return self.cot_stream.advance(image, task_prompt)
+
+    def render_panels(self) -> dict[str, np.ndarray]:
+        """The chain as it currently stands, drawn for the render strip. It runs
+        from the frame the chain started on, so it empties whenever the chain
+        restarts. Without a chain there is no panel at all rather than a blank
+        one, which keeps that run's strip the width of what it has."""
+        if self.cot_stream is None:
+            return {}
+        return {
+            "chain_of_thought": render_text_panel(
+                self.cot_stream.text(), self.COT_PANEL_WIDTH, self.COT_PANEL_HEIGHT
+            )
+        }
+
+    def render_texts(self) -> dict[str, str]:
+        if self.cot_stream is None:
+            return {}
+        return {"chain_of_thought": self.cot_stream.text()}
+
+    def _window(self, data: ReplayBufferData, start, stop) -> tuple:
+        """The ``(image, action, reward, rnn_state, scalar_obs, cot)`` the encoder
+        reads, sliced out of a replay batch over ``[start, stop)`` steps."""
+        return (
+            data.observations[:, start:stop],
+            data.actions[:, start:stop],
+            data.rewards[:, start:stop],
+            data.rnn_state[:, start],
+            self._scalar_obs(
+                data.velocity_x[:, start:stop],
+                data.velocity_y[:, start:stop],
+                data.velocity_z[:, start:stop],
+                data.episode_return[:, start:stop],
+                data.pass_mark[:, start:stop],
+                data.remaining_return[:, start:stop],
+                data.global_step[:, start:stop],
+                data.episode_step[:, start:stop],
+                data.health[:, start:stop],
+            ),
+            data.cot_activations[:, start:stop],
+        )
 
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
         return []
@@ -203,8 +297,13 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.health_seq,
         )
         x, rnn_state = self.encoder(
-            data.s_seq, data.a_seq, data.r_seq, data.rnn_state, scalar_obs
-        )  # (B, hidden_dim)
+            data.s_seq,
+            data.a_seq,
+            data.r_seq,
+            data.rnn_state,
+            scalar_obs,
+            data.cot_activations_seq,
+        )  # (B, state_dim)
 
         # Get action chunk from policy_head
         action, actor_activation = self.policy_head.get_action(x)  # (B, horizon, action_dim)
@@ -243,25 +342,7 @@ class ActorCriticWithActionValue(NetworkInterface):
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
         with torch.inference_mode():
-            next_image = data.observations[:, self.horizon :]
-            next_scalar_obs = self._scalar_obs(
-                data.velocity_x[:, self.horizon :],
-                data.velocity_y[:, self.horizon :],
-                data.velocity_z[:, self.horizon :],
-                data.episode_return[:, self.horizon :],
-                data.pass_mark[:, self.horizon :],
-                data.remaining_return[:, self.horizon :],
-                data.global_step[:, self.horizon :],
-                data.episode_step[:, self.horizon :],
-                data.health[:, self.horizon :],
-            )
-            next_state, _ = self.encoder.forward(
-                next_image,
-                data.actions[:, self.horizon :],
-                data.rewards[:, self.horizon :],
-                data.rnn_state[:, self.horizon],
-                next_scalar_obs,
-            )
+            next_state, _ = self.encoder(*self._window(data, self.horizon, None))
             next_action, _ = self.policy_head.get_action(next_state)
             next_output = self.value_head(next_state, next_action).output
         chunk_rewards = data.rewards[:, -self.horizon :]
@@ -269,25 +350,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         target_value = self.value_head.compute_target_value(next_output, chunk_rewards, chunk_dones)
 
         # Use seq_len frames (excluding last horizon frames)
-        curr_image = data.observations[:, : -self.horizon]
-        curr_scalar_obs = self._scalar_obs(
-            data.velocity_x[:, : -self.horizon],
-            data.velocity_y[:, : -self.horizon],
-            data.velocity_z[:, : -self.horizon],
-            data.episode_return[:, : -self.horizon],
-            data.pass_mark[:, : -self.horizon],
-            data.remaining_return[:, : -self.horizon],
-            data.global_step[:, : -self.horizon],
-            data.episode_step[:, : -self.horizon],
-            data.health[:, : -self.horizon],
-        )
-        curr_actions = data.actions[:, : -self.horizon]
-        curr_rewards = data.rewards[:, : -self.horizon]
-        curr_rnn_state = data.rnn_state[:, 0]  # (B, ...)
-
-        curr_state, _ = self.encoder.forward(
-            curr_image, curr_actions, curr_rewards, curr_rnn_state, curr_scalar_obs
-        )  # (B, state_dim)
+        curr_state, _ = self.encoder(*self._window(data, 0, -self.horizon))
 
         # Action chunk: (B, horizon, action_dim)
         action_chunk = data.actions[:, -self.horizon :]
@@ -325,25 +388,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         # Next-step inference (no grad): the action the agent will take, its Q,
         # and the activations carried into the InferResult.
         with torch.inference_mode():
-            next_image = data.observations[:, self.horizon :]
-            next_scalar_obs = self._scalar_obs(
-                data.velocity_x[:, self.horizon :],
-                data.velocity_y[:, self.horizon :],
-                data.velocity_z[:, self.horizon :],
-                data.episode_return[:, self.horizon :],
-                data.pass_mark[:, self.horizon :],
-                data.remaining_return[:, self.horizon :],
-                data.global_step[:, self.horizon :],
-                data.episode_step[:, self.horizon :],
-                data.health[:, self.horizon :],
-            )
-            next_state, next_rnn_state = self.encoder.forward(
-                next_image,
-                data.actions[:, self.horizon :],
-                data.rewards[:, self.horizon :],
-                data.rnn_state[:, self.horizon],
-                next_scalar_obs,
-            )
+            next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None))
             next_action, actor_activation = self.policy_head.get_action(next_state)
             next_q_out = self.value_head(next_state, next_action)
             critic_activation = next_q_out.activation
@@ -353,25 +398,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             next_q_out.output, chunk_rewards, chunk_dones
         )
 
-        prev_image = data.observations[:, : -self.horizon]
-        prev_scalar_obs = self._scalar_obs(
-            data.velocity_x[:, : -self.horizon],
-            data.velocity_y[:, : -self.horizon],
-            data.velocity_z[:, : -self.horizon],
-            data.episode_return[:, : -self.horizon],
-            data.pass_mark[:, : -self.horizon],
-            data.remaining_return[:, : -self.horizon],
-            data.global_step[:, : -self.horizon],
-            data.episode_step[:, : -self.horizon],
-            data.health[:, : -self.horizon],
-        )
-        prev_actions = data.actions[:, : -self.horizon]
-        prev_rewards = data.rewards[:, : -self.horizon]
-        prev_rnn_state = data.rnn_state[:, 0]
-
-        prev_state, _ = self.encoder.forward(
-            prev_image, prev_actions, prev_rewards, prev_rnn_state, prev_scalar_obs
-        )
+        prev_state, _ = self.encoder(*self._window(data, 0, -self.horizon))
 
         action_chunk = data.actions[:, -self.horizon :]
 

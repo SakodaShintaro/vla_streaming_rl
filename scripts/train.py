@@ -47,6 +47,28 @@ def _viz_resize(image: np.ndarray, scale: float) -> np.ndarray:
     return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
+def save_episode_texts(curr_image_dir: Path, text_list: list[dict[str, str]]) -> None:
+    """The free-form text agents emitted, one row per rendered frame.
+
+    Text a network draws into a panel is legible in the video but not
+    searchable; this is the same content as characters, so a run's chain of
+    thought can be read back and grepped. Tabs and newlines are escaped to keep
+    one step on one line.
+    """
+    keys = list(text_list[0].keys())
+    if not keys:
+        return
+
+    def escape(text: str) -> str:
+        return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+
+    tsv_path = curr_image_dir / "texts.tsv"
+    with open(tsv_path, "w", encoding="utf-8") as f:
+        f.write("step\t" + "\t".join(keys) + "\n")
+        for step, texts in enumerate(text_list):
+            f.write(f"{step}\t" + "\t".join(escape(texts[key]) for key in keys) + "\n")
+
+
 def save_episode_data(
     video_dir: Path,
     image_dir: Path,
@@ -56,6 +78,7 @@ def save_episode_data(
     action_list: list[np.ndarray],
     reward_list: list[float],
     obs_list: list[np.ndarray],
+    text_list: list[dict[str, str]],
 ) -> None:
     """Save episode video, images, actions and rewards"""
     if not bgr_image_list:
@@ -98,6 +121,8 @@ def save_episode_data(
         obs_bgr = cv2.cvtColor(obs_hwc, cv2.COLOR_RGB2BGR)
         obs_path = obs_image_dir / f"{idx:08d}.png"
         cv2.imwrite(str(obs_path), obs_bgr)
+
+    save_episode_texts(curr_image_dir, text_list)
 
     # Save actions and rewards to TSV file
     tsv_path = curr_image_dir / "log.tsv"
@@ -373,6 +398,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         action_list = []
         reward_list = []
         obs_list = [obs["image"].copy()]
+        # one entry per rendered frame, so the initial render leads
+        text_list = [result.texts]
 
         while True:
             global_step += 1
@@ -422,6 +449,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             rgb_image = concat_labeled_images(panels)
             bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
             bgr_image_list.append(bgr_image)
+            text_list.append(result.texts)
             if args.render:
                 cv2.imshow(args.env_id, bgr_image)
                 cv2.waitKey(1)
@@ -545,6 +573,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                         action_list,
                         reward_list,
                         obs_list,
+                        text_list,
                     )
         else:
             is_best = score > best_score
@@ -561,6 +590,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                     action_list,
                     reward_list,
                     obs_list,
+                    text_list,
                 )
 
         if (
@@ -575,6 +605,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 action_list,
                 reward_list,
                 obs_list,
+                text_list,
             )
 
         # Persist the light resume state every episode (the heavy weights /

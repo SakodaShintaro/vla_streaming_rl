@@ -33,6 +33,7 @@ class ReplayBufferData:
     global_step: torch.Tensor  # (B, T, 1)
     episode_step: torch.Tensor  # (B, T, 1)
     health: torch.Tensor  # (B, T, 1)
+    cot_activations: torch.Tensor  # (B, T, *cot_shape)
 
 
 class ReplayBuffer:
@@ -43,6 +44,7 @@ class ReplayBuffer:
         obs_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
+        cot_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
         max_prompt_tokens: int,
@@ -79,6 +81,11 @@ class ReplayBuffer:
         self.global_step = init_tensor((size, 1))
         self.episode_step = init_tensor((size, 1))
         self.health = init_tensor((size, 1))
+        self.cot_activations = torch.zeros(
+            (size, *cot_shape),
+            dtype=torch.bfloat16,
+            device=self.storage_device,
+        )
         self.task_prompt_token_ids = torch.full(
             (size, max_prompt_tokens),
             pad_token_id,
@@ -118,6 +125,7 @@ class ReplayBuffer:
             self.global_step[:curr_size].to(self.output_device, non_blocking=True),
             self.episode_step[:curr_size].to(self.output_device, non_blocking=True),
             self.health[:curr_size].to(self.output_device, non_blocking=True),
+            self.cot_activations[:curr_size].to(self.output_device, non_blocking=True),
         )
 
     def add(
@@ -137,6 +145,7 @@ class ReplayBuffer:
         global_step: float,
         episode_step: float,
         health: float,
+        cot_activation: torch.Tensor,
     ) -> None:
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
@@ -153,6 +162,7 @@ class ReplayBuffer:
         self.global_step[self.idx].fill_(global_step)
         self.episode_step[self.idx].fill_(episode_step)
         self.health[self.idx].fill_(health)
+        self.cot_activations[self.idx].copy_(cot_activation)
 
         self.task_prompt_token_ids[self.idx].fill_(self.pad_token_id)
         if len(task_prompt_token_ids) > self.max_prompt_tokens:
@@ -198,6 +208,7 @@ class ReplayBuffer:
             self.global_step[seq_indices].to(self.output_device, non_blocking=True),
             self.episode_step[seq_indices].to(self.output_device, non_blocking=True),
             self.health[seq_indices].to(self.output_device, non_blocking=True),
+            self.cot_activations[seq_indices].to(self.output_device, non_blocking=True),
         )
 
     def get_latest(self, seq_len: int) -> ReplayBufferData:
@@ -225,4 +236,5 @@ class ReplayBuffer:
             self.global_step[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.episode_step[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.health[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.cot_activations[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
         )

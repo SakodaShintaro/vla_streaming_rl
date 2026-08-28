@@ -5,6 +5,10 @@ from diffusers import AutoencoderTiny
 from torch import nn
 from transformers import AutoModel, AutoModelForImageTextToText, AutoProcessor
 
+from vla_streaming_rl.networks.modules.qwen_vision import (
+    interpolated_pos_embed,
+    rotary_pos_embed,
+)
 from vla_streaming_rl.wan import WanVAEWrapper
 
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -164,16 +168,17 @@ class QwenImageEncoder(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = F.interpolate(x, size=(self.resolution, self.resolution), mode="bilinear")
         batch_size = x.size(0)
-        cpu_images = [x[i].detach().cpu().float() for i in range(batch_size)]
-        img_out = self.image_processor(images=cpu_images, return_tensors="pt", do_rescale=False)
-        pixel_values = img_out["pixel_values"].to(x.device).type(self.visual.dtype)
+        img_out = self.image_processor(
+            images=x, return_tensors="pt", do_rescale=False, device=x.device
+        )
+        pixel_values = img_out["pixel_values"].type(self.visual.dtype)
         image_grid_thw = img_out["image_grid_thw"].to(x.device)
 
         hidden_states = self.visual.patch_embed(pixel_values)
-        pos_embeds = self.visual.fast_pos_embed_interpolate(image_grid_thw)
-        hidden_states = hidden_states + pos_embeds
+        pos_embeds = interpolated_pos_embed(self.visual, image_grid_thw)
+        hidden_states = hidden_states + pos_embeds.to(hidden_states.dtype)
 
-        rotary_pos_emb = self.visual.rot_pos_emb(image_grid_thw)
+        rotary_pos_emb = rotary_pos_embed(self.visual, image_grid_thw)
         total_tokens, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(total_tokens, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(total_tokens, -1)
