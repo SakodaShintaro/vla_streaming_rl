@@ -5,7 +5,7 @@ env_id: AnimalAI-v0
 # For "staged": stages 1-10 take steps_per_stage each and stage 11 runs out the
 # remainder, so the paper's 2M x 10 + 5M = 25M is step_limit == 12.5 x
 # steps_per_stage; the values below keep that ratio at 1/1000 scale.
-step_limit: 400_000
+step_limit: 200_000
 image_save_interval: 40
 
 env_factory:
@@ -38,12 +38,12 @@ env_factory:
   #   always sweeps all 900.
   train_variant: "01"
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
-  steps_per_stage: 40_000
+  steps_per_stage: 20_000
   # - advance_success_rate ("success"): the share of a round that has to be
   #   passed for the next stage to open. Pools are cumulative, so a round is 30
   #   arenas at stage 1 and 60 at stage 2; at 1.0 that is 30 then 60 straight
   #   passes. A round below the rate repeats the stage with a fresh draw order.
-  advance_success_rate: 0.9
+  advance_success_rate: 0.6
   binary_path: ~/animalai_env/4.3.2_alpha1/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
   #     false : discretize to the official MultiDiscrete([3, 3]) branches with a
