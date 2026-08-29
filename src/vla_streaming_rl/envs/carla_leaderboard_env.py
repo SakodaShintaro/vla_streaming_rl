@@ -43,6 +43,7 @@ COMMAND_TO_MANEUVER = {
     6: "The ego vehicle is changing to the right lane.",  # CHANGELANERIGHT
 }
 _MANEUVER_LOOKAHEAD_PTS = 10  # route points ahead to read the upcoming command from
+_SHAPED_REWARD_CLIP = 1.0
 
 
 @dataclass
@@ -683,10 +684,9 @@ class CARLALeaderboardEnv(gym.Env):
         if collided:
             terminated = True
 
-        # Wandering too far off-route is treated as a truncation (not a
-        # natural terminal): cut the episode and hand back a fixed -1 shaped
-        # reward so the agent learns the boundary, while the leaderboard
-        # reward keeps reporting the score delta. Looser analogue of
+        # Wandering too far off-route cuts the episode as a truncation (not a
+        # natural terminal). Forgoing the rest of the route's score is the
+        # penalty, so no extra shaping fires here. Looser analogue of
         # Bench2Drive's InRouteTest, which fails at 30 m.
         off_route_truncated = (
             self._early_off_route_m is not None
@@ -709,7 +709,7 @@ class CARLALeaderboardEnv(gym.Env):
                 self._blocked_step_counter = 0
 
         truncated = self.episode_step >= self.max_episode_steps or off_route_truncated
-        shaped_reward = -1.0 if off_route_truncated else reward
+        shaped_reward = float(np.clip(reward, -_SHAPED_REWARD_CLIP, _SHAPED_REWARD_CLIP))
 
         self.episode_step += 1
         self.global_step += 1

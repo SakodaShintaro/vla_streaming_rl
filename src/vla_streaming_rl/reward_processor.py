@@ -3,9 +3,6 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-_CARLA_IDLE_PENALTY = 0.1
-_CARLA_CLIP = 1.0
-
 
 class RewardProcessor:
     """Reward Processor."""
@@ -33,16 +30,6 @@ class RewardProcessor:
         elif self.type == "centering":
             result = (reward - self.return_rms.mean) / np.sqrt(self.return_rms.var + self.epsilon)
             result *= self.reward_scale
-        elif self.type == "carla":
-            # Exact-zero check: in CARLA the per-step reward is the delta
-            # of ``score_composed``, which is 0.0 only when route progress
-            # stalls and no new infraction fires — i.e. a genuine stuck
-            # state, not an "almost zero" continuous reward.
-            result = torch.where(
-                reward == 0.0, torch.full_like(reward, -_CARLA_IDLE_PENALTY), reward
-            )
-            result = torch.clamp(result, -_CARLA_CLIP, _CARLA_CLIP)
-            return result
         else:
             msg = "Invalid normalizer type"
             raise ValueError(msg)
@@ -73,7 +60,6 @@ class RunningNormalizer:
 if __name__ == "__main__":
     rp_scaling = RewardProcessor("scaling", 1.0)
     rp_centering = RewardProcessor("centering", 1.0)
-    rp_carla = RewardProcessor("carla", 1.0)
     rewards = [0.5, 10.0, 2.0, 3.0, 4.0, 5.0, -4.0, -10.0, 0.0, 1.0, -1.0, -50.0]
     for r in rewards:
         rp_scaling.update(r)
@@ -81,7 +67,4 @@ if __name__ == "__main__":
         r_tensor = torch.tensor(r)
         norm_r_scaling = rp_scaling.normalize(r_tensor).item()
         norm_r_centering = rp_centering.normalize(r_tensor).item()
-        norm_r_carla = rp_carla.normalize(r_tensor).item()
-        print(
-            f"{r=:+6.2f}, {norm_r_scaling=:+6.2f}, {norm_r_centering=:+6.2f}, {norm_r_carla=:+6.2f}"
-        )
+        print(f"{r=:+6.2f}, {norm_r_scaling=:+6.2f}, {norm_r_centering=:+6.2f}")
