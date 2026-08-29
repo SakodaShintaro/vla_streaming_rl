@@ -20,8 +20,7 @@ class ReplayBufferData:
     observations: torch.Tensor  # (B, T, obs_shape) image only
     rewards: torch.Tensor  # (B, T)
     dones: torch.Tensor  # (B, T)
-    # rnn_state shape (SpatialTemporalEncoder): (B, T, space_len, state_size, n_layer)
-    rnn_state: torch.Tensor
+    rnn_state: torch.Tensor  # (B, T, space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
     task_prompt_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     velocity_x: torch.Tensor  # (B, T, 1)
