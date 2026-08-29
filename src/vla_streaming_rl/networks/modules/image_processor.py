@@ -9,7 +9,6 @@ from vla_streaming_rl.networks.modules.qwen_vision import (
     interpolated_pos_embed,
     rotary_pos_embed,
 )
-from vla_streaming_rl.wan import WanVAEWrapper
 
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
@@ -48,22 +47,6 @@ class TaesdEncoder(nn.Module):
 
     def encode_token(self, x: torch.Tensor) -> torch.Tensor:
         return fold_grid_into_channels(self.encode(x))  # (B, 4 * H/8 * W/8, 1, 1)
-
-
-class WanEncoder(nn.Module):
-    def __init__(self, observation_space_shape: tuple[int]) -> None:
-        super().__init__()
-        assert observation_space_shape[0] == 3
-        self.vae = WanVAEWrapper()
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x = x * 2.0 - 1.0  # [0, 1] -> [-1, 1]
-        z = self.vae.encode_to_latent(x.unsqueeze(2))
-        self.vae.model.clear_cache()
-        return z.squeeze(1)  # (B, 16, H/8, W/8)
-
-    def encode_token(self, x: torch.Tensor) -> torch.Tensor:
-        return fold_grid_into_channels(self.encode(x))  # (B, 16 * H/8 * W/8, 1, 1)
 
 
 class Dinov2Encoder(nn.Module):
@@ -295,7 +278,6 @@ class FixupEncoder(nn.Module):
 IMAGE_ENCODERS = {
     "fixup": FixupEncoder,
     "taesd": TaesdEncoder,
-    "wan": WanEncoder,
     "dinov2": Dinov2Encoder,
     "siglip2": Siglip2Encoder,
     "vjepa2": Vjepa2Encoder,

@@ -10,7 +10,7 @@ critic_block_num: 1
 #             up the critic norm.
 #   dueling : original LayerNorm dueling V/A critic.
 critic_arch: dueling
-# Image encoder: fixup, taesd, wan, dinov2, siglip2, vjepa2, qwen (see IMAGE_ENCODERS in image_processor.py).
+# Image encoder: fixup, taesd, dinov2, siglip2, vjepa2, qwen (see IMAGE_ENCODERS in image_processor.py).
 image_encoder_type: qwen
 # Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
 image_encoder_output_dim: 16
