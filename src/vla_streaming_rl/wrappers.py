@@ -7,9 +7,6 @@ import gymnasium as gym
 import hydra
 import numpy as np
 
-REPEAT = 4
-
-
 CAR_RACING_PROMPT = "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible."
 
 
@@ -167,6 +164,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
     Bench2Drive eval artifacts.
     """
     if env_id == "CarRacing-v3":
+        REPEAT = 4
         env = gym.make(env_id, render_mode="rgb_array")
         env = env.env  # Unwrap the original TimeLimit wrapper
         env = gym.wrappers.TimeLimit(env, max_episode_steps=1000 * REPEAT)
