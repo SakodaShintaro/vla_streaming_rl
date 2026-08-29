@@ -11,7 +11,7 @@ image_save_interval: 40
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_env
   # - resolution: square camera height/width (kept divisible by the VAE stride 8).
-  resolution: 224
+  resolution: 96
   # - mode: which arenas each episode is drawn from, and in what order.
   #     staged  : train with the Animal-AI paper's cumulative 11-stage
   #               curriculum, one stage per competition level, drawing
@@ -31,7 +31,7 @@ env_factory:
   #   Training and eval overlap on purpose: eval is the fixed 900-arena
   #   benchmark and the trained variant is part of it, so test_result.tsv also
   #   reports the score over the arenas no training episode has seen.
-  mode: sequential
+  mode: success
   # - train_variant: which of a task's three variants the training modes use.
   #   Competition arenas are named XX-YY-ZZ (level-task-variant), so this picks
   #   one arena per task: 300 arenas, 30 per level. "eval" ignores it and
@@ -43,7 +43,7 @@ env_factory:
   #   passed for the next stage to open. Pools are cumulative, so a round is 30
   #   arenas at stage 1 and 60 at stage 2; at 1.0 that is 30 then 60 straight
   #   passes. A round below the rate repeats the stage with a fresh draw order.
-  advance_success_rate: 1.0
+  advance_success_rate: 0.9
   binary_path: ~/animalai_env/4.3.2_alpha1/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
   #     false : discretize to the official MultiDiscrete([3, 3]) branches with a
