@@ -6,7 +6,7 @@
 #PBS -P gch51673
 set -eux
 cd ${PBS_O_WORKDIR}
-source ~/.secrets
+set +x; source ~/.secrets; set -x
 
 singularity exec --nv \
   --bind ${HOME}:${HOME} \
