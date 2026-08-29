@@ -607,8 +607,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 vlm_past_kv, max_new_tokens=self.max_new_tokens
             )
             print(f"[TextAction] {generated_text}")
-        elif mode == "pi_fast":
-            raise NotImplementedError("pi_fast mode is not yet implemented")
         elif mode != "none":
             raise ValueError(f"Unknown text_action_mode: {mode}")
 
