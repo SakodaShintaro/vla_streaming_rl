@@ -6,19 +6,16 @@ from omegaconf import DictConfig
 
 def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
     if args.agent_type == "zeroshot_vlm":
+        from vla_streaming_rl.agents.vlm_backends import build_vlm_backend
         from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent
 
         return ZeroShotVLMAgent(
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,
             action_spec=env.unwrapped.action_spec,
-            model_id=args.openrouter_model_id,
+            backend=build_vlm_backend(args, env.unwrapped.action_choices),
             seq_len=args.seq_len,
-            max_new_tokens=args.max_new_tokens,
-            reasoning_max_tokens=args.reasoning_max_tokens,
             image_side=args.image_side,
-            temperature=args.temperature,
-            api_max_retries=args.api_max_retries,
             reset_on_episode_end=args.reset_on_episode_end,
         )
 

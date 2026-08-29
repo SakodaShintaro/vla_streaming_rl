@@ -13,6 +13,9 @@ REPEAT = 4
 CAR_RACING_PROMPT = "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible."
 
 
+CAR_RACING_ACTION_SPEC = "steer=<value>, accel=<value> where each <value> is a float in [-1, 1]"
+
+
 def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     pattern = r"(?:t\d+:\s*)?steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)"
     matches = re.findall(pattern, action_text)
@@ -21,6 +24,62 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
         action_array[i, 0] = np.clip(float(matches[i][0]), -1.0, 1.0)
         action_array[i, 1] = np.clip(float(matches[i][1]), -1.0, 1.0)
     return action_array, len(matches) > 0
+
+
+# Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
+# / back) and one rotation (noop / right / left) per tick. The env exposes it as
+# Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
+# named action maps onto the extreme Box value that survives that dead-zone.
+# An action is a move letter followed by a rotation letter -- FN walks straight
+# ahead, NL turns on the spot, FR does both. The letters say what they mean, and
+# the position says which half they belong to, so the N the two halves share
+# reads unambiguously.
+_ANIMALAI_MOVE = {"F": 1.0, "B": -1.0, "N": 0.0}
+_ANIMALAI_ROTATE = {"R": 1.0, "L": -1.0, "N": 0.0}
+ANIMALAI_ACTION_CHOICES = [
+    move + rotation for move in _ANIMALAI_MOVE for rotation in _ANIMALAI_ROTATE
+]
+
+ANIMALAI_PROMPT = (
+    "You control an animal in a 3D arena, seen from its own point of view. "
+    "Touching a green sphere scores points and ends the episode, and a larger "
+    "sphere scores more. Touching a yellow sphere scores points and the episode "
+    "continues. Touching a red sphere loses points and ends the episode. "
+    "Entering a red zone ends the episode immediately. An orange zone drains "
+    "your health, and your health also drains as time passes. "
+    "What this arena asks of you follows as `Task:`. "
+    "Action space: two letters, a move and a rotation applied on the same tick. "
+    "The move is F (walk forward), B (walk backward) or N (stand still). "
+    "The rotation is R (turn right), L (turn left) or N (no turn). "
+    "So FN walks straight ahead, NL turns left on the spot, FR walks while "
+    "turning right, and NN does nothing. "
+    "Bring whatever you are heading for to the center of your view before you "
+    "walk forward: turn on the spot (NR or NL) until it is centered, and only "
+    "then move. "
+    "Keep your speed down -- the third velocity component reported below should "
+    "stay at about 10 or less, so stand still (NN) for a tick whenever it climbs "
+    "past that. "
+)
+ANIMALAI_ACTION_SPEC = (
+    f"two letters -- one move out of {{{', '.join(_ANIMALAI_MOVE)}}} followed by one "
+    f"rotation out of {{{', '.join(_ANIMALAI_ROTATE)}}}, with no other text"
+)
+
+
+def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
+    """Decode the move/rotation letter pair into the Box action that the env
+    discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair.
+
+    Anything but one of the nine pairs is a format violation and is reported as
+    such rather than repaired here.
+    """
+    code = action_text.strip().upper()
+    if code not in ANIMALAI_ACTION_CHOICES:
+        return np.zeros((0, 2), dtype=np.float32), False
+    action_array = np.array(
+        [[_ANIMALAI_MOVE[code[0]], _ANIMALAI_ROTATE[code[1]]]], dtype=np.float32
+    )
+    return action_array, True
 
 
 def make_animalai_env(
@@ -128,6 +187,9 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
+        env.unwrapped.action_spec = CAR_RACING_ACTION_SPEC
+        # Continuous: there is no finite set of action texts to enumerate.
+        env.unwrapped.action_choices = []
         return env
 
     elif env_id == "CARLA-Leaderboard-v0":
@@ -146,6 +208,9 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
 
     elif env_id == "AnimalAI-v0":
         env = hydra.utils.instantiate(env_factory)
+        # The env composes its own task prompt (it appends live scalars), so the
+        # action encoding is injected by replacing the task text it starts from.
+        env.unwrapped.prompt = ANIMALAI_PROMPT
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)
@@ -157,6 +222,9 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = RemainingReturnObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
+        env.unwrapped.parse_action_text = _animalai_parse_action
+        env.unwrapped.action_spec = ANIMALAI_ACTION_SPEC
+        env.unwrapped.action_choices = ANIMALAI_ACTION_CHOICES
         return env
 
     else:

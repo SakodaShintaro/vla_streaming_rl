@@ -43,7 +43,7 @@ env_factory:
   #   passed for the next stage to open. Pools are cumulative, so a round is 30
   #   arenas at stage 1 and 60 at stage 2; at 1.0 that is 30 then 60 straight
   #   passes. A round below the rate repeats the stage with a fresh draw order.
-  advance_success_rate: 1.0
+  advance_success_rate: 0.9
   binary_path: ~/animalai_env/4.3.2_alpha1/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
   #     false : discretize to the official MultiDiscrete([3, 3]) branches with a
