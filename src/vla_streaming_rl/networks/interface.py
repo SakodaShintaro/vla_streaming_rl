@@ -130,11 +130,11 @@ class NetworkInterface(nn.Module, abc.ABC):
     cot_shape: tuple[int, int] = (0, 0)
 
     def advance_cot(
-        self, image: torch.Tensor, task_prompt: str, episode_done: bool
+        self, image: torch.Tensor, task_prompt: str, action_text: str, episode_done: bool
     ) -> torch.Tensor:
         """This step's chain-of-thought activations, empty unless the network
         carries a chain (see ``networks/cot_actor_critic.py``)."""
-        del image, task_prompt, episode_done
+        del image, task_prompt, action_text, episode_done
         return torch.zeros(self.cot_shape)
 
     def render_panels(self) -> dict[str, np.ndarray]:

@@ -79,6 +79,21 @@ def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     return action_array, True
 
 
+def _animalai_format_action(action: np.ndarray) -> str:
+    """The move/rotation letter pair a Box action discretizes to, for feeding a
+    taken action back to a reader that was taught the letters."""
+    move = np.asarray(action, dtype=np.float32).ravel()[0]
+    rotation = np.asarray(action, dtype=np.float32).ravel()[1]
+    move_code = "F" if move > 1.0 / 3.0 else ("B" if move < -1.0 / 3.0 else "N")
+    rotation_code = "R" if rotation > 1.0 / 3.0 else ("L" if rotation < -1.0 / 3.0 else "N")
+    return move_code + rotation_code
+
+
+def _format_action_vector(action: np.ndarray) -> str:
+    """Fallback rendering for envs with no symbolic action language."""
+    return " ".join(f"{value:+.2f}" for value in np.asarray(action, dtype=np.float32).ravel())
+
+
 def make_animalai_env(
     resolution: int,
     mode: str,
@@ -185,6 +200,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
+        env.unwrapped.format_action = _format_action_vector
         env.unwrapped.action_spec = CAR_RACING_ACTION_SPEC
         # Continuous: there is no finite set of action texts to enumerate.
         env.unwrapped.action_choices = []
@@ -202,6 +218,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = EpisodeReturnObsWrapper(env)
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 220
+        env.unwrapped.format_action = _format_action_vector
         return env
 
     elif env_id == "AnimalAI-v0":
@@ -221,6 +238,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _animalai_parse_action
+        env.unwrapped.format_action = _animalai_format_action
         env.unwrapped.action_spec = ANIMALAI_ACTION_SPEC
         env.unwrapped.action_choices = ANIMALAI_ACTION_CHOICES
         return env

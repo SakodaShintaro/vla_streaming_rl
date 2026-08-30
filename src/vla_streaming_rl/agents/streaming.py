@@ -38,6 +38,7 @@ class StreamingAgent(Agent):
         normalizing_by_return: bool,
         max_grad_norm: float,
         use_done: bool,
+        format_action,
         seq_len: int,
         horizon: int,
         use_eligibility_trace: bool,
@@ -68,6 +69,7 @@ class StreamingAgent(Agent):
 
         self.max_grad_norm = max_grad_norm
         self.use_done = use_done
+        self.format_action = format_action
 
         # Sequence observation management
         self.seq_len = seq_len
@@ -161,7 +163,9 @@ class StreamingAgent(Agent):
         ) = self._preprocess(obs, info)
         # The chain of thought advances once per environment step, whether or not
         # this tick needs a new action chunk.
-        cot_activation = self.network.advance_cot(image, obs["language"], episode_done)
+        cot_activation = self.network.advance_cot(
+            image, obs["language"], self.format_action(self.prev_action), episode_done
+        )
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -299,7 +303,9 @@ class StreamingAgent(Agent):
         ) = self._preprocess(obs, info)
         # The chain of thought advances once per environment step, whether or not
         # this tick needs a new action chunk.
-        cot_activation = self.network.advance_cot(image, obs["language"], episode_done)
+        cot_activation = self.network.advance_cot(
+            image, obs["language"], self.format_action(self.prev_action), episode_done
+        )
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,

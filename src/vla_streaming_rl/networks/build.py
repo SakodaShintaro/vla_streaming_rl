@@ -171,6 +171,8 @@ def build_network(
             cot_temperature=args.cot_temperature,
             cot_all_layers=args.cot_all_layers,
             cot_carry_prev=args.cot_carry_prev,
+            cot_history_frames=args.cot_history_frames,
+            cot_history_stride=args.cot_history_stride,
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
         ).to(device)

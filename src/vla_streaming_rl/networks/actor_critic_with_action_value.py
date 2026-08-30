@@ -65,6 +65,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_temperature: float,
         cot_all_layers: bool,
         cot_carry_prev: bool,
+        cot_history_frames: int,
+        cot_history_stride: int,
         cot_pool: str,
         cot_cuda_graph: bool,
     ) -> None:
@@ -112,6 +114,8 @@ class ActorCriticWithActionValue(NetworkInterface):
                 temperature=cot_temperature,
                 all_layers=cot_all_layers,
                 carry_prev=cot_carry_prev,
+                history_frames=cot_history_frames,
+                history_stride=cot_history_stride,
                 use_cuda_graph=cot_cuda_graph,
                 device=torch.device("cuda"),
             )
@@ -171,7 +175,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         return self.encoder.init_state()
 
     def advance_cot(
-        self, image: torch.Tensor, task_prompt: str, episode_done: bool
+        self, image: torch.Tensor, task_prompt: str, action_text: str, episode_done: bool
     ) -> torch.Tensor:
         """This step's chain-of-thought activations, or nothing when the chain is
         off. A finished episode ends the chain, so the next one starts its
@@ -180,7 +184,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             return torch.zeros(self.cot_shape)
         if episode_done:
             self.cot_stream.reset()
-        return self.cot_stream.advance(image, task_prompt)
+        return self.cot_stream.advance(image, task_prompt, action_text)
 
     def render_panels(self) -> dict[str, np.ndarray]:
         """The chain as it currently stands, drawn for the render strip. It runs

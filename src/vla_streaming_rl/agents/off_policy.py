@@ -40,6 +40,7 @@ class OffPolicyAgent(Agent):
         batch_size: int,
         max_grad_norm: float,
         use_done: bool,
+        format_action,
         seq_len: int,
         horizon: int,
         actor_lr: float,
@@ -70,6 +71,7 @@ class OffPolicyAgent(Agent):
         self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
         self.use_done = use_done
+        self.format_action = format_action
 
         # Sequence observation management
         self.seq_len = seq_len
@@ -206,7 +208,9 @@ class OffPolicyAgent(Agent):
         ) = self._preprocess(obs, info)
         # The chain of thought advances once per environment step, whether or not
         # this tick needs a new action chunk.
-        cot_activation = self.network.advance_cot(image, obs["language"], episode_done)
+        cot_activation = self.network.advance_cot(
+            image, obs["language"], self.format_action(self.prev_action), episode_done
+        )
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,

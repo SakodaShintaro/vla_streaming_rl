@@ -67,6 +67,12 @@ cot_all_layers: true
 # a restart continues the commentary instead of opening on the scene from
 # scratch. Off is the ablation: every chain sees only its own frame.
 cot_carry_prev: false
+# How many frames the prefill shows, and how many environment steps apart they
+# are taken. 1 leaves the model a still and is the ablation; several let it read
+# motion and approach off the prompt. (frames - 1) * stride is how far back the
+# window reaches, and each frame costs its own image tokens in every prefill.
+cot_history_frames: 1
+cot_history_stride: 1
 # How a step's chain tokens reach the space axis.
 #   mean : one slot per step, whose temporal recurrence follows the chain
 #   none : one slot per token, each recurring on a stride-L phase of the chain

@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: MIT
 """A frozen VLM kept mid-thought across environment steps.
 
-The chain of thought is the slow loop. It is prefilled from one frame and then
-advanced by a fixed budget of tokens per environment step, so a single line of
-reasoning spans many control ticks. When it ends -- EOS, or ``max_len`` tokens --
-the next advance prefills again from whatever frame is current, starting a fresh
-chain on a fresh image. With ``carry_prev`` the chain that just ended is quoted
-into that prefill, so the new one picks up where the last left off instead of
-opening on the scene from scratch.
+The chain of thought is the slow loop. It is prefilled from a window of recent
+frames and then advanced by a fixed budget of tokens per environment step, so a
+single line of reasoning spans many control ticks. When it ends -- EOS, or
+``max_len`` tokens -- the next advance prefills again from the window as it
+stands, starting a fresh chain on fresh images. ``history_frames`` and
+``history_stride`` set how far back that window reaches: one frame leaves the
+model a still, and several let it read motion and approach off the prompt
+itself. With ``carry_prev`` the chain that just ended is quoted into that
+prefill, so the new one picks up where the last left off instead of opening on
+the scene from scratch.
 
 What leaves this module is not text but the activation feeding the VLM's lm_head
 at each generated position: the state the model was in when it chose that token,
@@ -22,6 +25,7 @@ into the network's ``parameters()`` and its ``state_dict()``.
 """
 
 import re
+from collections import deque
 
 import torch
 from torchvision.transforms.functional import to_pil_image
@@ -31,11 +35,12 @@ from .vlm_backbone import load_model
 
 
 class CoTStream:
-    # The cache is allocated once at a fixed length, so it has to cover the
-    # longest prompt any run will prefill: the image tokens, the chat template,
-    # the instruction and the environment's task text. At 6 attention layers and
-    # 2 key-value heads the buffer costs single-digit megabytes, so this is set
-    # far above what any environment sends rather than tuned.
+    # The text half of the longest prompt any run will prefill: the chat
+    # template, the instruction and the environment's task text. What the frame
+    # window costs is measured at load and added on top, so raising
+    # ``history_frames`` does not have to be paid for here. At 6 attention
+    # layers and 2 key-value heads the buffer costs single-digit megabytes, so
+    # this is set far above what any environment sends rather than tuned.
     PROMPT_BUDGET = 1024
 
     # The frame the throwaway chain used for recording is never looked at, only
@@ -45,14 +50,37 @@ class CoTStream:
     # Written out in full rather than left to the model's own thinking mode,
     # which spends its budget restating the request ("The user wants me to...")
     # instead of the scene.
+    #
+    # Four fixed slots in a fixed order rather than free commentary. Two reasons.
+    # The chain reaches the encoder as activations on a per-position axis, so a
+    # fixed order makes position k mean the same thing on every chain instead of
+    # whatever the prose happened to be saying. And ReAct (arXiv:2210.03629,
+    # Table 3) measures the difference between thought that decomposes a goal,
+    # judges whether the last one is met and picks the next, and thought that
+    # only restates the current situation: 71 against 53 on ALFWorld. Free
+    # running commentary is the second kind.
     INSTRUCTION = (
-        "This is what an agent sees right now. Keep up a running commentary on "
-        "its situation, in short plain sentences.\n"
-        "Say: where the agent is relative to whatever matters around it, which "
-        "way it is heading, what is about to go wrong, and what it should be "
-        "trying to do next.\n"
-        "Write the commentary only. No preamble, no restating this request, no "
-        "headings or lists, no numbers or control values."
+        "You are the inner speech of an agent acting in this scene. Write four "
+        "lines, in this order, each one short sentence:\n"
+        "SEE: where the agent is now relative to whatever matters around it, and "
+        "what changed since the earlier frames.\n"
+        "GOAL: the sub-goal the agent is on right now, and whether the last one "
+        "is finished or has failed.\n"
+        "RISK: what is about to go wrong, or what the last actions failed to "
+        "achieve.\n"
+        "DO: what the agent should be doing next, and why.\n"
+        "Write the four lines only. No preamble, no restating this request, no "
+        "headings beyond the four labels, no numbers or control values."
+    )
+
+    # Prefixed whenever the window carries the actions that produced it. Without
+    # the actions the chain can describe change but cannot attribute it, so it
+    # cannot say that something the agent did failed -- which is what the RISK
+    # and GOAL lines are for.
+    ACTIONS = (
+        "The agent took these actions, one per frame above, each one producing "
+        "the frame it sits with: {actions}. The last is what produced the "
+        "current view."
     )
 
     # Quoted into the prefill under ``carry_prev``, so a restart continues the
@@ -65,6 +93,15 @@ class CoTStream:
         "...{previous}\n"
         "The frame above is the current one. Carry that line forward: write what "
         "is new or has changed since it, not what it already says."
+    )
+
+    # Prefixed to the prompt whenever the window holds more than one frame.
+    # Without it the model reads the extra images as unrelated views of the
+    # scene and describes each in turn instead of reading motion off them.
+    HISTORY = (
+        "The {count} images above are consecutive snapshots of the same scene, "
+        "oldest first; the last one is the agent's current view. Read them "
+        "together to see what has moved, which way, and how fast."
     )
 
     # How much of the finished chain is quoted back. The whole chain is material
@@ -81,6 +118,8 @@ class CoTStream:
         temperature: float,
         all_layers: bool,
         carry_prev: bool,
+        history_frames: int,
+        history_stride: int,
         use_cuda_graph: bool,
         device: torch.device,
     ) -> None:
@@ -89,12 +128,19 @@ class CoTStream:
             f"max_len {max_len} below the per-step budget {tokens_per_step}: "
             "every step would restart the chain"
         )
+        assert history_frames >= 1, f"history_frames must be at least 1; got {history_frames}"
+        assert history_stride >= 1, f"history_stride must be at least 1; got {history_stride}"
         self.model, self.processor = load_model(model_id, use_lora=False, device=device)
         self.model.eval().requires_grad_(False)
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len
         self.temperature = temperature
         self.carry_prev = carry_prev
+        self.history_frames = history_frames
+        self.history_stride = history_stride
+        # Every step the window can reach back over, so the oldest frame the
+        # stride asks for is always there once the episode is that long.
+        self._frames = deque(maxlen=(history_frames - 1) * history_stride + 1)
         self.device = device
         text_config = self.model.config.text_config
         self.hidden_size = text_config.hidden_size
@@ -106,7 +152,10 @@ class CoTStream:
         # replacing it, so its buffers keep the addresses a graph records.
         # A carried chain is quoted back into the prompt, so the prefill has to
         # fit one more chain's worth of tokens on top of the standing prompt.
-        self._cache_len = self.PROMPT_BUDGET + (max_len if carry_prev else 0) + max_len
+        self._window_tokens = self._measure_window_tokens()
+        self._cache_len = (
+            self.PROMPT_BUDGET + self._window_tokens + (max_len if carry_prev else 0) + max_len
+        )
         self._cache = StaticCache(config=self.model.config, max_cache_len=self._cache_len)
         # What a recorded step reads. Their contents change every step; their
         # addresses must not, which is the whole point of recording one.
@@ -118,8 +167,58 @@ class CoTStream:
         if use_cuda_graph:
             self._capture_decode()
 
+    def _blank_frame(self) -> torch.Tensor:
+        return torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE)
+
+    def _render_prompt(self, frame_count: int, prompt: str) -> str:
+        content = [{"type": "image"} for _ in range(frame_count)]
+        content.append({"type": "text", "text": prompt})
+        # Thinking off: with the <think> block left open the model spends the
+        # chain reasoning about the request rather than about the scene.
+        return self.processor.apply_chat_template(
+            [{"role": "user", "content": content}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+    def _measure_window_tokens(self) -> int:
+        """What the frame window costs the prefill, in tokens.
+
+        Measured rather than assumed: the count per frame depends on the
+        processor's resize policy, and the difference between a one- and a
+        two-frame prompt isolates it from the chat template around it. A frame
+        below the processor's floor resolution is upscaled to it, so the blank
+        stands in for anything an env of that size or smaller sends.
+        """
+
+        def total(count: int) -> int:
+            text = self._render_prompt(count, "")
+            blank = to_pil_image(self._blank_frame())
+            inputs = self.processor(text=[text], images=[blank] * count, return_tensors="pt")
+            return inputs["input_ids"].shape[1]
+
+        return (total(2) - total(1)) * self.history_frames
+
+    def _window(self) -> tuple[list[torch.Tensor], list[str]]:
+        """The frames the prefill shows and the action that produced each one,
+        oldest first, current view last.
+
+        Always ``history_frames`` long so the prompt keeps one length: before
+        the episode has run far enough for the stride to reach, the oldest frame
+        on hand stands in for the ones that do not exist yet.
+        """
+        latest = len(self._frames) - 1
+        picks = [
+            max(latest - k * self.history_stride, 0) for k in range(self.history_frames - 1, -1, -1)
+        ]
+        chosen = [self._frames[i] for i in picks]
+        return [frame for frame, _ in chosen], [action for _, action in chosen]
+
     def reset(self) -> None:
-        """Drop the chain. The next advance prefills from the frame it is given."""
+        """Drop the chain and the frames behind it. The next advance prefills
+        from the window the steps after this one refill."""
+        self._frames.clear()
         self._needs_prefill = True
         self._hidden = None
         self._next_token = None
@@ -132,23 +231,28 @@ class CoTStream:
         self._cache.reset()
 
     @torch.inference_mode()
-    def advance(self, image: torch.Tensor, task_prompt: str) -> torch.Tensor:
+    def advance(self, image: torch.Tensor, task_prompt: str, action_text: str) -> torch.Tensor:
         """The ``tokens_per_step`` activations this environment step issues.
 
         Args:
-            image: (C, H, W) float tensor in [0, 1]; read only when the chain
+            image: (C, H, W) float tensor in [0, 1]. Recorded into the frame
+                window every step, but read by the VLM only when the chain
                 restarts, which is what makes the chain the slow loop.
             task_prompt: the env's language instruction, empty where the env sets
                 none (or where ``use_prompt`` is off), leaving just the standing
                 instruction.
+            action_text: the action that produced ``image``, rendered by the
+                env's own encoding, so the chain can attribute what changed to
+                what the agent did rather than only observing it.
 
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16.
         """
+        self._frames.append((image.detach(), action_text))
         activations = []
         while len(activations) < self.tokens_per_step:
             if self._needs_prefill:
-                self._prefill(image, task_prompt)
+                self._prefill(task_prompt)
             activations.append(self._hidden)
             self._decode()
         return torch.stack(activations)
@@ -161,23 +265,21 @@ class CoTStream:
         pieces = [piece for piece in re.split(r"(?<=[.!?])\s+", text) if piece]
         return " ".join(pieces[-self.CARRY_SENTENCES :])
 
-    def _prefill(self, image: torch.Tensor, task_prompt: str) -> None:
+    def _prefill(self, task_prompt: str) -> None:
+        frames, actions = self._window()
+        history = self.HISTORY.format(count=len(frames)) if len(frames) > 1 else ""
+        taken = self.ACTIONS.format(actions=", ".join(actions))
         carried = self.CARRY.format(previous=self._prev_text) if self._prev_text else ""
-        prompt = "\n".join(part for part in (task_prompt, carried, self.INSTRUCTION) if part)
-        content = [{"type": "image"}, {"type": "text", "text": prompt}]
-        # Thinking off: with the <think> block left open the model spends the
-        # chain reasoning about the request rather than about the scene.
-        text = self.processor.apply_chat_template(
-            [{"role": "user", "content": content}],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
+        prompt = "\n".join(
+            part for part in (task_prompt, history, taken, carried, self.INSTRUCTION) if part
         )
-        picture = to_pil_image(image.detach().float().clamp(0.0, 1.0).cpu())
-        inputs = self.processor(text=[text], images=[picture], return_tensors="pt").to(self.device)
+        text = self._render_prompt(len(frames), prompt)
+        pictures = [to_pil_image(frame.float().clamp(0.0, 1.0).cpu()) for frame in frames]
+        inputs = self.processor(text=[text], images=pictures, return_tensors="pt").to(self.device)
         prompt_len = inputs["input_ids"].shape[1]
         assert prompt_len + self.max_len <= self._cache_len, (
-            f"prompt of {prompt_len} tokens plus a {self.max_len}-token chain exceeds the "
+            f"prompt of {prompt_len} tokens ({len(frames)} frames worth "
+            f"{self._window_tokens} of it) plus a {self.max_len}-token chain exceeds the "
             f"cache length {self._cache_len}; raise CoTStream.PROMPT_BUDGET"
         )
         self._tokens = []
@@ -205,7 +307,8 @@ class CoTStream:
         allocates, and a tensor born in inference mode cannot be written from
         outside it, which is what recording then does.
         """
-        self._prefill(torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE), "")
+        self._frames.append((self._blank_frame(), ""))
+        self._prefill("")
         self._write_step_inputs(self._position)
 
         # Capture must follow a few runs on a side stream, which is also what

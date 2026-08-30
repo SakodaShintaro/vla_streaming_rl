@@ -15,5 +15,8 @@ critic_lr: 1e-5
 # The chain-carrying run of the one actor-critic. Setting cot_tokens_num back to
 # 0 is its ablation: same body, same heads, same loss, no chain on the space axis.
 cot_tokens_num: 4
+cot_max_len: 128
 cot_carry_prev: true
+cot_history_frames: 4
+cot_history_stride: 4
 disable_state_predictor: 1
