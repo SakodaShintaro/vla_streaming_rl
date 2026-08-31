@@ -1,5 +1,6 @@
 # @package _global_
-encoder_block_num: 1
+encoder_block_num: 8
+layer_scale_init: 0.0001
 actor_hidden_dim: 512
 actor_block_num: 1
 critic_hidden_dim: 1024

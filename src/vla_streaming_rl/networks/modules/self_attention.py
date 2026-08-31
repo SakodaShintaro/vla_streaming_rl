@@ -131,9 +131,16 @@ class SpatialTransformerBlock(nn.Module):
         hidden_dim: Hidden dimension
         n_head: Number of attention heads
         max_position_embeddings: Maximum position embeddings
+        layer_scale_init: LayerScale gamma initial value
     """
 
-    def __init__(self, hidden_dim: int, n_head: int, max_position_embeddings: int) -> None:
+    def __init__(
+        self,
+        hidden_dim: int,
+        n_head: int,
+        max_position_embeddings: int,
+        layer_scale_init: float,
+    ) -> None:
         super().__init__()
         self.ln1 = nn.LayerNorm(hidden_dim)
         self.ln2 = nn.LayerNorm(hidden_dim)
@@ -149,8 +156,10 @@ class SpatialTransformerBlock(nn.Module):
             nn.Linear(4 * hidden_dim, hidden_dim, bias=False),
             nn.Dropout(0.0),
         )
+        self.attn_gamma = nn.Parameter(torch.full((hidden_dim,), layer_scale_init))
+        self.mlp_gamma = nn.Parameter(torch.full((hidden_dim,), layer_scale_init))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x), attn_mask=None)
-        x = x + self.mlp(self.ln2(x))
+        x = x + self.attn_gamma * self.attn(self.ln1(x), attn_mask=None)
+        x = x + self.mlp_gamma * self.mlp(self.ln2(x))
         return x

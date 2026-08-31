@@ -66,6 +66,7 @@ class SpatialTemporalEncoder(nn.Module):
         cot_layers: int,
         cot_dim: int,
         cot_pool: str,
+        layer_scale_init: float,
     ) -> None:
         super().__init__()
         assert cot_tokens_num >= 0, f"cot_tokens_num must not be negative; got {cot_tokens_num}"
@@ -109,6 +110,7 @@ class SpatialTemporalEncoder(nn.Module):
             hidden_dim=self.hidden_image_dim,
             n_head=1,
             temporal_model_type=temporal_model_type,
+            layer_scale_init=layer_scale_init,
         )
 
         self.output_dim = self.hidden_image_dim * self.space_len

@@ -17,9 +17,10 @@ class BaseTemporalBlock(nn.Module):
     Args:
         hidden_dim: Hidden dimension
         temporal_layer: Layer for temporal processing
+        layer_scale_init: LayerScale gamma initial value
     """
 
-    def __init__(self, hidden_dim: int, temporal_layer: nn.Module) -> None:
+    def __init__(self, hidden_dim: int, temporal_layer: nn.Module, layer_scale_init: float) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
 
@@ -35,6 +36,8 @@ class BaseTemporalBlock(nn.Module):
             nn.Linear(4 * hidden_dim, hidden_dim, bias=False),
             nn.Dropout(0.0),
         )
+        self.temporal_gamma = nn.Parameter(torch.full((hidden_dim,), layer_scale_init))
+        self.mlp_gamma = nn.Parameter(torch.full((hidden_dim,), layer_scale_init))
 
     def get_rnn_state_size(self) -> int:
         """Return size of rnn_state"""
@@ -47,10 +50,10 @@ class BaseTemporalBlock(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Block 1: Norm + TemporalLayer + Residual
         temporal_output, new_rnn_state = self.temporal(self.temporal_norm(x), rnn_state)
-        x = x + temporal_output
+        x = x + self.temporal_gamma * temporal_output
 
         # Block 2: Norm + MLP + Residual
-        x = x + self.mlp(self.mlp_norm(x))
+        x = x + self.mlp_gamma * self.mlp(self.mlp_norm(x))
 
         return x, new_rnn_state
 
@@ -327,33 +330,34 @@ class IdentityLayer(nn.Module):
 
 # Aliases for compatibility
 def CausalTransformerBlock(
-    hidden_dim: int, n_head: int, max_position_embeddings: int
+    hidden_dim: int, n_head: int, max_position_embeddings: int, layer_scale_init: float
 ) -> BaseTemporalBlock:
     """Causal Transformer block (with RoPE, applies causal mask internally)"""
     return BaseTemporalBlock(
         hidden_dim,
         CausalAttentionLayer(hidden_dim, n_head, max_position_embeddings),
+        layer_scale_init,
     )
 
 
-def MambaBlock(hidden_dim: int) -> BaseTemporalBlock:
+def MambaBlock(hidden_dim: int, layer_scale_init: float) -> BaseTemporalBlock:
     """Mamba state space model block (same structure as Transformer block)"""
-    return BaseTemporalBlock(hidden_dim, MambaLayer(hidden_dim))
+    return BaseTemporalBlock(hidden_dim, MambaLayer(hidden_dim), layer_scale_init)
 
 
-def GRUBlock(hidden_dim: int) -> BaseTemporalBlock:
+def GRUBlock(hidden_dim: int, layer_scale_init: float) -> BaseTemporalBlock:
     """GRU block (same structure as Transformer block)"""
-    return BaseTemporalBlock(hidden_dim, GRULayer(hidden_dim))
+    return BaseTemporalBlock(hidden_dim, GRULayer(hidden_dim), layer_scale_init)
 
 
-def GdnBlock(hidden_dim: int) -> BaseTemporalBlock:
+def GdnBlock(hidden_dim: int, layer_scale_init: float) -> BaseTemporalBlock:
     """GatedDeltaNet block (same structure as Transformer block)"""
-    return BaseTemporalBlock(hidden_dim, GatedDeltaNetLayer(hidden_dim))
+    return BaseTemporalBlock(hidden_dim, GatedDeltaNetLayer(hidden_dim), layer_scale_init)
 
 
-def IdentityBlock(hidden_dim: int) -> BaseTemporalBlock:
+def IdentityBlock(hidden_dim: int, layer_scale_init: float) -> BaseTemporalBlock:
     """Identity block (for comparison)"""
-    return BaseTemporalBlock(hidden_dim, IdentityLayer(hidden_dim))
+    return BaseTemporalBlock(hidden_dim, IdentityLayer(hidden_dim), layer_scale_init)
 
 
 if __name__ == "__main__":
@@ -367,10 +371,13 @@ if __name__ == "__main__":
     hidden_dim = C
     n_head = 4
     max_position_embeddings = 512
+    layer_scale_init = 1e-4
 
     # CausalTransformerBlock
     print("\n=== CausalTransformerBlock ===")
-    block = CausalTransformerBlock(hidden_dim, n_head, max_position_embeddings).to(device)
+    block = CausalTransformerBlock(
+        hidden_dim, n_head, max_position_embeddings, layer_scale_init
+    ).to(device)
     rnn_state = torch.zeros(1, B, block.get_rnn_state_size(), device=device)
     out, new_rnn_state = block(x, rnn_state)
     print(f"output shape: {out.shape}")
@@ -379,7 +386,7 @@ if __name__ == "__main__":
 
     # GRUBlock
     print("\n=== GRUBlock ===")
-    gru_block = GRUBlock(hidden_dim).to(device)
+    gru_block = GRUBlock(hidden_dim, layer_scale_init).to(device)
     rnn_state = torch.zeros(1, B, gru_block.get_rnn_state_size(), device=device)
     out, new_rnn_state = gru_block(x, rnn_state)
     print(f"output shape: {out.shape}")
@@ -388,7 +395,7 @@ if __name__ == "__main__":
 
     # MambaBlock
     print("\n=== MambaBlock ===")
-    mamba_block = MambaBlock(hidden_dim).to(device)
+    mamba_block = MambaBlock(hidden_dim, layer_scale_init).to(device)
     rnn_state = torch.zeros(1, B, mamba_block.get_rnn_state_size(), device=device)
     out, new_rnn_state = mamba_block(x, rnn_state)
     print(f"output shape: {out.shape}")
@@ -397,7 +404,7 @@ if __name__ == "__main__":
 
     # GdnBlock
     print("\n=== GdnBlock ===")
-    gdn_block = GdnBlock(hidden_dim).to(device)
+    gdn_block = GdnBlock(hidden_dim, layer_scale_init).to(device)
     rnn_state = torch.zeros(1, B, gdn_block.get_rnn_state_size(), device=device)
     out, new_rnn_state = gdn_block(x, rnn_state)
     print(f"output shape: {out.shape}")
@@ -406,7 +413,7 @@ if __name__ == "__main__":
 
     # IdentityBlock
     print("\n=== IdentityBlock ===")
-    identity_block = IdentityBlock(hidden_dim).to(device)
+    identity_block = IdentityBlock(hidden_dim, layer_scale_init).to(device)
     rnn_state = torch.zeros(1, B, identity_block.get_rnn_state_size(), device=device)
     out, new_rnn_state = identity_block(x, rnn_state)
     print(f"output shape: {out.shape}")

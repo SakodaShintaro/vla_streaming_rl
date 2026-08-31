@@ -145,6 +145,7 @@ def build_network(
             critic_loss_weight=args.critic_loss_weight,
             predictor_step_num=args.predictor_step_num,
             encoder_block_num=args.encoder_block_num,
+            layer_scale_init=args.layer_scale_init,
             temporal_model_type=args.temporal_model_type,
             horizon=args.horizon,
             policy_type=args.policy_type,

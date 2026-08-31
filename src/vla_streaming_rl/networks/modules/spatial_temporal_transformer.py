@@ -16,22 +16,25 @@ class SpatialTemporalBlock(nn.Module):
         temporal_model_type: str,
         tempo_len: int,
         space_len: int,
+        layer_scale_init: float,
     ) -> None:
         super().__init__()
 
         if temporal_model_type == "mamba":
-            self.tempo_block = MambaBlock(hidden_dim)
+            self.tempo_block = MambaBlock(hidden_dim, layer_scale_init)
         elif temporal_model_type == "transformer":
-            self.tempo_block = CausalTransformerBlock(hidden_dim, n_head, tempo_len)
+            self.tempo_block = CausalTransformerBlock(
+                hidden_dim, n_head, tempo_len, layer_scale_init
+            )
         elif temporal_model_type == "gru":
-            self.tempo_block = GRUBlock(hidden_dim)
+            self.tempo_block = GRUBlock(hidden_dim, layer_scale_init)
         elif temporal_model_type == "gdn":
-            self.tempo_block = GdnBlock(hidden_dim)
+            self.tempo_block = GdnBlock(hidden_dim, layer_scale_init)
         elif temporal_model_type == "identity":
-            self.tempo_block = IdentityBlock(hidden_dim)
+            self.tempo_block = IdentityBlock(hidden_dim, layer_scale_init)
         else:
             raise ValueError(f"Unknown temporal_model_type: {temporal_model_type}")
-        self.space_block = SpatialTransformerBlock(hidden_dim, n_head, space_len)
+        self.space_block = SpatialTransformerBlock(hidden_dim, n_head, space_len, layer_scale_init)
 
     def forward(
         self, x: torch.Tensor, rnn_state: torch.Tensor
@@ -63,6 +66,7 @@ class SpatialTemporalTransformer(nn.Module):
         hidden_dim: int,
         n_head: int,
         temporal_model_type: str,
+        layer_scale_init: float,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -82,6 +86,7 @@ class SpatialTemporalTransformer(nn.Module):
                     temporal_model_type,
                     tempo_len,
                     space_len,
+                    layer_scale_init,
                 )
                 for _ in range(self.n_layer)
             ]

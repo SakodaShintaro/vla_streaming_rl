@@ -67,6 +67,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_carry_prev: bool,
         cot_pool: str,
         cot_cuda_graph: bool,
+        layer_scale_init: float,
     ) -> None:
         super().__init__()
         self.sparsity = sparsity
@@ -128,6 +129,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             cot_layers=cot_layers,
             cot_dim=cot_dim,
             cot_pool=cot_pool,
+            layer_scale_init=layer_scale_init,
         )
 
         self.horizon = horizon
