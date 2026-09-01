@@ -482,6 +482,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             output_hidden_states=True,
             use_cache=True,
             return_dict=True,
+            logits_to_keep=1,
         )
 
         # language_model forward via the outer model (handles lm_head, cache wrapping)
