@@ -191,7 +191,7 @@ class CoTStream:
             output_hidden_states=True,
         )
         self._position = prompt_len
-        self._consume(self._depths(outputs.hidden_states), outputs.logits[0, -1])
+        self._consume(outputs.hidden_states, outputs.logits[0, -1])
 
     @torch.no_grad()
     def _capture_decode(self) -> None:
@@ -262,20 +262,18 @@ class CoTStream:
             self._graph.replay()
             hidden_states, logits = self._graph_hidden, self._graph_logits
         self._position = position + 1
-        self._consume(self._depths(hidden_states), logits[0, -1])
+        self._consume(hidden_states, logits[0, -1])
 
-    def _depths(self, hidden_states) -> torch.Tensor:
-        """This position's activation at every depth behind it:
-        (layers_num, hidden_size)."""
-        return torch.stack([state[0, -1] for state in hidden_states])
+    def _consume(self, hidden_states, logits: torch.Tensor) -> None:
+        """Keep the position's activation at every depth behind it --
+        (layers_num, hidden_size) -- sample the token it implies, and decide
+        whether the chain lives on.
 
-    def _consume(self, hidden: torch.Tensor, logits: torch.Tensor) -> None:
-        """Take the position's lm_head input, sample the token it implies, and
-        decide whether the chain lives on."""
-        # Copied, not referenced: after a replay this is the graph's own output
-        # buffer, which the next replay overwrites while the step's earlier
-        # activations are still being collected.
-        self._hidden = hidden.to(torch.bfloat16).clone()
+        Stacked into a tensor of this module's own: after a replay these are the
+        graph's own output buffers, which the next replay overwrites while the
+        step's earlier activations are still being collected.
+        """
+        self._hidden = torch.stack([state[0, -1] for state in hidden_states]).to(torch.bfloat16)
         probs = torch.softmax(logits.float() / self.temperature, dim=-1)
         self._next_token = torch.multinomial(probs, 1).view(1, 1)
         self._tokens.append(self._next_token.item())
