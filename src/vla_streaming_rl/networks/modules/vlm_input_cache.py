@@ -40,10 +40,10 @@ class VLMInputCache:
         device: torch.device,
         image_mode: str,
     ) -> None:
-        if len(observation_shape) != 3:
-            raise ValueError(f"observation_shape must be (C, H, W); got {tuple(observation_shape)}")
-        if image_mode not in ("mem", "sequence"):
-            raise ValueError(f"Unknown image_mode: {image_mode}")
+        assert len(observation_shape) == 3, (
+            f"observation_shape must be (C, H, W); got {tuple(observation_shape)}"
+        )
+        assert image_mode in ("mem", "sequence"), f"Unknown image_mode: {image_mode}"
         self.tokenizer = processor.tokenizer
         self.image_processor = processor.image_processor
         self.image_token = processor.image_token  # e.g. '<|image_pad|>'
@@ -101,13 +101,10 @@ class VLMInputCache:
             images: (B, T, C, H, W) float tensor in [0, 1].
             task_prompts: list of length B; one prompt per batch element.
         """
-        if images.ndim != 5:
-            raise ValueError(f"expected (B, T, C, H, W); got {tuple(images.shape)}")
+        assert images.ndim == 5, f"expected (B, T, C, H, W); got {tuple(images.shape)}"
         B, T = images.shape[:2]
-        if T != self.seq_len:
-            raise ValueError(f"T mismatch: cache expects seq_len={self.seq_len}, got T={T}")
-        if len(task_prompts) != B:
-            raise ValueError(f"task_prompts length {len(task_prompts)} != batch size {B}")
+        assert T == self.seq_len, f"T mismatch: cache expects seq_len={self.seq_len}, got T={T}"
+        assert len(task_prompts) == B, f"task_prompts length {len(task_prompts)} != batch size {B}"
 
         device = images.device
 
