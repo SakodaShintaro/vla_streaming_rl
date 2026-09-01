@@ -80,12 +80,13 @@ class VLMInputCache:
         # mem: 1 image in the prompt; sequence: T images, fed in temporal order.
         for _ in range(self.num_prompt_images):
             content.append({"type": "image", "image": dummy_pil})
-        messages = [[{"role": "user", "content": content}]]
+        # One conversation rather than a batch of one: the template returns a
+        # string for the first and a list for the second, and the string is
+        # what is wanted here.
+        messages = [{"role": "user", "content": content}]
         templated = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        if isinstance(templated, list):
-            templated = templated[0]
         # Pre-expand each image placeholder in-place. ``str.replace`` (no count)
         # does not recurse on substitutions, so each <image_pad> token becomes
         # exactly ``num_image_tokens`` copies regardless of how many images
