@@ -137,9 +137,10 @@ class StreamingAgent(Agent):
     ) -> StepResult:
         del global_step, reward
         metrics = {}
-        # The language this tick: composed here from the env's state, never read
-        # off the observation.
-        prompt = self.prompt_builder(obs, info)
+        # The language this episode: composed here from the env's state, never
+        # read off the observation. The chain of thought prefills it once, and
+        # what a tick adds to its context is the frame alone.
+        episode_text = self.prompt_builder.episode_text(obs, info)
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
@@ -167,10 +168,10 @@ class StreamingAgent(Agent):
             episode_step_obs,
             health_obs,
             task_prompt_token_ids,
-        ) = self._preprocess(obs, prompt)
+        ) = self._preprocess(obs, episode_text)
         # The chain of thought advances once per environment step, whether or not
         # this tick needs a new action chunk.
-        cot_activation = self.network.advance_cot(image, prompt, episode_done)
+        cot_activation = self.network.advance_cot(image, episode_text, episode_done)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -199,7 +200,7 @@ class StreamingAgent(Agent):
                 action=action,
                 metrics=metrics,
                 panels=self.network.render_panels(),
-                texts={"prompt": prompt, **self.network.render_texts()},
+                texts={"episode_text": episode_text, **self.network.render_texts()},
             )
 
         # new chunk: a single grad-enabled forward yields both the action chunk
@@ -240,7 +241,7 @@ class StreamingAgent(Agent):
             action=action,
             metrics=metrics,
             panels=self.network.render_panels(),
-            texts={"prompt": prompt, **self.network.render_texts()},
+            texts={"episode_text": episode_text, **self.network.render_texts()},
         )
 
     def on_episode_end(self, score: float) -> dict:
@@ -278,9 +279,10 @@ class StreamingAgent(Agent):
         the reset, and the testbed calls it on every tick."""
         del global_step, reward
         metrics = {}
-        # The language this tick: composed here from the env's state, never read
-        # off the observation.
-        prompt = self.prompt_builder(obs, info)
+        # The language this episode: composed here from the env's state, never
+        # read off the observation. The chain of thought prefills it once, and
+        # what a tick adds to its context is the frame alone.
+        episode_text = self.prompt_builder.episode_text(obs, info)
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
@@ -308,10 +310,10 @@ class StreamingAgent(Agent):
             episode_step_obs,
             health_obs,
             task_prompt_token_ids,
-        ) = self._preprocess(obs, prompt)
+        ) = self._preprocess(obs, episode_text)
         # The chain of thought advances once per environment step, whether or not
         # this tick needs a new action chunk.
-        cot_activation = self.network.advance_cot(image, prompt, episode_done)
+        cot_activation = self.network.advance_cot(image, episode_text, episode_done)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -341,7 +343,7 @@ class StreamingAgent(Agent):
                 action=action,
                 metrics=metrics,
                 panels=self.network.render_panels(),
-                texts={"prompt": prompt, **self.network.render_texts()},
+                texts={"episode_text": episode_text, **self.network.render_texts()},
             )
 
         latest_data = self.rb.get_latest(self.seq_len)
@@ -351,7 +353,7 @@ class StreamingAgent(Agent):
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
-                task_prompts=[prompt],
+                task_prompts=[episode_text],
                 velocity_x_seq=latest_data.velocity_x,
                 velocity_y_seq=latest_data.velocity_y,
                 velocity_z_seq=latest_data.velocity_z,
@@ -377,7 +379,7 @@ class StreamingAgent(Agent):
             action=action,
             metrics=metrics,
             panels=self.network.render_panels(),
-            texts={"prompt": prompt, **self.network.render_texts()},
+            texts={"episode_text": episode_text, **self.network.render_texts()},
         )
 
     def _preprocess(self, obs: dict[str, Any], prompt: str) -> tuple:

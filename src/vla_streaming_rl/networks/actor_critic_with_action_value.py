@@ -61,10 +61,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         image_encoder_trainable: bool,
         cot_model_id: str,
         cot_tokens_num: int,
-        cot_max_len: int,
         cot_temperature: float,
         cot_all_layers: bool,
-        cot_carry_prev: bool,
+        cot_window_steps: int,
         cot_pool: str,
         cot_cuda_graph: bool,
         layer_scale_init: float,
@@ -108,11 +107,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         if cot_tokens_num > 0:
             self.cot_stream = CoTStream(
                 model_id=cot_model_id,
+                observation_shape=observation_space_shape,
                 tokens_per_step=cot_tokens_num,
-                max_len=cot_max_len,
                 temperature=cot_temperature,
                 all_layers=cot_all_layers,
-                carry_prev=cot_carry_prev,
+                window_steps=cot_window_steps,
                 use_cuda_graph=cot_cuda_graph,
                 device=torch.device("cuda"),
             )
@@ -164,43 +163,59 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.detach_predictor = detach_predictor
         self.disable_state_predictor = disable_state_predictor
 
-    # Fixed so the render strip keeps one shape for the whole run; wide enough
-    # to read a chain of ``cot_max_len`` tokens.
-    COT_PANEL_WIDTH = 420
-    COT_PANEL_HEIGHT = 300
+    # Fixed so the render strip keeps one shape for the whole run; tall enough
+    # to read the last few ticks of the VLM's context off the bottom of it.
+    CONTEXT_PANEL_WIDTH = 480
+    CONTEXT_PANEL_HEIGHT = 360
 
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
     def advance_cot(
-        self, image: torch.Tensor, task_prompt: str, episode_done: bool
+        self,
+        image: torch.Tensor,
+        episode_text: str,
+        episode_done: bool,
     ) -> torch.Tensor:
         """This step's chain-of-thought activations, or nothing when the chain is
-        off. A finished episode ends the chain, so the next one starts its
-        commentary from its own first frame."""
+        off. A finished episode ends the context, so the next one opens its own
+        and starts its commentary from its own first frame."""
         if self.cot_stream is None:
             return torch.zeros(self.cot_shape)
         if episode_done:
             self.cot_stream.reset()
-        return self.cot_stream.advance(image, task_prompt)
+        return self.cot_stream.advance(image, episode_text)
 
     def render_panels(self) -> dict[str, np.ndarray]:
-        """The chain as it currently stands, drawn for the render strip. It runs
-        from the frame the chain started on, so it empties whenever the chain
-        restarts. Without a chain there is no panel at all rather than a blank
-        one, which keeps that run's strip the width of what it has."""
+        """The VLM's context as it currently stands, drawn for the render strip:
+        the episode's prompt, then each tick's action, frame and readings with
+        the commentary the chain wrote on them, the two colored apart. One panel
+        rather than several, because it is one running transcript.
+
+        It runs back only as far as the context window holds, so it empties
+        whenever an episode does. Without a chain there is no panel at all
+        rather than a blank one, which keeps that run's strip the width of what
+        it has."""
         if self.cot_stream is None:
             return {}
         return {
-            "chain_of_thought": render_text_panel(
-                self.cot_stream.text(), self.COT_PANEL_WIDTH, self.COT_PANEL_HEIGHT
+            "vlm_context": render_text_panel(
+                self.cot_stream.transcript(),
+                self.CONTEXT_PANEL_WIDTH,
+                self.CONTEXT_PANEL_HEIGHT,
             )
         }
 
     def render_texts(self) -> dict[str, str]:
+        """The same transcript for the episode log, where the color the panel
+        tells the two sides apart by has to be spelled out."""
         if self.cot_stream is None:
             return {}
-        return {"chain_of_thought": self.cot_stream.text()}
+        return {
+            "vlm_context": "\n".join(
+                f"[{role}] {text}" for role, text in self.cot_stream.transcript()
+            )
+        }
 
     def _window(self, data: ReplayBufferData, start, stop) -> tuple:
         """The ``(image, action, reward, rnn_state, scalar_obs, cot)`` the encoder

@@ -140,7 +140,7 @@ class ZeroShotVLMAgent(Agent):
         # The task half of the system prompt: composed here from the env's
         # state, so the whole system turn -- task text and response protocol --
         # is the agent's.
-        prompt = self.prompt_builder(obs, info)
+        episode_text = self.prompt_builder.episode_text(obs, info)
 
         # The reward shown with a past turn is the one observed after it.
         if self.step_in_episode > 0 and self.history:
@@ -149,7 +149,7 @@ class ZeroShotVLMAgent(Agent):
 
         image = preprocess_image(obs["image"], self.image_side)
         messages = self._build_messages(
-            prompt,
+            episode_text,
             image,
             current_reward=reward if self.step_in_episode > 0 else None,
         )
@@ -197,7 +197,7 @@ class ZeroShotVLMAgent(Agent):
             action=action,
             metrics=metrics,
             panels=panels,
-            texts={"prompt": prompt},
+            texts={"episode_text": episode_text},
         )
 
     def step(

@@ -82,6 +82,13 @@ def add_text_label_on_top(image: np.ndarray, text: str) -> np.ndarray:
 _CAPTION_LINE_BUDGET = 20
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
+# The two sides of a transcript panel: what a model was handed, and what it
+# wrote back. Blue reads as quoted material and white as the model's own voice,
+# which is the distinction the panel exists to make.
+PANEL_INPUT = "input"
+PANEL_OUTPUT = "output"
+PANEL_ROLE_COLORS = {PANEL_INPUT: (120, 180, 255), PANEL_OUTPUT: (245, 245, 245)}
+
 
 def wrap_text(text: str, width: int, font_scale: float, thickness: int) -> list[str]:
     """Greedily word-wrap ``text`` to a pixel ``width``."""
@@ -100,25 +107,41 @@ def wrap_text(text: str, width: int, font_scale: float, thickness: int) -> list[
     return lines
 
 
-def render_text_panel(text: str, width: int, height: int) -> np.ndarray:
-    """Free-form text word-wrapped onto a dark panel of exactly ``width`` x
+def render_text_panel(entries: list[tuple[str, str]], width: int, height: int) -> np.ndarray:
+    """A transcript word-wrapped onto a dark panel of exactly ``width`` x
     ``height``.
 
-    A panel rather than a caption band, so free-form text can stand as its own
-    entry in the render strip. The size is fixed by the arguments and not by the
-    text, which is what the stable-panel contract needs; text past the last line
-    that fits is dropped.
+    ``entries`` are ``(role, text)`` pairs drawn oldest first, each in the color
+    its role maps to, so that what a model was given and what it wrote back read
+    apart at a glance. A panel rather than a caption band, so the transcript can
+    stand as its own entry in the render strip.
+
+    The size is fixed by the arguments and not by the text, which is what the
+    stable-panel contract needs. What does not fit is dropped from the top: a
+    running transcript is read from its end, so the newest lines are the ones
+    worth keeping.
     """
     font_scale = 0.45
     thickness = 1
     (_, text_height), baseline = cv2.getTextSize("Ag", _FONT, font_scale, thickness)
     line_height = text_height + baseline + 4
 
+    lines = [
+        (role, wrapped)
+        for role, text in entries
+        for paragraph in text.split("\n")
+        for wrapped in wrap_text(paragraph, width, font_scale, thickness)
+    ]
     panel = np.full((height, width, 3), (30, 30, 30), dtype=np.uint8)
-    lines = wrap_text(text, width, font_scale, thickness)[: height // line_height]
-    for i, line in enumerate(lines):
+    for i, (role, line) in enumerate(lines[-(height // line_height) :]):
         cv2.putText(
-            panel, line, (5, (i + 1) * line_height), _FONT, font_scale, (235, 235, 235), thickness
+            panel,
+            line,
+            (5, (i + 1) * line_height),
+            _FONT,
+            font_scale,
+            PANEL_ROLE_COLORS[role],
+            thickness,
         )
     return panel
 

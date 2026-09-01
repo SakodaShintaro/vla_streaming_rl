@@ -47,16 +47,16 @@ wcm_sigreg_coef: 0.01
 wcm_sigreg_knots: 17
 wcm_sigreg_projections: 1024
 
-# Chain-of-thought stream. A frozen VLM keeps
-# one chain of thought running across environment steps: cot_tokens_num tokens
-# are generated per step and the activations feeding its lm_head join the
-# encoder's space axis. The chain restarts from the current frame on EOS or
-# after cot_max_len tokens, which is when the VLM reads a new image at all.
+# Chain-of-thought stream. A frozen VLM keeps one chain of thought running
+# across environment steps: cot_tokens_num tokens are generated per step and the
+# activations feeding its lm_head join the encoder's space axis. One context is
+# opened per episode and appended to -- the episode's prompt is prefilled once,
+# and each step adds only its own action, frame and readings -- so the chain
+# reads the episode as one line and never re-reads the prompt.
 cot_model_id: Qwen/Qwen3.5-0.8B
 # 0 = no chain, which is the plain actor-critic and the ablation a
 # chain-carrying run is measured against. The cot_* agent configs turn it on.
 cot_tokens_num: 0
-cot_max_len: 64
 cot_temperature: 0.7
 # Keep every hidden state behind each chain token (the embedding plus each of
 # the 24 layers) and let a learned softmax pick which depth to read, the way the
@@ -64,10 +64,11 @@ cot_temperature: 0.7
 # cot_tokens_num=4 and buffer_size=20000 -- so it wants buffer_device: cpu. The
 # per-step transfer back is ~3 ms, about 1.5% of a training step.
 cot_all_layers: true
-# Quote the chain that just ended into the prefill that starts the next one, so
-# a restart continues the commentary instead of opening on the scene from
-# scratch. Off is the ablation: every chain sees only its own frame.
-cot_carry_prev: false
+# How many recent steps the context keeps, over an episode prompt that is never
+# evicted -- the sliding window with attention sinks of arXiv:2608.28444, whose
+# cost is flat in episode length instead of quadratic. A step costs ~130 tokens,
+# so 16 steps is a ~3k-token context.
+cot_window_steps: 16
 # How a step's chain tokens reach the space axis.
 #   mean : one slot per step, whose temporal recurrence follows the chain
 #   none : one slot per token, each recurring on a stride-L phase of the chain

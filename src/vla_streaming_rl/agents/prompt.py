@@ -8,6 +8,20 @@ config rather than to the simulator: two agents can drive the same env with
 different framing, the env carries no text of its own, and ``use_prompt`` is a
 choice of builder instead of a blanking step in the trainer.
 
+A builder yields one string, ``episode_text``: what holds for the whole
+episode, the framing and the arena's own instruction. The chain of thought
+prefills it once and never reads it again, and what a tick adds to its context
+is the frame alone.
+
+It carries no number, names no action, and reports nothing that changes tick to
+tick. The scalars an env reports reach the policy through its own branch and
+the action through its own; spelling either out here only gave the chain of
+thought a machine-readable format to imitate instead of writing about the
+scene.
+
+``__call__`` composes the first two into the single string the networks that
+read the prompt as one blob still expect.
+
 There is one builder per (environment, regime), and the two regimes are
 deliberately kept apart rather than composed out of shared pieces:
 
@@ -62,14 +76,15 @@ class PromptBuilder(ABC):
         del env
 
     @abstractmethod
-    def __call__(self, obs: dict[str, Any], info: dict) -> str: ...
+    def episode_text(self, obs: dict[str, Any], info: dict) -> str:
+        """What holds for the whole episode."""
 
 
 class EmptyPromptBuilder(PromptBuilder):
     """No language at all: what ``use_prompt: 0`` selects, and the ablation a
     language-conditioned run is measured against."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
+    def episode_text(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
         return ""
 
@@ -79,19 +94,20 @@ class EmptyPromptBuilder(PromptBuilder):
 CAR_RACING_TEXT_ACTION_PROMPT = "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible."
 
 CAR_RACING_HIGH_LEVEL_PROMPT = (
-    "You control the red car in CarRacing-v3 (top-down). The road is gray and "
-    "the grass beside it is green. "
-    "The steering and the throttle are not yours to write: say in one short "
-    "sentence where the car should be going next -- which way the road bends "
-    "ahead, whether it is on the center of the road or has to come back to it, "
-    "and whether the corner ahead has to be taken slower."
+    "You are driving the red car in CarRacing-v3, seen from above. The road is "
+    "gray and the grass beside it is green, and the car is at the middle of the "
+    "picture pointing up it. "
+    "What matters is which way the road bends ahead, whether you are on the "
+    "center of it or drifting off toward the grass, and whether the corner "
+    "ahead has to be taken slower than you are going. "
+    "The steering and the throttle are not yours to write."
 )
 
 
 class CarRacingTextActionPromptBuilder(PromptBuilder):
     """CarRacing, for the regime where the VLM writes the action."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
+    def episode_text(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
         return CAR_RACING_TEXT_ACTION_PROMPT
 
@@ -99,7 +115,7 @@ class CarRacingTextActionPromptBuilder(PromptBuilder):
 class CarRacingHighLevelPromptBuilder(PromptBuilder):
     """CarRacing, for the regime where the policy head writes the action."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
+    def episode_text(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
         return CAR_RACING_HIGH_LEVEL_PROMPT
 
@@ -122,9 +138,8 @@ ANIMALAI_TEXT_ACTION_FRAMING = (
     "Bring whatever you are heading for to the center of your view before you "
     "walk forward: turn on the spot (NR or NL) until it is centered, and only "
     "then move. "
-    "Keep your speed down -- the third velocity component reported below should "
-    "stay at about 10 or less, so stand still (NN) for a tick whenever it climbs "
-    "past that. "
+    "Keep your speed down: stand still (NN) for a tick whenever you are "
+    "carrying too much of it. "
 )
 
 ANIMALAI_HIGH_LEVEL_FRAMING = (
@@ -133,67 +148,45 @@ ANIMALAI_HIGH_LEVEL_FRAMING = (
     "sphere scores more. Touching a yellow sphere scores points and the episode "
     "continues. Touching a red sphere loses points and ends the episode. "
     "Entering a red zone ends the episode immediately. An orange zone drains "
-    "your health, and your health also drains as time passes. "
-    "What this arena asks of you follows as `Task:`. "
-    "The movement itself is not yours to write: say in one short sentence what "
-    "to go for next and what in the current view says so -- which object or "
-    "which direction is worth heading for, and what has to be kept away from. "
-    "Face what you are heading for before closing on it, and stay slow enough "
-    "that the third velocity component reported below stays at about 10 or less. "
+    "your health, and your health also drains as time passes."
 )
 
 
 class AnimalAITextActionPromptBuilder(PromptBuilder):
     """Animal-AI, for the regime where the VLM writes the action.
 
-    Framing text, this arena's own instruction, and the live scalars. The
-    scalars are read off the observation the agent already holds, so the
-    sentence states exactly the numbers the network's scalar branch is fed, and
-    the arena instruction is looked up from the episode's arena name rather than
-    handed over as text by the env.
+    Framing text and this arena's own instruction stand for the episode, and a
+    tick reports nothing beyond its frame and the letters of the move that led
+    to it. The arena instruction is looked up from the episode's arena name
+    rather than handed over as text by the env.
     """
 
     def __init__(self, env: Env) -> None:
         self.tasks = _load_arena_tasks(env)
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        velocity_x, velocity_y, velocity_z = obs["velocity"]
+    def episode_text(self, obs: dict[str, Any], info: dict) -> str:
+        del obs
         return (
             f"{ANIMALAI_TEXT_ACTION_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
-            f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
-            f"Return so far: {obs['episode_return'][0]:+.2f}. "
-            f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
-            f"Return needed: {obs['remaining_return'][0]:+.2f}. "
-            f"Health: {obs['health'][0]:.2f}. "
-            f"Global step: {int(obs['global_step'][0])}. "
-            f"Episode step: {int(obs['episode_step'][0])}."
+            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}."
         )
 
 
 class AnimalAIHighLevelPromptBuilder(PromptBuilder):
     """Animal-AI, for the regime where the policy head writes the action.
 
-    The same arena instruction and the same live scalars as the text-action
-    regime, framed as a decision about where to go rather than as an action to
-    spell out.
+    The same arena instruction as the text-action regime, framed as a decision
+    about where to go rather than as an action to spell out.
     """
 
     def __init__(self, env: Env) -> None:
         self.tasks = _load_arena_tasks(env)
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        velocity_x, velocity_y, velocity_z = obs["velocity"]
+    def episode_text(self, obs: dict[str, Any], info: dict) -> str:
+        del obs
         return (
             f"{ANIMALAI_HIGH_LEVEL_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
-            f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
-            f"Return so far: {obs['episode_return'][0]:+.2f}. "
-            f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
-            f"Return needed: {obs['remaining_return'][0]:+.2f}. "
-            f"Health: {obs['health'][0]:.2f}. "
-            f"Global step: {int(obs['global_step'][0])}. "
-            f"Episode step: {int(obs['episode_step'][0])}."
+            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}."
         )
 
 
@@ -203,53 +196,30 @@ CARLA_TEXT_ACTION_FRAMING = (
     "Drive a car along a route in CARLA. Follow the planned route, "
     "obey traffic rules, and avoid collisions."
 )
-# CARLA RoadOption (agents.navigation.local_planner.RoadOption) -> the upcoming
-# maneuver sentence, so navigation intent reaches the policy as language. The
-# env reports the raw command through ``info["maneuver_command"]``; VOID (-1) is
-# what it reports when there is no route to read a maneuver off.
-CARLA_TEXT_ACTION_MANEUVER = {
-    -1: "The ego vehicle is following the lane straight ahead.",  # VOID
-    1: "The ego vehicle is turning left at the upcoming intersection.",  # LEFT
-    2: "The ego vehicle is turning right at the upcoming intersection.",  # RIGHT
-    3: "The ego vehicle is going straight through the upcoming intersection.",  # STRAIGHT
-    4: "The ego vehicle is following the lane straight ahead.",  # LANEFOLLOW
-    5: "The ego vehicle is changing to the left lane.",  # CHANGELANELEFT
-    6: "The ego vehicle is changing to the right lane.",  # CHANGELANERIGHT
-}
 
 CARLA_HIGH_LEVEL_FRAMING = (
-    "Drive a car along a route in CARLA. Follow the planned route, "
+    "You are driving a car along a route in CARLA. Follow the planned route, "
     "obey traffic rules, and avoid collisions. "
-    "The steering, the throttle and the brake are not yours to write: say in "
-    "one short sentence what the next maneuver asks of the car right now -- "
-    "what has to be given way to, and whether the speed has to come down "
-    "before it."
+    "What matters is what the road ahead asks of the car right now, what has "
+    "to be given way to, and whether the speed has to come down before it. "
+    "The steering, the throttle and the brake are not yours to write."
 )
-CARLA_HIGH_LEVEL_MANEUVER = {
-    -1: "The ego vehicle is following the lane straight ahead.",  # VOID
-    1: "The ego vehicle is turning left at the upcoming intersection.",  # LEFT
-    2: "The ego vehicle is turning right at the upcoming intersection.",  # RIGHT
-    3: "The ego vehicle is going straight through the upcoming intersection.",  # STRAIGHT
-    4: "The ego vehicle is following the lane straight ahead.",  # LANEFOLLOW
-    5: "The ego vehicle is changing to the left lane.",  # CHANGELANELEFT
-    6: "The ego vehicle is changing to the right lane.",  # CHANGELANERIGHT
-}
 
 
 class CarlaTextActionPromptBuilder(PromptBuilder):
     """CARLA, for the regime where the VLM writes the action."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        del obs
-        return f"{CARLA_TEXT_ACTION_FRAMING} {CARLA_TEXT_ACTION_MANEUVER[info['maneuver_command']]}"
+    def episode_text(self, obs: dict[str, Any], info: dict) -> str:
+        del obs, info
+        return CARLA_TEXT_ACTION_FRAMING
 
 
 class CarlaHighLevelPromptBuilder(PromptBuilder):
     """CARLA, for the regime where the policy head writes the action."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        del obs
-        return f"{CARLA_HIGH_LEVEL_FRAMING} {CARLA_HIGH_LEVEL_MANEUVER[info['maneuver_command']]}"
+    def episode_text(self, obs: dict[str, Any], info: dict) -> str:
+        del obs, info
+        return CARLA_HIGH_LEVEL_FRAMING
 
 
 # One builder per (env_id, regime). "text_action" is the regime in which the VLM

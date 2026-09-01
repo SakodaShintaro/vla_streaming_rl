@@ -209,7 +209,7 @@ class AnimalPPOAgent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step, reward
-        prompt = self.prompt_builder(obs, info)
+        episode_text = self.prompt_builder.episode_text(obs, info)
         visual, vels = self._preprocess(obs, info)
         shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
@@ -234,7 +234,12 @@ class AnimalPPOAgent(Agent):
             self.buffer = RolloutBuffer()
             metrics.update(self._update(rollout))
 
-        return StepResult(action=action, metrics=metrics, panels={}, texts={"prompt": prompt})
+        return StepResult(
+            action=action,
+            metrics=metrics,
+            panels={},
+            texts={"episode_text": episode_text},
+        )
 
     @torch.no_grad()
     def select_action(
@@ -251,14 +256,14 @@ class AnimalPPOAgent(Agent):
         same boundary rule, and the action chosen on a terminal observation is
         dropped simply by never being buffered."""
         del global_step, reward
-        prompt = self.prompt_builder(obs, info)
+        episode_text = self.prompt_builder.episode_text(obs, info)
         visual, vels = self._preprocess(obs, info)
         fresh = self._episode_boundary(terminated, truncated)
         return StepResult(
             action=self._act(visual, vels, fresh),
             metrics={},
             panels={},
-            texts={"prompt": prompt},
+            texts={"episode_text": episode_text},
         )
 
     def _episode_boundary(self, terminated: bool, truncated: bool) -> float:
