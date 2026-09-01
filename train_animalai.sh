@@ -6,7 +6,6 @@ set -eux
 # Every variant is one agent config; nothing else differs between them:
 #   vlm_off_policy_bs16     : standard agent, VLM actor-critic, off-policy
 #   animal_ppo              : the Animal-AI Olympics winning recurrent PPO
-#   animal_world_critic_ppo : that PPO plus the WCM world-critic loss
 agent=${1}
 exp_name=${2}
 cd $(dirname $0)
