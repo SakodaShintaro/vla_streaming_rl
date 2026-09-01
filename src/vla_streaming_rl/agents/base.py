@@ -81,7 +81,7 @@ class Agent(ABC):
         """Act on this tick and learn from it, the way this learning mode learns."""
 
     @abstractmethod
-    def on_episode_end(self, score: float, feedback_text: str) -> dict: ...
+    def on_episode_end(self, score: float) -> dict: ...
 
     @abstractmethod
     def optimizer_state_dict(self) -> dict:

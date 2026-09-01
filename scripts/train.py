@@ -549,8 +549,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 f"Ep: {episode_id}\tStep: {global_step}\tLast score: {score:.2f}\tAverage score: {recent_average_score:.2f}\tLength: {env_info['episode']['l']:.2f}\tElapsed time: {elapsed_time_hour:.2f}h"
             )
 
-        feedback_text = input("Feedback: ") if args.use_feedback else ""
-        episode_end_info = agent.on_episode_end(score, feedback_text)
+        episode_end_info = agent.on_episode_end(score)
         wandb.log(episode_end_info)
 
         arena_name = env_info["arena_name"] if "arena_name" in env_info else ""

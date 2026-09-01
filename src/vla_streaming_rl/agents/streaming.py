@@ -243,8 +243,8 @@ class StreamingAgent(Agent):
             texts={"prompt": prompt, **self.network.render_texts()},
         )
 
-    def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        del score, feedback_text
+    def on_episode_end(self, score: float) -> dict:
+        del score
         return {}
 
     def optimizer_state_dict(self) -> dict:

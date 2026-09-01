@@ -211,8 +211,8 @@ class ZeroShotVLMAgent(Agent):
     ) -> StepResult:
         return self.select_action(global_step, obs, reward, terminated, truncated, info)
 
-    def on_episode_end(self, score: float, feedback_text: str) -> dict:
-        del score, feedback_text
+    def on_episode_end(self, score: float) -> dict:
+        del score
         if self.reset_on_episode_end:
             self.history.clear()
             self.last_action = np.zeros(self.action_dim, dtype=np.float32)
