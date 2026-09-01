@@ -1,10 +1,12 @@
 #!/bin/bash
 set -eux
 
-suffix=${1:-""}
+# Usage: ./train_car_racing.sh <agent> <exp_name>
+agent=${1}
+exp_name=${2}
 cd $(dirname $0)
 
 uv run python scripts/train.py \
-  agent=cot_off_policy \
+  agent=${agent} \
   env=car_racing \
-  exp_name=${suffix}
+  exp_name=${exp_name}
