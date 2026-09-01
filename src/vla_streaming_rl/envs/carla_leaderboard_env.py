@@ -26,22 +26,10 @@ from vla_streaming_rl.envs.vehicle_graph import overlay_vehicle_graphs
 
 DT = 0.05  # [s] (20 FPS)
 
-BASE_PROMPT = (
-    "Drive a car along a route in CARLA. Follow the planned route, "
-    "obey traffic rules, and avoid collisions."
-)
-# CARLA RoadOption (agents.navigation.local_planner.RoadOption) -> the upcoming
-# maneuver sentence appended to the task prompt, so navigation intent is delivered
-# to VLA agents via the existing obs["language"] channel (and shown on-screen).
-COMMAND_TO_MANEUVER = {
-    -1: "The ego vehicle is following the lane straight ahead.",  # VOID
-    1: "The ego vehicle is turning left at the upcoming intersection.",  # LEFT
-    2: "The ego vehicle is turning right at the upcoming intersection.",  # RIGHT
-    3: "The ego vehicle is going straight through the upcoming intersection.",  # STRAIGHT
-    4: "The ego vehicle is following the lane straight ahead.",  # LANEFOLLOW
-    5: "The ego vehicle is changing to the left lane.",  # CHANGELANELEFT
-    6: "The ego vehicle is changing to the right lane.",  # CHANGELANERIGHT
-}
+# CARLA RoadOption (agents.navigation.local_planner.RoadOption) reported when
+# there is no route to read a maneuver off. The agent turns the command into the
+# sentence the policy reads (see agents/prompt.py).
+_VOID_COMMAND = -1
 _MANEUVER_LOOKAHEAD_PTS = 10  # route points ahead to read the upcoming command from
 _SHAPED_REWARD_CLIP = 1.0
 
@@ -195,7 +183,6 @@ class CARLALeaderboardEnv(gym.Env):
                 parent directory (Bench2Drive's standard layout).
         """
         super().__init__()
-        self.prompt = BASE_PROMPT
 
         # If a Bench2Drive route XML is given, the env runs the eval-equivalent
         # RouteScenario (ego spawn, BackgroundActivity NPC traffic, scripted
@@ -557,7 +544,7 @@ class CARLALeaderboardEnv(gym.Env):
             )
         return observation, self._build_scenario_info(
             {
-                "task_prompt": self._navigation_prompt(),
+                "maneuver_command": self._maneuver_command(),
                 "shaped_reward": 0.0,
                 **self._step_count_info(),
             }
@@ -568,25 +555,23 @@ class CARLALeaderboardEnv(gym.Env):
     # summary; ``None`` when no eval writer is attached.
     final_eval_summary: dict[str, float] | None = None
 
-    def _navigation_prompt(self) -> str:
-        """Task prompt augmented with the upcoming route maneuver.
+    def _maneuver_command(self) -> int:
+        """The upcoming route maneuver, as CARLA's own RoadOption value.
 
-        The maneuver command lives on the Bench2Drive route (``route_scenario.route``
-        as ``(transform, RoadOption)`` pairs); the route tracker's completion fraction
+        The command lives on the Bench2Drive route (``route_scenario.route`` as
+        ``(transform, RoadOption)`` pairs); the route tracker's completion fraction
         indexes the current position, and a small look-ahead surfaces the next turn.
-        Delivered via ``info["task_prompt"]`` (-> obs["language"]) so VLA agents receive
-        navigation intent through the standard prompt channel."""
+        Published as ``info["maneuver_command"]``: the env states the navigation
+        intent, the agent decides how to word it."""
         if self.runtime is None or self.runtime.route_scenario is None:
-            return self.prompt
+            return _VOID_COMMAND
         route = self.runtime.route_scenario.route
         if not route:
-            return self.prompt
+            return _VOID_COMMAND
         idx = int(self.route_tracker.route_completion * (len(route) - 1))
         look = min(idx + _MANEUVER_LOOKAHEAD_PTS, len(route) - 1)
         cmd = route[look][1]
-        command = int(cmd.value) if hasattr(cmd, "value") else int(cmd)
-        maneuver = COMMAND_TO_MANEUVER.get(command, COMMAND_TO_MANEUVER[4])
-        return f"{self.prompt} {maneuver}"
+        return int(cmd.value) if hasattr(cmd, "value") else int(cmd)
 
     def _build_scenario_info(self, base: dict[str, any]) -> dict[str, any]:
         """Merge bench2drive scenario metadata into an info dict.
@@ -727,7 +712,7 @@ class CARLALeaderboardEnv(gym.Env):
 
         info = self._build_scenario_info(
             {
-                "task_prompt": self._navigation_prompt(),
+                "maneuver_command": self._maneuver_command(),
                 "shaped_reward": shaped_reward,
                 **self._step_count_info(),
                 "route_completion": self.route_tracker.route_completion,

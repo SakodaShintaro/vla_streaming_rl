@@ -7,9 +7,6 @@ import gymnasium as gym
 import hydra
 import numpy as np
 
-CAR_RACING_PROMPT = "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible."
-
-
 CAR_RACING_ACTION_SPEC = "steer=<value>, accel=<value> where each <value> is a float in [-1, 1]"
 
 
@@ -37,26 +34,6 @@ ANIMALAI_ACTION_CHOICES = [
     move + rotation for move in _ANIMALAI_MOVE for rotation in _ANIMALAI_ROTATE
 ]
 
-ANIMALAI_PROMPT = (
-    "You control an animal in a 3D arena, seen from its own point of view. "
-    "Touching a green sphere scores points and ends the episode, and a larger "
-    "sphere scores more. Touching a yellow sphere scores points and the episode "
-    "continues. Touching a red sphere loses points and ends the episode. "
-    "Entering a red zone ends the episode immediately. An orange zone drains "
-    "your health, and your health also drains as time passes. "
-    "What this arena asks of you follows as `Task:`. "
-    "Action space: two letters, a move and a rotation applied on the same tick. "
-    "The move is F (walk forward), B (walk backward) or N (stand still). "
-    "The rotation is R (turn right), L (turn left) or N (no turn). "
-    "So FN walks straight ahead, NL turns left on the spot, FR walks while "
-    "turning right, and NN does nothing. "
-    "Bring whatever you are heading for to the center of your view before you "
-    "walk forward: turn on the spot (NR or NL) until it is centered, and only "
-    "then move. "
-    "Keep your speed down -- the third velocity component reported below should "
-    "stay at about 10 or less, so stand still (NN) for a tick whenever it climbs "
-    "past that. "
-)
 ANIMALAI_ACTION_SPEC = (
     f"two letters -- one move out of {{{', '.join(_ANIMALAI_MOVE)}}} followed by one "
     f"rotation out of {{{', '.join(_ANIMALAI_ROTATE)}}}, with no other text"
@@ -181,8 +158,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = StepCountInfoWrapper(env)
         env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
-        env = PromptWrapper(env, CAR_RACING_PROMPT)
-        env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
         env.unwrapped.action_spec = CAR_RACING_ACTION_SPEC
@@ -200,15 +175,11 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = ZeroScalarObsWrapper(env)
         env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
-        env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 220
         return env
 
     elif env_id == "AnimalAI-v0":
         env = hydra.utils.instantiate(env_factory)
-        # The env composes its own task prompt (it appends live scalars), so the
-        # action encoding is injected by replacing the task text it starts from.
-        env.unwrapped.prompt = ANIMALAI_PROMPT
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)
@@ -218,7 +189,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
         env = RemainingReturnObsWrapper(env)
-        env = LanguageObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _animalai_parse_action
         env.unwrapped.action_spec = ANIMALAI_ACTION_SPEC
@@ -313,18 +283,6 @@ class DictObsWrapper(gym.ObservationWrapper):
 
     def observation(self, obs: np.ndarray) -> dict[str, np.ndarray]:
         return {"image": obs}
-
-
-class LanguageObsWrapper(gym.Wrapper):
-    def reset(self, **kwargs) -> tuple:
-        obs, info = self.env.reset(**kwargs)
-        obs["language"] = info.pop("task_prompt")
-        return obs, info
-
-    def step(self, action: np.ndarray) -> tuple:
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        obs["language"] = info.pop("task_prompt")
-        return obs, reward, terminated, truncated, info
 
 
 class VelocityObsWrapper(gym.Wrapper):
@@ -597,22 +555,4 @@ class ZeroObsOnDoneWrapper(gym.ObservationWrapper):
         if terminated or truncated:
             obs = {key: np.zeros_like(value) for key, value in obs.items()}
 
-        return obs, reward, terminated, truncated, info
-
-
-class PromptWrapper(gym.Wrapper):
-    """Inject a prompt string into info dict for gym environments that don't natively provide one."""
-
-    def __init__(self, env: gym.Env, prompt: str) -> None:
-        super().__init__(env)
-        self.prompt = prompt
-
-    def reset(self, **kwargs) -> tuple:
-        obs, info = self.env.reset(**kwargs)
-        info["task_prompt"] = self.prompt
-        return obs, info
-
-    def step(self, action: np.ndarray) -> tuple:
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        info["task_prompt"] = self.prompt
         return obs, reward, terminated, truncated, info

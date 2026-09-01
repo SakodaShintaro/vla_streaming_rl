@@ -375,8 +375,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         # initialize episode (seed only the first call so the gym RNG is
         # set once; subsequent resets keep advancing it).
         obs, reset_info = env.reset(seed=seed) if episode_id == 0 else env.reset()
-        if not args.use_prompt:
-            obs["language"] = ""
 
         # initial action
         result = agent.select_action(global_step, obs, 0.0, False, False, reset_info)
@@ -387,7 +385,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         obs_for_render = obs["image"].copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
         panels = {
-            "environment": overlay_caption(env.render(), f"{obs['language']}  reward: {0.0:+.3f}"),
+            "environment": overlay_caption(
+                env.render(), f"{result.texts['prompt']}  reward: {0.0:+.3f}"
+            ),
             "observation": obs_viz,
             **result.panels,
         }
@@ -408,8 +408,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             env_step_start = time.time()
             obs, reward, terminated, truncated, env_info = env.step(action)
             env_step_time_msec = (time.time() - env_step_start) * 1000
-            if not args.use_prompt:
-                obs["language"] = ""
 
             # save action, reward, and observation
             action_list.append(action.copy())
@@ -441,7 +439,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             obs_viz = _viz_resize(obs_for_render, args.render_scale)
             panels = {
                 "environment": overlay_caption(
-                    env.render(), f"{obs['language']}  reward: {reward:.3f}"
+                    env.render(), f"{result.texts['prompt']}  reward: {reward:.3f}"
                 ),
                 "observation": obs_viz,
                 **result.panels,

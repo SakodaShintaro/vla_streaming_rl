@@ -5,6 +5,8 @@ from typing import Any
 
 import numpy as np
 
+from vla_streaming_rl.agents.prompt import PromptBuilder
+
 
 @dataclass
 class StepResult:
@@ -26,7 +28,9 @@ class StepResult:
       frames are encoded into a single video, which requires a constant size.
     - ``texts``: named free-form text, written to the episode's ``texts.tsv``.
       What a panel shows as pixels this keeps as characters, so a chain of
-      thought can be read back and searched after the run.
+      thought can be read back and searched after the run. Every agent puts the
+      language input it composed this tick under ``"prompt"`` (empty when it
+      composes none), which is also what the trainer captions the render with.
     """
 
     action: np.ndarray
@@ -41,11 +45,17 @@ class Agent(ABC):
 
     The agent grid is orthogonal: the learning rule (off-policy / on-policy /
     streaming) is the class, which ``agent_type`` names, and the network it
-    optimizes is a constructor argument."""
+    optimizes is a constructor argument.
 
-    def __init__(self, horizon: int, reset_on_episode_end: bool) -> None:
+    ``prompt_builder`` is the third axis: the env publishes state, the agent
+    turns it into the language its policy reads."""
+
+    def __init__(
+        self, horizon: int, reset_on_episode_end: bool, prompt_builder: PromptBuilder
+    ) -> None:
         self.horizon = int(horizon)
         self.reset_on_episode_end = bool(reset_on_episode_end)
+        self.prompt_builder = prompt_builder
 
     @abstractmethod
     def select_action(

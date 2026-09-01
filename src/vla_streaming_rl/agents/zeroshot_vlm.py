@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
+from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.utils import overlay_caption
 
 # The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
@@ -101,8 +102,13 @@ class ZeroShotVLMAgent(Agent):
         seq_len: int,
         image_side: int,
         reset_on_episode_end: bool,
+        prompt_builder: PromptBuilder,
     ) -> None:
-        super().__init__(horizon=1, reset_on_episode_end=reset_on_episode_end)
+        super().__init__(
+            horizon=1,
+            reset_on_episode_end=reset_on_episode_end,
+            prompt_builder=prompt_builder,
+        )
         self.backend = backend
 
         self.action_space = action_space
@@ -129,7 +135,12 @@ class ZeroShotVLMAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step, terminated, truncated, info
+        del global_step, terminated, truncated
+
+        # The task half of the system prompt: composed here from the env's
+        # state, so the whole system turn -- task text and response protocol --
+        # is the agent's.
+        prompt = self.prompt_builder(obs, info)
 
         # The reward shown with a past turn is the one observed after it.
         if self.step_in_episode > 0 and self.history:
@@ -138,7 +149,7 @@ class ZeroShotVLMAgent(Agent):
 
         image = preprocess_image(obs["image"], self.image_side)
         messages = self._build_messages(
-            obs["language"],
+            prompt,
             image,
             current_reward=reward if self.step_in_episode > 0 else None,
         )
@@ -182,7 +193,12 @@ class ZeroShotVLMAgent(Agent):
             f"finish: {response.finish_reason}  ||  {response_text}"
         )
         panels = {"output": _text_panel(caption, _OUTPUT_PANEL_WIDTH)}
-        return StepResult(action=action, metrics=metrics, panels=panels, texts={})
+        return StepResult(
+            action=action,
+            metrics=metrics,
+            panels=panels,
+            texts={"prompt": prompt},
+        )
 
     def step(
         self,

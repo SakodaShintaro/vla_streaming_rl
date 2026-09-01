@@ -3,11 +3,23 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
+from vla_streaming_rl.agents.prompt import build_prompt_builder
+
 
 def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
+    # Every agent composes its own language input; the env only publishes state.
+    prompt_builder = build_prompt_builder(env, args)
+
     if args.agent_type == "zeroshot_vlm":
         from vla_streaming_rl.agents.vlm_backends import build_vlm_backend
         from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent
+
+        # This baseline only ever acts by writing the action out, so it is the
+        # one agent whose regime is fixed rather than configured.
+        assert args.text_action_mode == "text_action", (
+            f"zeroshot_vlm writes its action as text, so text_action_mode has to be "
+            f'"text_action", not {args.text_action_mode!r}'
+        )
 
         return ZeroShotVLMAgent(
             action_space=env.action_space,
@@ -17,6 +29,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             seq_len=args.seq_len,
             image_side=args.image_side,
             reset_on_episode_end=args.reset_on_episode_end,
+            prompt_builder=prompt_builder,
         )
 
     if args.agent_type == "animal_ppo":
@@ -42,6 +55,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             velocity_scale=list(args.velocity_scale),
             health_scale=args.health_scale,
             reset_on_episode_end=args.reset_on_episode_end,
+            prompt_builder=prompt_builder,
         )
 
     if args.agent_type == "streaming":
@@ -66,6 +80,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             max_prompt_tokens=args.max_prompt_tokens,
             pad_token_id=args.pad_token_id,
             reset_on_episode_end=args.reset_on_episode_end,
+            prompt_builder=prompt_builder,
         )
 
     assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
@@ -90,4 +105,5 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
         max_prompt_tokens=args.max_prompt_tokens,
         pad_token_id=args.pad_token_id,
         reset_on_episode_end=args.reset_on_episode_end,
+        prompt_builder=prompt_builder,
     )

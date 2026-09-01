@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
+from vla_streaming_rl.agents.prompt import PromptBuilder
 
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward /
 # back) and one rotation (noop / right / left). The flat Discrete(9) the network
@@ -154,8 +155,13 @@ class AnimalPPOAgent(Agent):
         velocity_scale: list[float],
         health_scale: float,
         reset_on_episode_end: bool,
+        prompt_builder: PromptBuilder,
     ) -> None:
-        super().__init__(horizon=horizon, reset_on_episode_end=reset_on_episode_end)
+        super().__init__(
+            horizon=horizon,
+            reset_on_episode_end=reset_on_episode_end,
+            prompt_builder=prompt_builder,
+        )
         assert steps_num % seq_len == 0, f"steps_num {steps_num} is not a multiple of {seq_len}"
         assert minibatch_size % seq_len == 0, (
             f"minibatch_size {minibatch_size} is not a multiple of seq_len {seq_len}"
@@ -203,6 +209,7 @@ class AnimalPPOAgent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step, reward
+        prompt = self.prompt_builder(obs, info)
         visual, vels = self._preprocess(obs, info)
         shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
@@ -227,7 +234,7 @@ class AnimalPPOAgent(Agent):
             self.buffer = RolloutBuffer()
             metrics.update(self._update(rollout))
 
-        return StepResult(action=action, metrics=metrics, panels={}, texts={})
+        return StepResult(action=action, metrics=metrics, panels={}, texts={"prompt": prompt})
 
     @torch.no_grad()
     def select_action(
@@ -244,9 +251,15 @@ class AnimalPPOAgent(Agent):
         same boundary rule, and the action chosen on a terminal observation is
         dropped simply by never being buffered."""
         del global_step, reward
+        prompt = self.prompt_builder(obs, info)
         visual, vels = self._preprocess(obs, info)
         fresh = self._episode_boundary(terminated, truncated)
-        return StepResult(action=self._act(visual, vels, fresh), metrics={}, panels={}, texts={})
+        return StepResult(
+            action=self._act(visual, vels, fresh),
+            metrics={},
+            panels={},
+            texts={"prompt": prompt},
+        )
 
     def _episode_boundary(self, terminated: bool, truncated: bool) -> float:
         """1 when this observation is the first of an episode, which is what

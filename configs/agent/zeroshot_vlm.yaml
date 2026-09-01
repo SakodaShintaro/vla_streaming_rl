@@ -7,6 +7,9 @@ defaults:
   - _self_
 
 agent_type: zeroshot_vlm
+# This baseline acts by writing the action out and decoding it with the env's
+# parse_action_text, so it runs the text-action prompt regime (agents/prompt.py).
+text_action_mode: text_action
 # Where generation runs:
 #   openrouter : a hosted model, one API call per env step (`openrouter_model_id`).
 #   local      : a Qwen3.5 checkpoint generating in this process on the GPU

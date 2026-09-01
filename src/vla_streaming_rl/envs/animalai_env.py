@@ -48,7 +48,6 @@ separates the held-out part of a Testbed score from the rest.
 return to the arena's pass mark, which Unity itself never does (see `step`).
 """
 
-import csv
 import hashlib
 import json
 import random
@@ -67,21 +66,6 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
 )
 
 COMPETITION_DIR = Path("./external/animal-ai/configs/competition")
-ARENA_PROMPT_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
-
-
-def _load_arena_prompts() -> dict[str, str]:
-    """The per-task instruction, keyed by the "XX-YY" prefix of an arena label.
-
-    One row per Olympics task, its columns being category (= level), scenario
-    (= task within that level), a description, and the instruction in Japanese
-    then English.
-    """
-    with ARENA_PROMPT_CSV.open(encoding="utf-8") as csv_file:
-        rows = list(csv.reader(csv_file))[1:]
-    prompts = {f"{int(row[0]):02d}-{int(row[1]):02d}": row[4] for row in rows}
-    assert len(prompts) == len(rows), f"{ARENA_PROMPT_CSV} repeats a category/scenario pair"
-    return prompts
 
 
 # Environment parameter the rebuilt binary reads to pick continuous over
@@ -810,13 +794,6 @@ class AnimalAIEnv(gym.Env):
         self.end_at_pass_mark = end_at_pass_mark
         self.selector = selector
         self._arena_by_name = {arena.name: arena for arena in selector.arenas}
-        # Framing text shared by every arena; the arena's own instruction comes
-        # from the prompt csv. `make_env` replaces this with the action encoding.
-        self.prompt = "You control the agent in Animal-AI (first-person view)."
-        self._arena_prompts = _load_arena_prompts()
-        assert all(
-            arena.name.rsplit("-", 1)[0] in self._arena_prompts for arena in selector.arenas
-        ), f"{ARENA_PROMPT_CSV} is missing a row for an arena of the selector"
 
         self.binary_path = str(Path(binary_path).expanduser())
         self.resolution = resolution
@@ -843,7 +820,6 @@ class AnimalAIEnv(gym.Env):
         self.global_step = 0
         self.episode_step = 0
         self.arena_name: str = ""
-        self.arena_prompt: str = ""
         self.pass_mark: float = 0.0
         self._arena: Arena | None = None
         self._arena_items: list[dict] = []
@@ -954,22 +930,6 @@ class AnimalAIEnv(gym.Env):
             [float(vec[1]), float(vec[2]), float(vec[3])], dtype=np.float32
         )
 
-    def _build_prompt(self) -> str:
-        """Task text plus the current scalar observations, so a language-conditioned
-        policy reads the same values the scalar observation vector carries."""
-        vx, vy, vz = self._agent_velocity
-        return (
-            f"{self.prompt} "
-            f"Task: {self.arena_prompt}. "
-            f"Velocity: ({vx:+.2f}, {vy:+.2f}, {vz:+.2f}). "
-            f"Return so far: {self._episode_return:+.2f}. "
-            f"Pass mark: {self.pass_mark:+.2f}. "
-            f"Return needed: {self.pass_mark - self._episode_return:+.2f}. "
-            f"Health: {self._agent_health:.2f}. "
-            f"Global step: {self.global_step}. "
-            f"Episode step: {self.episode_step}."
-        )
-
     def _shape_reward(self, reward: float, episode_done: bool) -> float:
         """Reaching a goal is worth more than the arena says, climbing is encouraged,
         walking backwards is discouraged, and an episode ends with a bonus for having
@@ -988,7 +948,6 @@ class AnimalAIEnv(gym.Env):
 
     def _build_info(self, shaped_reward: float) -> dict:
         info = {
-            "task_prompt": self._build_prompt(),
             "shaped_reward": shaped_reward,
             "arena_name": self.arena_name,
             "arena_yaml": str(self._arena.path),
@@ -1016,7 +975,6 @@ class AnimalAIEnv(gym.Env):
         )
 
         self.arena_name = self._arena.name
-        self.arena_prompt = self._arena_prompts[self.arena_name.rsplit("-", 1)[0]]
         self.pass_mark, self._arena_items = _parse_arena(self._arena.path)
         self._aai.reset(arenas_configurations=str(self._arena.path))
         self.episode_step = 0

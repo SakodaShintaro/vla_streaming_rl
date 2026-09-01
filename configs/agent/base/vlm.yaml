@@ -7,7 +7,7 @@ text_action_mode: none
 use_prompt: 1
 use_feedback: 0
 max_new_tokens: 64
-max_prompt_tokens: 256
+max_prompt_tokens: 512
 pad_token_id: 0
 text_q_margin: 1.0
 # How frames are fed into the VLM.
