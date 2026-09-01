@@ -11,11 +11,11 @@ opening on the scene from scratch.
 
 What leaves this module is not text but the activation feeding the VLM's lm_head
 at each generated position: the state the model was in when it chose that token,
-which carries far more than the token id does. ``all_layers`` widens that to
-every hidden state behind it -- the embedding and each layer's output -- leaving
-which depth to read to a weighting the network trains, at 25x the storage. Nothing here trains and nothing
-here is differentiable, so downstream the chain is an ordinary observation
-stream, stored in the replay buffer next to the image.
+which carries far more than the token id does. Every hidden state behind it is
+kept -- the embedding and each layer's output -- leaving which depth to read to
+a weighting the network trains. Nothing here trains and nothing here is
+differentiable, so downstream the chain is an ordinary observation stream,
+stored in the replay buffer next to the image.
 
 Not an ``nn.Module`` on purpose: registering it would put a frozen 0.8B model
 into the network's ``parameters()`` and its ``state_dict()``.
@@ -78,7 +78,6 @@ class CoTStream:
         tokens_per_step: int,
         max_len: int,
         temperature: float,
-        all_layers: bool,
         carry_prev: bool,
         use_cuda_graph: bool,
         device: torch.device,
@@ -97,9 +96,8 @@ class CoTStream:
         self.device = device
         text_config = self.model.config.text_config
         self.hidden_size = text_config.hidden_size
-        self.all_layers = all_layers
-        # The embedding plus every layer's output, or only the last one.
-        self.layers_num = text_config.num_hidden_layers + 1 if all_layers else 1
+        # The embedding plus every layer's output.
+        self.layers_num = text_config.num_hidden_layers + 1
         self.eos_token_id = self.processor.tokenizer.eos_token_id
         # One cache for the whole run. A new chain resets it in place rather than
         # replacing it, so its buffers keep the addresses a graph records.
@@ -267,10 +265,8 @@ class CoTStream:
         self._consume(self._depths(hidden_states), logits[0, -1])
 
     def _depths(self, hidden_states) -> torch.Tensor:
-        """This position's activations at the depths the stream keeps:
+        """This position's activation at every depth behind it:
         (layers_num, hidden_size)."""
-        if not self.all_layers:
-            return hidden_states[-1][0, -1].unsqueeze(0)
         return torch.stack([state[0, -1] for state in hidden_states])
 
     def _consume(self, hidden: torch.Tensor, logits: torch.Tensor) -> None:
