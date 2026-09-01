@@ -62,7 +62,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_model_id: str,
         cot_tokens_num: int,
         cot_temperature: float,
-        cot_all_layers: bool,
         cot_window_steps: int,
         cot_pool: str,
         cot_cuda_graph: bool,
@@ -99,8 +98,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         # VLM to load, so the width comes from the config, not a loaded model.
         text_config = AutoConfig.from_pretrained(cot_model_id).text_config
         cot_dim = text_config.hidden_size
-        # The embedding plus every layer's output, or only the last one.
-        cot_layers = text_config.num_hidden_layers + 1 if cot_all_layers else 1
+        # The embedding plus every layer's output.
+        cot_layers = text_config.num_hidden_layers + 1
         self.cot_shape = (cot_tokens_num, cot_layers, cot_dim)
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
         self.cot_stream = None
@@ -110,7 +109,6 @@ class ActorCriticWithActionValue(NetworkInterface):
                 observation_shape=observation_space_shape,
                 tokens_per_step=cot_tokens_num,
                 temperature=cot_temperature,
-                all_layers=cot_all_layers,
                 window_steps=cot_window_steps,
                 use_cuda_graph=cot_cuda_graph,
                 device=torch.device("cuda"),

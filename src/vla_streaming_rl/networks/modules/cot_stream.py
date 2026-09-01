@@ -52,11 +52,11 @@ handed the episode's text and writes under it.
 
 What leaves this module is not text but the activation feeding the VLM's lm_head
 at each generated position: the state the model was in when it chose that token,
-which carries far more than the token id does. ``all_layers`` widens that to
-every hidden state behind it -- the embedding and each layer's output -- leaving
-which depth to read to a weighting the network trains, at 25x the storage.
-Nothing here trains and nothing here is differentiable, so downstream the chain
-is an ordinary observation stream, stored in the replay buffer next to the image.
+which carries far more than the token id does. Every hidden state behind it is
+kept -- the embedding and each layer's output -- leaving which depth to read to
+a weighting the network trains. Nothing here trains and nothing here is
+differentiable, so downstream the chain is an ordinary observation stream,
+stored in the replay buffer next to the image.
 
 Not an ``nn.Module`` on purpose: registering it would put a frozen 0.8B model
 into the network's ``parameters()`` and its ``state_dict()``.
@@ -165,7 +165,6 @@ class CoTStream:
         observation_shape: Sequence[int],
         tokens_per_step: int,
         temperature: float,
-        all_layers: bool,
         window_steps: int,
         use_cuda_graph: bool,
         device: torch.device,
@@ -184,9 +183,8 @@ class CoTStream:
         config = self.model.config
         text_config = config.text_config
         self.hidden_size = text_config.hidden_size
-        self.all_layers = all_layers
-        # The embedding plus every layer's output, or only the last one.
-        self.layers_num = text_config.num_hidden_layers + 1 if all_layers else 1
+        # The embedding plus every layer's output.
+        self.layers_num = text_config.num_hidden_layers + 1
         self.max_position = text_config.max_position_embeddings
 
         # What the chain may not choose. It writes one unbroken line of prose,
@@ -273,7 +271,40 @@ class CoTStream:
         self._graph = None
         self.reset()
         if use_cuda_graph:
-            self._capture_decode()
+            # Record one decode step, so the steady state replays as a single
+            # call instead of the ~2500 kernel launches issuing it costs.
+            # Recording runs the step, which writes the cache and advances the
+            # linear-attention state, so it happens on a throwaway document over
+            # a blank frame; the reset at the end leaves the real one to start
+            # clean.
+            #
+            # ``no_grad`` rather than ``inference_mode``: this is where the
+            # cache allocates, and a tensor born in inference mode cannot be
+            # written from outside it, which is what recording then does.
+            with torch.no_grad():
+                self._prefill_prefix("")
+                self._write_record(torch.zeros(self.observation_shape, device=self.device))
+                self._write_commentary()
+                self._write_step_inputs(self._next_token)
+
+                # Capture must follow a few runs on a side stream, which is also
+                # what settles the workspaces the kernels allocate on first use.
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        self._forward_step()
+                torch.cuda.current_stream().wait_stream(stream)
+
+                self._graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(self._graph):
+                    outputs = self._forward_step()
+                # Every hidden state the recorded step writes is kept, so a
+                # replay can read whichever depths are wanted; they live in the
+                # graph's own pool.
+                self._graph_hidden = outputs.hidden_states
+                self._graph_logits = outputs.logits
+                self.reset()
 
     @torch.inference_mode()
     def reset(self) -> None:
@@ -463,7 +494,7 @@ class CoTStream:
         )
         self._slots += length
         self._position += length
-        self._consume(self._depths(outputs.hidden_states), outputs.logits[0, -1])
+        self._consume(outputs.hidden_states, outputs.logits[0, -1])
 
     def _mark_record(self) -> None:
         """Take the document's end as the record's end: the point a step rolls
@@ -516,42 +547,6 @@ class CoTStream:
 
     # --- decoding -----------------------------------------------------------
 
-    @torch.no_grad()
-    def _capture_decode(self) -> None:
-        """Record one decode step, so the steady state replays as a single call
-        instead of the ~2500 kernel launches issuing it costs.
-
-        Recording runs the step, which writes the cache and advances the
-        linear-attention state, so it happens on a throwaway document over a
-        blank frame; the reset at the end leaves the real one to start clean.
-
-        ``no_grad`` rather than ``inference_mode``: this is where the cache
-        allocates, and a tensor born in inference mode cannot be written from
-        outside it, which is what recording then does.
-        """
-        self._prefill_prefix("")
-        self._write_record(torch.zeros(self.observation_shape, device=self.device))
-        self._write_commentary()
-        self._write_step_inputs(self._next_token)
-
-        # Capture must follow a few runs on a side stream, which is also what
-        # settles the workspaces the kernels allocate on first use.
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            for _ in range(3):
-                self._forward_step()
-        torch.cuda.current_stream().wait_stream(stream)
-
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph):
-            outputs = self._forward_step()
-        # Every hidden state the recorded step writes is kept, so a replay can
-        # read whichever depths are wanted; they live in the graph's own pool.
-        self._graph_hidden = outputs.hidden_states
-        self._graph_logits = outputs.logits
-        self.reset()
-
     def _write_step_inputs(self, token_id: int) -> None:
         """Fill the buffers the step reads.
 
@@ -583,14 +578,7 @@ class CoTStream:
             hidden_states, logits = self._graph_hidden, self._graph_logits
         self._slots += 1
         self._position += 1
-        self._consume(self._depths(hidden_states), logits[0, -1])
-
-    def _depths(self, hidden_states) -> torch.Tensor:
-        """This position's activations at the depths the stream keeps:
-        (layers_num, hidden_size)."""
-        if not self.all_layers:
-            return hidden_states[-1][0, -1].unsqueeze(0)
-        return torch.stack([state[0, -1] for state in hidden_states])
+        self._consume(hidden_states, logits[0, -1])
 
     def _repeats(self) -> list[int]:
         """The tokens that would say a run of ``REPEAT_BLOCK`` this answer
@@ -603,12 +591,15 @@ class CoTStream:
             if self._answer[index : index + len(tail)] == tail
         ]
 
-    def _consume(self, hidden: torch.Tensor, logits: torch.Tensor) -> None:
-        """Take the position's lm_head input and sample the token it implies."""
-        # Copied, not referenced: after a replay this is the graph's own output
-        # buffer, which the next replay overwrites while the step's earlier
-        # activations are still being collected.
-        self._hidden = hidden.to(torch.bfloat16).clone()
+    def _consume(self, hidden_states, logits: torch.Tensor) -> None:
+        """Keep the position's activation at every depth behind it --
+        (layers_num, hidden_size) -- and sample the token it implies.
+
+        Stacked into a tensor of this module's own: after a replay these are the
+        graph's own output buffers, which the next replay overwrites while the
+        step's earlier activations are still being collected.
+        """
+        self._hidden = torch.stack([state[0, -1] for state in hidden_states]).to(torch.bfloat16)
         # ``float`` copies, so masking never writes into a replay's own logits
         # buffer.
         logits = logits.float()

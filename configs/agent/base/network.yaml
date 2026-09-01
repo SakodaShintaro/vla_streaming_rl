@@ -58,12 +58,6 @@ cot_model_id: Qwen/Qwen3.5-0.8B
 # chain-carrying run is measured against. The cot_* agent configs turn it on.
 cot_tokens_num: 0
 cot_temperature: 0.7
-# Keep every hidden state behind each chain token (the embedding plus each of
-# the 24 layers) and let a learned softmax pick which depth to read, the way the
-# VLM network weights its own. Costs 25x the replay buffer -- 3.8 GB at
-# cot_tokens_num=4 and buffer_size=20000 -- so it wants buffer_device: cpu. The
-# per-step transfer back is ~3 ms, about 1.5% of a training step.
-cot_all_layers: true
 # How many recent steps the context keeps, over an episode prompt that is never
 # evicted -- the sliding window with attention sinks of arXiv:2608.28444, whose
 # cost is flat in episode length instead of quadratic. A step costs ~130 tokens,

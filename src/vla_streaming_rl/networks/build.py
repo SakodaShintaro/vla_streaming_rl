@@ -169,7 +169,6 @@ def build_network(
             cot_model_id=args.cot_model_id,
             cot_tokens_num=args.cot_tokens_num,
             cot_temperature=args.cot_temperature,
-            cot_all_layers=args.cot_all_layers,
             cot_window_steps=args.cot_window_steps,
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
