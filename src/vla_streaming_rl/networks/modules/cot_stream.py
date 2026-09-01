@@ -24,7 +24,6 @@ into the network's ``parameters()`` and its ``state_dict()``.
 import re
 
 import torch
-from torchvision.transforms.functional import to_pil_image
 from transformers import StaticCache
 
 from .vlm_backbone import load_model
@@ -173,8 +172,12 @@ class CoTStream:
             add_generation_prompt=True,
             enable_thinking=False,
         )
-        picture = to_pil_image(image.detach().float().clamp(0.0, 1.0).cpu())
-        inputs = self.processor(text=[text], images=[picture], return_tensors="pt").to(self.device)
+        inputs = self.processor(
+            text=[text],
+            images=[image.detach().float().clamp(0.0, 1.0)],
+            return_tensors="pt",
+            do_rescale=False,
+        ).to(self.device)
         prompt_len = inputs["input_ids"].shape[1]
         assert prompt_len + self.max_len <= self._cache_len, (
             f"prompt of {prompt_len} tokens plus a {self.max_len}-token chain exceeds the "
