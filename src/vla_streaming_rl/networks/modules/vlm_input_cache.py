@@ -40,10 +40,10 @@ class VLMInputCache:
         device: torch.device,
         image_mode: str,
     ) -> None:
-        if len(observation_shape) != 3:
-            raise ValueError(f"observation_shape must be (C, H, W); got {tuple(observation_shape)}")
-        if image_mode not in ("mem", "sequence"):
-            raise ValueError(f"Unknown image_mode: {image_mode}")
+        assert len(observation_shape) == 3, (
+            f"observation_shape must be (C, H, W); got {tuple(observation_shape)}"
+        )
+        assert image_mode in ("mem", "sequence"), f"Unknown image_mode: {image_mode}"
         self.tokenizer = processor.tokenizer
         self.image_processor = processor.image_processor
         self.image_token = processor.image_token  # e.g. '<|image_pad|>'
@@ -62,13 +62,12 @@ class VLMInputCache:
         C, H, W = self.observation_shape
         dummy_tensor = torch.zeros(C, H, W, dtype=torch.float32)
         img_ref = self.image_processor(images=[dummy_tensor], return_tensors="pt", do_rescale=False)
-        single_grid = img_ref["image_grid_thw"].to(device)  # (1, 3)
-        self.cached_single_grid = single_grid
-        self.cached_all_image_grid_thw = single_grid.repeat(seq_len, 1)
-        # Prompt-image grid: 1 row for mem, T rows for sequence (per batch element).
-        self.cached_prompt_image_grid_thw = single_grid.repeat(self.num_prompt_images, 1)
+        # Every frame of a run has the same dimensions, so every row of every
+        # ``image_grid_thw`` is this one row; the counts differ, and expanding
+        # to a count costs nothing.
+        self.cached_single_grid = img_ref["image_grid_thw"].to(device)  # (1, 3)
         merge_length = self.image_processor.merge_size**2
-        self.num_image_tokens = int(single_grid[0].prod().item() // merge_length)
+        self.num_image_tokens = int(self.cached_single_grid[0].prod().item() // merge_length)
 
         # --- Chat template cache: render the template once with a sentinel
         #     in place of the prompt and the image placeholder pre-expanded
@@ -80,12 +79,13 @@ class VLMInputCache:
         # mem: 1 image in the prompt; sequence: T images, fed in temporal order.
         for _ in range(self.num_prompt_images):
             content.append({"type": "image", "image": dummy_pil})
-        messages = [[{"role": "user", "content": content}]]
+        # One conversation rather than a batch of one: the template returns a
+        # string for the first and a list for the second, and the string is
+        # what is wanted here.
+        messages = [{"role": "user", "content": content}]
         templated = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        if isinstance(templated, list):
-            templated = templated[0]
         # Pre-expand each image placeholder in-place. ``str.replace`` (no count)
         # does not recurse on substitutions, so each <image_pad> token becomes
         # exactly ``num_image_tokens`` copies regardless of how many images
@@ -101,13 +101,10 @@ class VLMInputCache:
             images: (B, T, C, H, W) float tensor in [0, 1].
             task_prompts: list of length B; one prompt per batch element.
         """
-        if images.ndim != 5:
-            raise ValueError(f"expected (B, T, C, H, W); got {tuple(images.shape)}")
+        assert images.ndim == 5, f"expected (B, T, C, H, W); got {tuple(images.shape)}"
         B, T = images.shape[:2]
-        if T != self.seq_len:
-            raise ValueError(f"T mismatch: cache expects seq_len={self.seq_len}, got T={T}")
-        if len(task_prompts) != B:
-            raise ValueError(f"task_prompts length {len(task_prompts)} != batch size {B}")
+        assert T == self.seq_len, f"T mismatch: cache expects seq_len={self.seq_len}, got T={T}"
+        assert len(task_prompts) == B, f"task_prompts length {len(task_prompts)} != batch size {B}"
 
         device = images.device
 
@@ -124,17 +121,10 @@ class VLMInputCache:
             do_rescale=False,
         )
         all_pixel_values = img_out["pixel_values"].to(device).to(torch.bfloat16)
-        if B == 1:
-            all_image_grid_thw = self.cached_all_image_grid_thw
-        else:
-            all_image_grid_thw = self.cached_single_grid.expand(B * T, -1)
-
-        # image_grid_thw lists every image actually present in the LLM prompt:
-        # 1 per batch element for mem, T per batch element for sequence.
-        if self.num_prompt_images == 1:
-            prompt_image_grid_thw = self.cached_single_grid.expand(B, -1)
-        else:
-            prompt_image_grid_thw = self.cached_prompt_image_grid_thw.repeat(B, 1)
+        # One row per frame the vision tower is given, and one per image the LLM
+        # prompt actually holds: 1 per batch element for mem, T for sequence.
+        all_image_grid_thw = self.cached_single_grid.expand(B * T, -1)
+        prompt_image_grid_thw = self.cached_single_grid.expand(B * self.num_prompt_images, -1)
 
         input_ids = text_inputs["input_ids"].to(device)
         return {
