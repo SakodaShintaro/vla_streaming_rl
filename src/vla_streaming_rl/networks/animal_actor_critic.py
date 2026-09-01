@@ -85,8 +85,7 @@ class AnimalEncoder(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Every step of the window rather than only its last: the recurrent
         output ``(B, T, TEMPORAL_UNITS)``, the per-step visual latent
-        ``(B, T, HIDDEN_NODES)`` a world-critic head predicts -- see
-        ``networks/animal_world_critic_actor_critic.py`` -- and the state."""
+        ``(B, T, HIDDEN_NODES)``, and the state."""
         batch_size, steps_num = images.shape[:2]
         flat_num = batch_size * steps_num
         visual = images.reshape(flat_num, *images.shape[2:])
@@ -307,8 +306,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         self, data: ReplayBufferData
     ) -> tuple[torch.Tensor, torch.Tensor, dict]:
         """The state the actor and critic read, plus whatever auxiliary loss the
-        network trains on that same window -- none here, and the world-critic
-        terms in ``networks/animal_world_critic_actor_critic.py``."""
+        network trains on that same window -- none here."""
         curr_state, _ = self.encoder(*self._window(data, 0, -self.horizon))
         return curr_state, torch.zeros((), device=curr_state.device), {}
 
