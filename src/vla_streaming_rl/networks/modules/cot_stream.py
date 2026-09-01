@@ -113,7 +113,38 @@ class CoTStream:
         self._graph = None
         self.reset()
         if use_cuda_graph:
-            self._capture_decode()
+            # Record one decode step, so the steady state replays as a single
+            # call instead of the ~2500 kernel launches issuing it costs.
+            # Recording runs the step, which writes the cache and advances the
+            # linear-attention state, so it happens on a throwaway chain over a
+            # blank frame; the reset at the end leaves the real chain to start
+            # clean.
+            #
+            # ``no_grad`` rather than ``inference_mode``: this is where the
+            # cache allocates, and a tensor born in inference mode cannot be
+            # written from outside it, which is what recording then does.
+            with torch.no_grad():
+                self._prefill(torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE), "")
+                self._write_step_inputs(self._position)
+
+                # Capture must follow a few runs on a side stream, which is also
+                # what settles the workspaces the kernels allocate on first use.
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        self._forward_step()
+                torch.cuda.current_stream().wait_stream(stream)
+
+                self._graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(self._graph):
+                    outputs = self._forward_step()
+                # Every hidden state the recorded step writes is kept, so a
+                # replay can read whichever depths are wanted; they live in the
+                # graph's own pool.
+                self._graph_hidden = outputs.hidden_states
+                self._graph_logits = outputs.logits
+                self.reset()
 
     def reset(self) -> None:
         """Drop the chain. The next advance prefills from the frame it is given."""
@@ -147,16 +178,17 @@ class CoTStream:
             if self._needs_prefill:
                 self._prefill(image, task_prompt)
             activations.append(self._hidden)
-            self._decode()
+            position = self._position
+            self._write_step_inputs(position)
+            if self._graph is None:
+                outputs = self._forward_step()
+                hidden_states, logits = outputs.hidden_states, outputs.logits
+            else:
+                self._graph.replay()
+                hidden_states, logits = self._graph_hidden, self._graph_logits
+            self._position = position + 1
+            self._consume(hidden_states, logits[0, -1])
         return torch.stack(activations)
-
-    def _tail(self, text: str) -> str:
-        """The last ``CARRY_SENTENCES`` sentences of a finished chain, which is
-        what gets quoted back. A chain cut at ``max_len`` ends mid-sentence, so
-        the final piece is usually a fragment, and continuing a fragment is
-        exactly the behavior wanted."""
-        pieces = [piece for piece in re.split(r"(?<=[.!?])\s+", text) if piece]
-        return " ".join(pieces[-self.CARRY_SENTENCES :])
 
     def _prefill(self, image: torch.Tensor, task_prompt: str) -> None:
         carried = self.CARRY.format(previous=self._prev_text) if self._prev_text else ""
@@ -193,40 +225,6 @@ class CoTStream:
         self._position = prompt_len
         self._consume(outputs.hidden_states, outputs.logits[0, -1])
 
-    @torch.no_grad()
-    def _capture_decode(self) -> None:
-        """Record one decode step, so the steady state replays as a single call
-        instead of the ~2500 kernel launches issuing it costs.
-
-        Recording runs the step, which writes the cache and advances the
-        linear-attention state, so it happens on a throwaway chain over a blank
-        frame; the reset at the end leaves the real chain to start clean.
-
-        ``no_grad`` rather than ``inference_mode``: this is where the cache
-        allocates, and a tensor born in inference mode cannot be written from
-        outside it, which is what recording then does.
-        """
-        self._prefill(torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE), "")
-        self._write_step_inputs(self._position)
-
-        # Capture must follow a few runs on a side stream, which is also what
-        # settles the workspaces the kernels allocate on first use.
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            for _ in range(3):
-                self._forward_step()
-        torch.cuda.current_stream().wait_stream(stream)
-
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph):
-            outputs = self._forward_step()
-        # Every hidden state the recorded step writes is kept, so a replay can
-        # read whichever depths are wanted; they live in the graph's own pool.
-        self._graph_hidden = outputs.hidden_states
-        self._graph_logits = outputs.logits
-        self.reset()
-
     def _write_step_inputs(self, position: int) -> None:
         """Fill the buffers the step reads.
 
@@ -252,18 +250,6 @@ class CoTStream:
             position_ids=self._graph_position_ids,
         )
 
-    def _decode(self) -> None:
-        position = self._position
-        self._write_step_inputs(position)
-        if self._graph is None:
-            outputs = self._forward_step()
-            hidden_states, logits = outputs.hidden_states, outputs.logits
-        else:
-            self._graph.replay()
-            hidden_states, logits = self._graph_hidden, self._graph_logits
-        self._position = position + 1
-        self._consume(hidden_states, logits[0, -1])
-
     def _consume(self, hidden_states, logits: torch.Tensor) -> None:
         """Keep the position's activation at every depth behind it --
         (layers_num, hidden_size) -- sample the token it implies, and decide
@@ -279,7 +265,11 @@ class CoTStream:
         self._tokens.append(self._next_token.item())
         ended = self._tokens[-1] == self.eos_token_id or len(self._tokens) >= self.max_len
         if ended:
-            self._prev_text = self._tail(self.text()) if self.carry_prev else ""
+            # The last ``CARRY_SENTENCES`` sentences are what gets quoted back.
+            # A chain cut at ``max_len`` ends mid-sentence, so the final piece is
+            # usually a fragment, and continuing a fragment is what is wanted.
+            pieces = [piece for piece in re.split(r"(?<=[.!?])\s+", self.text()) if piece]
+            self._prev_text = " ".join(pieces[-self.CARRY_SENTENCES :]) if self.carry_prev else ""
             self._needs_prefill = True
 
     def text(self) -> str:
