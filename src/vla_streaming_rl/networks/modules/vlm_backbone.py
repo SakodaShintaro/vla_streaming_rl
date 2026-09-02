@@ -1,4 +1,14 @@
 # SPDX-License-Identifier: MIT
+# Both lines work around transformers not finding FLA's gated delta rule kernels
+# (huggingface/transformers#48148), which silently leaves 18 of the model's 24
+# layers on the torch fallback. The resolver only walks attributes reachable
+# from the package root, so importing the submodule is what makes the chained
+# path resolve; the alias covers the name FLA 0.5.0 exports it under. Both must
+# run before `modeling_qwen3_5` is imported, which is when its decorators bind.
+import fla.ops.gated_delta_rule as _gated_delta_rule
+
+_gated_delta_rule.recurrent_gated_delta_rule = _gated_delta_rule.fused_recurrent_gated_delta_rule
+
 import torch
 from peft import LoraConfig, get_peft_model
 from torch import nn
