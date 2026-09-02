@@ -18,5 +18,5 @@ singularity exec --nv \
     export DISPLAY=:1
     cd ${HOME}/work/vla_streaming_rl
     uv sync
-    ./${script} ${exp_name}
+    ./${script} ${agent_id} ${exp_name}
   "
