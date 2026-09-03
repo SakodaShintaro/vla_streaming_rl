@@ -138,8 +138,8 @@ ANIMALAI_HIGH_LEVEL_FRAMING = (
     "The movement itself is not yours to write: say in one short sentence what "
     "to go for next and what in the current view says so -- which object or "
     "which direction is worth heading for, and what has to be kept away from. "
-    "Face what you are heading for before closing on it, and stay slow enough "
-    "that the third velocity component reported below stays at about 10 or less. "
+    "Face what you are heading for before closing on it, and keep your speed "
+    "down while you close on it. "
 )
 
 
@@ -174,26 +174,24 @@ class AnimalAITextActionPromptBuilder(PromptBuilder):
 class AnimalAIHighLevelPromptBuilder(PromptBuilder):
     """Animal-AI, for the regime where the policy head writes the action.
 
-    The same arena instruction and the same live scalars as the text-action
-    regime, framed as a decision about where to go rather than as an action to
-    spell out.
+    The same arena instruction as the text-action regime, framed as a decision
+    about where to go rather than as an action to spell out.
+
+    No live scalars. The chain of thought reads this text once, when the episode
+    prefills it, so a number put here would be frozen at its first-step value
+    while the render kept drawing the live one -- two different things under one
+    name. The scalars the policy needs reach it through the network's scalar
+    branch, which reads them from the observation every step.
     """
 
     def __init__(self, env: Env) -> None:
         self.tasks = _load_arena_tasks(env)
 
     def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        velocity_x, velocity_y, velocity_z = obs["velocity"]
+        del obs
         return (
             f"{ANIMALAI_HIGH_LEVEL_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
-            f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
-            f"Return so far: {obs['episode_return'][0]:+.2f}. "
-            f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
-            f"Return needed: {obs['remaining_return'][0]:+.2f}. "
-            f"Health: {obs['health'][0]:.2f}. "
-            f"Global step: {int(obs['global_step'][0])}. "
-            f"Episode step: {int(obs['episode_step'][0])}."
+            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}."
         )
 
 

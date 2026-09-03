@@ -123,9 +123,7 @@ def run_arena(
 
     if render:
         panels = {
-            "environment": overlay_caption(
-                env.render(), f"{result.texts['prompt']}  reward: {0.0:+.3f}"
-            ),
+            "environment": overlay_caption(env.render(), result.texts["prompt"]),
             "observation": obs["image"].copy().transpose(1, 2, 0),
             **result.panels,
         }
@@ -139,9 +137,7 @@ def run_arena(
 
         if render:
             panels = {
-                "environment": overlay_caption(
-                    env.render(), f"{result.texts['prompt']}  reward: {reward:.3f}"
-                ),
+                "environment": overlay_caption(env.render(), result.texts["prompt"]),
                 "observation": obs["image"].copy().transpose(1, 2, 0),
                 **result.panels,
             }

@@ -61,9 +61,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         image_encoder_trainable: bool,
         cot_model_id: str,
         cot_tokens_num: int,
-        cot_max_len: int,
         cot_temperature: float,
-        cot_carry_prev: bool,
         cot_pool: str,
         cot_cuda_graph: bool,
         layer_scale_init: float,
@@ -108,9 +106,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             self.cot_stream = CoTStream(
                 model_id=cot_model_id,
                 tokens_per_step=cot_tokens_num,
-                max_len=cot_max_len,
                 temperature=cot_temperature,
-                carry_prev=cot_carry_prev,
                 use_cuda_graph=cot_cuda_graph,
                 device=torch.device("cuda"),
             )
@@ -163,7 +159,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.disable_state_predictor = disable_state_predictor
 
     # Fixed so the render strip keeps one shape for the whole run; wide enough
-    # to read a chain of ``cot_max_len`` tokens.
+    # to read the tail of the chain the stream reports.
     COT_PANEL_WIDTH = 420
     COT_PANEL_HEIGHT = 300
 
@@ -198,7 +194,10 @@ class ActorCriticWithActionValue(NetworkInterface):
     def render_texts(self) -> dict[str, str]:
         if self.cot_stream is None:
             return {}
-        return {"chain_of_thought": self.cot_stream.text()}
+        return {
+            "cot_prompt": self.cot_stream.prompt_text(),
+            "chain_of_thought": self.cot_stream.text(),
+        }
 
     def _window(self, data: ReplayBufferData, start, stop) -> tuple:
         """The ``(image, action, reward, rnn_state, scalar_obs, cot)`` the encoder
