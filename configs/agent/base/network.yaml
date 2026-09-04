@@ -62,6 +62,17 @@ cot_temperature: 0.7
 # a restart continues the commentary instead of opening on the scene from
 # scratch. Off is the ablation: every chain sees only its own frame.
 cot_carry_prev: false
+# When the VLM runs, which is what decides how fresh the chain is and how
+# much of a control tick it costs.
+#   stream : one chain kept mid-thought, cot_tokens_num tokens issued per
+#            step, so every step pays a slice of it and the chain is always
+#            partly written (cot_steps_per_chain is ignored).
+#   batch  : a whole chain written every cot_steps_per_chain steps and held
+#            in between, so what the agent reads is a finished thought about
+#            a frame up to that many ticks old (cot_cuda_graph is ignored:
+#            there is no per-step decode to record).
+cot_mode: batch
+cot_steps_per_chain: 16
 # How a step's chain tokens reach the space axis.
 #   mean : one slot per step, whose temporal recurrence follows the chain
 #   none : one slot per token, each recurring on a stride-L phase of the chain

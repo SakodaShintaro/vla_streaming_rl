@@ -15,6 +15,7 @@ from vla_streaming_rl.networks.interface import (
     NetworkInterface,
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
+from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
 from vla_streaming_rl.networks.modules.cot_stream import CoTStream
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
 from vla_streaming_rl.networks.modules.policy_head import build_policy_head
@@ -24,6 +25,48 @@ from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
 from vla_streaming_rl.utils import render_text_panel
+
+
+def build_cot(
+    mode: str,
+    model_id: str,
+    tokens_per_step: int,
+    max_len: int,
+    temperature: float,
+    carry_prev: bool,
+    steps_per_chain: int,
+    use_cuda_graph: bool,
+    device: torch.device,
+):
+    """The chain generator named by `mode`, both of which advance() the same way.
+
+    "stream" keeps one chain mid-thought and issues `tokens_per_step` of it per
+    environment step; "batch" writes a whole chain every `steps_per_chain` steps
+    and holds it in between. Every mode's parameters are always supplied; a mode
+    ignores the ones that do not apply to it.
+    """
+    builders = {
+        "stream": lambda: CoTStream(
+            model_id=model_id,
+            tokens_per_step=tokens_per_step,
+            max_len=max_len,
+            temperature=temperature,
+            carry_prev=carry_prev,
+            use_cuda_graph=use_cuda_graph,
+            device=device,
+        ),
+        "batch": lambda: CoTBatch(
+            model_id=model_id,
+            tokens_per_step=tokens_per_step,
+            max_len=max_len,
+            temperature=temperature,
+            carry_prev=carry_prev,
+            steps_per_chain=steps_per_chain,
+            device=device,
+        ),
+    }
+    assert mode in builders, f"unknown cot_mode {mode!r}; expected one of {sorted(builders)}"
+    return builders[mode]()
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -64,6 +107,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_max_len: int,
         cot_temperature: float,
         cot_carry_prev: bool,
+        cot_mode: str,
+        cot_steps_per_chain: int,
         cot_pool: str,
         cot_cuda_graph: bool,
         layer_scale_init: float,
@@ -105,12 +150,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
         self.cot_stream = None
         if cot_tokens_num > 0:
-            self.cot_stream = CoTStream(
+            self.cot_stream = build_cot(
+                mode=cot_mode,
                 model_id=cot_model_id,
                 tokens_per_step=cot_tokens_num,
                 max_len=cot_max_len,
                 temperature=cot_temperature,
                 carry_prev=cot_carry_prev,
+                steps_per_chain=cot_steps_per_chain,
                 use_cuda_graph=cot_cuda_graph,
                 device=torch.device("cuda"),
             )
