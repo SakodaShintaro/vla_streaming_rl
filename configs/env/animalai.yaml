@@ -11,7 +11,7 @@ image_save_interval: 40
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_env
   # - resolution: square camera height/width (kept divisible by the VAE stride 8).
-  resolution: 96
+  resolution: 192
   # - mode: which arenas each episode is drawn from, and in what order.
   #     staged  : train with the Animal-AI paper's cumulative 11-stage
   #               curriculum, one stage per competition level, drawing

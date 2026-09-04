@@ -1,7 +1,7 @@
 # @package _global_
 
-steps_num: 6144 # 24 parallel * 256 steps per env
-minibatch_size: 1536
+steps_num: 3072
+minibatch_size: 768
 mini_epochs: 4
 lam: 0.9
 learning_rate: 1e-4
