@@ -103,7 +103,6 @@ class CoTBatch:
             **inputs,
             max_new_tokens=self.max_len,
             do_sample=False,
-            repetition_penalty=1.15,
             output_hidden_states=True,
             return_dict_in_generate=True,
         )
