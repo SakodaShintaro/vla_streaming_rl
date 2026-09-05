@@ -1,29 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""A frozen VLM run to the end of a chain, once every N environment steps.
-
-The same job as ``CoTStream`` and the same interface, taking the opposite side
-of one trade. ``CoTStream`` keeps a chain mid-thought and issues a fixed budget
-of tokens per control tick, so the reasoning is spread thin over many steps and
-is always partly written. Here the chain runs to completion in a single call and
-the steps in between read what it produced, so what the agent sees is a finished
-thought about a frame that is up to ``steps_per_chain`` ticks old.
-
-That is why the KV cache does not appear: nothing is carried between calls, and
-a call is one ordinary ``generate`` over a chat-template prompt. Measured on an
-episode's frames, carrying the cache across steps saved nothing at these context
-lengths -- generation is bound by the per-token launch overhead, and the prefill
-it removes is worth about one token of that.
-
-What leaves this module is what leaves ``CoTStream``: the activation feeding the
-lm_head at each generated position, every depth behind it kept, as an ordinary
-observation stream. Nothing here trains and nothing here is differentiable.
-
-Not an ``nn.Module``, for the same reason as ``CoTStream``: registering it would
-put a frozen VLM into the network's ``parameters()`` and ``state_dict()``.
-"""
-
-import re
-
 import torch
 
 from .cot_stream import CoTStream
@@ -31,12 +6,24 @@ from .vlm_backbone import load_model
 
 
 class CoTBatch:
-    # The prompt is `CoTStream`'s, not a variant of it. The two differ in when
-    # the model is run, and a second wording would confound that with a
-    # difference in what it was asked.
+    # The instruction is `CoTStream`'s, not a variant of it. The two differ in
+    # when the model is run, and a second wording would confound that with a
+    # difference in what it was asked. Its CARRY has no counterpart here: what
+    # that quotes back is in the conversation already.
     INSTRUCTION = CoTStream.INSTRUCTION
-    CARRY = CoTStream.CARRY
-    CARRY_SENTENCES = CoTStream.CARRY_SENTENCES
+
+    # The instruction opens the conversation and is never repeated in it. Later
+    # turns are the new frame under this cue instead, which is what asks for a
+    # delta rather than a fresh description: told only to continue, the model
+    # paraphrases what it already said and the chain stops carrying anything new.
+    # Greedy decoding writes the sentence it just wrote again, for as many
+    # tokens as it is given, until this is on.
+    REPETITION_PENALTY = 1.15
+
+    CONTINUE = (
+        "The current frame. Carry the commentary forward: write what is new or "
+        "has changed since the last one, not what it already says."
+    )
 
     def __init__(
         self,
@@ -57,7 +44,12 @@ class CoTBatch:
         self.model.eval().requires_grad_(False)
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len
-        self.temperature = temperature
+        # `temperature` is accepted so both modes take the same parameters, and
+        # ignored: a chain written in one call is decoded greedily, which is how
+        # this was measured. `CoTStream` samples because it has to keep one
+        # chain alive over many steps and a greedy one there settles into a loop
+        # it can never leave.
+        del temperature
         self.carry_prev = carry_prev
         self.steps_per_chain = steps_per_chain
         self.device = device
@@ -68,9 +60,11 @@ class CoTBatch:
         self.reset()
 
     def reset(self) -> None:
-        """Drop the chain. The next advance writes a new one from the frame it is given."""
+        """Drop the conversation. The next advance opens a new one on the frame it
+        is given."""
         self._tokens = []
-        self._prev_text = ""
+        self._conversation = []
+        self._images = []
         self._activations = torch.zeros(
             (self.tokens_per_step, self.layers_num, self.hidden_size),
             dtype=torch.bfloat16,
@@ -101,11 +95,18 @@ class CoTBatch:
         return self._activations
 
     def _write_chain(self, image: torch.Tensor, task_prompt: str) -> None:
-        carried = self.CARRY.format(previous=self._prev_text) if self._prev_text else ""
-        prompt = "\n".join(part for part in (task_prompt, carried, self.INSTRUCTION) if part)
-        content = [{"type": "image"}, {"type": "text", "text": prompt}]
+        # carry_prev off is the ablation: every chain sees only its own frame,
+        # so the conversation goes no further back than the turn about to open.
+        self._conversation = self._conversation if self.carry_prev else []
+        self._images = self._images if self.carry_prev else []
+        opening = "\n".join(part for part in (task_prompt, self.INSTRUCTION) if part)
+        asked = opening if not self._conversation else self.CONTINUE
+        self._conversation.append(
+            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": asked}]}
+        )
+        self._images.append(image.to(torch.float32))
         text = self.processor.apply_chat_template(
-            [{"role": "user", "content": content}],
+            self._conversation,
             add_generation_prompt=True,
             tokenize=False,
             # Thinking off: with the <think> block left open the model spends the
@@ -114,7 +115,7 @@ class CoTBatch:
         )
         inputs = self.processor(
             text=[text],
-            images=[image.to(torch.float32)],
+            images=self._images,
             return_tensors="pt",
             do_rescale=False,
         ).to(self.device)
@@ -122,19 +123,17 @@ class CoTBatch:
         outputs = self.model.generate(
             **inputs,
             max_new_tokens=self.max_len,
-            do_sample=True,
-            temperature=self.temperature,
+            do_sample=False,
+            repetition_penalty=self.REPETITION_PENALTY,
             output_hidden_states=True,
             return_dict_in_generate=True,
         )
         prompt_len = inputs["input_ids"].shape[1]
         self._tokens = outputs.sequences[0, prompt_len:].tolist()
         self._activations = self._read_activations(outputs.hidden_states)
-        # The last `CARRY_SENTENCES` sentences are what a carried chain quotes
-        # back. A chain cut at `max_len` ends mid-sentence, and continuing a
-        # fragment is what is wanted.
-        pieces = [piece for piece in re.split(r"(?<=[.!?])\s+", self.text()) if piece]
-        self._prev_text = " ".join(pieces[-self.CARRY_SENTENCES :]) if self.carry_prev else ""
+        self._conversation.append(
+            {"role": "assistant", "content": [{"type": "text", "text": self.text()}]}
+        )
 
     def _read_activations(self, hidden_states) -> torch.Tensor:
         """The tail of the chain, every depth kept: (tokens_per_step, layers_num, hidden_size).

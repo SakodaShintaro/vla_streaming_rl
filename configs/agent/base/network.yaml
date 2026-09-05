@@ -69,8 +69,9 @@ cot_carry_prev: false
 #            partly written (cot_steps_per_chain is ignored).
 #   batch  : a whole chain written every cot_steps_per_chain steps and held
 #            in between, so what the agent reads is a finished thought about
-#            a frame up to that many ticks old (cot_cuda_graph is ignored:
-#            there is no per-step decode to record).
+#            a frame up to that many ticks old. Ignores cot_cuda_graph, since
+#            there is no per-step decode to record, and cot_temperature: a
+#            chain written in one call is decoded greedily.
 cot_mode: batch
 cot_steps_per_chain: 16
 # How a step's chain tokens reach the space axis.
