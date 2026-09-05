@@ -24,7 +24,6 @@ def build_agent(
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,
             backend=build_vlm_backend(args, env.unwrapped.action_choices),
-            image_side=args.image_side,
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
         )

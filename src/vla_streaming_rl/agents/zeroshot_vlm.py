@@ -37,10 +37,14 @@ _OUTPUT_PANEL_WIDTH = 512
 _OUTPUT_PANEL_HEIGHT = 406
 
 
-def preprocess_image(image: np.ndarray, image_side: int) -> Image.Image:
-    """A CHW float observation as a square RGB image of side ``image_side``."""
-    hwc = (image.transpose(1, 2, 0) * 255).astype(np.uint8)
-    return Image.fromarray(hwc).resize((image_side, image_side), Image.LANCZOS)
+def preprocess_image(image: np.ndarray) -> Image.Image:
+    """A CHW float observation as an RGB image, which is what a backend takes.
+
+    The resolution is left alone: both backends resize for themselves -- the
+    local processor to a multiple of its patch size, the hosted one server-side
+    -- so scaling here only moves bytes without changing what the model sees.
+    """
+    return Image.fromarray((image.transpose(1, 2, 0) * 255).astype(np.uint8))
 
 
 class ZeroShotVLMAgent(Agent):
@@ -50,7 +54,6 @@ class ZeroShotVLMAgent(Agent):
         action_space: gym.spaces.Box,
         parse_action_text,
         backend,
-        image_side: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
     ) -> None:
@@ -64,7 +67,6 @@ class ZeroShotVLMAgent(Agent):
         self.action_space = action_space
         self.action_dim = int(np.prod(action_space.shape))
         self.parse_action_text = parse_action_text
-        self.image_side = image_side
 
         self.last_action = np.zeros(self.action_dim, dtype=np.float32)
         self.step_in_episode = 0
@@ -84,7 +86,7 @@ class ZeroShotVLMAgent(Agent):
     ) -> StepResult:
         del global_step, terminated, truncated
 
-        image = preprocess_image(obs["image"], self.image_side)
+        image = preprocess_image(obs["image"])
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
 
@@ -168,7 +170,7 @@ class ZeroShotVLMAgent(Agent):
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> Image.Image:
         del info
-        return preprocess_image(obs["image"], self.image_side)
+        return preprocess_image(obs["image"])
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         return np.clip(net_action, self.action_space.low, self.action_space.high)
