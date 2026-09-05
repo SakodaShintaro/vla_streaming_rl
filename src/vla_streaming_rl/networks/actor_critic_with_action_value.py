@@ -24,7 +24,7 @@ from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
-from vla_streaming_rl.utils import render_text_panel
+from vla_streaming_rl.utils import render_conversation_panel
 
 
 def build_cot(
@@ -211,32 +211,37 @@ class ActorCriticWithActionValue(NetworkInterface):
 
     # Fixed so the render strip keeps one shape for the whole run; wide enough
     # to read a chain of ``cot_max_len`` tokens.
-    COT_PANEL_WIDTH = 420
-    COT_PANEL_HEIGHT = 300
+    # Wide and tall enough for several turns of the conversation at once: the
+    # panel is the only place a run shows what the chain was actually asked.
+    COT_PANEL_WIDTH = 680
+    COT_PANEL_HEIGHT = 560
 
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
-    def advance_cot(self, episode_done: bool) -> torch.Tensor:
+    def advance_cot(self, episode_started: bool) -> torch.Tensor:
         """This step's chain-of-thought activations, or nothing when the chain is
-        off. A finished episode ends the chain, so the next one starts its
-        commentary from its own first frame."""
+        off. The first tick of an episode ends whatever chain was running, so an
+        episode's commentary starts on its own first frame rather than carrying
+        the one written about the frame the last episode ended on."""
         if self.cot_stream is None:
             return torch.zeros(self.cot_shape)
-        if episode_done:
+        if episode_started:
             self.cot_stream.reset()
         return self.cot_stream.advance()
 
     def render_panels(self) -> dict[str, np.ndarray]:
-        """The chain as it currently stands, drawn for the render strip. It runs
-        from the frame the chain started on, so it empties whenever the chain
-        restarts. Without a chain there is no panel at all rather than a blank
-        one, which keeps that run's strip the width of what it has."""
+        """The conversation as it currently stands, drawn for the render strip:
+        the turn the agent was shown this tick and the chains written about the
+        ones before it. Without a chain there is no panel at all rather than a
+        blank one, which keeps that run's strip the width of what it has."""
         if self.cot_stream is None:
             return {}
         return {
-            "chain_of_thought": render_text_panel(
-                self.cot_stream.text(), self.COT_PANEL_WIDTH, self.COT_PANEL_HEIGHT
+            "conversation": render_conversation_panel(
+                self.cot_stream.prompt_builder.conversation(),
+                self.COT_PANEL_WIDTH,
+                self.COT_PANEL_HEIGHT,
             )
         }
 

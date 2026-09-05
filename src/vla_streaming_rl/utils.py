@@ -83,11 +83,29 @@ _CAPTION_LINE_BUDGET = 20
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
+# What a VLM writes is not ASCII -- curly quotes, dashes, ellipses -- and the
+# Hershey fonts OpenCV draws with have no glyph for any of it, so every one of
+# them lands in a panel as "???". Folded to their ASCII shapes on the way in.
+_DRAWABLE = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "--",
+        "\u2026": "...",
+        "\u2022": "*",
+        "\u00a0": " ",
+    }
+)
+
+
 def wrap_text(text: str, width: int, font_scale: float, thickness: int) -> list[str]:
     """Greedily word-wrap ``text`` to a pixel ``width``."""
     lines: list[str] = []
     current = ""
-    for word in text.split():
+    for word in text.translate(_DRAWABLE).split():
         trial = f"{current} {word}".strip()
         (trial_width, _), _ = cv2.getTextSize(trial, _FONT, font_scale, thickness)
         if trial_width <= width - 10 or not current:
@@ -120,6 +138,71 @@ def render_text_panel(text: str, width: int, height: int) -> np.ndarray:
         cv2.putText(
             panel, line, (5, (i + 1) * line_height), _FONT, font_scale, (235, 235, 235), thickness
         )
+    return panel
+
+
+# The chain's conversation, drawn the way a chat log reads: what the agent was
+# shown on one side, what it wrote on the other.
+_USER_BUBBLE = (78, 62, 48)
+_ASSISTANT_BUBBLE = (52, 84, 52)
+_BUBBLE_TEXT = (238, 238, 238)
+_BUBBLE_FRACTION = 0.78
+
+
+def render_conversation_panel(turns: list[dict], width: int, height: int) -> np.ndarray:
+    """A conversation drawn as chat bubbles on a panel of exactly ``width`` x
+    ``height``.
+
+    The standing task is not drawn: it is the same every tick and the trainer
+    already captions the environment panel with it. What is drawn is what
+    changes -- the turn the agent was shown this tick and what the chain wrote
+    about the ones before it.
+
+    The newest turn sits at the bottom and older ones are laid above it until the
+    panel is full, so the latest exchange is always visible however long the
+    conversation has grown. User turns are left-aligned, the chain's own replies
+    right-aligned, each on its own colour.
+    """
+    font_scale = 0.45
+    thickness = 1
+    (_, text_height), baseline = cv2.getTextSize("Ag", _FONT, font_scale, thickness)
+    line_height = text_height + baseline + 4
+    padding = 6
+    gap = 6
+    bubble_width = int(width * _BUBBLE_FRACTION)
+
+    panel = np.full((height, width, 3), (30, 30, 30), dtype=np.uint8)
+    bottom = height - gap
+    said = [turn for turn in turns if turn and turn["role"] in ("user", "assistant")]
+    for turn in reversed(said):
+        text = " ".join(
+            part["text"] for part in turn["content"] if part["type"] == "text" and part["text"]
+        )
+        lines = wrap_text(text if text else "(frame only)", bubble_width, font_scale, thickness)
+        bubble_height = line_height * len(lines) + padding * 2
+        top = bottom - bubble_height
+        if top < gap:
+            break
+        assistant = turn["role"] == "assistant"
+        left = width - gap - bubble_width if assistant else gap
+        cv2.rectangle(
+            panel,
+            (left, top),
+            (left + bubble_width, bottom),
+            _ASSISTANT_BUBBLE if assistant else _USER_BUBBLE,
+            cv2.FILLED,
+        )
+        for index, line in enumerate(lines):
+            cv2.putText(
+                panel,
+                line,
+                (left + padding, top + padding + (index + 1) * line_height - baseline),
+                _FONT,
+                font_scale,
+                _BUBBLE_TEXT,
+                thickness,
+            )
+        bottom = top - gap
     return panel
 
 

@@ -129,10 +129,10 @@ class NetworkInterface(nn.Module, abc.ABC):
     # verbatim. Everything else contributes no tokens.
     cot_shape: tuple[int, int] = (0, 0)
 
-    def advance_cot(self, episode_done: bool) -> torch.Tensor:
+    def advance_cot(self, episode_started: bool) -> torch.Tensor:
         """This step's chain-of-thought activations, empty unless the network
         carries a chain (see ``networks/cot_actor_critic.py``)."""
-        del episode_done
+        del episode_started
         return torch.zeros(self.cot_shape)
 
     def render_panels(self) -> dict[str, np.ndarray]:

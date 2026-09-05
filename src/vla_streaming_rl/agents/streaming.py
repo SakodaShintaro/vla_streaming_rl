@@ -138,12 +138,19 @@ class StreamingAgent(Agent):
         del global_step
         metrics = {}
         episode_done = terminated or truncated
+        # A terminal observation still belongs to the episode that ended, so the
+        # conversation and the chain are dropped on the tick after it rather than
+        # on it -- the same boundary the rnn state resets on. Dropped on the
+        # terminal tick instead, the turn that tick then writes would be the one
+        # the next episode opens on.
+        episode_started = self._previous_done
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
         metrics["shaped_reward"] = shaped_reward
         self._reset_rnn_state_if_fresh(episode_done)
-        if episode_done:
+        if episode_started:
             self.prompt_builder.reset()
+        if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
             self._episode_reset = self.use_done
@@ -171,7 +178,7 @@ class StreamingAgent(Agent):
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
         task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
-        cot_activation = self.network.advance_cot(episode_done)
+        cot_activation = self.network.advance_cot(episode_started)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -280,12 +287,19 @@ class StreamingAgent(Agent):
         del global_step
         metrics = {}
         episode_done = terminated or truncated
+        # A terminal observation still belongs to the episode that ended, so the
+        # conversation and the chain are dropped on the tick after it rather than
+        # on it -- the same boundary the rnn state resets on. Dropped on the
+        # terminal tick instead, the turn that tick then writes would be the one
+        # the next episode opens on.
+        episode_started = self._previous_done
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
         metrics["shaped_reward"] = shaped_reward
         self._reset_rnn_state_if_fresh(episode_done)
-        if episode_done:
+        if episode_started:
             self.prompt_builder.reset()
+        if episode_done:
             self.action_chunk = None
             self.chunk_step = 0
             self._episode_reset = self.use_done
@@ -313,7 +327,7 @@ class StreamingAgent(Agent):
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
         task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
-        cot_activation = self.network.advance_cot(episode_done)
+        cot_activation = self.network.advance_cot(episode_started)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
