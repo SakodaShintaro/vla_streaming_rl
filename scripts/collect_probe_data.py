@@ -34,6 +34,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_agent
+from vla_streaming_rl.agents.prompt import build_prompt_builder
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
 from vla_streaming_rl.wrappers import make_env
@@ -121,14 +122,16 @@ def main(args: DictConfig, result_dir: Path) -> None:
     env = make_env(args.env_id, args.env_factory, result_dir=None)
     env.action_space.seed(seed)
 
+    prompt_builder = build_prompt_builder(env, args)
     network = build_network(
         args,
         observation_space_shape=env.observation_space["image"].shape,
         action_space_shape=env.action_space.shape,
         parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
+        prompt_builder=prompt_builder,
         device=torch.device("cuda"),
     )
-    agent = build_agent(env, network, args)
+    agent = build_agent(env, network, prompt_builder, args)
     load_checkpoint_weights(Path(args.resume_dir), network)
     network.eval()
 

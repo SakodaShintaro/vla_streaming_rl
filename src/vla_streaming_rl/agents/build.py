@@ -3,13 +3,12 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.prompt import build_prompt_builder
+from vla_streaming_rl.agents.prompt import PromptBuilder
 
 
-def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
-    # Every agent composes its own language input; the env only publishes state.
-    prompt_builder = build_prompt_builder(env, args)
-
+def build_agent(
+    env: Env, network: torch.nn.Module, prompt_builder: PromptBuilder, args: DictConfig
+):
     if args.agent_type == "zeroshot_vlm":
         from vla_streaming_rl.agents.vlm_backends import build_vlm_backend
         from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent

@@ -2,30 +2,20 @@
 import torch
 import torch.nn.functional as F
 
-from .cot_stream import CoTStream
+from vla_streaming_rl.agents.prompt import PromptBuilder
+
 from .vlm_backbone import load_model
 
 
 class CoTBatch:
-    # The instruction is `CoTStream`'s, not a variant of it. The two differ in
-    # when the model is run, and a second wording would confound that with a
-    # difference in what it was asked. Its CARRY has no counterpart here: what
-    # that quotes back is in the conversation already.
-    INSTRUCTION = CoTStream.INSTRUCTION
-
-    CONTINUE = (
-        "The current frame. Carry the commentary forward: write what is new or "
-        "has changed since the last one, not what it already says."
-    )
-
     def __init__(
         self,
         model_id: str,
         tokens_per_step: int,
         max_len: int,
         temperature: float,
-        carry_prev: bool,
         steps_per_chain: int,
+        prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
@@ -44,8 +34,10 @@ class CoTBatch:
         # chain alive over many steps and a greedy one there settles into a loop
         # it can never leave.
         del temperature
-        self.carry_prev = carry_prev
         self.steps_per_chain = steps_per_chain
+        # The conversation is the agent's; a chain reads it on the steps it
+        # writes and puts what it wrote back as that turn's reply.
+        self.prompt_builder = prompt_builder
         self.device = device
         text_config = self.model.config.text_config
         self.hidden_size = text_config.hidden_size
@@ -54,11 +46,9 @@ class CoTBatch:
         self.reset()
 
     def reset(self) -> None:
-        """Drop the conversation. The next advance opens a new one on the frame it
-        is given."""
+        """Drop the chain. The next advance writes a new one on the frame it is
+        given; the conversation it is written into is the builder's to reset."""
         self._tokens = []
-        self._conversation = []
-        self._images = []
         self._activations = torch.zeros(
             (self.tokens_per_step, self.layers_num, self.hidden_size),
             dtype=torch.bfloat16,
@@ -69,38 +59,26 @@ class CoTBatch:
         self._until_next = 0
 
     @torch.inference_mode()
-    def advance(self, image: torch.Tensor, task_prompt: str) -> torch.Tensor:
+    def advance(self) -> torch.Tensor:
         """This environment step's activations, writing a fresh chain when due.
 
-        Args:
-            image: (C, H, W) float tensor in [0, 1]; read only on the steps that
-                write a chain, which is what makes the chain the slow loop.
-            task_prompt: the env's language instruction, empty where the env sets
-                none, leaving just the standing instruction.
+        The builder's conversation is read on the steps that write a chain and
+        not at all in between, which is what makes the chain the slow loop.
 
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16. The same tensor
             on every step until the next chain is written.
         """
         if self._until_next == 0:
-            self._write_chain(image, task_prompt)
+            self._write_chain()
             self._until_next = self.steps_per_chain
         self._until_next -= 1
         return self._activations
 
-    def _write_chain(self, image: torch.Tensor, task_prompt: str) -> None:
-        # carry_prev off is the ablation: every chain sees only its own frame,
-        # so the conversation goes no further back than the turn about to open.
-        self._conversation = self._conversation if self.carry_prev else []
-        self._images = self._images if self.carry_prev else []
-        opening = "\n".join(part for part in (task_prompt, self.INSTRUCTION) if part)
-        asked = opening if not self._conversation else self.CONTINUE
-        self._conversation.append(
-            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": asked}]}
-        )
-        self._images.append(image.to(torch.float32))
+    def _write_chain(self) -> None:
+        messages, images = self._render(self.prompt_builder.conversation())
         text = self.processor.apply_chat_template(
-            self._conversation,
+            messages,
             add_generation_prompt=True,
             tokenize=False,
             # Thinking off: with the <think> block left open the model spends the
@@ -109,7 +87,7 @@ class CoTBatch:
         )
         inputs = self.processor(
             text=[text],
-            images=self._images,
+            images=images,
             return_tensors="pt",
             do_rescale=False,
         ).to(self.device)
@@ -125,9 +103,29 @@ class CoTBatch:
         prompt_len = inputs["input_ids"].shape[1]
         self._tokens = outputs.sequences[0, prompt_len:].tolist()
         self._activations = self._read_activations(outputs.hidden_states)
-        self._conversation.append(
-            {"role": "assistant", "content": [{"type": "text", "text": self.text()}]}
-        )
+        self.prompt_builder.add_reply(self.text())
+
+    def _render(self, turns: list[dict]) -> tuple[list[dict], list[torch.Tensor]]:
+        """The turns as the processor takes them: the frames pulled out into
+        their own list, since the chat template wants a placeholder where each
+        one goes and the pixels handed over beside it."""
+        images = [
+            part["image"].to(torch.float32)
+            for turn in turns
+            for part in turn["content"]
+            if part["type"] == "image"
+        ]
+        messages = [
+            {
+                "role": turn["role"],
+                "content": [
+                    {key: value for key, value in part.items() if key != "image"}
+                    for part in turn["content"]
+                ],
+            }
+            for turn in turns
+        ]
+        return messages, images
 
     def _read_activations(self, hidden_states) -> torch.Tensor:
         """The whole chain, every depth kept, pooled to one step's read:

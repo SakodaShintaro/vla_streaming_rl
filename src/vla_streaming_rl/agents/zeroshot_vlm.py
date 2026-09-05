@@ -137,17 +137,18 @@ class ZeroShotVLMAgent(Agent):
     ) -> StepResult:
         del global_step, terminated, truncated
 
-        # The task half of the system prompt: composed here from the env's
-        # state, so the whole system turn -- task text and response protocol --
-        # is the agent's.
-        prompt = self.prompt_builder(obs, reward, info)
-
         # The reward shown with a past turn is the one observed after it.
         if self.step_in_episode > 0 and self.history:
             past_image, past_response, _ = self.history[-1]
             self.history[-1] = (past_image, past_response, reward)
 
         image = preprocess_image(obs["image"], self.image_side)
+        # The task half of the system prompt: composed here from the env's
+        # state, so the whole system turn -- task text and response protocol --
+        # is the agent's. This baseline keeps its own turn history, so it reads
+        # the standing task out of the conversation and builds the rest itself.
+        self.prompt_builder.observe(obs, reward, info, image)
+        prompt = self.prompt_builder.task_text()
         messages = self._build_messages(
             prompt,
             image,

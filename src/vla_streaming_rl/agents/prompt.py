@@ -22,9 +22,11 @@ rewording one regime must not move the other, since the two are measured
 against each other.
 
 A builder is called once per environment step with the observation, the reward
-and the info the agent itself received, and returns the whole prompt for that
-tick. The reward is the env's own number -- the one the trainer captions the
-render with -- not the shaped reward the agent trains on.
+and the info the agent itself received, and returns the conversation as it then
+stands: the standing task, every turn a chain has already answered, and this
+tick's own turn. Holding the conversation here is what keeps the VLM modules
+free of any environment's vocabulary -- they run a model over what they are
+handed and compose no text of their own beyond how a chain is continued.
 """
 
 import csv
@@ -58,21 +60,112 @@ def _load_arena_tasks(env: Env) -> dict[str, str]:
 
 
 class PromptBuilder(ABC):
-    """The language input for one tick, from that tick's observation, reward and
-    info."""
+    """The conversation this run's VLMs read, carried across environment steps.
+
+    Every tick ``observe`` records what the agent is looking at. A chain reads
+    that through ``conversation`` on the steps it actually writes -- one step in
+    ``cot_steps_per_chain`` -- and hands back what it wrote through
+    ``add_reply``, which is what puts the turn it answered into the conversation
+    for good. The ticks in between are overwritten rather than accumulated, so
+    the conversation holds the turns a chain saw and not every step of the run.
+    """
+
+    # How a chain is to be written, the same in every environment. Written out
+    # in full rather than left to the model's own thinking mode, which spends
+    # its budget restating the request ("The user wants me to...") instead of
+    # the scene.
+    #
+    # First person, because the task that follows is addressed to the agent
+    # ("You control an animal...") and the chain is the agent's own thought.
+    #
+    # Whether asking plainly is enough turns out to be a question about the
+    # model, not the wording. Measured over a recorded episode with
+    # local/probe_cot_prompt.py, this text holds at 2B and above -- no "you", a
+    # few "I" a chain -- while 0.8B ignores it and writes advice to the agent
+    # instead ("Your health is critically low", "You need to find a safe path").
+    # 0.8B can be made to comply, but only by an identity line, a rule per
+    # sentence and forbidding the word outright, which is a prompt bent around
+    # one model. ``cot_model_id`` carries the cost of that choice instead.
+    #
+    # The delta line is stated as a difference because a chain told only to
+    # continue paraphrases what it already said and stops carrying new
+    # information. What it already said is in the conversation as its own turns,
+    # so nothing has to quote it back.
+    BASE = (
+        "This is what you can see right now. Think aloud as you act, in the "
+        "first person.\n"
+        "Say where I am relative to whatever matters around me, which way I am "
+        "heading, what is about to go wrong, and what I should do next.\n"
+        "Write only what has changed since my last thought, not what it already "
+        "says.\n"
+        "Two or three short sentences. No preamble, no lists, no numbers."
+    )
 
     def __init__(self, env: Env) -> None:
         del env
+        self._turns = []
+        self._current = {}
+        self._task_text = ""
+
+    def reset(self) -> None:
+        """A finished episode ends the conversation; the next one opens its own."""
+        self._turns = []
+        self._current = {}
+
+    def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
+        """What the agent is looking at this tick: the turn a chain would read if
+        it wrote one now. Overwritten every step until one does."""
+        self._task_text = f"{self.BASE}\n{self._task(obs, info)}"
+        self._current = {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": self._turn(obs, reward, info)},
+            ],
+        }
+
+    def conversation(self) -> list[dict]:
+        """What a chain about to write reads: the standing task, the turns it has
+        already answered, and the turn it is being asked about now."""
+        opening = {"role": "system", "content": [{"type": "text", "text": self._task_text}]}
+        return [opening] + self._turns + [self._current]
+
+    def add_reply(self, text: str) -> None:
+        """What the chain wrote about that turn, which settles the pair into the
+        conversation."""
+        self._turns = self._turns + [
+            self._current,
+            {"role": "assistant", "content": [{"type": "text", "text": text}]},
+        ]
+
+    def task_text(self) -> str:
+        """The standing task: what the policy reads, and what it tokenizes.
+
+        The same string on every tick of an episode, so a network that tokenizes
+        it gets the same token ids throughout. The live numbers are not in it;
+        they reach the policy through the scalar branch and the chain through
+        the turns.
+        """
+        return self._task_text
 
     @abstractmethod
-    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str: ...
+    def _task(self, obs: dict[str, Any], info: dict) -> str:
+        """The standing task: what the env asks, unchanged through an episode."""
+
+    @abstractmethod
+    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        """What this tick alone says: the live numbers under the frame."""
 
 
 class EmptyPromptBuilder(PromptBuilder):
     """No language at all: what ``use_prompt: 0`` selects, and the ablation a
     language-conditioned run is measured against."""
 
-    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _task(self, obs: dict[str, Any], info: dict) -> str:
+        del obs, info
+        return ""
+
+    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward, info
         return ""
 
@@ -94,17 +187,25 @@ CAR_RACING_HIGH_LEVEL_PROMPT = (
 class CarRacingTextActionPromptBuilder(PromptBuilder):
     """CarRacing, for the regime where the VLM writes the action."""
 
-    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward, info
+    def _task(self, obs: dict[str, Any], info: dict) -> str:
+        del obs, info
         return CAR_RACING_TEXT_ACTION_PROMPT
+
+    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del obs, reward, info
+        return ""
 
 
 class CarRacingHighLevelPromptBuilder(PromptBuilder):
     """CarRacing, for the regime where the policy head writes the action."""
 
-    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward, info
+    def _task(self, obs: dict[str, Any], info: dict) -> str:
+        del obs, info
         return CAR_RACING_HIGH_LEVEL_PROMPT
+
+    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del obs, reward, info
+        return ""
 
 
 # --- Animal-AI ---------------------------------------------------------------
@@ -146,6 +247,26 @@ ANIMALAI_HIGH_LEVEL_FRAMING = (
 )
 
 
+def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
+    """Animal-AI's live scalars: the numbers the frame cannot show.
+
+    The same values the network's scalar branch is fed, so the sentence states
+    exactly what the policy reads. Shared by both regimes -- these are what the
+    env reports, not how the run frames it.
+    """
+    velocity_x, velocity_y, velocity_z = obs["velocity"]
+    return (
+        f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
+        f"Reward: {reward:+.2f}. "
+        f"Return so far: {obs['episode_return'][0]:+.2f}. "
+        f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
+        f"Return needed: {obs['remaining_return'][0]:+.2f}. "
+        f"Health: {obs['health'][0]:.2f}. "
+        f"Global step: {int(obs['global_step'][0])}. "
+        f"Episode step: {int(obs['episode_step'][0])}."
+    )
+
+
 class AnimalAITextActionPromptBuilder(PromptBuilder):
     """Animal-AI, for the regime where the VLM writes the action.
 
@@ -157,22 +278,19 @@ class AnimalAITextActionPromptBuilder(PromptBuilder):
     """
 
     def __init__(self, env: Env) -> None:
+        super().__init__(env)
         self.tasks = _load_arena_tasks(env)
 
-    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        velocity_x, velocity_y, velocity_z = obs["velocity"]
+    def _task(self, obs: dict[str, Any], info: dict) -> str:
+        del obs
         return (
             f"{ANIMALAI_TEXT_ACTION_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
-            f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
-            f"Reward: {reward:+.2f}. "
-            f"Return so far: {obs['episode_return'][0]:+.2f}. "
-            f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
-            f"Return needed: {obs['remaining_return'][0]:+.2f}. "
-            f"Health: {obs['health'][0]:.2f}. "
-            f"Global step: {int(obs['global_step'][0])}. "
-            f"Episode step: {int(obs['episode_step'][0])}."
+            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}."
         )
+
+    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del info
+        return _animalai_turn(obs, reward)
 
 
 class AnimalAIHighLevelPromptBuilder(PromptBuilder):
@@ -184,22 +302,19 @@ class AnimalAIHighLevelPromptBuilder(PromptBuilder):
     """
 
     def __init__(self, env: Env) -> None:
+        super().__init__(env)
         self.tasks = _load_arena_tasks(env)
 
-    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        velocity_x, velocity_y, velocity_z = obs["velocity"]
+    def _task(self, obs: dict[str, Any], info: dict) -> str:
+        del obs
         return (
             f"{ANIMALAI_HIGH_LEVEL_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
-            f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
-            f"Reward: {reward:+.2f}. "
-            f"Return so far: {obs['episode_return'][0]:+.2f}. "
-            f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
-            f"Return needed: {obs['remaining_return'][0]:+.2f}. "
-            f"Health: {obs['health'][0]:.2f}. "
-            f"Global step: {int(obs['global_step'][0])}. "
-            f"Episode step: {int(obs['episode_step'][0])}."
+            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}."
         )
+
+    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del info
+        return _animalai_turn(obs, reward)
 
 
 # --- CARLA -------------------------------------------------------------------
@@ -244,17 +359,25 @@ CARLA_HIGH_LEVEL_MANEUVER = {
 class CarlaTextActionPromptBuilder(PromptBuilder):
     """CARLA, for the regime where the VLM writes the action."""
 
-    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _task(self, obs: dict[str, Any], info: dict) -> str:
+        del obs, info
+        return CARLA_TEXT_ACTION_FRAMING
+
+    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward
-        return f"{CARLA_TEXT_ACTION_FRAMING} {CARLA_TEXT_ACTION_MANEUVER[info['maneuver_command']]}"
+        return CARLA_TEXT_ACTION_MANEUVER[info["maneuver_command"]]
 
 
 class CarlaHighLevelPromptBuilder(PromptBuilder):
     """CARLA, for the regime where the policy head writes the action."""
 
-    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _task(self, obs: dict[str, Any], info: dict) -> str:
+        del obs, info
+        return CARLA_HIGH_LEVEL_FRAMING
+
+    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward
-        return f"{CARLA_HIGH_LEVEL_FRAMING} {CARLA_HIGH_LEVEL_MANEUVER[info['maneuver_command']]}"
+        return CARLA_HIGH_LEVEL_MANEUVER[info["maneuver_command"]]
 
 
 # One builder per (env_id, regime). "text_action" is the regime in which the VLM

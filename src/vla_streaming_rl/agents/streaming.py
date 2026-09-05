@@ -137,15 +137,13 @@ class StreamingAgent(Agent):
     ) -> StepResult:
         del global_step
         metrics = {}
-        # The language this tick: composed here from the env's state, never read
-        # off the observation.
-        prompt = self.prompt_builder(obs, reward, info)
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
         metrics["shaped_reward"] = shaped_reward
         self._reset_rnn_state_if_fresh(episode_done)
         if episode_done:
+            self.prompt_builder.reset()
             self.action_chunk = None
             self.chunk_step = 0
             self._episode_reset = self.use_done
@@ -166,11 +164,14 @@ class StreamingAgent(Agent):
             global_step_obs,
             episode_step_obs,
             health_obs,
-            task_prompt_token_ids,
-        ) = self._preprocess(obs, prompt)
-        # The chain of thought advances once per environment step, whether or not
-        # this tick needs a new action chunk.
-        cot_activation = self.network.advance_cot(image, prompt, episode_done)
+        ) = self._preprocess(obs)
+        # The language this tick, composed from the env's state and never read off
+        # the observation. The chain reads the same conversation on the steps it
+        # writes, and writes its own turn back into it.
+        self.prompt_builder.observe(obs, reward, info, image)
+        prompt = self.prompt_builder.task_text()
+        task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
+        cot_activation = self.network.advance_cot(episode_done)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -278,15 +279,13 @@ class StreamingAgent(Agent):
         the reset, and the testbed calls it on every tick."""
         del global_step
         metrics = {}
-        # The language this tick: composed here from the env's state, never read
-        # off the observation.
-        prompt = self.prompt_builder(obs, reward, info)
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
         metrics["shaped_reward"] = shaped_reward
         self._reset_rnn_state_if_fresh(episode_done)
         if episode_done:
+            self.prompt_builder.reset()
             self.action_chunk = None
             self.chunk_step = 0
             self._episode_reset = self.use_done
@@ -307,11 +306,14 @@ class StreamingAgent(Agent):
             global_step_obs,
             episode_step_obs,
             health_obs,
-            task_prompt_token_ids,
-        ) = self._preprocess(obs, prompt)
-        # The chain of thought advances once per environment step, whether or not
-        # this tick needs a new action chunk.
-        cot_activation = self.network.advance_cot(image, prompt, episode_done)
+        ) = self._preprocess(obs)
+        # The language this tick, composed from the env's state and never read off
+        # the observation. The chain reads the same conversation on the steps it
+        # writes, and writes its own turn back into it.
+        self.prompt_builder.observe(obs, reward, info, image)
+        prompt = self.prompt_builder.task_text()
+        task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
+        cot_activation = self.network.advance_cot(episode_done)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -380,13 +382,12 @@ class StreamingAgent(Agent):
             texts={"prompt": prompt, **self.network.render_texts()},
         )
 
-    def _preprocess(self, obs: dict[str, Any], prompt: str) -> tuple:
+    def _preprocess(self, obs: dict[str, Any]) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
         the image tensor, the raw scalar observations (velocity_x, velocity_y,
         velocity_z, episode_return, pass_mark, remaining_return, global_step,
         episode_step,
-        health; the network updates its running normalizer stats here) and the
-        tokenized form of the prompt the agent composed for this tick."""
+        health; the network updates its running normalizer stats here)."""
         image = torch.from_numpy(obs["image"]).to(self.device)
         velocity_x, velocity_y, velocity_z = obs["velocity"].astype(np.float32)
         episode_return = np.float32(obs["episode_return"][0])
@@ -406,7 +407,6 @@ class StreamingAgent(Agent):
             episode_step_obs,
             health_obs,
         )
-        task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
         return (
             image,
             velocity_x,
@@ -418,7 +418,6 @@ class StreamingAgent(Agent):
             global_step_obs,
             episode_step_obs,
             health_obs,
-            task_prompt_token_ids,
         )
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:

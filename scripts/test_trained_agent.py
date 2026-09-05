@@ -34,6 +34,7 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_agent
+from vla_streaming_rl.agents.prompt import build_prompt_builder
 from vla_streaming_rl.envs.animalai_env import seen_in_training
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
@@ -246,14 +247,16 @@ def main(
     # would be far outside anything the checkpoint was trained at.
     env.unwrapped.set_global_step(global_step)
 
+    prompt_builder = build_prompt_builder(env, args)
     network = build_network(
         args,
         observation_space_shape=env.observation_space["image"].shape,
         action_space_shape=env.action_space.shape,
         parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
+        prompt_builder=prompt_builder,
         device=torch.device("cuda"),
     )
-    agent = build_agent(env, network, args)
+    agent = build_agent(env, network, prompt_builder, args)
     load_checkpoint_weights(checkpoint_path, network)
     network.eval()
 

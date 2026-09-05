@@ -27,6 +27,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_agent
+from vla_streaming_rl.agents.prompt import build_prompt_builder
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
 from vla_streaming_rl.wrappers import make_env
@@ -317,6 +318,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
     # The zero-shot VLM baseline is not trained, so it has no network to build
     # and nothing to optimize.
+    # Every agent composes its own language input; the env only publishes state.
+    # The chain of thought writes into the same conversation, so the builder is
+    # made before the network that carries the chain.
+    prompt_builder = build_prompt_builder(env, args)
+
     trains_a_network = args.agent_type != "zeroshot_vlm"
     network = (
         build_network(
@@ -324,13 +330,14 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             observation_space_shape=env.observation_space["image"].shape,
             action_space_shape=env.action_space.shape,
             parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
+            prompt_builder=prompt_builder,
             device=torch.device("cuda"),
         )
         if trains_a_network
         else None
     )
 
-    agent = build_agent(env, network, args)
+    agent = build_agent(env, network, prompt_builder, args)
 
     parameter_count = sum(p.numel() for p in agent.network.parameters()) if trains_a_network else 0
     print(f"Parameter count: {parameter_count:,}")

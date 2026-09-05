@@ -209,8 +209,9 @@ class AnimalPPOAgent(Agent):
         info: dict,
     ) -> StepResult:
         del global_step
-        prompt = self.prompt_builder(obs, reward, info)
         visual, vels = self._preprocess(obs, info)
+        self.prompt_builder.observe(obs, reward, info, visual)
+        prompt = self.prompt_builder.task_text()
         shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
         # tick, so that transition can only be completed now
@@ -251,8 +252,9 @@ class AnimalPPOAgent(Agent):
         same boundary rule, and the action chosen on a terminal observation is
         dropped simply by never being buffered."""
         del global_step
-        prompt = self.prompt_builder(obs, reward, info)
         visual, vels = self._preprocess(obs, info)
+        self.prompt_builder.observe(obs, reward, info, visual)
+        prompt = self.prompt_builder.task_text()
         fresh = self._episode_boundary(terminated, truncated)
         return StepResult(
             action=self._act(visual, vels, fresh),

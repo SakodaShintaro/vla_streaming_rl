@@ -5,8 +5,8 @@ The chain of thought is the slow loop. It is prefilled from one frame and then
 advanced by a fixed budget of tokens per environment step, so a single line of
 reasoning spans many control ticks. When it ends -- EOS, or ``max_len`` tokens --
 the next advance prefills again from whatever frame is current, starting a fresh
-chain on a fresh image. With ``carry_prev`` the chain that just ended is quoted
-into that prefill, so the new one picks up where the last left off instead of
+chain on a fresh image. That prefill carries the chain that just ended as the
+model's own turn, so the new one picks up where the last left off instead of
 opening on the scene from scratch.
 
 What leaves this module is not text but the activation feeding the VLM's lm_head
@@ -21,10 +21,10 @@ Not an ``nn.Module`` on purpose: registering it would put a frozen 0.8B model
 into the network's ``parameters()`` and its ``state_dict()``.
 """
 
-import re
-
 import torch
 from transformers import StaticCache
+
+from vla_streaming_rl.agents.prompt import PromptBuilder
 
 from .vlm_backbone import load_model
 
@@ -41,45 +41,14 @@ class CoTStream:
     # resized by the processor, so its size is arbitrary.
     CAPTURE_FRAME_SIDE = 64
 
-    # Written out in full rather than left to the model's own thinking mode,
-    # which spends its budget restating the request ("The user wants me to...")
-    # instead of the scene.
-    INSTRUCTION = (
-        "This is what an agent sees right now. Keep up a running commentary on "
-        "its situation, in short plain sentences.\n"
-        "Say: where the agent is relative to whatever matters around it, which "
-        "way it is heading, what is about to go wrong, and what it should be "
-        "trying to do next.\n"
-        "Write the commentary only. No preamble, no restating this request, no "
-        "headings or lists, no numbers or control values."
-    )
-
-    # Quoted into the prefill under ``carry_prev``, so a restart continues the
-    # commentary. Third person throughout: addressing the writer ("you were
-    # saying") turned a quarter of the chains into commands aimed at the agent.
-    # Stated as a delta, because told only to continue the model paraphrases what
-    # it already said and the chain stops carrying new information.
-    CARRY = (
-        "The commentary was mid-flow a moment ago, on an older frame:\n"
-        "...{previous}\n"
-        "The frame above is the current one. Carry that line forward: write what "
-        "is new or has changed since it, not what it already says."
-    )
-
-    # How much of the finished chain is quoted back. The whole chain is material
-    # to copy from -- the tail is the thought that was actually still running,
-    # and the frame supplies the rest. One sentence keeps a median 28% of the
-    # chain against 63% for two, which is the point: less to paraphrase.
-    CARRY_SENTENCES = 1
-
     def __init__(
         self,
         model_id: str,
         tokens_per_step: int,
         max_len: int,
         temperature: float,
-        carry_prev: bool,
         use_cuda_graph: bool,
+        prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
@@ -92,7 +61,9 @@ class CoTStream:
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len
         self.temperature = temperature
-        self.carry_prev = carry_prev
+        # The conversation is the agent's; a chain reads it on the steps it
+        # restarts and writes its own turn back when it ends.
+        self.prompt_builder = prompt_builder
         self.device = device
         text_config = self.model.config.text_config
         self.hidden_size = text_config.hidden_size
@@ -101,9 +72,9 @@ class CoTStream:
         self.eos_token_id = self.processor.tokenizer.eos_token_id
         # One cache for the whole run. A new chain resets it in place rather than
         # replacing it, so its buffers keep the addresses a graph records.
-        # A carried chain is quoted back into the prompt, so the prefill has to
-        # fit one more chain's worth of tokens on top of the standing prompt.
-        self._cache_len = self.PROMPT_BUDGET + (max_len if carry_prev else 0) + max_len
+        # The chain that ended last is quoted back into the prompt, so the prefill
+        # has to fit one more chain's worth of tokens on top of the standing one.
+        self._cache_len = self.PROMPT_BUDGET + max_len + max_len
         self._cache = StaticCache(config=self.model.config, max_cache_len=self._cache_len)
         # What a recorded step reads. Their contents change every step; their
         # addresses must not, which is the whole point of recording one.
@@ -124,7 +95,19 @@ class CoTStream:
             # cache allocates, and a tensor born in inference mode cannot be
             # written from outside it, which is what recording then does.
             with torch.no_grad():
-                self._prefill(torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE), "")
+                blank_frame = torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE)
+                self._prefill(
+                    [
+                        {"role": "system", "content": [{"type": "text", "text": ""}]},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "image": blank_frame},
+                                {"type": "text", "text": ""},
+                            ],
+                        },
+                    ]
+                )
                 self._write_step_inputs(self._position)
 
                 # Capture must follow a few runs on a side stream, which is also
@@ -144,7 +127,10 @@ class CoTStream:
                 # graph's own pool.
                 self._graph_hidden = outputs.hidden_states
                 self._graph_logits = outputs.logits
+                # The throwaway chain may have ended and answered the blank turn
+                # it opened on, so the conversation is reset with it.
                 self.reset()
+                self.prompt_builder.reset()
 
     def reset(self) -> None:
         """Drop the chain. The next advance prefills from the frame it is given."""
@@ -152,7 +138,6 @@ class CoTStream:
         self._hidden = None
         self._next_token = None
         self._tokens = []
-        self._prev_text = ""
         # Kept here rather than read back from the cache: a recorded step advances
         # the cache inside the graph, where a host-side counter is the only thing
         # that stays in step with it.
@@ -160,15 +145,14 @@ class CoTStream:
         self._cache.reset()
 
     @torch.inference_mode()
-    def advance(self, image: torch.Tensor, task_prompt: str) -> torch.Tensor:
+    def advance(self) -> torch.Tensor:
         """The ``tokens_per_step`` activations this environment step issues.
 
-        Args:
-            image: (C, H, W) float tensor in [0, 1]; read only when the chain
-                restarts, which is what makes the chain the slow loop.
-            task_prompt: the env's language instruction, empty where the env sets
-                none (or where ``use_prompt`` is off), leaving just the standing
-                instruction.
+        The builder's conversation is read only where a chain restarts, and only
+        its tail -- the standing task, the chain that ended last, and the turn
+        being opened on -- because a prefill has to fit ``PROMPT_BUDGET``. That
+        the frame is read there and nowhere else is what makes the chain the
+        slow loop.
 
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16.
@@ -176,7 +160,7 @@ class CoTStream:
         activations = []
         while len(activations) < self.tokens_per_step:
             if self._needs_prefill:
-                self._prefill(image, task_prompt)
+                self._prefill(self.prompt_builder.conversation())
             activations.append(self._hidden)
             position = self._position
             self._write_step_inputs(position)
@@ -190,14 +174,25 @@ class CoTStream:
             self._consume(hidden_states, logits[0, -1])
         return torch.stack(activations)
 
-    def _prefill(self, image: torch.Tensor, task_prompt: str) -> None:
-        carried = self.CARRY.format(previous=self._prev_text) if self._prev_text else ""
-        prompt = "\n".join(part for part in (task_prompt, carried, self.INSTRUCTION) if part)
-        content = [{"type": "image"}, {"type": "text", "text": prompt}]
+    def _prefill(self, conversation: list[dict]) -> None:
+        # The standing task, the chain that ended last as the model's own turn,
+        # and the turn being opened on. Everything before those is dropped rather
+        # than sent: a prefill has to fit ``PROMPT_BUDGET`` however long the
+        # conversation has grown, and the only frame it carries is the current.
+        turn = conversation[-1]
+        image = turn["content"][0]["image"]
+        replies = [reply for reply in conversation if reply["role"] == "assistant"]
+        current = {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": turn["content"][1]["text"]},
+            ],
+        }
         # Thinking off: with the <think> block left open the model spends the
         # chain reasoning about the request rather than about the scene.
         text = self.processor.apply_chat_template(
-            [{"role": "user", "content": content}],
+            [conversation[0]] + replies[-1:] + [current],
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,
@@ -265,11 +260,7 @@ class CoTStream:
         self._tokens.append(self._next_token.item())
         ended = self._tokens[-1] == self.eos_token_id or len(self._tokens) >= self.max_len
         if ended:
-            # The last ``CARRY_SENTENCES`` sentences are what gets quoted back.
-            # A chain cut at ``max_len`` ends mid-sentence, so the final piece is
-            # usually a fragment, and continuing a fragment is what is wanted.
-            pieces = [piece for piece in re.split(r"(?<=[.!?])\s+", self.text()) if piece]
-            self._prev_text = " ".join(pieces[-self.CARRY_SENTENCES :]) if self.carry_prev else ""
+            self.prompt_builder.add_reply(self.text())
             self._needs_prefill = True
 
     def text(self) -> str:

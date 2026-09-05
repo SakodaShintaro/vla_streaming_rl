@@ -33,9 +33,9 @@ def build_cot(
     tokens_per_step: int,
     max_len: int,
     temperature: float,
-    carry_prev: bool,
     steps_per_chain: int,
     use_cuda_graph: bool,
+    prompt_builder,
     device: torch.device,
 ):
     """The chain generator named by `mode`, both of which advance() the same way.
@@ -51,8 +51,8 @@ def build_cot(
             tokens_per_step=tokens_per_step,
             max_len=max_len,
             temperature=temperature,
-            carry_prev=carry_prev,
             use_cuda_graph=use_cuda_graph,
+            prompt_builder=prompt_builder,
             device=device,
         ),
         "batch": lambda: CoTBatch(
@@ -60,8 +60,8 @@ def build_cot(
             tokens_per_step=tokens_per_step,
             max_len=max_len,
             temperature=temperature,
-            carry_prev=carry_prev,
             steps_per_chain=steps_per_chain,
+            prompt_builder=prompt_builder,
             device=device,
         ),
     }
@@ -106,11 +106,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_tokens_num: int,
         cot_max_len: int,
         cot_temperature: float,
-        cot_carry_prev: bool,
         cot_mode: str,
         cot_steps_per_chain: int,
         cot_pool: str,
         cot_cuda_graph: bool,
+        prompt_builder,
         layer_scale_init: float,
     ) -> None:
         super().__init__()
@@ -156,9 +156,9 @@ class ActorCriticWithActionValue(NetworkInterface):
                 tokens_per_step=cot_tokens_num,
                 max_len=cot_max_len,
                 temperature=cot_temperature,
-                carry_prev=cot_carry_prev,
                 steps_per_chain=cot_steps_per_chain,
                 use_cuda_graph=cot_cuda_graph,
+                prompt_builder=prompt_builder,
                 device=torch.device("cuda"),
             )
 
@@ -217,9 +217,7 @@ class ActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
-    def advance_cot(
-        self, image: torch.Tensor, task_prompt: str, episode_done: bool
-    ) -> torch.Tensor:
+    def advance_cot(self, episode_done: bool) -> torch.Tensor:
         """This step's chain-of-thought activations, or nothing when the chain is
         off. A finished episode ends the chain, so the next one starts its
         commentary from its own first frame."""
@@ -227,7 +225,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             return torch.zeros(self.cot_shape)
         if episode_done:
             self.cot_stream.reset()
-        return self.cot_stream.advance(image, task_prompt)
+        return self.cot_stream.advance()
 
     def render_panels(self) -> dict[str, np.ndarray]:
         """The chain as it currently stands, drawn for the render strip. It runs

@@ -71,6 +71,7 @@ def build_network(
     observation_space_shape: tuple[int, ...],
     action_space_shape: tuple[int, ...],
     parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
+    prompt_builder,
     device: torch.device,
 ) -> nn.Module:
     # The PPO network has its own value head baked in and reads no critic
@@ -170,11 +171,11 @@ def build_network(
             cot_tokens_num=args.cot_tokens_num,
             cot_max_len=args.cot_max_len,
             cot_temperature=args.cot_temperature,
-            cot_carry_prev=args.cot_carry_prev,
             cot_mode=args.cot_mode,
             cot_steps_per_chain=args.cot_steps_per_chain,
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
+            prompt_builder=prompt_builder,
         ).to(device)
 
     elif args.network_class == "animal_actor_critic":
