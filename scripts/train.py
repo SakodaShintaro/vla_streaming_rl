@@ -260,37 +260,31 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     torch.backends.cudnn.deterministic = True
     torch.cuda.set_device(0)
 
-    # Create result directories and save files only if not in debug mode
-    if not args.debug:
-        # save seed to file
-        with open(result_dir / "seed.txt", "w") as f:
-            f.write(str(seed))
+    # save seed to file
+    with open(result_dir / "seed.txt", "w") as f:
+        f.write(str(seed))
 
-        # Save branch name, git show -s and git diff results
-        branch_name = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True
-        ).stdout
-        git_show = subprocess.run(["git", "show", "-s"], capture_output=True, text=True).stdout
-        git_diff = subprocess.run(["git", "diff"], capture_output=True, text=True).stdout
-        with open(result_dir / "git_info.txt", "w") as f:
-            f.write(f"branch:\n{branch_name}\n")
-            f.write(f"git show -s:\n{git_show}\n")
-            f.write(f"git diff:\n{git_diff}\n")
+    # Save branch name, git show -s and git diff results
+    branch_name = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True
+    ).stdout
+    git_show = subprocess.run(["git", "show", "-s"], capture_output=True, text=True).stdout
+    git_diff = subprocess.run(["git", "diff"], capture_output=True, text=True).stdout
+    with open(result_dir / "git_info.txt", "w") as f:
+        f.write(f"branch:\n{branch_name}\n")
+        f.write(f"git show -s:\n{git_show}\n")
+        f.write(f"git diff:\n{git_diff}\n")
 
-        video_dir = result_dir / "video"
-        video_dir.mkdir(parents=True, exist_ok=True)
+    video_dir = result_dir / "video"
+    video_dir.mkdir(parents=True, exist_ok=True)
 
-        image_dir = result_dir / "images"
-        image_dir.mkdir(parents=True, exist_ok=True)
+    image_dir = result_dir / "images"
+    image_dir.mkdir(parents=True, exist_ok=True)
 
-        obs_dir = result_dir / "obs"
-        obs_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        result_dir = None
-        video_dir = None
-        image_dir = None
-        obs_dir = None
-    log_episode_path = result_dir / "log_episode.tsv" if result_dir is not None else None
+    obs_dir = result_dir / "obs"
+    obs_dir.mkdir(parents=True, exist_ok=True)
+
+    log_episode_path = result_dir / "log_episode.tsv"
     log_episode_file = None
     log_episode_writer = None
 
@@ -447,7 +441,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 cv2.imshow(args.env_id, bgr_image)
                 cv2.waitKey(1)
 
-            if global_step % checkpoint_interval == 0 and result_dir is not None:
+            if global_step % checkpoint_interval == 0:
                 save_checkpoint(result_dir, network, agent)
 
             if terminated or truncated:
@@ -525,19 +519,18 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             data_dict["recent_average_score"] = recent_average_score
         wandb.log(data_dict)
 
-        if result_dir is not None:
-            if log_episode_writer is None:
-                log_episode_file = open(log_episode_path, "w", newline="")
-                fieldnames = list(data_dict.keys()) + [
-                    "recent_average_score",
-                    "recent_success_rate",
-                ]
-                log_episode_writer = csv.DictWriter(
-                    log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
-                )
-                log_episode_writer.writeheader()
-            log_episode_writer.writerow(data_dict)
-            log_episode_file.flush()
+        if log_episode_writer is None:
+            log_episode_file = open(log_episode_path, "w", newline="")
+            fieldnames = list(data_dict.keys()) + [
+                "recent_average_score",
+                "recent_success_rate",
+            ]
+            log_episode_writer = csv.DictWriter(
+                log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
+            )
+            log_episode_writer.writeheader()
+        log_episode_writer.writerow(data_dict)
+        log_episode_file.flush()
 
         if episode_id % args.print_interval == 0:
             print(
@@ -555,21 +548,20 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             )
             if arena_is_best:
                 best_score_per_arena[arena_name] = score
-                if result_dir is not None:
-                    save_episode_data(
-                        video_dir,
-                        image_dir,
-                        obs_dir,
-                        f"best_{arena_name}",
-                        bgr_image_list,
-                        action_list,
-                        reward_list,
-                        obs_list,
-                        text_list,
-                    )
+                save_episode_data(
+                    video_dir,
+                    image_dir,
+                    obs_dir,
+                    f"best_{arena_name}",
+                    bgr_image_list,
+                    action_list,
+                    reward_list,
+                    obs_list,
+                    text_list,
+                )
         else:
             is_best = score > best_score
-            if is_best and result_dir is not None:
+            if is_best:
                 with open(result_dir / "best_score.txt", "w") as f:
                     f.write(f"{episode_id + 1}\t{score:.2f}")
                 best_score = score
@@ -585,9 +577,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                     text_list,
                 )
 
-        if (
-            episode_id == 0 or (episode_id + 1) % args.image_save_interval == 0
-        ) and result_dir is not None:
+        if episode_id == 0 or (episode_id + 1) % args.image_save_interval == 0:
             save_episode_data(
                 video_dir,
                 image_dir,
@@ -602,33 +592,31 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         # Persist the light resume state every episode (the heavy weights /
         # optimizer files follow the checkpoint_interval cadence above).
-        if result_dir is not None:
-            train_state = {
-                "global_step": global_step,
-                "episode_id": episode_id + 1,
-                "episode_count": episode_count,
-                "score_sum_all": float(score_sum_all),
-                "success_sum_all": float(success_sum_all),
-                "success_episode_count": success_episode_count,
-                "best_score": float(best_score),
-                "score_list": [float(s) for s in score_list],
-                "success_list": [float(s) for s in success_list],
-            }
-            get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
-            if get_curriculum is not None:
-                curriculum = get_curriculum()
-                train_state["curriculum_progress"] = curriculum["progress"]
-                write_arena_stats(result_dir / "arena_stats.tsv", curriculum, best_score_per_arena)
-            (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
+        train_state = {
+            "global_step": global_step,
+            "episode_id": episode_id + 1,
+            "episode_count": episode_count,
+            "score_sum_all": float(score_sum_all),
+            "success_sum_all": float(success_sum_all),
+            "success_episode_count": success_episode_count,
+            "best_score": float(best_score),
+            "score_list": [float(s) for s in score_list],
+            "success_list": [float(s) for s in success_list],
+        }
+        get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
+        if get_curriculum is not None:
+            curriculum = get_curriculum()
+            train_state["curriculum_progress"] = curriculum["progress"]
+            write_arena_stats(result_dir / "arena_stats.tsv", curriculum, best_score_per_arena)
+        (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
 
         episode_id += 1
 
-    if result_dir is not None:
-        save_checkpoint(result_dir, network, agent)
+    save_checkpoint(result_dir, network, agent)
 
     env.close()
 
-    if args.env_id == "AnimalAI-v0" and result_dir is not None:
+    if args.env_id == "AnimalAI-v0" and not args.debug:
         from test_trained_agent import run_testbed
 
         eval_factory = OmegaConf.merge(args.env_factory, {"mode": "eval"})
