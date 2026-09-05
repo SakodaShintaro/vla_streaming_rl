@@ -88,11 +88,10 @@ def save_episode_data(
     # panels every step, so every render frame has the same size. Fail loudly
     # if that is violated rather than letting the video encoder error out.
     frame_sizes = {img.shape for img in bgr_image_list}
-    if len(frame_sizes) != 1:
-        raise ValueError(
-            f"Episode '{name}' produced frames of differing sizes {frame_sizes}; "
-            "an agent's panel set / shapes must stay constant across the run."
-        )
+    assert len(frame_sizes) == 1, (
+        f"Episode '{name}' produced frames of differing sizes {frame_sizes}; "
+        "an agent's panel set / shapes must stay constant across the run."
+    )
 
     # libx264 (yuv420p) requires even width/height; the concatenated panel strip
     # can be an odd size. Pad one black row/column when needed.
