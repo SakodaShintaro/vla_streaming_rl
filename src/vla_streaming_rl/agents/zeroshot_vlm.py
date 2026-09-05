@@ -95,7 +95,14 @@ class ZeroShotVLMAgent(Agent):
         response_text = response.text
         answer_match = ANSWER_RE.search(response_text)
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
-        action, parse_ok = self._parse_action(answer_text)
+        action_array, parse_ok = self.parse_action_text(answer_text)
+        # A response that did not follow the format leaves the env running on the
+        # previous action; nothing is recovered from the rest of the text.
+        action = (
+            self._to_env_action(action_array[0].astype(np.float32))
+            if parse_ok
+            else self.last_action
+        )
 
         # Only the action is handed back as this turn's reply, not the <think>
         # section that produced it: replaying the full response made the model
@@ -165,13 +172,3 @@ class ZeroShotVLMAgent(Agent):
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         return np.clip(net_action, self.action_space.low, self.action_space.high)
-
-    # ------------------------------------------------------------------
-    # Action decoding
-    # ------------------------------------------------------------------
-
-    def _parse_action(self, answer_text: str) -> tuple[np.ndarray, bool]:
-        action_array, parse_ok = self.parse_action_text(answer_text)
-        if parse_ok:
-            return self._to_env_action(action_array[0].astype(np.float32)), True
-        return self.last_action, False
