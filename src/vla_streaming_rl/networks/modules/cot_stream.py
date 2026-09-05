@@ -21,6 +21,8 @@ Not an ``nn.Module`` on purpose: registering it would put a frozen 0.8B model
 into the network's ``parameters()`` and its ``state_dict()``.
 """
 
+import time
+
 import torch
 from transformers import StaticCache
 
@@ -138,6 +140,10 @@ class CoTStream:
         self._hidden = None
         self._next_token = None
         self._tokens = []
+        # The prompt the chain was prefilled on, and what this step's tokens
+        # cost. Reported to the render panel, not used by the chain itself.
+        self._input_tokens = 0
+        self._msec = 0.0
         # Kept here rather than read back from the cache: a recorded step advances
         # the cache inside the graph, where a host-side counter is the only thing
         # that stays in step with it.
@@ -157,6 +163,7 @@ class CoTStream:
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16.
         """
+        start = time.perf_counter()
         activations = []
         while len(activations) < self.tokens_per_step:
             if self._needs_prefill:
@@ -172,6 +179,7 @@ class CoTStream:
                 hidden_states, logits = self._graph_hidden, self._graph_logits
             self._position = position + 1
             self._consume(hidden_states, logits[0, -1])
+        self._msec = (time.perf_counter() - start) * 1000.0
         return torch.stack(activations)
 
     def _prefill(self, conversation: list[dict]) -> None:
@@ -209,6 +217,7 @@ class CoTStream:
             f"cache length {self._cache_len}; raise CoTStream.PROMPT_BUDGET"
         )
         self._tokens = []
+        self._input_tokens = int(prompt_len)
         self._cache.reset()
         self._needs_prefill = False
         outputs = self.model(
@@ -262,6 +271,15 @@ class CoTStream:
         if ended:
             self.prompt_builder.add_reply(self.text())
             self._needs_prefill = True
+
+    def stats(self) -> dict:
+        """What the chain costs: the prompt it was prefilled on, the tokens it
+        has written since, and the wall time this step's tokens took."""
+        return {
+            "input_tokens": self._input_tokens,
+            "output_tokens": len(self._tokens),
+            "msec": self._msec,
+        }
 
     def text(self) -> str:
         """The chain as written so far, for logging."""

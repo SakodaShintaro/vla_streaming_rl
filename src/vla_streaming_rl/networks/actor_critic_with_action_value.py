@@ -233,13 +233,20 @@ class ActorCriticWithActionValue(NetworkInterface):
     def render_panels(self) -> dict[str, np.ndarray]:
         """The conversation as it currently stands, drawn for the render strip:
         the turn the agent was shown this tick and the chains written about the
-        ones before it. Without a chain there is no panel at all rather than a
-        blank one, which keeps that run's strip the width of what it has."""
+        ones before it, under what the last run of the VLM cost. Without a chain
+        there is no panel at all rather than a blank one, which keeps that run's
+        strip the width of what it has."""
         if self.cot_stream is None:
             return {}
+        stats = self.cot_stream.stats()
+        status = (
+            f"in {stats['input_tokens']} tok   out {stats['output_tokens']} tok   "
+            f"{stats['msec']:.0f} ms"
+        )
         return {
             "conversation": render_conversation_panel(
                 self.cot_stream.prompt_builder.conversation(),
+                status,
                 self.COT_PANEL_WIDTH,
                 self.COT_PANEL_HEIGHT,
             )

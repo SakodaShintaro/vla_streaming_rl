@@ -149,9 +149,11 @@ _BUBBLE_TEXT = (238, 238, 238)
 _BUBBLE_FRACTION = 0.78
 
 
-def render_conversation_panel(turns: list[dict], width: int, height: int) -> np.ndarray:
+def render_conversation_panel(
+    turns: list[dict], status: str, width: int, height: int
+) -> np.ndarray:
     """A conversation drawn as chat bubbles on a panel of exactly ``width`` x
-    ``height``.
+    ``height``, under a line of ``status``.
 
     The standing task is not drawn: it is the same every tick and the trainer
     already captions the environment panel with it. What is drawn is what
@@ -161,7 +163,8 @@ def render_conversation_panel(turns: list[dict], width: int, height: int) -> np.
     The newest turn sits at the bottom and older ones are laid above it until the
     panel is full, so the latest exchange is always visible however long the
     conversation has grown. User turns are left-aligned, the chain's own replies
-    right-aligned, each on its own colour.
+    right-aligned, each on its own colour. ``status`` is drawn as a strip along
+    the top, where it stays put as the turns scroll under it.
     """
     font_scale = 0.45
     thickness = 1
@@ -172,6 +175,18 @@ def render_conversation_panel(turns: list[dict], width: int, height: int) -> np.
     bubble_width = int(width * _BUBBLE_FRACTION)
 
     panel = np.full((height, width, 3), (30, 30, 30), dtype=np.uint8)
+    status_height = line_height + padding * 2
+    cv2.rectangle(panel, (0, 0), (width, status_height), (48, 48, 48), cv2.FILLED)
+    cv2.putText(
+        panel,
+        status,
+        (gap, padding + line_height - baseline),
+        _FONT,
+        font_scale,
+        (190, 190, 190),
+        thickness,
+    )
+
     bottom = height - gap
     said = [turn for turn in turns if turn and turn["role"] in ("user", "assistant")]
     for turn in reversed(said):
@@ -181,7 +196,7 @@ def render_conversation_panel(turns: list[dict], width: int, height: int) -> np.
         lines = wrap_text(text if text else "(frame only)", bubble_width, font_scale, thickness)
         bubble_height = line_height * len(lines) + padding * 2
         top = bottom - bubble_height
-        if top < gap:
+        if top < status_height + gap:
             break
         assistant = turn["role"] == "assistant"
         left = width - gap - bubble_width if assistant else gap

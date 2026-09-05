@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: MIT
+import time
+
 import torch
 import torch.nn.functional as F
 
@@ -49,6 +51,10 @@ class CoTBatch:
         """Drop the chain. The next advance writes a new one on the frame it is
         given; the conversation it is written into is the builder's to reset."""
         self._tokens = []
+        # What the last chain cost. Kept between writes, since the steps that
+        # hold one are not the steps that paid for it.
+        self._input_tokens = 0
+        self._msec = 0.0
         self._activations = torch.zeros(
             (self.tokens_per_step, self.layers_num, self.hidden_size),
             dtype=torch.bfloat16,
@@ -76,6 +82,7 @@ class CoTBatch:
         return self._activations
 
     def _write_chain(self) -> None:
+        start = time.perf_counter()
         messages, images = self._render(self.prompt_builder.conversation())
         text = self.processor.apply_chat_template(
             messages,
@@ -103,6 +110,8 @@ class CoTBatch:
         prompt_len = inputs["input_ids"].shape[1]
         self._tokens = outputs.sequences[0, prompt_len:].tolist()
         self._activations = self._read_activations(outputs.hidden_states)
+        self._input_tokens = int(prompt_len)
+        self._msec = (time.perf_counter() - start) * 1000.0
         self.prompt_builder.add_reply(self.text())
 
     def _render(self, turns: list[dict]) -> tuple[list[dict], list[torch.Tensor]]:
@@ -144,6 +153,15 @@ class CoTBatch:
             positions.to(torch.float32).permute(1, 2, 0), self.tokens_per_step
         )
         return pooled.permute(2, 0, 1).to(torch.bfloat16)
+
+    def stats(self) -> dict:
+        """What the last chain cost: the tokens it was given, the tokens it
+        wrote, and the wall time the write took."""
+        return {
+            "input_tokens": self._input_tokens,
+            "output_tokens": len(self._tokens),
+            "msec": self._msec,
+        }
 
     def text(self) -> str:
         """The chain as written, for logging."""
