@@ -12,14 +12,6 @@ class CoTBatch:
     # that quotes back is in the conversation already.
     INSTRUCTION = CoTStream.INSTRUCTION
 
-    # The instruction opens the conversation and is never repeated in it. Later
-    # turns are the new frame under this cue instead, which is what asks for a
-    # delta rather than a fresh description: told only to continue, the model
-    # paraphrases what it already said and the chain stops carrying anything new.
-    # Greedy decoding writes the sentence it just wrote again, for as many
-    # tokens as it is given, until this is on.
-    REPETITION_PENALTY = 1.15
-
     CONTINUE = (
         "The current frame. Carry the commentary forward: write what is new or "
         "has changed since the last one, not what it already says."
@@ -124,7 +116,7 @@ class CoTBatch:
             **inputs,
             max_new_tokens=self.max_len,
             do_sample=False,
-            repetition_penalty=self.REPETITION_PENALTY,
+            repetition_penalty=1.15,
             output_hidden_states=True,
             return_dict_in_generate=True,
         )
