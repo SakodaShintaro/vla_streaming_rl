@@ -37,21 +37,6 @@ _OUTPUT_PANEL_WIDTH = 512
 _OUTPUT_PANEL_HEIGHT = 406
 
 
-def build_format_hint(action_spec: str) -> str:
-    """The response protocol. Every generated token is latency (one request per
-    env step), so the model is asked for a short justification and the action,
-    and nothing else -- no scene description, no restating of the task."""
-    return (
-        "Reply with exactly two sections and no other text. "
-        "First, in AT MOST two short sentences inside <think>...</think>, "
-        "say what in the current image decides your next action, taking the previous "
-        "reward (if shown) into account. Do not describe the scene in general, do not "
-        "restate the task, and do not repeat your earlier reasoning. "
-        f"Then output the action inside <answer>...</answer> using the format: {action_spec}. "
-        "The text inside <answer> must contain ONLY the action -- no commentary, no labels."
-    )
-
-
 def preprocess_image(image: np.ndarray, image_side: int) -> Image.Image:
     """A CHW float observation as a square RGB image of side ``image_side``."""
     hwc = (image.transpose(1, 2, 0) * 255).astype(np.uint8)
@@ -64,7 +49,6 @@ class ZeroShotVLMAgent(Agent):
         *,
         action_space: gym.spaces.Box,
         parse_action_text,
-        action_spec: str,
         backend,
         image_side: int,
         reset_on_episode_end: bool,
@@ -80,7 +64,6 @@ class ZeroShotVLMAgent(Agent):
         self.action_space = action_space
         self.action_dim = int(np.prod(action_space.shape))
         self.parse_action_text = parse_action_text
-        self.format_hint = build_format_hint(action_spec)
         self.image_side = image_side
 
         self.last_action = np.zeros(self.action_dim, dtype=np.float32)
@@ -106,7 +89,7 @@ class ZeroShotVLMAgent(Agent):
         prompt = self.prompt_builder.task_text()
 
         request_start = time.time()
-        response = self.backend.generate(self._build_messages())
+        response = self.backend.generate(self.prompt_builder.conversation())
         api_msec = (time.time() - request_start) * 1000
 
         response_text = response.text
@@ -192,15 +175,3 @@ class ZeroShotVLMAgent(Agent):
         if parse_ok:
             return self._to_env_action(action_array[0].astype(np.float32)), True
         return self.last_action, False
-
-    # ------------------------------------------------------------------
-    # Message construction
-    # ------------------------------------------------------------------
-
-    def _build_messages(self) -> list[dict]:
-        """The builder's conversation with the response protocol appended to its
-        opening turn: what the env asks is the builder's, how to answer it is
-        this agent's, and the turns in between are replayed as they stand."""
-        system_text = f"{self.prompt_builder.task_text()}\n\n{self.format_hint}"
-        opening = {"role": "system", "content": [{"type": "text", "text": system_text}]}
-        return [opening] + self.prompt_builder.conversation()[1:]

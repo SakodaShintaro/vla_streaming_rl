@@ -12,7 +12,8 @@ There is one builder per (environment, regime), and the two regimes are
 deliberately kept apart rather than composed out of shared pieces:
 
 - ``text_action``: the VLM writes the action itself, which
-  ``parse_action_text`` decodes. The prompt has to teach the action encoding.
+  ``parse_action_text`` decodes. The prompt has to teach the action encoding and
+  the two sections the answer is read out of.
 - everything else (``none``, ``high_level``): the action comes from the policy
   head and the language is either read as conditioning or generated as a
   high-level intent. Naming the action encoding here would only mislead.
@@ -38,6 +39,26 @@ from gymnasium import Env
 from omegaconf import DictConfig
 
 ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
+
+# How an answer is to be written where the VLM writes the action itself: a short
+# justification and then the action alone, which the reader takes out of
+# <answer>. The same in every environment, so it is stated once here; what stays
+# per-environment is the encoding of the action, which each prompt below spells
+# out beside everything else that env asks for.
+#
+# Every generated token is latency (one generation per env step), so this buys
+# only the justification that changes the action: a full scene description (the
+# <perception> section of the original Odysseus protocol) tripled the output for
+# no measured benefit.
+TEXT_ACTION_PROTOCOL = (
+    "Reply with exactly two sections and no other text. "
+    "First, in AT MOST two short sentences inside <think>...</think>, say what in "
+    "the current image decides your next action, taking the reward reported under "
+    "the frame into account. Do not describe the scene in general, do not restate "
+    "the task, and do not repeat your earlier reasoning. "
+    "Then output the action inside <answer>...</answer>, which must contain ONLY "
+    "the action -- no commentary, no labels."
+)
 
 
 def _load_arena_tasks(env: Env) -> dict[str, str]:
@@ -172,7 +193,12 @@ class EmptyPromptBuilder(PromptBuilder):
 
 # --- CarRacing ---------------------------------------------------------------
 
-CAR_RACING_TEXT_ACTION_PROMPT = "You control the red car in CarRacing-v3 (top-down). Stay on the gray road and avoid going onto the green grass; hug the road center when possible."
+CAR_RACING_TEXT_ACTION_PROMPT = (
+    "You control the red car in CarRacing-v3 (top-down). Stay on the gray road "
+    "and avoid going onto the green grass; hug the road center when possible. "
+    "Write the action as `steer=<value>, accel=<value>`, where each <value> is a "
+    "float in [-1, 1]."
+)
 
 CAR_RACING_HIGH_LEVEL_PROMPT = (
     "You control the red car in CarRacing-v3 (top-down). The road is gray and "
@@ -189,7 +215,7 @@ class CarRacingTextActionPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return CAR_RACING_TEXT_ACTION_PROMPT
+        return f"{CAR_RACING_TEXT_ACTION_PROMPT} {TEXT_ACTION_PROTOCOL}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward, info
@@ -285,7 +311,8 @@ class AnimalAITextActionPromptBuilder(PromptBuilder):
         del obs
         return (
             f"{ANIMALAI_TEXT_ACTION_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}."
+            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
+            f"{TEXT_ACTION_PROTOCOL}"
         )
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
@@ -361,7 +388,7 @@ class CarlaTextActionPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return CARLA_TEXT_ACTION_FRAMING
+        return f"{CARLA_TEXT_ACTION_FRAMING} {TEXT_ACTION_PROTOCOL}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward

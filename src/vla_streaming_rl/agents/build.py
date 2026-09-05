@@ -23,7 +23,6 @@ def build_agent(
         return ZeroShotVLMAgent(
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,
-            action_spec=env.unwrapped.action_spec,
             backend=build_vlm_backend(args, env.unwrapped.action_choices),
             image_side=args.image_side,
             reset_on_episode_end=args.reset_on_episode_end,

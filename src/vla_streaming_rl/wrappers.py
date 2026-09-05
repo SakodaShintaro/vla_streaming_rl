@@ -7,8 +7,6 @@ import gymnasium as gym
 import hydra
 import numpy as np
 
-CAR_RACING_ACTION_SPEC = "steer=<value>, accel=<value> where each <value> is a float in [-1, 1]"
-
 
 def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     pattern = r"(?:t\d+:\s*)?steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)"
@@ -33,11 +31,6 @@ _ANIMALAI_ROTATE = {"R": 1.0, "L": -1.0, "N": 0.0}
 ANIMALAI_ACTION_CHOICES = [
     move + rotation for move in _ANIMALAI_MOVE for rotation in _ANIMALAI_ROTATE
 ]
-
-ANIMALAI_ACTION_SPEC = (
-    f"two letters -- one move out of {{{', '.join(_ANIMALAI_MOVE)}}} followed by one "
-    f"rotation out of {{{', '.join(_ANIMALAI_ROTATE)}}}, with no other text"
-)
 
 
 def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
@@ -160,7 +153,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
-        env.unwrapped.action_spec = CAR_RACING_ACTION_SPEC
         # Continuous: there is no finite set of action texts to enumerate.
         env.unwrapped.action_choices = []
         return env
@@ -191,7 +183,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = RemainingReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _animalai_parse_action
-        env.unwrapped.action_spec = ANIMALAI_ACTION_SPEC
         env.unwrapped.action_choices = ANIMALAI_ACTION_CHOICES
         return env
 
