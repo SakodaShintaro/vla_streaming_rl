@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 import torch
+import torch.nn.functional as F
 
 from .cot_stream import CoTStream
 from .vlm_backbone import load_model
@@ -30,7 +31,8 @@ class CoTBatch:
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
         assert steps_per_chain >= 1, f"steps_per_chain must be positive; got {steps_per_chain}"
         assert max_len >= tokens_per_step, (
-            f"max_len {max_len} below {tokens_per_step}: a chain could not fill one step's read"
+            f"max_len {max_len} below {tokens_per_step}: the pool would stretch a chain "
+            "shorter than one step's read"
         )
         self.model, self.processor = load_model(model_id, use_lora=False, device=device)
         self.model.eval().requires_grad_(False)
@@ -128,22 +130,22 @@ class CoTBatch:
         )
 
     def _read_activations(self, hidden_states) -> torch.Tensor:
-        """The tail of the chain, every depth kept: (tokens_per_step, layers_num, hidden_size).
+        """The whole chain, every depth kept, pooled to one step's read:
+        (tokens_per_step, layers_num, hidden_size).
 
         ``generate`` reports one entry per generated position, each a tuple over
-        depths; the position's own activation is the last row of each. The tail
-        is taken rather than the head because that is where the chain has said
-        what it concluded, and a chain shorter than one step's read is held at
-        its first position rather than padded with zeros, which would read as an
-        activation the model never produced.
+        depths; the position's own activation is the last row of each. A chain
+        stops where the model stops it, so the positions are pooled along the
+        chain rather than sliced to its tail: the whole chain reaches the policy,
+        and a chain that ended early needs no padding to reach the fixed read.
         """
-        positions = [
-            torch.stack([depth[0, -1] for depth in step]).to(torch.bfloat16)
-            for step in hidden_states[-self.tokens_per_step :]
-        ]
-        while len(positions) < self.tokens_per_step:
-            positions.insert(0, positions[0])
-        return torch.stack(positions)
+        positions = torch.stack(
+            [torch.stack([depth[0, -1] for depth in step]) for step in hidden_states]
+        )
+        pooled = F.adaptive_avg_pool1d(
+            positions.to(torch.float32).permute(1, 2, 0), self.tokens_per_step
+        )
+        return pooled.permute(2, 0, 1).to(torch.bfloat16)
 
     def text(self) -> str:
         """The chain as written, for logging."""
