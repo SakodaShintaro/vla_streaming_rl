@@ -18,7 +18,7 @@ from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder
-from vla_streaming_rl.utils import render_text_panel
+from vla_streaming_rl.utils import render_conversation_panel
 
 # The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
 # the tag before writing the real section, and reading the first one then takes
@@ -28,13 +28,6 @@ ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
 # Stands in for the assistant turn of a step whose response did not follow the
 # format, so the history stays an honest record of what was actually executed.
 NO_ACTION = "(no valid action; the previous action was repeated)"
-
-# The render panel is text only. Its size is fixed here rather than by the text,
-# so the panel keeps a constant size across a run (the stable-panel contract in
-# ``StepResult``). Text past the last line that fits is dropped, so the decoded
-# action leads and the raw response follows.
-_OUTPUT_PANEL_WIDTH = 512
-_OUTPUT_PANEL_HEIGHT = 406
 
 
 def preprocess_image(image: np.ndarray) -> Image.Image:
@@ -48,6 +41,14 @@ def preprocess_image(image: np.ndarray) -> Image.Image:
 
 
 class ZeroShotVLMAgent(Agent):
+    # Wide and tall enough for several turns of the conversation at once, as on
+    # the trained side: the panel is the only place a run shows what the model
+    # was actually asked. Fixed rather than grown from the text, so the strip
+    # keeps a constant size across a run (the stable-panel contract in
+    # ``StepResult``).
+    PANEL_WIDTH = 680
+    PANEL_HEIGHT = 560
+
     def __init__(
         self,
         *,
@@ -106,11 +107,11 @@ class ZeroShotVLMAgent(Agent):
             else self.last_action
         )
 
-        # Only the action is handed back as this turn's reply, not the <think>
-        # section that produced it: replaying the full response made the model
-        # copy its own earlier thoughts verbatim instead of reading the current
-        # frame, and it was half the prompt.
-        self.prompt_builder.add_reply(answer_text if parse_ok else NO_ACTION)
+        # The reply is handed back as written, <think> section and all, so the
+        # conversation is the whole record of what the model said -- what the
+        # render panel draws is then what the model itself reads. A response that
+        # did not parse says so, since the env carried on without it.
+        self.prompt_builder.add_reply(response_text if parse_ok else f"{response_text} {NO_ACTION}")
         self.last_action = action
         self.step_in_episode += 1
 
@@ -130,11 +131,16 @@ class ZeroShotVLMAgent(Agent):
             "vlm/prompt_tokens": float(response.prompt_tokens),
             "vlm/completion_tokens": float(response.completion_tokens),
         }
-        caption = (
-            f"answer: {answer_text!r}  parse: {'ok' if parse_ok else 'failed'}  "
-            f"finish: {response.finish_reason}  ||  {response_text}"
+        status = (
+            f"in {response.prompt_tokens} tok   out {response.completion_tokens} tok   "
+            f"{api_msec:.0f} ms   parse {'ok' if parse_ok else 'failed'}   "
+            f"{response.finish_reason}"
         )
-        panels = {"output": render_text_panel(caption, _OUTPUT_PANEL_WIDTH, _OUTPUT_PANEL_HEIGHT)}
+        panels = {
+            "conversation": render_conversation_panel(
+                self.prompt_builder.conversation(), status, self.PANEL_WIDTH, self.PANEL_HEIGHT
+            )
+        }
         return StepResult(
             action=action,
             metrics=metrics,
