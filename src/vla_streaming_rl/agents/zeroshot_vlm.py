@@ -19,7 +19,7 @@ from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder
-from vla_streaming_rl.utils import overlay_caption
+from vla_streaming_rl.utils import render_text_panel
 
 # The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
 # the tag before writing the real section, and reading the first one then takes
@@ -30,16 +30,12 @@ ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
 # format, so the history stays an honest record of what was actually executed.
 NO_ACTION = "(no valid action; the previous action was repeated)"
 
-# The render panel is text only, so it is a zero-height image whose caption band
-# is the whole panel. The band reserves a fixed number of lines, so the panel
-# keeps a constant size across a run (the stable-panel contract in
-# ``StepResult``); only the width is chosen here. Text past the band's line
-# budget is dropped, so the decoded action leads and the raw response follows.
+# The render panel is text only. Its size is fixed here rather than by the text,
+# so the panel keeps a constant size across a run (the stable-panel contract in
+# ``StepResult``). Text past the last line that fits is dropped, so the decoded
+# action leads and the raw response follows.
 _OUTPUT_PANEL_WIDTH = 512
-
-
-def _text_panel(text: str, width: int) -> np.ndarray:
-    return overlay_caption(np.zeros((0, width, 3), dtype=np.uint8), text)
+_OUTPUT_PANEL_HEIGHT = 406
 
 
 def build_format_hint(action_spec: str) -> str:
@@ -193,7 +189,7 @@ class ZeroShotVLMAgent(Agent):
             f"answer: {answer_text!r}  parse: {'ok' if parse_ok else 'failed'}  "
             f"finish: {response.finish_reason}  ||  {response_text}"
         )
-        panels = {"output": _text_panel(caption, _OUTPUT_PANEL_WIDTH)}
+        panels = {"output": render_text_panel(caption, _OUTPUT_PANEL_WIDTH, _OUTPUT_PANEL_HEIGHT)}
         return StepResult(
             action=action,
             metrics=metrics,
