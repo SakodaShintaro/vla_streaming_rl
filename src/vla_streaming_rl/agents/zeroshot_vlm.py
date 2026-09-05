@@ -10,7 +10,6 @@ into the same trainer loop and reports the same telemetry.
 
 import re
 import time
-from collections import deque
 from typing import Any
 
 import gymnasium as gym
@@ -60,34 +59,6 @@ def preprocess_image(image: np.ndarray, image_side: int) -> Image.Image:
 
 
 class ZeroShotVLMAgent(Agent):
-    """Zero-shot VLM controller driven by a short structured CoT protocol.
-
-    At each step the current observation is sent to the model as a user turn;
-    the model is prompted to produce two XML-style sections in order:
-
-      ``<think>...</think>`` -- at most two sentences on what in the current
-      image decides the next action.
-
-      ``<answer>...</answer>`` -- the textual action that the env's
-      ``parse_action_text`` decodes into an action vector.
-
-    Latency is one API round trip per env step and scales with the tokens
-    generated, so the protocol buys only the justification that changes the
-    action: a full scene description (the ``<perception>`` section of the
-    original Odysseus protocol) tripled the output for no measured benefit.
-
-    The most recent ``seq_len`` turns of the current episode (image, the ACTION
-    taken, reward observed AFTER it) are kept in a FIFO and prepended to the chat
-    as in-context history. The <think> section is deliberately not kept:
-    replaying it made the model copy its own earlier thoughts instead of reading
-    the frame.
-
-    A response that does not follow the format is a failure of the model and is
-    reported as one (``parse_failed`` in the metrics); nothing is recovered from
-    the rest of the text, since a phrase picked out of the reasoning is not the
-    action the model chose. The env keeps running on the previous action.
-    """
-
     def __init__(
         self,
         *,
@@ -95,7 +66,6 @@ class ZeroShotVLMAgent(Agent):
         parse_action_text,
         action_spec: str,
         backend,
-        seq_len: int,
         image_side: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
@@ -111,10 +81,8 @@ class ZeroShotVLMAgent(Agent):
         self.action_dim = int(np.prod(action_space.shape))
         self.parse_action_text = parse_action_text
         self.format_hint = build_format_hint(action_spec)
-        self.seq_len = seq_len
         self.image_side = image_side
 
-        self.history: deque[tuple[Image.Image, str, float | None]] = deque(maxlen=max(seq_len, 1))
         self.last_action = np.zeros(self.action_dim, dtype=np.float32)
         self.step_in_episode = 0
 
@@ -133,26 +101,12 @@ class ZeroShotVLMAgent(Agent):
     ) -> StepResult:
         del global_step, terminated, truncated
 
-        # The reward shown with a past turn is the one observed after it.
-        if self.step_in_episode > 0 and self.history:
-            past_image, past_response, _ = self.history[-1]
-            self.history[-1] = (past_image, past_response, reward)
-
         image = preprocess_image(obs["image"], self.image_side)
-        # The task half of the system prompt: composed here from the env's
-        # state, so the whole system turn -- task text and response protocol --
-        # is the agent's. This baseline keeps its own turn history, so it reads
-        # the standing task out of the conversation and builds the rest itself.
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
-        messages = self._build_messages(
-            prompt,
-            image,
-            current_reward=reward if self.step_in_episode > 0 else None,
-        )
 
         request_start = time.time()
-        response = self.backend.generate(messages)
+        response = self.backend.generate(self._build_messages())
         api_msec = (time.time() - request_start) * 1000
 
         response_text = response.text
@@ -160,12 +114,11 @@ class ZeroShotVLMAgent(Agent):
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
         action, parse_ok = self._parse_action(answer_text)
 
-        # Only the action goes into the history, not the <think> section that
-        # produced it: replaying the full response made the model copy its own
-        # earlier thoughts verbatim instead of reading the current frame, and it
-        # was half the prompt.
-        if self.seq_len > 0:
-            self.history.append((image, answer_text if parse_ok else NO_ACTION, None))
+        # Only the action is handed back as this turn's reply, not the <think>
+        # section that produced it: replaying the full response made the model
+        # copy its own earlier thoughts verbatim instead of reading the current
+        # frame, and it was half the prompt.
+        self.prompt_builder.add_reply(answer_text if parse_ok else NO_ACTION)
         self.last_action = action
         self.step_in_episode += 1
 
@@ -211,7 +164,7 @@ class ZeroShotVLMAgent(Agent):
     def on_episode_end(self, score: float) -> dict:
         del score
         if self.reset_on_episode_end:
-            self.history.clear()
+            self.prompt_builder.reset()
             self.last_action = np.zeros(self.action_dim, dtype=np.float32)
             self.step_in_episode = 0
         return {}
@@ -244,34 +197,10 @@ class ZeroShotVLMAgent(Agent):
     # Message construction
     # ------------------------------------------------------------------
 
-    def _build_messages(
-        self, task_prompt: str, image: Image.Image, current_reward: float | None
-    ) -> list[dict]:
-        system_prompt = f"{task_prompt}\n\n{self.format_hint}"
-        messages: list[dict] = [
-            {"role": "system", "content": [{"type": "text", "text": system_prompt}]}
-        ]
-        # The reward shown before user turn i is the one stored on history[i-1],
-        # i.e. the reward observed AFTER history[i-1]'s action. The oldest entry
-        # in the FIFO has no predecessor left, so its reward prefix is dropped.
-        for i in range(len(self.history)):
-            past_image, past_response, _ = self.history[i]
-            reward_prefix = self.history[i - 1][2] if i > 0 else None
-            messages.append(
-                {"role": "user", "content": self._build_user_content(past_image, reward_prefix)}
-            )
-            messages.append(
-                {"role": "assistant", "content": [{"type": "text", "text": past_response}]}
-            )
-        messages.append(
-            {"role": "user", "content": self._build_user_content(image, current_reward)}
-        )
-        return messages
-
-    @staticmethod
-    def _build_user_content(image: Image.Image, reward: float | None) -> list[dict]:
-        content: list[dict] = []
-        if reward is not None:
-            content.append({"type": "text", "text": f"Previous reward: {reward:+.3f}"})
-        content.append({"type": "image", "image": image})
-        return content
+    def _build_messages(self) -> list[dict]:
+        """The builder's conversation with the response protocol appended to its
+        opening turn: what the env asks is the builder's, how to answer it is
+        this agent's, and the turns in between are replayed as they stand."""
+        system_text = f"{self.prompt_builder.task_text()}\n\n{self.format_hint}"
+        opening = {"role": "system", "content": [{"type": "text", "text": system_text}]}
+        return [opening] + self.prompt_builder.conversation()[1:]
