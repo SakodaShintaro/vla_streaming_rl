@@ -21,8 +21,10 @@ Each class therefore holds its own complete text. The duplication is the point:
 rewording one regime must not move the other, since the two are measured
 against each other.
 
-A builder is called once per environment step with the observation and info the
-agent itself received, and returns the whole prompt for that tick.
+A builder is called once per environment step with the observation, the reward
+and the info the agent itself received, and returns the whole prompt for that
+tick. The reward is the env's own number -- the one the trainer captions the
+render with -- not the shaped reward the agent trains on.
 """
 
 import csv
@@ -56,21 +58,22 @@ def _load_arena_tasks(env: Env) -> dict[str, str]:
 
 
 class PromptBuilder(ABC):
-    """The language input for one tick, from that tick's observation and info."""
+    """The language input for one tick, from that tick's observation, reward and
+    info."""
 
     def __init__(self, env: Env) -> None:
         del env
 
     @abstractmethod
-    def __call__(self, obs: dict[str, Any], info: dict) -> str: ...
+    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str: ...
 
 
 class EmptyPromptBuilder(PromptBuilder):
     """No language at all: what ``use_prompt: 0`` selects, and the ablation a
     language-conditioned run is measured against."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
+    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del obs, reward, info
         return ""
 
 
@@ -91,16 +94,16 @@ CAR_RACING_HIGH_LEVEL_PROMPT = (
 class CarRacingTextActionPromptBuilder(PromptBuilder):
     """CarRacing, for the regime where the VLM writes the action."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
+    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del obs, reward, info
         return CAR_RACING_TEXT_ACTION_PROMPT
 
 
 class CarRacingHighLevelPromptBuilder(PromptBuilder):
     """CarRacing, for the regime where the policy head writes the action."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
+    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del obs, reward, info
         return CAR_RACING_HIGH_LEVEL_PROMPT
 
 
@@ -156,12 +159,13 @@ class AnimalAITextActionPromptBuilder(PromptBuilder):
     def __init__(self, env: Env) -> None:
         self.tasks = _load_arena_tasks(env)
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
+    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         velocity_x, velocity_y, velocity_z = obs["velocity"]
         return (
             f"{ANIMALAI_TEXT_ACTION_FRAMING} "
             f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
             f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
+            f"Reward: {reward:+.2f}. "
             f"Return so far: {obs['episode_return'][0]:+.2f}. "
             f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
             f"Return needed: {obs['remaining_return'][0]:+.2f}. "
@@ -182,12 +186,13 @@ class AnimalAIHighLevelPromptBuilder(PromptBuilder):
     def __init__(self, env: Env) -> None:
         self.tasks = _load_arena_tasks(env)
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
+    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         velocity_x, velocity_y, velocity_z = obs["velocity"]
         return (
             f"{ANIMALAI_HIGH_LEVEL_FRAMING} "
             f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
             f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
+            f"Reward: {reward:+.2f}. "
             f"Return so far: {obs['episode_return'][0]:+.2f}. "
             f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
             f"Return needed: {obs['remaining_return'][0]:+.2f}. "
@@ -239,16 +244,16 @@ CARLA_HIGH_LEVEL_MANEUVER = {
 class CarlaTextActionPromptBuilder(PromptBuilder):
     """CARLA, for the regime where the VLM writes the action."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        del obs
+    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del obs, reward
         return f"{CARLA_TEXT_ACTION_FRAMING} {CARLA_TEXT_ACTION_MANEUVER[info['maneuver_command']]}"
 
 
 class CarlaHighLevelPromptBuilder(PromptBuilder):
     """CARLA, for the regime where the policy head writes the action."""
 
-    def __call__(self, obs: dict[str, Any], info: dict) -> str:
-        del obs
+    def __call__(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+        del obs, reward
         return f"{CARLA_HIGH_LEVEL_FRAMING} {CARLA_HIGH_LEVEL_MANEUVER[info['maneuver_command']]}"
 
 

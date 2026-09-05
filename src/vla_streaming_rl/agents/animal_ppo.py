@@ -208,8 +208,8 @@ class AnimalPPOAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step, reward
-        prompt = self.prompt_builder(obs, info)
+        del global_step
+        prompt = self.prompt_builder(obs, reward, info)
         visual, vels = self._preprocess(obs, info)
         shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
@@ -250,8 +250,8 @@ class AnimalPPOAgent(Agent):
         the reset; the testbed calls it on every tick. Both are covered by the
         same boundary rule, and the action chosen on a terminal observation is
         dropped simply by never being buffered."""
-        del global_step, reward
-        prompt = self.prompt_builder(obs, info)
+        del global_step
+        prompt = self.prompt_builder(obs, reward, info)
         visual, vels = self._preprocess(obs, info)
         fresh = self._episode_boundary(terminated, truncated)
         return StepResult(

@@ -180,11 +180,10 @@ class OffPolicyAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del reward
         metrics = {}
         # The language this tick: composed here from the env's state, never read
         # off the observation.
-        prompt = self.prompt_builder(obs, info)
+        prompt = self.prompt_builder(obs, reward, info)
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]

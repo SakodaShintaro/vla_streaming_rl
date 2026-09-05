@@ -135,11 +135,11 @@ class StreamingAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step, reward
+        del global_step
         metrics = {}
         # The language this tick: composed here from the env's state, never read
         # off the observation.
-        prompt = self.prompt_builder(obs, info)
+        prompt = self.prompt_builder(obs, reward, info)
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
@@ -276,11 +276,11 @@ class StreamingAgent(Agent):
     ) -> StepResult:
         """Act without learning: the trainer calls this once per episode after
         the reset, and the testbed calls it on every tick."""
-        del global_step, reward
+        del global_step
         metrics = {}
         # The language this tick: composed here from the env's state, never read
         # off the observation.
-        prompt = self.prompt_builder(obs, info)
+        prompt = self.prompt_builder(obs, reward, info)
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]

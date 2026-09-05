@@ -140,7 +140,7 @@ class ZeroShotVLMAgent(Agent):
         # The task half of the system prompt: composed here from the env's
         # state, so the whole system turn -- task text and response protocol --
         # is the agent's.
-        prompt = self.prompt_builder(obs, info)
+        prompt = self.prompt_builder(obs, reward, info)
 
         # The reward shown with a past turn is the one observed after it.
         if self.step_in_episode > 0 and self.history:
