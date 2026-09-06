@@ -89,6 +89,11 @@ class PromptBuilder(ABC):
     ``add_reply``, which is what puts the turn it answered into the conversation
     for good. The ticks in between are overwritten rather than accumulated, so
     the conversation holds the turns a chain saw and not every step of the run.
+
+    ``history_turns`` is how many of those exchanges it keeps. Every turn still
+    held is re-read on every step that follows, so a conversation left to grow
+    charges the whole episode for its own beginning; the oldest exchange is
+    dropped instead.
     """
 
     # How a chain is to be written, the same in every environment. Written out
@@ -122,8 +127,10 @@ class PromptBuilder(ABC):
         "Two or three short sentences. No preamble, no lists, no numbers."
     )
 
-    def __init__(self, env: Env) -> None:
+    def __init__(self, env: Env, history_turns: int) -> None:
         del env
+        assert history_turns >= 0, history_turns
+        self.history_turns = history_turns
         self._turns = []
         self._current = {}
         self._task_text = ""
@@ -153,11 +160,13 @@ class PromptBuilder(ABC):
 
     def add_reply(self, text: str) -> None:
         """What the chain wrote about that turn, which settles the pair into the
-        conversation."""
-        self._turns = self._turns + [
+        conversation, dropping the oldest exchange once ``history_turns`` are
+        held."""
+        turns = self._turns + [
             self._current,
             {"role": "assistant", "content": [{"type": "text", "text": text}]},
         ]
+        self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
 
     def task_text(self) -> str:
         """The standing task: what the policy reads, and what it tokenizes.
@@ -303,8 +312,8 @@ class AnimalAITextActionPromptBuilder(PromptBuilder):
     handed over as text by the env.
     """
 
-    def __init__(self, env: Env) -> None:
-        super().__init__(env)
+    def __init__(self, env: Env, history_turns: int) -> None:
+        super().__init__(env, history_turns)
         self.tasks = _load_arena_tasks(env)
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -328,8 +337,8 @@ class AnimalAIHighLevelPromptBuilder(PromptBuilder):
     spell out.
     """
 
-    def __init__(self, env: Env) -> None:
-        super().__init__(env)
+    def __init__(self, env: Env, history_turns: int) -> None:
+        super().__init__(env, history_turns)
         self.tasks = _load_arena_tasks(env)
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -422,7 +431,7 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     if not args.use_prompt:
-        return EmptyPromptBuilder(env)
+        return EmptyPromptBuilder(env, args.prompt_history_turns)
 
     assert args.text_action_mode in ("none", "high_level", "text_action"), (
         f"Unknown text_action_mode: {args.text_action_mode!r}"
@@ -433,4 +442,4 @@ def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
 
     key = (args.env_id, regime)
     assert key in PROMPT_BUILDERS, f"No prompt builder for {key}"
-    return PROMPT_BUILDERS[key](env)
+    return PROMPT_BUILDERS[key](env, args.prompt_history_turns)
