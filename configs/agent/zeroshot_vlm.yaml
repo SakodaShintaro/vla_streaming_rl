@@ -34,11 +34,12 @@ vlm_backend: openrouter
 # qwen/qwen3.6-27b                                    262,144      0.600      3.600
 # qwen/qwen3.8-max                                  1,000,000      2.000      6.000
 openrouter_model_id: qwen/qwen3.7-flash
-# Response budget. The local backend has none to spend: it writes the <answer>
-# opener itself and draws the action from the env's action texts, one token.
+# Response budget, on both backends: the reply is the <think> section and the
+# <answer> that follows it, and a local generation stops at </answer> rather
+# than spending the rest.
 max_new_tokens: 2048
-# Cap on the model's own hidden thinking (OpenRouter `reasoning`; on the local
-# backend, the chat template's own block). The prompt already asks for the chain
+# The model's own hidden thinking: a cap on OpenRouter's `reasoning`, and on the
+# local backend the switch the chat template's own block reads. The prompt already asks for the chain
 # of thought inside <think>, so the hidden copy only competes for max_new_tokens:
 # with no cap the budget runs out before <answer> and the response comes back
 # empty. 0 disables thinking entirely.
