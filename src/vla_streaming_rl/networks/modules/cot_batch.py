@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from vla_streaming_rl.agents.prompt import PromptBuilder
 
-from .vlm_backbone import load_model
+from .vlm_backbone import load_model, sampling_kwargs
 
 
 class CoTBatch:
@@ -30,12 +30,12 @@ class CoTBatch:
         self.model.eval().requires_grad_(False)
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len
-        # `temperature` is accepted so both modes take the same parameters, and
-        # ignored: a chain written in one call is decoded greedily, which is how
-        # this was measured. `CoTStream` samples because it has to keep one
-        # chain alive over many steps and a greedy one there settles into a loop
-        # it can never leave.
-        del temperature
+        # Decoded the way the zero-shot controller decodes: it reads the same
+        # conversation through the same model, so a chain written any other way
+        # would not be the baseline's reasoning measured under RL. 0 is greedy,
+        # which `generate` spells as do_sample=False rather than a zero divisor.
+        assert temperature >= 0.0, temperature
+        self.temperature = temperature
         self.steps_per_chain = steps_per_chain
         # The conversation is the agent's; a chain reads it on the steps it
         # writes and puts what it wrote back as that turn's reply.
@@ -102,7 +102,7 @@ class CoTBatch:
         outputs = self.model.generate(
             **inputs,
             max_new_tokens=self.max_len,
-            do_sample=False,
+            **sampling_kwargs(self.temperature),
             output_hidden_states=True,
             return_dict_in_generate=True,
         )

@@ -104,8 +104,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         image_encoder_trainable: bool,
         vlm_model_id: str,
         cot_tokens_num: int,
-        cot_max_len: int,
-        cot_temperature: float,
+        max_new_tokens: int,
+        temperature: float,
         cot_mode: str,
         cot_steps_per_chain: int,
         cot_pool: str,
@@ -154,8 +154,8 @@ class ActorCriticWithActionValue(NetworkInterface):
                 mode=cot_mode,
                 model_id=vlm_model_id,
                 tokens_per_step=cot_tokens_num,
-                max_len=cot_max_len,
-                temperature=cot_temperature,
+                max_len=max_new_tokens,
+                temperature=temperature,
                 steps_per_chain=cot_steps_per_chain,
                 use_cuda_graph=cot_cuda_graph,
                 prompt_builder=prompt_builder,
@@ -210,7 +210,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.disable_state_predictor = disable_state_predictor
 
     # Fixed so the render strip keeps one shape for the whole run; wide enough
-    # to read a chain of ``cot_max_len`` tokens.
+    # to read a chain of ``max_new_tokens`` tokens.
     # Wide and tall enough for several turns of the conversation at once: the
     # panel is the only place a run shows what the chain was actually asked.
     COT_PANEL_WIDTH = 680

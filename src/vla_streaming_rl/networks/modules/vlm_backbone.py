@@ -19,6 +19,21 @@ from transformers import (
 )
 
 
+def sampling_kwargs(temperature: float) -> dict:
+    """What `generate` is given to decode at ``temperature``, 0 meaning greedy.
+
+    Lives beside `load_model` because the chain-of-thought stream and the
+    zero-shot controller both decode through it, and the point of sharing it is
+    that the two are decoded alike. A zero temperature is a request for greedy
+    decoding, which `generate` takes as do_sample=False rather than as a divisor
+    it would fall over on.
+    """
+    assert temperature >= 0.0, temperature
+    if temperature == 0.0:
+        return {"do_sample": False}
+    return {"do_sample": True, "temperature": temperature}
+
+
 def load_model(
     model_id: str, use_lora: bool, device: torch.device
 ) -> tuple[nn.Module, AutoProcessor]:

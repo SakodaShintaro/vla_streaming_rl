@@ -44,7 +44,6 @@ max_new_tokens: 128
 # with no cap the budget runs out before <answer> and the response comes back
 # empty. 0 disables thinking entirely.
 reasoning_max_tokens: 0
-temperature: 0.5
 # Retries the OpenAI SDK makes per request (exponential backoff). A run is one
 # API call per env step, so an upstream 429 / 5xx must not abort it.
 api_max_retries: 16

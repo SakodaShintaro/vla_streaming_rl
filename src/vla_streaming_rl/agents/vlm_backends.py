@@ -19,7 +19,7 @@ from omegaconf import DictConfig
 from openai import OpenAI
 from PIL import Image
 
-from vla_streaming_rl.networks.modules.vlm_backbone import load_model
+from vla_streaming_rl.networks.modules.vlm_backbone import load_model, sampling_kwargs
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -127,7 +127,7 @@ class LocalVLMBackend:
         reasoning_max_tokens: int,
         temperature: float,
     ) -> None:
-        assert temperature > 0.0, temperature
+        assert temperature >= 0.0, temperature
         self.device = torch.device("cuda")
         self.model, self.processor = load_model(model_id, use_lora=False, device=self.device)
         self.model.eval()
@@ -152,8 +152,7 @@ class LocalVLMBackend:
         generated = self.model.generate(
             **inputs,
             max_new_tokens=self.max_new_tokens,
-            do_sample=True,
-            temperature=self.temperature,
+            **sampling_kwargs(self.temperature),
             stop_strings=[ANSWER_CLOSE],
             tokenizer=self.processor.tokenizer,
         )
