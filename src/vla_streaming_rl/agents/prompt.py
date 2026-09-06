@@ -53,8 +53,8 @@ ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 TEXT_ACTION_PROTOCOL = (
     "Reply with exactly two sections and no other text. "
     "First, in AT MOST two short sentences inside <think>...</think>, say what in "
-    "the current image decides your next action, taking the reward reported under "
-    "the frame into account. Do not describe the scene in general, do not restate "
+    "the current image decides your next action, taking the previous reward (if "
+    "shown) into account. Do not describe the scene in general, do not restate "
     "the task, and do not repeat your earlier reasoning. "
     "Then output the action inside <answer>...</answer>, which must contain ONLY "
     "the action -- no commentary, no labels."
@@ -143,7 +143,7 @@ class PromptBuilder(ABC):
     def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
         """What the agent is looking at this tick: the turn a chain would read if
         it wrote one now. Overwritten every step until one does."""
-        self._task_text = f"{self.BASE}\n{self._task(obs, info)}"
+        self._task_text = f"{self.BASE}\n{self._task(obs, info)}".strip()
         self._current = {
             "role": "user",
             "content": [
@@ -245,26 +245,19 @@ class CarRacingHighLevelPromptBuilder(PromptBuilder):
 
 # --- Animal-AI ---------------------------------------------------------------
 
+# The wording the 2026-08-16 baseline ran (cleared 33 of its 72 arenas): the
+# task in one sentence and the action vocabulary spelled out, with no scoring
+# rules, no per-arena instruction and no advice on how to move.
 ANIMALAI_TEXT_ACTION_FRAMING = (
-    "You control an animal in a 3D arena, seen from its own point of view. "
-    "Touching a green sphere scores points and ends the episode, and a larger "
-    "sphere scores more. Touching a yellow sphere scores points and the episode "
-    "continues. Touching a red sphere loses points and ends the episode. "
-    "Entering a red zone ends the episode immediately. An orange zone drains "
-    "your health, and your health also drains as time passes. "
-    "What this arena asks of you follows as `Task:`. "
-    "The action is exactly one of these nine codes and nothing else: "
-    "NN (stand still), NR (turn right on the spot), NL (turn left on the spot), "
-    "FN (walk straight ahead), FR (walk forward while turning right), "
-    "FL (walk forward while turning left), BN (walk straight back), "
-    "BR (walk backward while turning right), BL (walk backward while turning "
-    "left). "
-    "Bring whatever you are heading for to the center of your view before you "
-    "walk forward: turn on the spot (NR or NL) until it is centered, and only "
-    "then move. "
-    "Keep your speed down -- the forward speed reported below should stay at "
-    "about 10 or less, so stand still (NN) for a tick whenever it climbs past "
-    "that. "
+    "You control the agent in Animal-AI (first-person view). "
+    "Find and reach the green or yellow goal sphere; avoid red zones. "
+    "Action space: one move and one rotation, applied on the same tick, "
+    "written as `<move>, <rotation>`. "
+    "The move is one of: stand still, walk forward, walk backward. "
+    "The rotation is one of: no turn, turn right, turn left. "
+    "For example `walk forward, no turn` goes straight ahead, "
+    "`stand still, turn left` turns on the spot, and "
+    "`walk forward, turn right` walks while turning. "
 )
 
 ANIMALAI_HIGH_LEVEL_FRAMING = (
@@ -310,28 +303,29 @@ def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
 class AnimalAITextActionPromptBuilder(PromptBuilder):
     """Animal-AI, for the regime where the VLM writes the action.
 
-    Framing text, this arena's own instruction, and the live scalars. The
-    scalars are read off the observation the agent already holds, so the
-    sentence states exactly the numbers the network's scalar branch is fed, and
-    the arena instruction is looked up from the episode's arena name rather than
-    handed over as text by the env.
+    The framing and the live scalars, and nothing else: the chain regime's
+    opening is not prepended and the arena's own instruction is not looked up,
+    since neither was in front of the baseline this wording is taken from.
     """
 
-    def __init__(self, env: Env, history_turns: int) -> None:
-        super().__init__(env, history_turns)
-        self.tasks = _load_arena_tasks(env)
+    BASE = ""
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
-        del obs
-        return (
-            f"{ANIMALAI_TEXT_ACTION_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
-            f"{TEXT_ACTION_PROTOCOL}"
-        )
+        del obs, info
+        return f"{ANIMALAI_TEXT_ACTION_FRAMING} {TEXT_ACTION_PROTOCOL}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del info
-        return _animalai_turn(obs, reward)
+        """The scalars the 8/16 baseline reported: no reward and no return
+        needed, which it never had in front of it."""
+        del info, reward
+        return (
+            f"Forward speed: {obs['velocity'][2]:+.2f}. "
+            f"Return so far: {obs['episode_return'][0]:+.2f}. "
+            f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
+            f"Health: {obs['health'][0]:.2f}. "
+            f"Global step: {int(obs['global_step'][0])}. "
+            f"Episode step: {int(obs['episode_step'][0])}."
+        )
 
 
 class AnimalAIHighLevelPromptBuilder(PromptBuilder):

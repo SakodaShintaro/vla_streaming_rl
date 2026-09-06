@@ -22,30 +22,26 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
 # Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
 # named action maps onto the extreme Box value that survives that dead-zone.
-# An action is a move letter followed by a rotation letter -- FN walks straight
-# ahead, NL turns on the spot, FR does both. The letters say what they mean, and
-# the position says which half they belong to, so the N the two halves share
-# reads unambiguously.
-_ANIMALAI_MOVE = {"F": 1.0, "B": -1.0, "N": 0.0}
-_ANIMALAI_ROTATE = {"R": 1.0, "L": -1.0, "N": 0.0}
-ANIMALAI_ACTION_CHOICES = [
-    move + rotation for move in _ANIMALAI_MOVE for rotation in _ANIMALAI_ROTATE
-]
+# An action is written the way it is said: `<move>, <rotation>`, so the model
+# spells out what it is doing rather than looking a letter code up in the prompt
+# every step.
+_ANIMALAI_MOVE = {"stand still": 0.0, "walk forward": 1.0, "walk backward": -1.0}
+_ANIMALAI_ROTATE = {"no turn": 0.0, "turn right": 1.0, "turn left": -1.0}
+# The phrase pair exactly as specified. Anything else is a format violation and
+# is reported as such rather than repaired here.
+_ANIMALAI_ACTION_RE = re.compile(
+    f"({'|'.join(_ANIMALAI_MOVE)}), ({'|'.join(_ANIMALAI_ROTATE)})", re.IGNORECASE
+)
 
 
 def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    """Decode the move/rotation letter pair into the Box action that the env
-    discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair.
-
-    Anything but one of the nine pairs is a format violation and is reported as
-    such rather than repaired here.
-    """
-    code = action_text.strip().upper()
-    if code not in ANIMALAI_ACTION_CHOICES:
+    """Decode the `<move>, <rotation>` phrase pair into the Box action that the
+    env discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair."""
+    match = _ANIMALAI_ACTION_RE.fullmatch(action_text.strip())
+    if match is None:
         return np.zeros((0, 2), dtype=np.float32), False
-    action_array = np.array(
-        [[_ANIMALAI_MOVE[code[0]], _ANIMALAI_ROTATE[code[1]]]], dtype=np.float32
-    )
+    move, rotation = (group.lower() for group in match.groups())
+    action_array = np.array([[_ANIMALAI_MOVE[move], _ANIMALAI_ROTATE[rotation]]], dtype=np.float32)
     return action_array, True
 
 
@@ -153,8 +149,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
-        # Continuous: there is no finite set of action texts to enumerate.
-        env.unwrapped.action_choices = []
         return env
 
     elif env_id == "CARLA-Leaderboard-v0":
@@ -183,7 +177,6 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = RemainingReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _animalai_parse_action
-        env.unwrapped.action_choices = ANIMALAI_ACTION_CHOICES
         return env
 
     else:
