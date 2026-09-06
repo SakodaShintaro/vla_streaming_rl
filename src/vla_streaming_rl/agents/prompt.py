@@ -262,9 +262,9 @@ ANIMALAI_TEXT_ACTION_FRAMING = (
     "Bring whatever you are heading for to the center of your view before you "
     "walk forward: turn on the spot (NR or NL) until it is centered, and only "
     "then move. "
-    "Keep your speed down -- the third velocity component reported below should "
-    "stay at about 10 or less, so stand still (NN) for a tick whenever it climbs "
-    "past that. "
+    "Keep your speed down -- the forward speed reported below should stay at "
+    "about 10 or less, so stand still (NN) for a tick whenever it climbs past "
+    "that. "
 )
 
 ANIMALAI_HIGH_LEVEL_FRAMING = (
@@ -279,20 +279,24 @@ ANIMALAI_HIGH_LEVEL_FRAMING = (
     "to go for next and what in the current view says so -- which object or "
     "which direction is worth heading for, and what has to be kept away from. "
     "Face what you are heading for before closing on it, and stay slow enough "
-    "that the third velocity component reported below stays at about 10 or less. "
+    "that the forward speed reported below stays at about 10 or less. "
 )
 
 
 def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
     """Animal-AI's live scalars: the numbers the frame cannot show.
 
-    The same values the network's scalar branch is fed, so the sentence states
-    exactly what the policy reads. Shared by both regimes -- these are what the
-    env reports, not how the run frames it.
+    Read off the observation the network's scalar branch is fed, cut down to
+    what a reply can act on: of the three velocity components only the forward
+    one, since a model handed all three reads the vector as motion the animal
+    cannot have -- it reported flying and ascending off a standing still frame.
+    The lateral and vertical components still reach the policy through the
+    scalar branch. Shared by both regimes -- these are what the env reports, not
+    how the run frames it.
     """
-    velocity_x, velocity_y, velocity_z = obs["velocity"]
+    forward_speed = obs["velocity"][2]
     return (
-        f"Velocity: ({velocity_x:+.2f}, {velocity_y:+.2f}, {velocity_z:+.2f}). "
+        f"Forward speed: {forward_speed:+.2f}. "
         f"Reward: {reward:+.2f}. "
         f"Return so far: {obs['episode_return'][0]:+.2f}. "
         f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
