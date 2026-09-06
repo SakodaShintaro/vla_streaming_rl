@@ -14,7 +14,7 @@ text_action_mode: text_action
 #   openrouter : a hosted model, one API call per env step (`openrouter_model_id`).
 #   local      : a Qwen3.5 checkpoint generating in this process on the GPU
 #                (`vlm_model_id`, from base/vlm), so no API key and no server.
-vlm_backend: openrouter
+vlm_backend: local
 # OpenRouter model
 # model                                               context   $in/Mtok  $out/Mtok
 # qwen/qwen3.7-flash                                1,000,000      0.030      0.130
