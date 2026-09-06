@@ -8,15 +8,10 @@ cd $(dirname $0)
 
 export GRPC_VERBOSITY=ERROR
 
-# Animal-AI v5 does not auto-download the Unity binary. Place the unzipped
-# Linux build at $HOME/animalai_env/Linux/animalAI.x86_64 (downloaded from
-# https://github.com/Kinds-of-Intelligence-CFI/animal-ai/releases).
-AAI_BINARY="${HOME}/animalai_env/Linux/animalAI.x86_64"
-if [ ! -x "${AAI_BINARY}" ]; then
-    echo "ERROR: AAI binary not found or not executable: ${AAI_BINARY}" >&2
-    echo "Download Linux.zip from animal-ai releases, unzip to ~/animalai_env/, chmod +x." >&2
-    exit 1
-fi
+# Fetch the Unity player this run needs, which is a no-op once it is installed.
+# The version and the install path live there and in configs/env/animalai.yaml,
+# so this script names neither.
+./setup_animalai.sh
 
 # The Unity player writes one CSV row per step into a queue its writer cannot
 # drain at this throughput, which puts the host out of memory after a few hours.

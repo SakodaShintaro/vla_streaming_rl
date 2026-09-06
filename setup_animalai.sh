@@ -9,7 +9,7 @@ cd $(dirname $0)
 # so it also accepts continuous actions and renders the top-down camera. In the
 # discrete mode it is step-for-step identical to the official 4.3.x release.
 # configs/env/animalai.yaml points env_factory.binary_path at what this installs.
-AAI_VERSION=4.3.2_alpha1
+AAI_VERSION=4.3.2_alpha2
 AAI_DIR="$HOME/animalai_env/$AAI_VERSION"
 AAI_URL="https://github.com/SakodaShintaro/animal-ai-unity/releases/download/${AAI_VERSION}/Linux.zip"
 

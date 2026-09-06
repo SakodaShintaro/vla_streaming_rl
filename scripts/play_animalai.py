@@ -55,7 +55,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARENA_ROOT = REPO_ROOT / "external/animal-ai/configs/competition"
-DEFAULT_BINARY = Path.home() / "animalai_env/Linux/animalAI.x86_64"
+DEFAULT_BINARY = Path.home() / "animalai_env/4.3.2_alpha2/Linux/animalAI.x86_64"
 
 # "    t: 500" / "    timeLimit: 500" -- the key name differs by AAI version,
 # so rewrite whichever one the file uses and keep it.

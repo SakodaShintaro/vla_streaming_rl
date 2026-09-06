@@ -1104,7 +1104,7 @@ if __name__ == "__main__":
         resolution=96,
         seed=0,
         base_port=5005,
-        binary_path="~/animalai_env/Linux/animalAI.x86_64",
+        binary_path="~/animalai_env/4.3.2_alpha2/Linux/animalAI.x86_64",
         continuous_action=False,
         topdown_camera=False,
         topdown_resolution=96,

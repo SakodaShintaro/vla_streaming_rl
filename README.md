@@ -47,22 +47,27 @@ are installed via `uv sync` from the wheel referenced in `pyproject.toml`.
 
 ### (Optional) Setup Animal-AI
 
-Animal-AI v5 does not auto-download the Unity binary, so place it manually.
+Animal-AI v5 does not auto-download the Unity binary, so fetch it once:
 
 ```bash
-# Download Linux.zip from the Animal-AI releases page:
-#   https://github.com/Kinds-of-Intelligence-CFI/animal-ai/releases
-# (verified with v4.3.0 Linux build)
-
-mkdir -p ~/animalai_env
-unzip Linux.zip -d ~/animalai_env/
-chmod +x ~/animalai_env/Linux/animalAI.x86_64
+./setup_animalai.sh
 ```
 
-The training script (`train_animalai.sh`) expects the binary at
-`~/animalai_env/Linux/animalAI.x86_64`. The arena (task) is selected via
-`configs/env/animalai.yaml` (`env_factory.arena_yaml`); `null` falls back
-to the `GoodGoal_Random.yml` bundled inside the `animalai` package.
+That installs the 4.3.2_alpha2 Linux build of
+[SakodaShintaro/animal-ai-unity](https://github.com/SakodaShintaro/animal-ai-unity)
+into `~/animalai_env/4.3.2_alpha2/`, which is where
+`configs/env/animalai.yaml` points `env_factory.binary_path`. It is the official
+player rebuilt so it also accepts continuous actions and renders the top-down
+camera; in discrete mode it is step-for-step identical to the official 4.3.x
+release. `train_animalai.sh` runs the script itself, so this is only needed to
+install the binary ahead of time.
+
+Do not measure on 4.3.2_alpha1: the two tunnel prefabs are silently missing from
+that build, which leaves the 21 competition arenas built around them as open
+floor.
+
+Which arenas an episode draws from is set in `configs/env/animalai.yaml` under
+`env_factory` (`mode`, `train_variant`, `train_level`).
 
 ### Setup pre-commit hooks
 
