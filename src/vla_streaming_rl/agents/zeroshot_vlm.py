@@ -115,16 +115,6 @@ class ZeroShotVLMAgent(Agent):
         self.last_action = action
         self.step_in_episode += 1
 
-        # `finish_reason` and the token counts are what distinguishes a model
-        # that ignored the format from one that never got to emit an answer (a
-        # reasoning model can spend the whole budget before `content` starts).
-        print(
-            f"  [step {self.step_in_episode:4d}] reward={reward:+.3f} "
-            f"parse={'ok' if parse_ok else 'failed'} api={api_msec:.0f}ms "
-            f"finish={response.finish_reason} "
-            f"tokens={response.prompt_tokens}->{response.completion_tokens} "
-            f"text={response_text!r}"
-        )
         metrics = {
             "vlm/parse_failed": float(not parse_ok),
             "vlm/api_msec": api_msec,
