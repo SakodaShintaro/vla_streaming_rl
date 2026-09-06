@@ -31,7 +31,7 @@ env_factory:
   #   Training and eval overlap on purpose: eval is the fixed 900-arena
   #   benchmark and the trained variant is part of it, so test_result.tsv also
   #   reports the score over the arenas no training episode has seen.
-  mode: success
+  mode: sequential
   # - train_variant: which of a task's three variants the training modes use.
   #   Competition arenas are named XX-YY-ZZ (level-task-variant), so this picks
   #   one arena per task: 300 arenas, 30 per level. "eval" ignores it and

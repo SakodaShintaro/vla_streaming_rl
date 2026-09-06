@@ -59,14 +59,14 @@ def _to_openai_content(content: list[dict]):
     ]
 
 
+def _to_openai_messages(messages: list[dict]) -> list[dict]:
+    return [
+        {"role": message["role"], "content": _to_openai_content(message["content"])}
+        for message in messages
+    ]
+
+
 class OpenRouterBackend:
-    """A model hosted on OpenRouter, reached over its OpenAI-compatible endpoint.
-
-    Switching to a stronger model is a matter of changing ``model_id`` (e.g.
-    ``anthropic/claude-opus-5``, ``google/gemini-3.1-pro-preview``,
-    ``openai/gpt-5.2``).
-    """
-
     def __init__(
         self,
         *,
@@ -118,33 +118,7 @@ class OpenRouterBackend:
         )
 
 
-def _to_openai_messages(messages: list[dict]) -> list[dict]:
-    return [
-        {"role": message["role"], "content": _to_openai_content(message["content"])}
-        for message in messages
-    ]
-
-
 class LocalVLMBackend:
-    """A Qwen3.5 checkpoint generating in this process.
-
-    The same `load_model` the trained networks use, so a local run needs no
-    server and no extra dependency -- it does share the GPU with whatever else
-    the run has loaded, and it generates one response per env step, so it is
-    slower per step than a hosted model.
-
-    The protocol is the hosted backend's, run locally: the model writes the
-    whole reply itself and the agent reads the action out of it, so a response
-    that ignores the format fails here exactly as it would there. Constraining
-    the action to a legal token instead would make the two backends measure
-    different things under one baseline's name.
-
-    ``reasoning_max_tokens`` turns the chat template's own thinking block on and
-    off, which is what the hosted backend's `reasoning` parameter does
-    server-side. There is no server here to hold it to a budget, so the cap
-    itself is the shared ``max_new_tokens``.
-    """
-
     def __init__(
         self,
         *,
@@ -164,23 +138,16 @@ class LocalVLMBackend:
         self.enable_thinking = reasoning_max_tokens != 0
         self.temperature = temperature
 
-    def _render(self, messages: list[dict]):
-        return self.processor.apply_chat_template(
+    @torch.inference_mode()
+    def generate(self, messages: list[dict]) -> VLMResponse:
+        inputs = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            # Forwarded to the chat template as a jinja variable, which is where
-            # a Qwen3 template reads its thinking switch from. `apply_chat_template`
-            # also offers it to the processor, which has no use for it and logs
-            # one "not a valid argument" line about it per process.
             enable_thinking=self.enable_thinking,
         ).to(self.device)
-
-    @torch.inference_mode()
-    def generate(self, messages: list[dict]) -> VLMResponse:
-        inputs = self._render(messages)
         prompt_tokens = int(inputs["input_ids"].shape[1])
         generated = self.model.generate(
             **inputs,
