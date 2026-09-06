@@ -8,19 +8,13 @@ config rather than to the simulator: two agents can drive the same env with
 different framing, the env carries no text of its own, and ``use_prompt`` is a
 choice of builder instead of a blanking step in the trainer.
 
-There is one builder per (environment, regime), and the two regimes are
-deliberately kept apart rather than composed out of shared pieces:
-
-- ``text_action``: the VLM writes the action itself, which
-  ``parse_action_text`` decodes. The prompt has to teach the action encoding and
-  the two sections the answer is read out of.
-- everything else (``none``, ``high_level``): the action comes from the policy
-  head and the language is either read as conditioning or generated as a
-  high-level intent. Naming the action encoding here would only mislead.
-
-Each class therefore holds its own complete text. The duplication is the point:
-rewording one regime must not move the other, since the two are measured
-against each other.
+There is one builder per environment, and it always writes the prompt of an
+agent about to act: what the env asks, the action vocabulary it is asked in, the
+arena's own instruction, and the two sections the answer is read out of. Whether
+the action then comes from the reply or from a policy head is the reader's
+business, not the prompt's -- a run that reads the language as conditioning is
+reading the same words a run that acts on it would, so the two are comparable
+without a second wording to keep in step.
 
 A builder is called once per environment step with the observation, the reward
 and the info the agent itself received, and returns the conversation as it then
@@ -96,28 +90,6 @@ class PromptBuilder(ABC):
     dropped instead.
     """
 
-    # How a chain is to be written, the same in every environment. Written out
-    # in full rather than left to the model's own thinking mode, which spends
-    # its budget restating the request ("The user wants me to...") instead of
-    # the scene.
-    #
-    # First person, because the task that follows is addressed to the agent
-    # ("You control an animal...") and the chain is the agent's own thought.
-    #
-    # The delta line is stated as a difference because a chain told only to
-    # continue paraphrases what it already said and stops carrying new
-    # information. What it already said is in the conversation as its own turns,
-    # so nothing has to quote it back.
-    BASE = (
-        "This is what you can see right now. Think aloud as you act, in the "
-        "first person.\n"
-        "Say where I am relative to whatever matters around me, which way I am "
-        "heading, what is about to go wrong, and what I should do next.\n"
-        "Write only what has changed since my last thought, not what it already "
-        "says.\n"
-        "Two or three short sentences. No preamble, no lists, no numbers."
-    )
-
     def __init__(self, env: Env, history_turns: int) -> None:
         del env
         assert history_turns >= 0, history_turns
@@ -134,7 +106,7 @@ class PromptBuilder(ABC):
     def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
         """What the agent is looking at this tick: the turn a chain would read if
         it wrote one now. Overwritten every step until one does."""
-        self._task_text = f"{self.BASE}\n{self._task(obs, info)}".strip()
+        self._task_text = self._task(obs, info)
         self._current = {
             "role": "user",
             "content": [
@@ -200,18 +172,9 @@ CAR_RACING_TEXT_ACTION_PROMPT = (
     "float in [-1, 1]."
 )
 
-CAR_RACING_HIGH_LEVEL_PROMPT = (
-    "You control the red car in CarRacing-v3 (top-down). The road is gray and "
-    "the grass beside it is green. "
-    "The steering and the throttle are not yours to write: say in one short "
-    "sentence where the car should be going next -- which way the road bends "
-    "ahead, whether it is on the center of the road or has to come back to it, "
-    "and whether the corner ahead has to be taken slower."
-)
 
-
-class CarRacingTextActionPromptBuilder(PromptBuilder):
-    """CarRacing, for the regime where the VLM writes the action."""
+class CarRacingPromptBuilder(PromptBuilder):
+    """CarRacing."""
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
@@ -222,24 +185,16 @@ class CarRacingTextActionPromptBuilder(PromptBuilder):
         return ""
 
 
-class CarRacingHighLevelPromptBuilder(PromptBuilder):
-    """CarRacing, for the regime where the policy head writes the action."""
-
-    def _task(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
-        return CAR_RACING_HIGH_LEVEL_PROMPT
-
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward, info
-        return ""
-
-
 # --- Animal-AI ---------------------------------------------------------------
 
-# The wording the 2026-08-16 baseline ran (cleared 33 of its 72 arenas): the
-# task in one sentence and the action vocabulary spelled out, with no scoring
-# rules, no per-arena instruction and no advice on how to move.
-ANIMALAI_TEXT_ACTION_FRAMING = (
+# Grown from the wording the 2026-08-16 baseline ran (cleared 33 of its 72
+# arenas): the task in one sentence and the action vocabulary spelled out. What
+# that wording left out and this adds is the step between seeing and acting.
+# Reading a level-02 episode, the baseline wrote "the goal sphere is visible to
+# the right, which is on the opposite side of the scene from the current forward
+# direction" and answered `walk backward, no turn`: it had the direction and no
+# rule that turns it into a turn. `turn right` was not chosen once in 250 steps.
+ANIMALAI_FRAMING = (
     "You control the agent in Animal-AI (first-person view). "
     "Find and reach the green or yellow goal sphere; avoid red zones. "
     "Action space: one move and one rotation, applied on the same tick, "
@@ -249,21 +204,13 @@ ANIMALAI_TEXT_ACTION_FRAMING = (
     "For example `walk forward, no turn` goes straight ahead, "
     "`stand still, turn left` turns on the spot, and "
     "`walk forward, turn right` walks while turning. "
-)
-
-ANIMALAI_HIGH_LEVEL_FRAMING = (
-    "You control an animal in a 3D arena, seen from its own point of view. "
-    "Touching a green sphere scores points and ends the episode, and a larger "
-    "sphere scores more. Touching a yellow sphere scores points and the episode "
-    "continues. Touching a red sphere loses points and ends the episode. "
-    "Entering a red zone ends the episode immediately. An orange zone drains "
-    "your health, and your health also drains as time passes. "
+    "Face what you are heading for before you close on it: while it sits off to "
+    "one side of the view, turn on the spot towards it, and walk forward once "
+    "it is centered. "
+    "You see only what is in front of you while the arena extends all around "
+    "you, so what you are looking for is out of view more often than not, and "
+    "turning on the spot is how it is found. "
     "What this arena asks of you follows as `Task:`. "
-    "The movement itself is not yours to write: say in one short sentence what "
-    "to go for next and what in the current view says so -- which object or "
-    "which direction is worth heading for, and what has to be kept away from. "
-    "Face what you are heading for before closing on it, and stay slow enough "
-    "that the forward speed reported below stays at about 10 or less. "
 )
 
 
@@ -275,8 +222,7 @@ def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
     one, since a model handed all three reads the vector as motion the animal
     cannot have -- it reported flying and ascending off a standing still frame.
     The lateral and vertical components still reach the policy through the
-    scalar branch. Shared by both regimes -- these are what the env reports, not
-    how the run frames it.
+    scalar branch. These are what the env reports, not how the run frames it.
     """
     forward_speed = obs["velocity"][2]
     return (
@@ -291,40 +237,12 @@ def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
     )
 
 
-class AnimalAITextActionPromptBuilder(PromptBuilder):
-    """Animal-AI, for the regime where the VLM writes the action.
+class AnimalAIPromptBuilder(PromptBuilder):
+    """Animal-AI: the framing, this arena's own instruction, and the live
+    scalars.
 
-    The framing and the live scalars, and nothing else: the chain regime's
-    opening is not prepended and the arena's own instruction is not looked up,
-    since neither was in front of the baseline this wording is taken from.
-    """
-
-    BASE = ""
-
-    def _task(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
-        return f"{ANIMALAI_TEXT_ACTION_FRAMING} {TEXT_ACTION_PROTOCOL}"
-
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        """The scalars the 8/16 baseline reported: no reward and no return
-        needed, which it never had in front of it."""
-        del info, reward
-        return (
-            f"Forward speed: {obs['velocity'][2]:+.2f}. "
-            f"Return so far: {obs['episode_return'][0]:+.2f}. "
-            f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
-            f"Health: {obs['health'][0]:.2f}. "
-            f"Global step: {int(obs['global_step'][0])}. "
-            f"Episode step: {int(obs['episode_step'][0])}."
-        )
-
-
-class AnimalAIHighLevelPromptBuilder(PromptBuilder):
-    """Animal-AI, for the regime where the policy head writes the action.
-
-    The same arena instruction and the same live scalars as the text-action
-    regime, framed as a decision about where to go rather than as an action to
-    spell out.
+    The instruction is looked up from the episode's arena name rather than
+    handed over as text by the env, so the env carries no vocabulary of its own.
     """
 
     def __init__(self, env: Env, history_turns: int) -> None:
@@ -334,8 +252,9 @@ class AnimalAIHighLevelPromptBuilder(PromptBuilder):
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs
         return (
-            f"{ANIMALAI_HIGH_LEVEL_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}."
+            f"{ANIMALAI_FRAMING} "
+            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
+            f"{TEXT_ACTION_PROTOCOL}"
         )
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
@@ -363,27 +282,9 @@ CARLA_TEXT_ACTION_MANEUVER = {
     6: "The ego vehicle is changing to the right lane.",  # CHANGELANERIGHT
 }
 
-CARLA_HIGH_LEVEL_FRAMING = (
-    "Drive a car along a route in CARLA. Follow the planned route, "
-    "obey traffic rules, and avoid collisions. "
-    "The steering, the throttle and the brake are not yours to write: say in "
-    "one short sentence what the next maneuver asks of the car right now -- "
-    "what has to be given way to, and whether the speed has to come down "
-    "before it."
-)
-CARLA_HIGH_LEVEL_MANEUVER = {
-    -1: "The ego vehicle is following the lane straight ahead.",  # VOID
-    1: "The ego vehicle is turning left at the upcoming intersection.",  # LEFT
-    2: "The ego vehicle is turning right at the upcoming intersection.",  # RIGHT
-    3: "The ego vehicle is going straight through the upcoming intersection.",  # STRAIGHT
-    4: "The ego vehicle is following the lane straight ahead.",  # LANEFOLLOW
-    5: "The ego vehicle is changing to the left lane.",  # CHANGELANELEFT
-    6: "The ego vehicle is changing to the right lane.",  # CHANGELANERIGHT
-}
 
-
-class CarlaTextActionPromptBuilder(PromptBuilder):
-    """CARLA, for the regime where the VLM writes the action."""
+class CarlaPromptBuilder(PromptBuilder):
+    """CARLA."""
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
@@ -394,28 +295,11 @@ class CarlaTextActionPromptBuilder(PromptBuilder):
         return CARLA_TEXT_ACTION_MANEUVER[info["maneuver_command"]]
 
 
-class CarlaHighLevelPromptBuilder(PromptBuilder):
-    """CARLA, for the regime where the policy head writes the action."""
-
-    def _task(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
-        return CARLA_HIGH_LEVEL_FRAMING
-
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward
-        return CARLA_HIGH_LEVEL_MANEUVER[info["maneuver_command"]]
-
-
-# One builder per (env_id, regime). "text_action" is the regime in which the VLM
-# writes the action itself; "high_level" covers the modes that leave the action
-# to the policy head.
+# One builder per environment, whoever ends up acting on what it says.
 PROMPT_BUILDERS = {
-    ("CarRacing-v3", "text_action"): CarRacingTextActionPromptBuilder,
-    ("CarRacing-v3", "high_level"): CarRacingHighLevelPromptBuilder,
-    ("AnimalAI-v0", "text_action"): AnimalAITextActionPromptBuilder,
-    ("AnimalAI-v0", "high_level"): AnimalAIHighLevelPromptBuilder,
-    ("CARLA-Leaderboard-v0", "text_action"): CarlaTextActionPromptBuilder,
-    ("CARLA-Leaderboard-v0", "high_level"): CarlaHighLevelPromptBuilder,
+    "CarRacing-v3": CarRacingPromptBuilder,
+    "AnimalAI-v0": AnimalAIPromptBuilder,
+    "CARLA-Leaderboard-v0": CarlaPromptBuilder,
 }
 
 
@@ -423,13 +307,5 @@ def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     if not args.use_prompt:
         return EmptyPromptBuilder(env, args.prompt_history_turns)
 
-    assert args.text_action_mode in ("none", "high_level", "text_action"), (
-        f"Unknown text_action_mode: {args.text_action_mode!r}"
-    )
-    # ``none`` generates no text at all and ``high_level`` generates an intent;
-    # both leave the action to the policy head, so both read the same prompt.
-    regime = "text_action" if args.text_action_mode == "text_action" else "high_level"
-
-    key = (args.env_id, regime)
-    assert key in PROMPT_BUILDERS, f"No prompt builder for {key}"
-    return PROMPT_BUILDERS[key](env, args.prompt_history_turns)
+    assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
+    return PROMPT_BUILDERS[args.env_id](env, args.prompt_history_turns)
