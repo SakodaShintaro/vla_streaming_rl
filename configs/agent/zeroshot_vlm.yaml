@@ -7,7 +7,6 @@ defaults:
   - _self_
 
 agent_type: zeroshot_vlm
-prompt_conversation_slots: ${cot_steps_per_chain}
 # This baseline acts by writing the action out and decoding it with the env's
 # parse_action_text, so it runs the text-action prompt regime (agents/prompt.py).
 text_action_mode: text_action
