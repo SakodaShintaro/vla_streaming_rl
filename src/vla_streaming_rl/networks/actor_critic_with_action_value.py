@@ -148,9 +148,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_layers = text_config.num_hidden_layers + 1
         self.cot_shape = (cot_tokens_num, cot_layers, cot_dim)
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
-        self.cot_stream = None
+        self.cot_module = None
         if cot_tokens_num > 0:
-            self.cot_stream = build_cot(
+            self.cot_module = build_cot(
                 mode=cot_mode,
                 model_id=vlm_model_id,
                 tokens_per_step=cot_tokens_num,
@@ -224,11 +224,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         off. The first tick of an episode ends whatever chain was running, so an
         episode's commentary starts on its own first frame rather than carrying
         the one written about the frame the last episode ended on."""
-        if self.cot_stream is None:
+        if self.cot_module is None:
             return torch.zeros(self.cot_shape)
         if episode_started:
-            self.cot_stream.reset()
-        return self.cot_stream.advance()
+            self.cot_module.reset()
+        return self.cot_module.advance()
 
     def render_panels(self) -> dict[str, np.ndarray]:
         """The conversation as it currently stands, drawn for the render strip:
@@ -236,16 +236,16 @@ class ActorCriticWithActionValue(NetworkInterface):
         ones before it, under what the last run of the VLM cost. Without a chain
         there is no panel at all rather than a blank one, which keeps that run's
         strip the width of what it has."""
-        if self.cot_stream is None:
+        if self.cot_module is None:
             return {}
-        stats = self.cot_stream.stats()
+        stats = self.cot_module.stats()
         status = (
             f"in {stats['input_tokens']} tok   out {stats['output_tokens']} tok   "
             f"{stats['msec']:.0f} ms"
         )
         return {
             "conversation": render_conversation_panel(
-                self.cot_stream.prompt_builder.conversation(),
+                self.cot_module.prompt_builder.conversation(),
                 status,
                 self.COT_PANEL_WIDTH,
                 self.COT_PANEL_HEIGHT,
@@ -253,9 +253,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         }
 
     def render_texts(self) -> dict[str, str]:
-        if self.cot_stream is None:
+        if self.cot_module is None:
             return {}
-        return {"chain_of_thought": self.cot_stream.text()}
+        return {"chain_of_thought": self.cot_module.text()}
 
     def _window(self, data: ReplayBufferData, start, stop) -> tuple:
         """The ``(image, action, reward, rnn_state, scalar_obs, cot)`` the encoder
