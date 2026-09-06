@@ -27,10 +27,17 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
 # every step.
 _ANIMALAI_MOVE = {"stand still": 0.0, "walk forward": 1.0, "walk backward": -1.0}
 _ANIMALAI_ROTATE = {"no turn": 0.0, "turn right": 1.0, "turn left": -1.0}
-# The phrase pair exactly as specified. Anything else is a format violation and
-# is reported as such rather than repaired here.
+# One phrase from each half, comma separated. Which half a phrase belongs to is
+# what it says, not where it sits, so the two orders read the same and both are
+# accepted: a model naming the half it cares about first writes "turn left,
+# stand still" as readily as "stand still, turn left", and rejecting one of them
+# would measure word order rather than the action chosen. Anything that is not
+# one phrase from each half stays a format violation, reported as such rather
+# than repaired here.
 _ANIMALAI_ACTION_RE = re.compile(
-    f"({'|'.join(_ANIMALAI_MOVE)}), ({'|'.join(_ANIMALAI_ROTATE)})", re.IGNORECASE
+    f"({'|'.join(_ANIMALAI_MOVE | _ANIMALAI_ROTATE)}), "
+    f"({'|'.join(_ANIMALAI_MOVE | _ANIMALAI_ROTATE)})",
+    re.IGNORECASE,
 )
 
 
@@ -40,8 +47,14 @@ def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     match = _ANIMALAI_ACTION_RE.fullmatch(action_text.strip())
     if match is None:
         return np.zeros((0, 2), dtype=np.float32), False
-    move, rotation = (group.lower() for group in match.groups())
-    action_array = np.array([[_ANIMALAI_MOVE[move], _ANIMALAI_ROTATE[rotation]]], dtype=np.float32)
+    first, second = (group.lower() for group in match.groups())
+    moves = [phrase for phrase in (first, second) if phrase in _ANIMALAI_MOVE]
+    rotations = [phrase for phrase in (first, second) if phrase in _ANIMALAI_ROTATE]
+    if len(moves) != 1 or len(rotations) != 1:
+        return np.zeros((0, 2), dtype=np.float32), False
+    action_array = np.array(
+        [[_ANIMALAI_MOVE[moves[0]], _ANIMALAI_ROTATE[rotations[0]]]], dtype=np.float32
+    )
     return action_array, True
 
 
