@@ -56,13 +56,16 @@ class ZeroShotVLMAgent(Agent):
         parse_action_text,
         backend,
         reset_on_episode_end: bool,
-        prompt_builder: PromptBuilder,
+        prompt_builders: list[PromptBuilder],
     ) -> None:
+        assert prompt_builders, "the baseline reads at least one conversation"
         super().__init__(
             horizon=1,
             reset_on_episode_end=reset_on_episode_end,
-            prompt_builder=prompt_builder,
+            prompt_builder=prompt_builders[0],
         )
+        self.prompt_builders = prompt_builders
+        self.builder_index = 0
         self.backend = backend
 
         self.action_space = action_space
@@ -131,6 +134,10 @@ class ZeroShotVLMAgent(Agent):
                 self.prompt_builder.conversation(), status, self.PANEL_WIDTH, self.PANEL_HEIGHT
             )
         }
+        # Answered, drawn, and handed on: the next step reads the conversation
+        # whose own last turn is a chain's worth of steps back.
+        self.builder_index = (self.builder_index + 1) % len(self.prompt_builders)
+        self.prompt_builder = self.prompt_builders[self.builder_index]
         return StepResult(
             action=action,
             metrics=metrics,
@@ -152,7 +159,10 @@ class ZeroShotVLMAgent(Agent):
     def on_episode_end(self, score: float) -> dict:
         del score
         if self.reset_on_episode_end:
-            self.prompt_builder.reset()
+            for builder in self.prompt_builders:
+                builder.reset()
+            self.builder_index = 0
+            self.prompt_builder = self.prompt_builders[0]
             self.last_action = np.zeros(self.action_dim, dtype=np.float32)
             self.step_in_episode = 0
         return {}

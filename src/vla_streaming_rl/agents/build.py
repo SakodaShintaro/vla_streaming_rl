@@ -10,6 +10,7 @@ def build_agent(
     env: Env, network: torch.nn.Module, prompt_builder: PromptBuilder, args: DictConfig
 ):
     if args.agent_type == "zeroshot_vlm":
+        from vla_streaming_rl.agents.prompt import build_prompt_builder
         from vla_streaming_rl.agents.vlm_backends import build_vlm_backend
         from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent
 
@@ -25,7 +26,12 @@ def build_agent(
             parse_action_text=env.unwrapped.parse_action_text,
             backend=build_vlm_backend(args),
             reset_on_episode_end=args.reset_on_episode_end,
-            prompt_builder=prompt_builder,
+            # One conversation per step of a chain: the baseline answers on
+            # every step, so this is where its history gets the spacing the
+            # chain-of-thought stream gets from answering once per that many.
+            # The one already built is the first of them.
+            prompt_builders=[prompt_builder]
+            + [build_prompt_builder(env, args) for _ in range(args.prompt_conversation_slots - 1)],
         )
 
     if args.agent_type == "animal_ppo":
