@@ -108,6 +108,10 @@ class OpenRouterBackend:
             temperature=self.temperature,
             extra_body={"reasoning": self.reasoning},
         )
+        # OpenRouter reports an upstream failure in the body of a 200, which the
+        # SDK's own retries never see; `choices` is then absent and the payload
+        # is the only account of what went wrong.
+        assert completion.choices, f"OpenRouter returned no choices: {completion}"
         choice = completion.choices[0]
         return VLMResponse(
             text=choice.message.content or "",
