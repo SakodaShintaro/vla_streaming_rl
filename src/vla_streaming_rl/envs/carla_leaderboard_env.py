@@ -327,6 +327,13 @@ class CARLALeaderboardEnv(gym.Env):
         self.history_length = 200
         self.physics_history: list[VehiclePhysics] = []
 
+    @property
+    def is_exhausted(self) -> bool:
+        """Whether the runtime has dispensed its whole playlist, which is what
+        ends a Bench2Drive220 sequential sweep. A run with no fixed playlist has
+        no runtime and never runs out."""
+        return self.runtime is not None and self.runtime.is_exhausted
+
     def _apply_world_settings(self) -> None:
         """Apply the sync-mode + large-map streaming settings to ``self.world``.
 

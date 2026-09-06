@@ -1,7 +1,8 @@
 # @package _global_
 env_id: AnimalAI-v0
-# Only bounds the two training modes. "eval" instead ends when all 900 arenas
-# have run (scripts/test_trained_agent.py loops until the env is exhausted).
+# Only bounds the modes that never run out ("staged", "success", "random").
+# "sequential" and "eval" instead end when their arena order has run out, which
+# the env reports as `is_exhausted`.
 # For "staged": stages 1-10 take steps_per_stage each and stage 11 runs out the
 # remainder, so the paper's 2M x 10 + 5M = 25M is step_limit == 12.5 x
 # steps_per_stage; the values below keep that ratio at 1/1000 scale.
@@ -20,9 +21,10 @@ env_factory:
   #               the stage's whole pool drawn without replacement, then the
   #               next stage if the round's success rate reached
   #               advance_success_rate (steps_per_stage is ignored).
-  #     sequential : no curriculum. Every training arena in label order,
-  #               wrapping back to the first once the last has run, until
-  #               step_limit (steps_per_stage is ignored).
+  #     sequential : no curriculum. Every training arena once, in label order,
+  #               and the run ends there -- a sweep of the training set, so a
+  #               second lap would only mix repeats into the score
+  #               (steps_per_stage is ignored).
   #     random  : no curriculum. Every episode draws uniformly at random from
   #               the whole training set, with no ordering and nothing
   #               withheld (steps_per_stage is ignored).

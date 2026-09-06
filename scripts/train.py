@@ -361,11 +361,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             set_global_step(global_step)
 
     while True:
-        # Stop when the env has dispensed every scenario in a fixed playlist
-        # (e.g. Bench2Drive220 sequential mode). For envs without a finite
-        # playlist this is always False.
-        runtime = getattr(env.unwrapped, "runtime", None)
-        if runtime is not None and getattr(runtime, "is_exhausted", False):
+        # Stop when the env has dispensed every scenario in a fixed playlist:
+        # Animal-AI's "sequential" and "eval" arena orders, Bench2Drive220's
+        # sequential runtime. An env with no finite playlist does not publish
+        # the flag and is left to episode_limit / step_limit.
+        if getattr(env.unwrapped, "is_exhausted", False):
             break
 
         # Stop once we've run the configured number of episodes.

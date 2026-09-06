@@ -28,8 +28,8 @@ loads*, so that is factored out into an `ArenaSelector`, picked by the
               300) drawn without replacement, then the next stage if the
               round's success rate reached `advance_success_rate`
               (`SuccessDrivenSelector`).
-  - "sequential" no curriculum: every training arena in label order, wrapping
-              around forever (`SequentialSelector`, cycling).
+  - "sequential" no curriculum: every training arena once, in label order,
+              then the run ends (`SequentialSelector`, not cycling).
   - "random"  no curriculum: every episode draws uniformly at random from the
               whole training set (`RandomSelector`).
   - "eval"    every configs/competition/ arena once, in order -- the
@@ -512,9 +512,7 @@ class SequentialSelector(ArenaSelector):
         by that arena's pass mark (scripts/test_trained_agent.py loops until
         exhausted).
       - True: wrap back to the first arena instead of ending, so the set is
-        replayed until train.py's step_limit stops the run. This is the
-        curriculum-free training mode, running the training arenas in level
-        order rather than by stage.
+        replayed until train.py's step_limit stops the run.
     """
 
     def __init__(self, arenas: list[Arena], cycle: bool):
@@ -611,8 +609,11 @@ def build_selector(
         "success": lambda: SuccessDrivenSelector(
             variant=train_variant, advance_success_rate=advance_success_rate, seed=seed
         ),
+        # One pass and done: the curriculum-free sweep is a measurement of the
+        # training set, so a second lap over the same arenas would only mix
+        # repeats into the score.
         "sequential": lambda: SequentialSelector(
-            arenas=_training_arenas(train_variant, train_level), cycle=True
+            arenas=_training_arenas(train_variant, train_level), cycle=False
         ),
         "random": lambda: RandomSelector(
             arenas=_training_arenas(train_variant, train_level), seed=seed
@@ -855,6 +856,13 @@ class AnimalAIEnv(gym.Env):
         # by the arena's `t`, refills whenever a reward is collected, and the
         # episode ends when it hits 0 -- the real "time left" of the episode.
         self._agent_health: float = 0.0
+
+    @property
+    def is_exhausted(self) -> bool:
+        """Whether the selector has served its whole playlist, which is what ends
+        a run over a finite arena order ("sequential", "eval"). The modes that
+        never run out answer False forever and leave the run to `step_limit`."""
+        return self.selector.is_exhausted
 
     def set_global_step(self, global_step: int) -> None:
         """Resume hook: restore the step counter the curriculum schedules on."""
