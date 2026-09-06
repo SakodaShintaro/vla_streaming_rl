@@ -45,6 +45,7 @@ class InferInput:
     episode_step_seq: torch.Tensor  # (B, T, 1)
     health_seq: torch.Tensor  # (B, T, 1)
     cot_activations_seq: torch.Tensor  # (B, T, *cot_shape)
+    cot_age_seq: torch.Tensor  # (B, T, 1)
 
 
 @dataclass
@@ -129,11 +130,12 @@ class NetworkInterface(nn.Module, abc.ABC):
     # verbatim. Everything else contributes no tokens.
     cot_shape: tuple[int, int] = (0, 0)
 
-    def advance_cot(self, episode_started: bool) -> torch.Tensor:
-        """This step's chain-of-thought activations, empty unless the network
-        carries a chain (see ``networks/cot_actor_critic.py``)."""
+    def advance_cot(self, episode_started: bool) -> tuple[torch.Tensor, int]:
+        """This step's chain-of-thought activations and how many steps ago they
+        were generated, empty and 0 unless the network carries a chain (see
+        ``networks/cot_actor_critic.py``)."""
         del episode_started
-        return torch.zeros(self.cot_shape)
+        return torch.zeros(self.cot_shape), 0
 
     def render_panels(self) -> dict[str, np.ndarray]:
         """Named RGB panels this network contributes to the render strip. The

@@ -222,7 +222,7 @@ class OffPolicyAgent(Agent):
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
         task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
-        cot_activation = self.network.advance_cot(episode_started)
+        cot_activation, cot_age = self.network.advance_cot(episode_started)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -241,6 +241,7 @@ class OffPolicyAgent(Agent):
             episode_step_obs,
             health_obs,
             cot_activation,
+            cot_age,
         )
 
         warmup = global_step < self.learning_starts
@@ -275,6 +276,7 @@ class OffPolicyAgent(Agent):
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
                 cot_activations_seq=latest_data.cot_activations,
+                cot_age_seq=latest_data.cot_age,
             )
         )
         self.rnn_state = infer_result.rnn_state

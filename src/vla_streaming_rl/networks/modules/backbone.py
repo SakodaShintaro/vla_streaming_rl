@@ -66,11 +66,13 @@ class SpatialTemporalEncoder(nn.Module):
         cot_layers: int,
         cot_dim: int,
         cot_pool: str,
+        cot_steps_per_chain: int,
         layer_scale_init: float,
     ) -> None:
         super().__init__()
         assert cot_tokens_num >= 0, f"cot_tokens_num must not be negative; got {cot_tokens_num}"
         assert cot_pool in ("mean", "none"), f"Unknown cot_pool: {cot_pool}"
+        assert cot_steps_per_chain >= 1, cot_steps_per_chain
         # Pooling leaves one slot per step; without it every token gets its own.
         # With no chain at all there is nothing to pool, and averaging an empty
         # axis would invent a slot full of NaN.
@@ -102,6 +104,14 @@ class SpatialTemporalEncoder(nn.Module):
         # them is the weighting that picks which depth the encoder reads.
         self.cot_layer_logits = nn.Parameter(torch.zeros(cot_layers))
         self.cot_proj = nn.Linear(cot_dim, self.hidden_image_dim)
+        # How old the chain is, added onto the chain's own tokens rather than
+        # given a token of its own: the same activations mean one thing on the
+        # frame they were written about and another fifteen steps later, and
+        # what has to know that is the slot carrying them. Zero-initialized, so
+        # a run starts from exactly the chain embedding it had before and moves
+        # off it only if the age turns out to matter.
+        self.cot_age_embed = nn.Embedding(cot_steps_per_chain, self.hidden_image_dim)
+        nn.init.zeros_(self.cot_age_embed.weight)
 
         self.spatial_temporal = SpatialTemporalTransformer(
             n_layer=n_layer,
@@ -130,6 +140,7 @@ class SpatialTemporalEncoder(nn.Module):
         rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)
         scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
         cot_activations: torch.Tensor,  # (B, T, cot_tokens_num, cot_layers, cot_dim)
+        cot_age: torch.Tensor,  # (B, T, 1)
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -155,7 +166,10 @@ class SpatialTemporalEncoder(nn.Module):
         weights = F.softmax(self.cot_layer_logits, dim=0)
         cot = (cot_activations.to(image_embed.dtype) * weights.view(1, 1, 1, -1, 1)).sum(dim=3)
         cot = cot.mean(dim=2, keepdim=True) if self.pool_cot else cot
-        cot_embed = self.cot_proj(cot)  # [B, T, cot_slots, C']
+        # [B, T, 1, C'], broadcast over the slots: every token of one step's
+        # chain is that step's chain, so they share its age.
+        age_embed = self.cot_age_embed(cot_age.squeeze(-1).long()).unsqueeze(2)
+        cot_embed = self.cot_proj(cot) + age_embed  # [B, T, cot_slots, C']
 
         all_embed = torch.cat(
             [image_embed, action_embed, reward_embed, scalar_obs_embed, register_token, cot_embed],

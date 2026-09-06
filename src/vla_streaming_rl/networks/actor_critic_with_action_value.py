@@ -174,6 +174,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             cot_layers=cot_layers,
             cot_dim=cot_dim,
             cot_pool=cot_pool,
+            cot_steps_per_chain=cot_steps_per_chain,
             layer_scale_init=layer_scale_init,
         )
 
@@ -219,16 +220,20 @@ class ActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
-    def advance_cot(self, episode_started: bool) -> torch.Tensor:
-        """This step's chain-of-thought activations, or nothing when the chain is
-        off. The first tick of an episode ends whatever chain was running, so an
-        episode's commentary starts on its own first frame rather than carrying
-        the one written about the frame the last episode ended on."""
+    def advance_cot(self, episode_started: bool) -> tuple[torch.Tensor, int]:
+        """This step's chain-of-thought activations and how many steps ago they
+        were generated, or nothing when the chain is off. The first tick of an
+        episode ends whatever chain was running, so an episode's commentary
+        starts on its own first frame rather than carrying the one written about
+        the frame the last episode ended on."""
         if self.cot_module is None:
-            return torch.zeros(self.cot_shape)
+            return torch.zeros(self.cot_shape), 0
         if episode_started:
             self.cot_module.reset()
-        return self.cot_module.advance()
+        # Advanced first: `age` is about the chain the call hands back, which is
+        # a fresh one on the steps that write.
+        activations = self.cot_module.advance()
+        return activations, self.cot_module.age()
 
     def render_panels(self) -> dict[str, np.ndarray]:
         """The conversation as it currently stands, drawn for the render strip:
@@ -277,6 +282,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.health[:, start:stop],
             ),
             data.cot_activations[:, start:stop],
+            data.cot_age[:, start:stop],
         )
 
     def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
@@ -360,6 +366,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.rnn_state,
             scalar_obs,
             data.cot_activations_seq,
+            data.cot_age_seq,
         )  # (B, state_dim)
 
         # Get action chunk from policy_head

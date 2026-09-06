@@ -33,6 +33,7 @@ class ReplayBufferData:
     episode_step: torch.Tensor  # (B, T, 1)
     health: torch.Tensor  # (B, T, 1)
     cot_activations: torch.Tensor  # (B, T, *cot_shape)
+    cot_age: torch.Tensor  # (B, T, 1)
 
 
 class ReplayBuffer:
@@ -85,6 +86,11 @@ class ReplayBuffer:
             dtype=torch.bfloat16,
             device=self.storage_device,
         )
+        # How many steps ago each stored chain was generated. Kept per
+        # transition because a sampled step is any step of an episode and the
+        # age cannot be recovered from one: it is periodic in the writing
+        # cadence, which no other stored field carries.
+        self.cot_age = init_tensor((size, 1))
         self.task_prompt_token_ids = torch.full(
             (size, max_prompt_tokens),
             pad_token_id,
@@ -125,6 +131,7 @@ class ReplayBuffer:
             self.episode_step[:curr_size].to(self.output_device, non_blocking=True),
             self.health[:curr_size].to(self.output_device, non_blocking=True),
             self.cot_activations[:curr_size].to(self.output_device, non_blocking=True),
+            self.cot_age[:curr_size].to(self.output_device, non_blocking=True),
         )
 
     def add(
@@ -145,6 +152,7 @@ class ReplayBuffer:
         episode_step: float,
         health: float,
         cot_activation: torch.Tensor,
+        cot_age: int,
     ) -> None:
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
@@ -162,6 +170,7 @@ class ReplayBuffer:
         self.episode_step[self.idx].fill_(episode_step)
         self.health[self.idx].fill_(health)
         self.cot_activations[self.idx].copy_(cot_activation)
+        self.cot_age[self.idx].fill_(cot_age)
 
         self.task_prompt_token_ids[self.idx].fill_(self.pad_token_id)
         if len(task_prompt_token_ids) > self.max_prompt_tokens:
@@ -208,6 +217,7 @@ class ReplayBuffer:
             self.episode_step[seq_indices].to(self.output_device, non_blocking=True),
             self.health[seq_indices].to(self.output_device, non_blocking=True),
             self.cot_activations[seq_indices].to(self.output_device, non_blocking=True),
+            self.cot_age[seq_indices].to(self.output_device, non_blocking=True),
         )
 
     def get_latest(self, seq_len: int) -> ReplayBufferData:
@@ -236,4 +246,5 @@ class ReplayBuffer:
             self.episode_step[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.health[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.cot_activations[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.cot_age[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
         )

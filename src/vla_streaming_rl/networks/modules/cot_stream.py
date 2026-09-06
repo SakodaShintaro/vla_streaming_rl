@@ -151,6 +151,15 @@ class CoTStream:
         self._cache.reset()
 
     @torch.inference_mode()
+    def age(self) -> int:
+        """How many environment steps ago what is being read was generated.
+
+        Always 0 here: this mode issues its tokens on the step that reads them,
+        which is the whole difference from `CoTBatch`. Kept so both modes answer
+        the same question.
+        """
+        return 0
+
     def advance(self) -> torch.Tensor:
         """The ``tokens_per_step`` activations this environment step issues.
 

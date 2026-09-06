@@ -64,6 +64,18 @@ class CoTBatch:
         # reasons about that episode's own first frame.
         self._until_next = 0
 
+    def age(self) -> int:
+        """How many environment steps ago the chain now being read was written.
+
+        0 on the step that wrote it, up to ``steps_per_chain - 1`` on the last
+        step that holds it. What the encoder needs alongside the activations:
+        the same chain means something different on the frame it was written
+        about than it does fifteen steps later, and nothing else in the
+        observation says which of the two this is -- `episode_step` carries it
+        only modulo a period the encoder cannot take.
+        """
+        return self.steps_per_chain - 1 - self._until_next
+
     @torch.inference_mode()
     def advance(self) -> torch.Tensor:
         """This environment step's activations, writing a fresh chain when due.
