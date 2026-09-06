@@ -6,7 +6,7 @@ state_out_dim: 4
 text_action_mode: none
 use_prompt: 1
 prompt_history_turns: 16
-max_new_tokens: 64
+max_new_tokens: 128
 temperature: 0.5
 max_prompt_tokens: 512
 pad_token_id: 0
