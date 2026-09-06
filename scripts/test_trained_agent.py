@@ -162,6 +162,7 @@ def run_testbed(
     global_step: int,
     result_dir: Path,
     train_variant: str,
+    train_level: str,
 ) -> dict[str, float]:
     """Sweep every arena the env's SequentialSelector serves and write results.
 
@@ -174,7 +175,7 @@ def run_testbed(
     result_dir.mkdir(parents=True, exist_ok=True)
     selector = env.unwrapped.selector
     arena_count = len(selector.arenas)
-    seen = seen_in_training(train_variant)
+    seen = seen_in_training(train_variant, train_level)
     print(f"Running {arena_count} arenas, 1 episode each.")
 
     result_path = result_dir / "test_result.tsv"
@@ -269,6 +270,7 @@ def main(
         global_step,
         result_dir,
         args.env_factory.train_variant,
+        args.env_factory.train_level,
     )
 
     env.close()

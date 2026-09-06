@@ -62,6 +62,7 @@ def make_animalai_env(
     resolution: int,
     mode: str,
     train_variant: str,
+    train_level: str,
     steps_per_stage: int,
     advance_success_rate: float,
     binary_path: str,
@@ -75,6 +76,7 @@ def make_animalai_env(
     selector = build_selector(
         mode=mode,
         train_variant=train_variant,
+        train_level=train_level,
         steps_per_stage=steps_per_stage,
         advance_success_rate=advance_success_rate,
         seed=0,

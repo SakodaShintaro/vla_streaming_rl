@@ -187,15 +187,25 @@ def _competition_arenas() -> list[Arena]:
     return [Arena(path, path.stem) for path in paths]
 
 
-def _training_arenas(variant: str) -> list[Arena]:
+def _training_arenas(variant: str, level: str) -> list[Arena]:
     """The training set: the `variant` numbered copy of every Olympics task.
 
     Each task family XX-YY ships three variants, so one variant is one arena
     per family -- 300 of the 900, which is the arena set the paper's
     curriculum trains on. The other variants are what eval scores.
+
+    `level` narrows that to one Olympics level, "all" keeping every level. It is
+    for looking at one level on its own -- what a run scores on level 02 without
+    waiting for a curriculum to reach it -- so the curriculum modes reject it:
+    their stages are the levels, and hiding levels from them would leave the
+    stage numbers meaning something else.
     """
     arenas = [arena for arena in _competition_arenas() if arena.name.rsplit("-", 1)[1] == variant]
     assert arenas, f"no competition arena has variant {variant!r}"
+    if level == "all":
+        return arenas
+    arenas = [arena for arena in arenas if arena.name.split("-")[0] == level]
+    assert arenas, f"no competition arena has level {level!r} at variant {variant!r}"
     return arenas
 
 
@@ -207,7 +217,7 @@ def _training_stages(variant: str) -> list[list[Arena]]:
     each stage is 30 arenas. `StagedSelector` accumulates them; the rounds of
     `SuccessDrivenSelector` are one stage each.
     """
-    arenas = _training_arenas(variant)
+    arenas = _training_arenas(variant, "all")
     return [
         [arena for arena in arenas if arena.name.split("-")[0] == level]
         for level in sorted({arena.name.split("-")[0] for arena in arenas})
@@ -250,13 +260,14 @@ def _arena_signature(path: Path) -> str:
     return hashlib.md5(payload.encode()).hexdigest()
 
 
-def seen_in_training(variant: str) -> set[str]:
+def seen_in_training(variant: str, level: str) -> set[str]:
     """Labels of the eval arenas a run trained on `variant` has already seen.
 
     The training variant itself, plus every other variant whose arena is
-    identical to the one its family contributed to training.
+    identical to the one its family contributed to training. `level` is the run's
+    `train_level`, so a run held to one level is not credited with the rest.
     """
-    trained = {_arena_signature(arena.path) for arena in _training_arenas(variant)}
+    trained = {_arena_signature(arena.path) for arena in _training_arenas(variant, level)}
     return {
         arena.name for arena in _competition_arenas() if _arena_signature(arena.path) in trained
     }
@@ -572,7 +583,12 @@ class RandomSelector(ArenaSelector):
 
 
 def build_selector(
-    mode: str, train_variant: str, steps_per_stage: int, advance_success_rate: float, seed: int
+    mode: str,
+    train_variant: str,
+    train_level: str,
+    steps_per_stage: int,
+    advance_success_rate: float,
+    seed: int,
 ) -> ArenaSelector:
     """Build the arena selector named by `mode` (see the module docstring).
 
@@ -584,6 +600,10 @@ def build_selector(
     Every mode's parameters are always supplied; a mode ignores the ones that
     do not apply to it.
     """
+    assert train_level == "all" or mode in ("sequential", "random"), (
+        f"train_level {train_level!r} narrows the training set to one level, which "
+        f"the {mode!r} curriculum has no room for: its stages are the levels"
+    )
     builders = {
         "staged": lambda: StagedSelector(
             variant=train_variant, steps_per_stage=steps_per_stage, seed=seed
@@ -592,9 +612,11 @@ def build_selector(
             variant=train_variant, advance_success_rate=advance_success_rate, seed=seed
         ),
         "sequential": lambda: SequentialSelector(
-            arenas=_training_arenas(train_variant), cycle=True
+            arenas=_training_arenas(train_variant, train_level), cycle=True
         ),
-        "random": lambda: RandomSelector(arenas=_training_arenas(train_variant), seed=seed),
+        "random": lambda: RandomSelector(
+            arenas=_training_arenas(train_variant, train_level), seed=seed
+        ),
         "eval": lambda: SequentialSelector(arenas=_competition_arenas(), cycle=False),
     }
     assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"

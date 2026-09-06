@@ -37,6 +37,11 @@ env_factory:
   #   one arena per task: 300 arenas, 30 per level. "eval" ignores it and
   #   always sweeps all 900.
   train_variant: "01"
+  # - train_level: hold the training set to one Olympics level ("02"), or "all"
+  #   for every level. For looking at one level on its own without waiting for a
+  #   curriculum to reach it, so only "sequential" and "random" take it: the
+  #   other modes' stages are the levels.
+  train_level: "all"
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 20_000
   # - advance_success_rate ("success"): the share of a round that has to be

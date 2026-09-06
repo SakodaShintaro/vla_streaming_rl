@@ -643,6 +643,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             global_step,
             result_dir / "eval" / "final",
             args.env_factory.train_variant,
+            args.env_factory.train_level,
         )
         wandb.summary.update({f"testbed/{k}": v for k, v in testbed_metrics.items()})
         eval_env.close()
