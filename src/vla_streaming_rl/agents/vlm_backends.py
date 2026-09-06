@@ -23,13 +23,10 @@ from vla_streaming_rl.networks.modules.vlm_backbone import load_model
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# The protocol's answer section, and the close of a chat template's own thinking
-# block. The opener ends in a newline so that every action text is a single
-# token after it -- straight after `>` the tokenizer merges some of them into
-# the tag, which would leave those actions' logits not comparable with the rest.
-ANSWER_OPEN = "<answer>\n"
+# The close of the protocol's answer section, which is where a local generation
+# is stopped: the action is the last thing the protocol asks for, so nothing
+# past it is worth the latency.
 ANSWER_CLOSE = "</answer>"
-THINK_CLOSE = "</think>"
 
 
 @dataclass(frozen=True)
@@ -136,62 +133,41 @@ class LocalVLMBackend:
     the run has loaded, and it generates one response per env step, so it is
     slower per step than a hosted model.
 
-    The action is chosen rather than read back: the ``<answer>`` opener is
-    written into the model's own reply and the token after it is drawn from the
-    env's action texts alone, so a response always carries a legal action. That
-    only works where the actions can be enumerated, which rules out an env with
-    a continuous action text.
+    The protocol is the hosted backend's, run locally: the model writes the
+    whole reply itself and the agent reads the action out of it, so a response
+    that ignores the format fails here exactly as it would there. Constraining
+    the action to a legal token instead would make the two backends measure
+    different things under one baseline's name.
 
-    ``reasoning_max_tokens`` caps the chat template's own thinking block first,
-    which is what the hosted backend's `reasoning` parameter does server-side.
-    There is no server here to enforce it, so the block is generated on its own
-    and closed at the budget.
+    ``reasoning_max_tokens`` turns the chat template's own thinking block on and
+    off, which is what the hosted backend's `reasoning` parameter does
+    server-side. There is no server here to hold it to a budget, so the cap
+    itself is the shared ``max_new_tokens``.
     """
 
     def __init__(
         self,
         *,
         model_id: str,
-        action_choices: list[str],
+        max_new_tokens: int,
         reasoning_max_tokens: int,
         temperature: float,
     ) -> None:
-        assert action_choices, (
-            "the local backend picks among action texts; this env enumerates none"
-        )
         assert temperature > 0.0, temperature
         self.device = torch.device("cuda")
         self.model, self.processor = load_model(model_id, use_lora=False, device=self.device)
         self.model.eval()
-        self.action_choices = action_choices
-        self.action_token_ids = [self._action_token_id(choice) for choice in action_choices]
-        self.reasoning_max_tokens = reasoning_max_tokens
+        self.max_new_tokens = max_new_tokens
         # As on the hosted backend, 0 means the model does no thinking of its
         # own; here that is the chat template's block, which it then renders
         # already closed.
         self.enable_thinking = reasoning_max_tokens != 0
         self.temperature = temperature
 
-    def _action_token_id(self, choice: str) -> int:
-        """The one token ``choice`` becomes where it is generated, after the opener."""
-        tokenizer = self.processor.tokenizer
-        opener = tokenizer.encode(ANSWER_OPEN, add_special_tokens=False)
-        whole = tokenizer.encode(ANSWER_OPEN + choice, add_special_tokens=False)
-        assert whole[: len(opener)] == opener and len(whole) == len(opener) + 1, (
-            f"{choice!r} is not a single token after {ANSWER_OPEN!r}: {whole}"
-        )
-        return whole[-1]
-
-    def _render(self, messages: list[dict], prefill: str):
-        """The conversation with ``prefill`` already written as the model's reply,
-        which `generate` continues instead of starting a fresh turn."""
-        conversation = messages + [
-            {"role": "assistant", "content": [{"type": "text", "text": prefill}]}
-        ]
+    def _render(self, messages: list[dict]):
         return self.processor.apply_chat_template(
-            conversation,
-            add_generation_prompt=False,
-            continue_final_message=True,
+            messages,
+            add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
@@ -202,49 +178,31 @@ class LocalVLMBackend:
             enable_thinking=self.enable_thinking,
         ).to(self.device)
 
-    def _reason(self, messages: list[dict]) -> tuple[str, int]:
-        """The model's own thinking, closed off so the answer can follow it."""
-        if self.reasoning_max_tokens == 0:
-            return "", 0
-        inputs = self._render(messages, "")
+    @torch.inference_mode()
+    def generate(self, messages: list[dict]) -> VLMResponse:
+        inputs = self._render(messages)
         prompt_tokens = int(inputs["input_ids"].shape[1])
         generated = self.model.generate(
             **inputs,
-            max_new_tokens=self.reasoning_max_tokens,
+            max_new_tokens=self.max_new_tokens,
             do_sample=True,
             temperature=self.temperature,
-            stop_strings=[THINK_CLOSE],
+            stop_strings=[ANSWER_CLOSE],
             tokenizer=self.processor.tokenizer,
         )
-        # `generate` returns the prompt followed by the completion, so the
-        # thinking is what sits past the prompt length.
         ids = generated[0, prompt_tokens:]
         text = self.processor.decode(ids, skip_special_tokens=True)
-        # Closed here rather than trusted to close itself: the budget cuts the
-        # block off mid-sentence whenever the model would have run past it.
-        return f"{text.split(THINK_CLOSE)[0].strip()}\n{THINK_CLOSE}\n\n", int(ids.shape[0])
-
-    @torch.inference_mode()
-    def generate(self, messages: list[dict]) -> VLMResponse:
-        reasoning, reasoning_tokens = self._reason(messages)
-        prefill = f"{reasoning}{ANSWER_OPEN}"
-        inputs = self._render(messages, prefill)
-        # One forward pass over the prompt: the action is the softmax over just
-        # the action tokens' logits, so no other token can ever be produced.
-        logits = self.model(**inputs).logits[0, -1, self.action_token_ids]
-        index = int(torch.multinomial(torch.softmax(logits / self.temperature, dim=-1), 1))
         return VLMResponse(
-            text=f"{prefill}{self.action_choices[index]}{ANSWER_CLOSE}",
-            # The action is drawn from a closed set, so there is no budget to run out of.
-            finish_reason="stop",
-            # The thinking block is part of this prompt but was generated, not
-            # given, so it is counted once -- as completion.
-            prompt_tokens=int(inputs["input_ids"].shape[1]) - reasoning_tokens,
-            completion_tokens=reasoning_tokens + 1,
+            text=text,
+            # What the hosted backend reports: the answer closed the reply, or
+            # the budget ran out before it did.
+            finish_reason="stop" if ANSWER_CLOSE in text else "length",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=int(ids.shape[0]),
         )
 
 
-def build_vlm_backend(args: DictConfig, action_choices: list[str]):
+def build_vlm_backend(args: DictConfig):
     assert args.vlm_backend in ("openrouter", "local"), args.vlm_backend
     if args.vlm_backend == "openrouter":
         return OpenRouterBackend(
@@ -256,7 +214,7 @@ def build_vlm_backend(args: DictConfig, action_choices: list[str]):
         )
     return LocalVLMBackend(
         model_id=args.vlm_model_id,
-        action_choices=action_choices,
+        max_new_tokens=args.max_new_tokens,
         reasoning_max_tokens=args.reasoning_max_tokens,
         temperature=args.temperature,
     )
