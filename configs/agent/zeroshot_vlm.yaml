@@ -37,7 +37,7 @@ openrouter_model_id: qwen/qwen3.7-flash
 # Response budget, on both backends: the reply is the <think> section and the
 # <answer> that follows it, and a local generation stops at </answer> rather
 # than spending the rest.
-max_new_tokens: 2048
+max_new_tokens: 128
 # The model's own hidden thinking: a cap on OpenRouter's `reasoning`, and on the
 # local backend the switch the chat template's own block reads. The prompt already asks for the chain
 # of thought inside <think>, so the hidden copy only competes for max_new_tokens:
