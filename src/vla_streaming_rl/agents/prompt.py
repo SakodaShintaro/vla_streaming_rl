@@ -104,15 +104,6 @@ class PromptBuilder(ABC):
     # First person, because the task that follows is addressed to the agent
     # ("You control an animal...") and the chain is the agent's own thought.
     #
-    # Whether asking plainly is enough turns out to be a question about the
-    # model, not the wording. Measured over a recorded episode with
-    # local/probe_cot_prompt.py, this text holds at 2B and above -- no "you", a
-    # few "I" a chain -- while 0.8B ignores it and writes advice to the agent
-    # instead ("Your health is critically low", "You need to find a safe path").
-    # 0.8B can be made to comply, but only by an identity line, a rule per
-    # sentence and forbidding the word outright, which is a prompt bent around
-    # one model. ``cot_model_id`` carries the cost of that choice instead.
-    #
     # The delta line is stated as a difference because a chain told only to
     # continue paraphrases what it already said and stops carrying new
     # information. What it already said is in the conversation as its own turns,

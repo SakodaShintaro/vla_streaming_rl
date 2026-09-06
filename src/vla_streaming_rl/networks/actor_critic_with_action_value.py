@@ -102,7 +102,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         image_encoder_output_dim: int,
         image_encode_mode: str,
         image_encoder_trainable: bool,
-        cot_model_id: str,
+        vlm_model_id: str,
         cot_tokens_num: int,
         cot_max_len: int,
         cot_temperature: float,
@@ -142,7 +142,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         # and the same loss with the chain's tokens taken out of the space axis,
         # which is what isolates what the chain contributes. No chain means no
         # VLM to load, so the width comes from the config, not a loaded model.
-        text_config = AutoConfig.from_pretrained(cot_model_id).text_config
+        text_config = AutoConfig.from_pretrained(vlm_model_id).text_config
         cot_dim = text_config.hidden_size
         # The embedding plus every layer's output.
         cot_layers = text_config.num_hidden_layers + 1
@@ -152,7 +152,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         if cot_tokens_num > 0:
             self.cot_stream = build_cot(
                 mode=cot_mode,
-                model_id=cot_model_id,
+                model_id=vlm_model_id,
                 tokens_per_step=cot_tokens_num,
                 max_len=cot_max_len,
                 temperature=cot_temperature,

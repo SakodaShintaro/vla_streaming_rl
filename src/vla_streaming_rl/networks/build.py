@@ -167,7 +167,7 @@ def build_network(
             image_encoder_output_dim=args.image_encoder_output_dim,
             image_encode_mode=args.image_encode_mode,
             image_encoder_trainable=args.image_encoder_trainable,
-            cot_model_id=args.cot_model_id,
+            vlm_model_id=args.vlm_model_id,
             cot_tokens_num=args.cot_tokens_num,
             cot_max_len=args.cot_max_len,
             cot_temperature=args.cot_temperature,

@@ -52,11 +52,6 @@ wcm_sigreg_projections: 1024
 # are generated per step and the activations feeding its lm_head join the
 # encoder's space axis. The chain restarts from the current frame on EOS or
 # after cot_max_len tokens, which is when the VLM reads a new image at all.
-# 0.8B does not hold the chain's first person: it reads the task ("You control
-# an animal...") as addressed to somebody else and writes advice to them. 2B is
-# the smallest that keeps it, at +10 ms and +2.5 GB a step (local/
-# benchmark_cot_models.py, local/probe_cot_prompt.py).
-cot_model_id: Qwen/Qwen3.5-2B
 # 0 = no chain, which is the plain actor-critic and the ablation a
 # chain-carrying run is measured against. The cot_* agent configs turn it on.
 cot_tokens_num: 0
