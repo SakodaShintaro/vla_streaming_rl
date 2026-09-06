@@ -80,8 +80,9 @@ def save_episode_data(
     reward_list: list[float],
     obs_list: list[np.ndarray],
     text_list: list[dict[str, str]],
+    xyz_list: list[tuple[float, float, float]],
 ) -> None:
-    """Save episode video, images, actions and rewards"""
+    """Save episode video, images, actions, rewards and positions"""
     if not bgr_image_list:
         return
 
@@ -124,18 +125,24 @@ def save_episode_data(
 
     save_episode_texts(curr_image_dir, text_list)
 
-    # Save actions and rewards to TSV file
-    tsv_path = curr_image_dir / "log.tsv"
-    with open(tsv_path, "w", encoding="utf-8") as f:
-        f.write("step\t")
-        for i in range(len(action_list[0])):
-            f.write(f"action{i}\t")
-        f.write("reward\n")
-        for step, (action, reward) in enumerate(zip(action_list, reward_list)):
-            f.write(f"{step}\t")
-            for a in action:
-                f.write(f"{float(a):.6f}\t")
-            f.write(f"{float(reward):.6f}\n")
+    # One row per step: the action taken, the reward it drew, and where the
+    # agent stood after it, so an episode's trajectory can be drawn from the
+    # run rather than re-simulated. ``xyz_list`` is empty for an env that
+    # reports no position, and the x/y/z columns are then left out rather than
+    # filled with a stand-in.
+    columns = [f"action{i}" for i in range(len(action_list[0]))] + ["reward"]
+    rows = [
+        [f"{float(a):.6f}" for a in action] + [f"{float(reward):.6f}"]
+        for action, reward in zip(action_list, reward_list)
+    ]
+    if xyz_list:
+        columns = columns + ["x", "y", "z"]
+        rows = [row + [f"{float(v):.4f}" for v in xyz] for row, xyz in zip(rows, xyz_list)]
+
+    with open(curr_image_dir / "log.tsv", "w", encoding="utf-8") as f:
+        f.write("step\t" + "\t".join(columns) + "\n")
+        for step, row in enumerate(rows):
+            f.write(f"{step}\t" + "\t".join(row) + "\n")
 
 
 def save_checkpoint(result_dir: Path, network, agent) -> None:
@@ -398,6 +405,10 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         obs_list = [obs["image"].copy()]
         # one entry per rendered frame, so the initial render leads
         text_list = [result.texts]
+        # Animal-AI reports the agent's arena position every step; an env with no
+        # arena reports none and this stays empty.
+        log_position = "agent_xyz" in reset_info
+        xyz_list = []
 
         while True:
             global_step += 1
@@ -411,6 +422,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             action_list.append(action.copy())
             reward_list.append(reward)
             obs_list.append(obs["image"].copy())
+            if log_position:
+                xyz_list.append(env_info["agent_xyz"])
 
             agent_step_start = time.time()
             result = agent.step(global_step, obs, reward, terminated, truncated, env_info)
@@ -565,6 +578,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                     reward_list,
                     obs_list,
                     text_list,
+                    xyz_list,
                 )
         else:
             is_best = score > best_score
@@ -582,6 +596,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                     reward_list,
                     obs_list,
                     text_list,
+                    xyz_list,
                 )
 
         if episode_id == 0 or (episode_id + 1) % args.image_save_interval == 0:
@@ -595,6 +610,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 reward_list,
                 obs_list,
                 text_list,
+                xyz_list,
             )
 
         # Persist the light resume state every episode (the heavy weights /
