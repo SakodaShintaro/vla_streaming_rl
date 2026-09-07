@@ -138,7 +138,16 @@ class PromptBuilder(ABC):
         self._turns = self._turns + [{"role": "user", "content": [{"type": "text", "text": text}]}]
         self._current = {}
 
-    def rejection_text(self) -> str:
+    def reject(self) -> None:
+        """Say, as the env and not as the agent, that the last reply named no
+        action it could run. A complaint folded into the assistant's own turn
+        reads back as something the agent chose to say; this is what it was
+        told."""
+        self._turns = self._turns + [
+            {"role": "user", "content": [{"type": "text", "text": self._rejection_text()}]}
+        ]
+
+    def _rejection_text(self) -> str:
         return "(Not a legal action -- nothing was executed.)"
 
     @abstractmethod
@@ -241,7 +250,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
         super().__init__(env, history_turns)
         self.tasks = _load_arena_tasks(env)
 
-    def rejection_text(self) -> str:
+    def _rejection_text(self) -> str:
         return (
             "(Not a legal action -- the agent stood still. Both halves are "
             "needed, as in `stand still, turn left`.)"

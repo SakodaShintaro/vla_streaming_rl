@@ -144,11 +144,11 @@ class ZeroShotVLMAgent(Agent):
 
         # The reply is handed back as written, <think> section and all, so the
         # conversation is the whole record of what the model said -- what the
-        # render panel draws is then what the model itself reads. A response that
-        # did not parse says so, since the env carried on without it.
-        self.prompt_builder.add_reply(
-            response_text if parse_ok else f"{response_text} {self.prompt_builder.rejection_text()}"
-        )
+        # render panel draws is then what the model itself reads. A reply that
+        # named no runnable action is answered by the env in its own turn.
+        self.prompt_builder.add_reply(response_text)
+        if not parse_ok:
+            self.prompt_builder.reject()
 
         self.held_metrics = {
             "vlm/parse_failed": float(not parse_ok),
