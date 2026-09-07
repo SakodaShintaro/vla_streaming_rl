@@ -25,13 +25,6 @@ from vla_streaming_rl.utils import render_conversation_panel
 # the whole reasoning as the action.
 ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
 
-# Stands in for the assistant turn of a step whose response did not follow the
-# format, so the history stays an honest record of what was actually executed.
-# Standing still rather than repeating the last action, because repeating turns a
-# malformed reply into a committed one: a run that answers badly while walking
-# keeps walking into whatever it could not describe.
-NO_ACTION = "(no valid action; the agent stood still)"
-
 
 def preprocess_image(image: np.ndarray) -> Image.Image:
     """A CHW float observation as an RGB image, which is what a backend takes.
@@ -153,7 +146,9 @@ class ZeroShotVLMAgent(Agent):
         # conversation is the whole record of what the model said -- what the
         # render panel draws is then what the model itself reads. A response that
         # did not parse says so, since the env carried on without it.
-        self.prompt_builder.add_reply(response_text if parse_ok else f"{response_text} {NO_ACTION}")
+        self.prompt_builder.add_reply(
+            response_text if parse_ok else f"{response_text} {self.prompt_builder.rejection_text()}"
+        )
 
         self.held_metrics = {
             "vlm/parse_failed": float(not parse_ok),

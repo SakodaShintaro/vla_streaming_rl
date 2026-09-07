@@ -141,6 +141,9 @@ class PromptBuilder(ABC):
         """
         return self._task_text
 
+    def rejection_text(self) -> str:
+        return "(Not a legal action -- nothing was executed.)"
+
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         """The standing task: what the env asks, unchanged through an episode."""
@@ -248,6 +251,12 @@ class AnimalAIPromptBuilder(PromptBuilder):
     def __init__(self, env: Env, history_turns: int) -> None:
         super().__init__(env, history_turns)
         self.tasks = _load_arena_tasks(env)
+
+    def rejection_text(self) -> str:
+        return (
+            "(Not a legal action -- the agent stood still. Both halves are "
+            "needed, as in `stand still, turn left`.)"
+        )
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs
