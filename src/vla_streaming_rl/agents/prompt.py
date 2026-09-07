@@ -138,17 +138,17 @@ class PromptBuilder(ABC):
         self._turns = self._turns + [{"role": "user", "content": [{"type": "text", "text": text}]}]
         self._current = {}
 
-    def reject(self) -> None:
+    def reject(self, answer: str) -> None:
         """Say, as the env and not as the agent, that the last reply named no
         action it could run. A complaint folded into the assistant's own turn
         reads back as something the agent chose to say; this is what it was
         told."""
         self._turns = self._turns + [
-            {"role": "user", "content": [{"type": "text", "text": self._rejection_text()}]}
+            {"role": "user", "content": [{"type": "text", "text": self._rejection_text(answer)}]}
         ]
 
-    def _rejection_text(self) -> str:
-        return "(Not a legal action -- nothing was executed.)"
+    def _rejection_text(self, answer: str) -> str:
+        return f"({answer!r} is not an action -- nothing ran.)"
 
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -250,10 +250,11 @@ class AnimalAIPromptBuilder(PromptBuilder):
         super().__init__(env, history_turns)
         self.tasks = _load_arena_tasks(env)
 
-    def _rejection_text(self) -> str:
+    def _rejection_text(self, answer: str) -> str:
         return (
-            "(Not a legal action -- the agent stood still. Both halves are "
-            "needed, as in `stand still, turn left`.)"
+            f"(`{answer}` is not an action -- the agent stood still. First half: "
+            "stand still / walk forward / walk backward. Second half: no turn / "
+            "turn right / turn left.)"
         )
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:

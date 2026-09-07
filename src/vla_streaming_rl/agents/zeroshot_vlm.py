@@ -148,7 +148,7 @@ class ZeroShotVLMAgent(Agent):
         # named no runnable action is answered by the env in its own turn.
         self.prompt_builder.add_reply(response_text)
         if not parse_ok:
-            self.prompt_builder.reject()
+            self.prompt_builder.reject(answer_text)
 
         self.held_metrics = {
             "vlm/parse_failed": float(not parse_ok),
