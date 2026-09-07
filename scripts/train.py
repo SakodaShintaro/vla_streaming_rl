@@ -277,7 +277,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True
     ).stdout
     git_show = subprocess.run(["git", "show", "-s"], capture_output=True, text=True).stdout
-    git_diff = subprocess.run(["git", "diff"], capture_output=True, text=True).stdout
+    git_diff = subprocess.run(["git", "diff", "HEAD"], capture_output=True, text=True).stdout
     with open(result_dir / "git_info.txt", "w") as f:
         f.write(f"branch:\n{branch_name}\n")
         f.write(f"git show -s:\n{git_show}\n")
