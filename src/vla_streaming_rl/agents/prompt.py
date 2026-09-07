@@ -131,6 +131,13 @@ class PromptBuilder(ABC):
         """
         return self._task_text
 
+    def close_episode(self, text: str) -> None:
+        """End the episode inside the conversation instead of dropping it: the
+        turns stay and ``text`` says how it went, so the attempt that follows
+        reads what the ones before it did and what came of them."""
+        self._turns = self._turns + [{"role": "user", "content": [{"type": "text", "text": text}]}]
+        self._current = {}
+
     def rejection_text(self) -> str:
         return "(Not a legal action -- nothing was executed.)"
 
@@ -196,7 +203,6 @@ ANIMALAI_FRAMING = (
     "You see only what is in front of you while the arena extends all around "
     "you, so what you are looking for is out of view more often than not, and "
     "turning on the spot is how it is found. "
-    "What this arena asks of you follows as `Task:`. "
 )
 
 
