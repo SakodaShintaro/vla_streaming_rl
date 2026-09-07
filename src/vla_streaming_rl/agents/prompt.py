@@ -34,16 +34,6 @@ from omegaconf import DictConfig
 
 ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 
-# How an answer is to be written where the VLM writes the action itself: a short
-# justification and then the action alone, which the reader takes out of
-# <answer>. The same in every environment, so it is stated once here; what stays
-# per-environment is the encoding of the action, which each prompt below spells
-# out beside everything else that env asks for.
-#
-# Every generated token is latency (one generation per env step), so this buys
-# only the justification that changes the action: a full scene description (the
-# <perception> section of the original Odysseus protocol) tripled the output for
-# no measured benefit.
 TEXT_ACTION_PROTOCOL = (
     "Reply with exactly two sections and no other text. "
     "First, in AT MOST two short sentences inside <think>...</think>, say what in "
@@ -190,13 +180,6 @@ class CarRacingPromptBuilder(PromptBuilder):
 
 # --- Animal-AI ---------------------------------------------------------------
 
-# Grown from the wording the 2026-08-16 baseline ran (cleared 33 of its 72
-# arenas): the task in one sentence and the action vocabulary spelled out. What
-# that wording left out and this adds is the step between seeing and acting.
-# Reading a level-02 episode, the baseline wrote "the goal sphere is visible to
-# the right, which is on the opposite side of the scene from the current forward
-# direction" and answered `walk backward, no turn`: it had the direction and no
-# rule that turns it into a turn. `turn right` was not chosen once in 250 steps.
 ANIMALAI_FRAMING = (
     "You control the agent in Animal-AI (first-person view). "
     "Find and reach the green or yellow goal sphere; avoid red zones. "
