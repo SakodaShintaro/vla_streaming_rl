@@ -79,7 +79,7 @@ def load_model(
                 "linear_fc1",
                 "linear_fc2",
             ],
-            use_dora=True,
+            use_dora=False,
             init_lora_weights="gaussian",
         )
         model = get_peft_model(model, lora_config)
