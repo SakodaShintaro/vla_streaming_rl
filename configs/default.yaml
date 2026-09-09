@@ -30,7 +30,7 @@ max_grad_norm: 5.0
 sparsity: 0.0
 gamma: 0.99
 multi_gammas: []
-seq_len: 1
+seq_len: 2
 horizon: 1
 buffer_device: cuda
 critic_loss_weight: 1.0
