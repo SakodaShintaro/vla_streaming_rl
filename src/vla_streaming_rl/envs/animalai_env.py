@@ -796,7 +796,14 @@ class AnimalAIEnv(gym.Env):
     docstring for the three of them.
     """
 
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+    _PHYSICS_STEP_SEC = 0.02
+    _DECISION_PERIOD = 5
+
+    metadata = {
+        "render_modes": ["rgb_array"],
+        "render_fps": 30,
+        "decision_fps": 1.0 / (_DECISION_PERIOD * _PHYSICS_STEP_SEC),
+    }
 
     def __init__(
         self,
@@ -906,7 +913,7 @@ class AnimalAIEnv(gym.Env):
             # so an arena's `t` costs t*5 physics steps and an episode advances
             # in 0.1 s of simulated time. This is the only one of these knobs
             # that changes what the agent experiences.
-            decisionPeriod=5,
+            decisionPeriod=self._DECISION_PERIOD,
             # Run the simulation as fast as it will go: `timescale` matches the
             # paper's training scripts, and no frame rate cap. Neither changes
             # the agent's experience -- the physics step is fixed at 0.02 s and

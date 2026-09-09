@@ -11,8 +11,3 @@ temperature: 0.5
 max_prompt_tokens: 512
 pad_token_id: 0
 text_q_margin: 1.0
-# Decision rate of the environment, in Hz. The frame window goes through the
-# backbone's native video channel, and this is what the plaintext timestamps
-# labelling each temporal patch are written from; AnimalAI makes one decision
-# per 5 physics steps of 0.02 s.
-history_fps: 10.0

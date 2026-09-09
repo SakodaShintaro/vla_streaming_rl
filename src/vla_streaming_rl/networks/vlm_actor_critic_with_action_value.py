@@ -73,7 +73,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         predictor_hidden_dim: int,
         predictor_block_num: int,
         sparsity: float,
-        history_fps: float,
+        decision_fps: float,
         predictor_type: str,
         policy_type: str,
         image_encoder_type: str,
@@ -89,7 +89,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.critic_loss_weight = critic_loss_weight
         self.text_q_margin = text_q_margin
         self.text_action_mode = text_action_mode
-        self.history_fps = history_fps
+        self.decision_fps = decision_fps
 
         self.predictor_step_num = predictor_step_num
         self.disable_state_predictor = disable_state_predictor
@@ -460,7 +460,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             processor=self.processor,
             images=obs,
             task_prompts=task_prompts,
-            history_fps=self.history_fps,
+            decision_fps=self.decision_fps,
         )
         inputs_embeds = self._build_inputs_embeds(inputs)
 

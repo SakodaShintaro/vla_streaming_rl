@@ -148,6 +148,9 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         REPEAT = 4
         env = gym.make(env_id, render_mode="rgb_array")
         env = env.env  # Unwrap the original TimeLimit wrapper
+        # CarRacing steps its physics once per rendered frame, so one decision
+        # per frame is what it offers before ActionRepeatWrapper thins it out.
+        env.metadata["decision_fps"] = env.metadata["render_fps"]
         env = gym.wrappers.TimeLimit(env, max_episode_steps=1000 * REPEAT)
         env = CarRacingRewardFixWrapper(env)
         env = CarRacingActionWrapper(env)
@@ -221,6 +224,12 @@ class ActionRepeatWrapper(gym.Wrapper):
     def __init__(self, env: gym.Env, repeat: int) -> None:
         super().__init__(env)
         self.repeat = repeat
+        # Acting once per ``repeat`` frames is what the agent's own clock runs
+        # at, so the rate the wrapped env publishes no longer describes it.
+        self.metadata = {
+            **env.metadata,
+            "decision_fps": env.metadata["decision_fps"] / repeat,
+        }
 
     def step(self, action: np.ndarray) -> tuple:
         total_reward = 0

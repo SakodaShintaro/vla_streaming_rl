@@ -126,6 +126,9 @@ class CARLALeaderboardEnv(gym.Env):
     - Visualization of map + route + vehicle position
     """
 
+    # One decision per simulator tick.
+    metadata = {"render_modes": ["rgb_array"], "decision_fps": 1.0 / DT}
+
     def __init__(
         self,
         route_xml: str | None,

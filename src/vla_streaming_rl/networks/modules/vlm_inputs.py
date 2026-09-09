@@ -26,14 +26,14 @@ def build_vlm_inputs(
     processor: AutoProcessor,
     images: torch.Tensor,
     task_prompts: list[str],
-    history_fps: float,
+    decision_fps: float,
 ) -> dict:
     """Build VLM inputs.
 
     Args:
         images: (B, T, C, H, W) float tensor in [0, 1].
         task_prompts: one prompt per batch element.
-        history_fps: the environment's decision rate, which is what the plaintext
+        decision_fps: the environment's decision rate, which is what the plaintext
             timestamps labelling each temporal patch are written from.
 
     Returns the prompt (``input_ids``, ``attention_mask``, ``mm_token_type_ids``),
@@ -41,7 +41,7 @@ def build_vlm_inputs(
     (``vision_pixel_values``, ``vision_grid_thw``) and the window length.
     """
     assert images.ndim == 5, f"expected (B, T, C, H, W); got {tuple(images.shape)}"
-    assert history_fps > 0.0, history_fps
+    assert decision_fps > 0.0, decision_fps
     B, T = images.shape[:2]
     assert len(task_prompts) == B, f"task_prompts length {len(task_prompts)} != batch size {B}"
     temporal_patch_size = processor.video_processor.temporal_patch_size
@@ -56,8 +56,8 @@ def build_vlm_inputs(
     # the convention SimpleMemVLA deploys.
     metadata = VideoMetadata(
         total_num_frames=T,
-        fps=history_fps,
-        duration=T / history_fps,
+        fps=decision_fps,
+        duration=T / decision_fps,
         frames_indices=list(range(T)),
         video_backend="tensor",
     )
