@@ -405,12 +405,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return self.vlm_model.model
 
     def _build_inputs_embeds(self, inputs: dict) -> torch.Tensor:
-        """Build inputs_embeds and scatter the video tokens into <video_pad> positions.
-
-        The window is one video, so the vision tower runs over temporal patches
-        rather than single frames and returns merged tokens in the order of the
-        <video_pad> placeholders the timestamps are interleaved with.
-        """
         vlm_inner = self._get_vlm_model_inner()
         inputs_embeds = vlm_inner.get_input_embeddings()(inputs["input_ids"])
 
@@ -419,8 +413,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         vision_output = visual(pixel_values, grid_thw=inputs["vision_grid_thw"])
         vision_embeds = vision_output.pooler_output.to(inputs_embeds.device, inputs_embeds.dtype)
 
-        video_token_id = vlm_inner.config.video_token_id
-        mask = (inputs["input_ids"] == video_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+        mask = (
+            (inputs["input_ids"] == inputs["vision_token_id"])
+            .unsqueeze(-1)
+            .expand_as(inputs_embeds)
+        )
         return inputs_embeds.masked_scatter(mask, vision_embeds)
 
     def _vlm_language_forward(self, inputs: dict, inputs_embeds: torch.Tensor):
@@ -430,7 +427,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Compute 3D position_ids (needed for image token positions)
         position_ids = vlm_inner.compute_3d_position_ids(
             input_ids=inputs["input_ids"],
-            image_grid_thw=None,
+            image_grid_thw=inputs["image_grid_thw"],
             video_grid_thw=inputs["video_grid_thw"],
             inputs_embeds=inputs_embeds,
             attention_mask=inputs["attention_mask"],

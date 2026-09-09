@@ -22,19 +22,25 @@ def build_vlm_inputs(
             timestamps labelling each temporal patch are written from.
 
     Returns the prompt (``input_ids``, ``attention_mask``, ``mm_token_type_ids``),
-    the grid M-RoPE reads (``video_grid_thw``), what the vision tower is fed
-    (``vision_pixel_values``, ``vision_grid_thw``) and the window length.
+    the grids M-RoPE reads (``image_grid_thw``, ``video_grid_thw``; one of the two
+    is None), what the vision tower is fed (``vision_pixel_values``,
+    ``vision_grid_thw``), the placeholder the tower's tokens are scattered into
+    (``vision_token_id``) and the window length.
     """
     assert images.ndim == 5, f"expected (B, T, C, H, W); got {tuple(images.shape)}"
     assert decision_fps > 0.0, decision_fps
     B, T = images.shape[:2]
     assert len(task_prompts) == B, f"task_prompts length {len(task_prompts)} != batch size {B}"
+    device = images.device
+
+    if T == 1:
+        return _single_frame_inputs(processor, images[:, 0], task_prompts, device)
+
     temporal_patch_size = processor.video_processor.temporal_patch_size
     assert T % temporal_patch_size == 0, (
         f"the window must pack into temporal patches: T={T} is not divisible by "
         f"temporal_patch_size={temporal_patch_size}"
     )
-    device = images.device
 
     # Bicubic to match the resample the processor would have used itself.
     frames = F.interpolate(
@@ -74,8 +80,53 @@ def build_vlm_inputs(
         "input_ids": encoded["input_ids"].to(device),
         "attention_mask": encoded["attention_mask"].to(device),
         "mm_token_type_ids": encoded["mm_token_type_ids"].to(device),
+        "image_grid_thw": None,
         "video_grid_thw": grid,
         "vision_pixel_values": encoded["pixel_values_videos"].to(device).to(torch.bfloat16),
         "vision_grid_thw": grid,
+        "vision_token_id": processor.video_token_id,
         "seq_len": T,
+    }
+
+
+def _single_frame_inputs(
+    processor: AutoProcessor,
+    frame: torch.Tensor,
+    task_prompts: list[str],
+    device: torch.device,
+) -> dict:
+    """The one-frame window, packed as a plain image.
+
+    A window of one has no pair to form a temporal patch with, and the video
+    channel has nothing to say about it: no motion for the Conv3d to read across
+    the temporal kernel and one timestamp carrying no relation. Sending it as an
+    image is both what the format is for and what this repo did before the video
+    channel existed, so a `seq_len: 1` run stays comparable with those. The
+    image processor does its own upscaling here -- its minimum-pixel floor is
+    the FRAME_SIZE grid already -- so the frames are handed over untouched.
+    """
+    B = frame.shape[0]
+    messages = [
+        [{"role": "user", "content": [{"type": "text", "text": p}, {"type": "image"}]}]
+        for p in task_prompts
+    ]
+    texts = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    encoded = processor(
+        text=texts,
+        images=[frame[b] for b in range(B)],
+        do_rescale=False,
+        padding=True,
+        return_tensors="pt",
+    )
+    grid = encoded["image_grid_thw"].to(device)
+    return {
+        "input_ids": encoded["input_ids"].to(device),
+        "attention_mask": encoded["attention_mask"].to(device),
+        "mm_token_type_ids": encoded["mm_token_type_ids"].to(device),
+        "image_grid_thw": grid,
+        "video_grid_thw": None,
+        "vision_pixel_values": encoded["pixel_values"].to(device).to(torch.bfloat16),
+        "vision_grid_thw": grid,
+        "vision_token_id": processor.image_token_id,
+        "seq_len": 1,
     }
