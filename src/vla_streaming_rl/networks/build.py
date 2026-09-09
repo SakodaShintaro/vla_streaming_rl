@@ -173,6 +173,7 @@ def build_network(
             temperature=args.temperature,
             cot_mode=args.cot_mode,
             cot_steps_per_chain=args.cot_steps_per_chain,
+            cot_dropout=args.cot_dropout,
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
             prompt_builder=prompt_builder,

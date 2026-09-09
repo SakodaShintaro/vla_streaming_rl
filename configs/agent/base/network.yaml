@@ -66,6 +66,10 @@ cot_tokens_num: 0
 #            since there is no per-step decode to record.
 cot_mode: batch
 cot_steps_per_chain: 16
+# Share of learning batches the chain is taken away from, so the critic is
+# calibrated on states with and without one and the gap between them means
+# something. 0 leaves the chain in every batch, which is the ablation.
+cot_dropout: 0.5
 # How a step's chain tokens reach the space axis.
 #   mean : one slot per step, whose temporal recurrence follows the chain
 #   none : one slot per token, each recurring on a stride-L phase of the chain

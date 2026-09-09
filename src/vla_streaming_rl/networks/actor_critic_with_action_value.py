@@ -108,6 +108,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         temperature: float,
         cot_mode: str,
         cot_steps_per_chain: int,
+        cot_dropout: float,
         cot_pool: str,
         cot_cuda_graph: bool,
         prompt_builder,
@@ -136,6 +137,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         hidden_image_dim = self.image_processor.output_shape[0]
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
+        assert 0.0 <= cot_dropout < 1.0, cot_dropout
+        self.cot_dropout = cot_dropout
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
         # ``cot_tokens_num = 0`` is the ablation: the same body, the same heads
@@ -262,6 +265,23 @@ class ActorCriticWithActionValue(NetworkInterface):
             return {}
         return {"chain_of_thought": self.cot_module.text()}
 
+    def _drop_cot(self, cot_activations: torch.Tensor) -> torch.Tensor:
+        """The chain taken away from a share ``cot_dropout`` of the batch.
+
+        Only on the learning path. Without it the critic has never scored a
+        state whose chain is missing, so asking it what an action is worth
+        without one is asking about an input it was never trained on -- which is
+        exactly what the chain's own contribution has to be measured against.
+        Dropping whole sequences rather than single steps keeps a sampled window
+        internally consistent.
+        """
+        if self.cot_dropout == 0.0:
+            return cot_activations
+        keep = (
+            torch.rand(cot_activations.shape[0], device=cot_activations.device) >= self.cot_dropout
+        )
+        return cot_activations * keep.view(-1, *([1] * (cot_activations.dim() - 1)))
+
     def _window(self, data: ReplayBufferData, start, stop) -> tuple:
         """The ``(image, action, reward, rnn_state, scalar_obs, cot)`` the encoder
         reads, sliced out of a replay batch over ``[start, stop)`` steps."""
@@ -281,7 +301,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.episode_step[:, start:stop],
                 data.health[:, start:stop],
             ),
-            data.cot_activations[:, start:stop],
+            self._drop_cot(data.cot_activations[:, start:stop]),
             data.cot_age[:, start:stop],
         )
 
