@@ -23,9 +23,8 @@ from .modules.policy_head import build_policy_head
 from .modules.prediction_head import StatePredictionHead
 from .modules.reward_processor import RewardProcessor
 from .modules.value_head import DistributionalValueHead
-from .modules.video_encoder import VideoEncoder
 from .modules.vlm_backbone import load_model
-from .modules.vlm_input_cache import VLMInputCache
+from .modules.vlm_inputs import build_vlm_inputs
 
 
 class VLMActorCriticWithActionValue(NetworkInterface):
@@ -74,7 +73,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         predictor_hidden_dim: int,
         predictor_block_num: int,
         sparsity: float,
-        image_mode: str,
+        history_fps: float,
         predictor_type: str,
         policy_type: str,
         image_encoder_type: str,
@@ -83,7 +82,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
-        assert image_mode in ("mem", "sequence"), f"Unknown image_mode: {image_mode}"
         self.seq_len = seq_len
         self.horizon = horizon
         self.action_dim = action_space_shape[0]
@@ -91,7 +89,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.critic_loss_weight = critic_loss_weight
         self.text_q_margin = text_q_margin
         self.text_action_mode = text_action_mode
-        self.image_mode = image_mode
+        self.history_fps = history_fps
 
         self.predictor_step_num = predictor_step_num
         self.disable_state_predictor = disable_state_predictor
@@ -139,7 +137,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.pad_token_id = pad_token_id
 
         self.num_state_queries = num_state_queries
-        self.video_encoder = VideoEncoder()
 
         self.state_out_proj = nn.Linear(vlm_hidden_size, state_out_dim).to(device)
         # AdaptiveAvgPool1d fixes the token count to num_state_queries, so
@@ -177,18 +174,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.state_to_predictor_proj = nn.Linear(state_out_dim, hidden_image_dim)
 
         self._dummy_state = torch.zeros(1, 1, 1)
-
-        # VLMInputCache caches everything that depends
-        # only on image dimensions (image_grid_thw, chat template format) but
-        # tokenizes the prompt fresh every step so envs that vary their
-        # task prompt (LIBERO, future CoT, ...) keep working.
-        self._input_cache = VLMInputCache(
-            processor=self.processor,
-            observation_shape=observation_space_shape,
-            seq_len=seq_len,
-            device=torch.device(device),
-            image_mode=self.image_mode,
-        )
 
     def init_state(self) -> torch.Tensor:
         return self._dummy_state.clone()
@@ -420,44 +405,23 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return self.vlm_model.model
 
     def _build_inputs_embeds(self, inputs: dict) -> torch.Tensor:
-        """Build inputs_embeds and scatter image embeddings into <image_pad> positions.
+        """Build inputs_embeds and scatter the video tokens into <video_pad> positions.
 
-        Two image paths share the same scatter step but differ in what gets scattered:
-
-        - mem mode: only the last frame appears in the LLM context. ``VideoEncoder``
-          processes all frames jointly (with causal temporal attention) and returns
-          merged tokens for the last frame only.
-        - sequence mode: every frame appears in the LLM context in temporal order.
-          The VLM's stock vision encoder processes each frame independently and
-          returns merged tokens for all frames, concatenated in the same order as
-          the <image_pad> placeholders.
+        The window is one video, so the vision tower runs over temporal patches
+        rather than single frames and returns merged tokens in the order of the
+        <video_pad> placeholders the timestamps are interleaved with.
         """
         vlm_inner = self._get_vlm_model_inner()
         inputs_embeds = vlm_inner.get_input_embeddings()(inputs["input_ids"])
 
-        batch_size = inputs["input_ids"].shape[0]
-        seq_len = inputs["seq_len"]
+        visual = self._get_visual()
+        pixel_values = inputs["vision_pixel_values"].type(visual.dtype)
+        vision_output = visual(pixel_values, grid_thw=inputs["vision_grid_thw"])
+        vision_embeds = vision_output.pooler_output.to(inputs_embeds.device, inputs_embeds.dtype)
 
-        if self.image_mode == "sequence":
-            visual = self._get_visual()
-            pixel_values = inputs["all_pixel_values"].type(visual.dtype)
-            vision_output = visual(pixel_values, grid_thw=inputs["all_image_grid_thw"])
-            image_embeds = vision_output.pooler_output
-        else:
-            image_embeds = self.video_encoder(
-                self._get_visual(),
-                inputs["all_pixel_values"],
-                inputs["all_image_grid_thw"],
-                batch_size,
-                seq_len,
-            )
-        image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-
-        image_token_id = vlm_inner.config.image_token_id
-        image_mask = (inputs["input_ids"] == image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-        inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-
-        return inputs_embeds
+        video_token_id = vlm_inner.config.video_token_id
+        mask = (inputs["input_ids"] == video_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+        return inputs_embeds.masked_scatter(mask, vision_embeds)
 
     def _vlm_language_forward(self, inputs: dict, inputs_embeds: torch.Tensor):
         """Run the VLM language model with pre-built inputs_embeds (no pixel_values)."""
@@ -466,8 +430,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Compute 3D position_ids (needed for image token positions)
         position_ids = vlm_inner.compute_3d_position_ids(
             input_ids=inputs["input_ids"],
-            image_grid_thw=inputs["image_grid_thw"],
-            video_grid_thw=None,
+            image_grid_thw=None,
+            video_grid_thw=inputs["video_grid_thw"],
             inputs_embeds=inputs_embeds,
             attention_mask=inputs["attention_mask"],
             past_key_values=None,
@@ -492,7 +456,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self, obs: torch.Tensor, task_prompts: list[str]
     ) -> tuple[torch.Tensor, object]:
         """Run VLM forward and return (state, past_key_values)."""
-        inputs = self._input_cache(obs, task_prompts)
+        inputs = build_vlm_inputs(
+            processor=self.processor,
+            images=obs,
+            task_prompts=task_prompts,
+            history_fps=self.history_fps,
+        )
         inputs_embeds = self._build_inputs_embeds(inputs)
 
         # When the VLM weights themselves are frozen we can save a lot of memory

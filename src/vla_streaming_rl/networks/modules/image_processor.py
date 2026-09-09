@@ -128,7 +128,6 @@ class QwenImageEncoder(nn.Module):
 
     No temporal attention (there is only one frame), so this is just the
     original ViT forward pass: patch_embed + pos_embed, ViT blocks, PatchMerger.
-    c.f. VideoEncoder in video_encoder.py, which handles multiple frames.
     """
 
     resolution = 224
