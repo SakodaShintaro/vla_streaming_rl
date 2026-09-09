@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import torch
 from omegaconf import DictConfig
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 from PIL import Image
 
 from vla_streaming_rl.networks.modules.vlm_backbone import load_model, sampling_kwargs
@@ -104,29 +104,40 @@ class OpenRouterBackend:
         self.temperature = temperature
         self.body_max_retries = body_max_retries
 
-    def _create(self, messages: list[dict]):
-        return self.client.chat.completions.create(
-            model=self.model_id,
-            messages=_to_openai_messages(messages),
-            max_tokens=self.max_new_tokens,
-            temperature=self.temperature,
-            extra_body={"reasoning": self.reasoning},
-        )
+    def _attempt(self, messages: list[dict]):
+        """One request, as either the completion or what went wrong with it.
+
+        An upstream failure reaches this client two ways -- a 400 the SDK raises
+        (`Provider returned error`) and a 200 whose body carries the error with
+        no `choices` -- and neither is retried by the SDK. Both are the same
+        transient thing here, so both come back as a failure to retry.
+        """
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model_id,
+                messages=_to_openai_messages(messages),
+                max_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                extra_body={"reasoning": self.reasoning},
+            )
+        except BadRequestError as error:
+            return None, str(error)
+        return completion, None if completion.choices else f"no choices: {completion}"
 
     def generate(self, messages: list[dict]) -> VLMResponse:
-        # OpenRouter reports an upstream failure in the body of a 200, which the
-        # SDK's own retries never see: `choices` is then absent. Those failures
-        # are usually transient (a provider hiccup, a multimodal download that
-        # timed out), so retry them here rather than lose a run that is hours
-        # deep; the payload of the last one is the only account of what happened.
+        # A provider hiccup (a shared-pool 400, a multimodal download that timed
+        # out upstream) must not lose a run that is hours deep, so it is waited
+        # out here; what the last attempt said is the only account of it.
         for attempt in range(self.body_max_retries):
-            completion = self._create(messages)
-            if completion.choices:
+            completion, failure = self._attempt(messages)
+            if failure is None:
                 break
             delay = self.BODY_RETRY_BASE_SECONDS * 2**attempt
-            print(f"OpenRouter returned no choices, retrying in {delay:.1f}s: {completion}")
+            print(f"OpenRouter request failed, retrying in {delay:.1f}s: {failure}")
             time.sleep(delay)
-        assert completion.choices, f"OpenRouter returned no choices: {completion}"
+        assert failure is None, (
+            f"OpenRouter request failed {self.body_max_retries} times: {failure}"
+        )
         choice = completion.choices[0]
         return VLMResponse(
             text=choice.message.content or "",
