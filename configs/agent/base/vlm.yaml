@@ -1,7 +1,7 @@
 # @package _global_
 use_lora: 0
 vlm_model_id: Qwen/Qwen3.5-2B
-num_state_queries: 219
+num_state_queries: 100
 state_out_dim: 4
 text_action_mode: none
 use_prompt: 1

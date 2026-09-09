@@ -187,7 +187,7 @@ class CarRacingPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CAR_RACING_TEXT_ACTION_PROMPT} {TEXT_ACTION_PROTOCOL}"
+        return f"{CAR_RACING_TEXT_ACTION_PROMPT}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward, info
