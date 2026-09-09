@@ -43,3 +43,6 @@ reasoning_max_tokens: 0
 # Retries the OpenAI SDK makes per request (exponential backoff). A run is one
 # API call per env step, so an upstream 429 / 5xx must not abort it.
 api_max_retries: 16
+# Retries for a 200 whose body carries an upstream error (no `choices`), which
+# the SDK's own retries never see.
+body_max_retries: 5
