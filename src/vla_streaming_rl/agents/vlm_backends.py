@@ -12,6 +12,7 @@ parts -- the format transformers' chat templates require -- which
 import base64
 import io
 import os
+import time
 from dataclasses import dataclass
 
 import torch
@@ -67,6 +68,10 @@ def _to_openai_messages(messages: list[dict]) -> list[dict]:
 
 
 class OpenRouterBackend:
+    # First wait before re-sending a request whose 200 carried an upstream
+    # error; each further attempt doubles it.
+    BODY_RETRY_BASE_SECONDS = 2.0
+
     def __init__(
         self,
         *,
@@ -75,6 +80,7 @@ class OpenRouterBackend:
         reasoning_max_tokens: int,
         temperature: float,
         api_max_retries: int,
+        body_max_retries: int,
     ) -> None:
         # One API call per env step means a single upstream hiccup (a shared-pool
         # 429, a 5xx) would otherwise abort a run that is minutes deep. The SDK
@@ -96,18 +102,30 @@ class OpenRouterBackend:
             else {"max_tokens": reasoning_max_tokens}
         )
         self.temperature = temperature
+        self.body_max_retries = body_max_retries
 
-    def generate(self, messages: list[dict]) -> VLMResponse:
-        completion = self.client.chat.completions.create(
+    def _create(self, messages: list[dict]):
+        return self.client.chat.completions.create(
             model=self.model_id,
             messages=_to_openai_messages(messages),
             max_tokens=self.max_new_tokens,
             temperature=self.temperature,
             extra_body={"reasoning": self.reasoning},
         )
+
+    def generate(self, messages: list[dict]) -> VLMResponse:
         # OpenRouter reports an upstream failure in the body of a 200, which the
-        # SDK's own retries never see; `choices` is then absent and the payload
-        # is the only account of what went wrong.
+        # SDK's own retries never see: `choices` is then absent. Those failures
+        # are usually transient (a provider hiccup, a multimodal download that
+        # timed out), so retry them here rather than lose a run that is hours
+        # deep; the payload of the last one is the only account of what happened.
+        for attempt in range(self.body_max_retries):
+            completion = self._create(messages)
+            if completion.choices:
+                break
+            delay = self.BODY_RETRY_BASE_SECONDS * 2**attempt
+            print(f"OpenRouter returned no choices, retrying in {delay:.1f}s: {completion}")
+            time.sleep(delay)
         assert completion.choices, f"OpenRouter returned no choices: {completion}"
         choice = completion.choices[0]
         return VLMResponse(
@@ -177,6 +195,7 @@ def build_vlm_backend(args: DictConfig):
             reasoning_max_tokens=args.reasoning_max_tokens,
             temperature=args.temperature,
             api_max_retries=args.api_max_retries,
+            body_max_retries=args.body_max_retries,
         )
     return LocalVLMBackend(
         model_id=args.vlm_model_id,
