@@ -51,6 +51,13 @@ env_factory:
   #   arenas at stage 1 and 60 at stage 2; at 1.0 that is 30 then 60 straight
   #   passes. A round below the rate repeats the stage with a fresh draw order.
   advance_success_rate: 0.6
+  # - sequential_repeats ("sequential"): how many episodes each arena gets
+  #   before the sweep moves on, back to back. 1 is the plain one-pass
+  #   measurement. Above 1 is what an agent that carries something between
+  #   attempts is measured with: the run rewrites a failed arena's task off the
+  #   attempt that failed (agent.episode_critic) and the retry reads it, which
+  #   only means anything while it is still the same arena.
+  sequential_repeats: 1
   binary_path: ~/animalai_env/4.3.2_alpha3/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
   #     false : discretize to the official MultiDiscrete([3, 3]) branches with a

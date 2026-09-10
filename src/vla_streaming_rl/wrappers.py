@@ -65,6 +65,7 @@ def make_animalai_env(
     train_level: str,
     steps_per_stage: int,
     advance_success_rate: float,
+    sequential_repeats: int,
     binary_path: str,
     continuous_action: bool,
     topdown_camera: bool,
@@ -80,6 +81,7 @@ def make_animalai_env(
         train_level=train_level,
         steps_per_stage=steps_per_stage,
         advance_success_rate=advance_success_rate,
+        sequential_repeats=sequential_repeats,
         seed=0,
     )
     return AnimalAIEnv(

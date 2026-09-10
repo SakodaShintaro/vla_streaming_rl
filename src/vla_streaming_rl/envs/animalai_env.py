@@ -513,34 +513,51 @@ class SequentialSelector(ArenaSelector):
         exhausted).
       - True: wrap back to the first arena instead of ending, so the set is
         replayed until train.py's step_limit stops the run.
+
+    `repeats` runs each arena that many episodes in a row before moving on,
+    which is what an agent that carries something from one attempt to the next
+    is measured with: a critic rewrites the arena's task off the attempt that
+    failed (agents/episode_critic), and the attempt that reads it has to be the
+    same arena. Repeats sit together on purpose -- a second pass over the whole
+    set would put hundreds of episodes between an arena and its retry.
     """
 
-    def __init__(self, arenas: list[Arena], cycle: bool):
+    def __init__(self, arenas: list[Arena], cycle: bool, repeats: int):
         super().__init__(arenas)
+        assert repeats >= 1, repeats
         self.cycle = cycle
+        self.repeats = repeats
         self._next_index = 0
 
     @property
+    def _visits(self) -> int:
+        return len(self.arenas) * self.repeats
+
+    @property
     def is_exhausted(self) -> bool:
-        return not self.cycle and self._next_index >= len(self.arenas)
+        return not self.cycle and self._next_index >= self._visits
 
     def next_arena(self, global_step: int) -> Arena:
-        arena = self.arenas[self._next_index % len(self.arenas)]
+        arena = self.arenas[(self._next_index % self._visits) // self.repeats]
         self._next_index += 1
         return arena
 
     def info(self, global_step: int) -> dict:
+        visit = (self._next_index - 1) % self._visits
         return {
-            "arena_index": (self._next_index - 1) % len(self.arenas),
+            "arena_index": visit // self.repeats,
             "arena_total": len(self.arenas),
-            "lap": (self._next_index - 1) // len(self.arenas),
+            "arena_attempt": visit % self.repeats,
+            "lap": (self._next_index - 1) // self._visits,
         }
 
     def status(self, global_step: int) -> str:
         cleared = sum(self.is_cleared(arena) for arena in self.arenas)
+        visit = (self._next_index - 1) % self._visits
         return (
-            f"{(self._next_index - 1) % len(self.arenas) + 1}/{len(self.arenas)}"
-            f"  lap:{(self._next_index - 1) // len(self.arenas) + 1}"
+            f"{visit // self.repeats + 1}/{len(self.arenas)}"
+            f"  try:{visit % self.repeats + 1}/{self.repeats}"
+            f"  lap:{(self._next_index - 1) // self._visits + 1}"
             f"  cleared:{cleared}/{len(self.arenas)}  step:{global_step}"
         )
 
@@ -586,6 +603,7 @@ def build_selector(
     train_level: str,
     steps_per_stage: int,
     advance_success_rate: float,
+    sequential_repeats: int,
     seed: int,
 ) -> ArenaSelector:
     """Build the arena selector named by `mode` (see the module docstring).
@@ -611,14 +629,17 @@ def build_selector(
         ),
         # One pass and done: the curriculum-free sweep is a measurement of the
         # training set, so a second lap over the same arenas would only mix
-        # repeats into the score.
+        # repeats into the score. `sequential_repeats` is the exception, and it
+        # keeps an arena's attempts together rather than lapping.
         "sequential": lambda: SequentialSelector(
-            arenas=_training_arenas(train_variant, train_level), cycle=False
+            arenas=_training_arenas(train_variant, train_level),
+            cycle=False,
+            repeats=sequential_repeats,
         ),
         "random": lambda: RandomSelector(
             arenas=_training_arenas(train_variant, train_level), seed=seed
         ),
-        "eval": lambda: SequentialSelector(arenas=_competition_arenas(), cycle=False),
+        "eval": lambda: SequentialSelector(arenas=_competition_arenas(), cycle=False, repeats=1),
     }
     assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"
     return builders[mode]()
