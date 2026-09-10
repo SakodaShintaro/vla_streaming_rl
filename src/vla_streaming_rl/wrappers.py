@@ -69,6 +69,7 @@ def make_animalai_env(
     continuous_action: bool,
     topdown_camera: bool,
     topdown_resolution: int,
+    colored_walls: bool,
     end_at_pass_mark: bool,
 ) -> gym.Env:
     from vla_streaming_rl.envs.animalai_env import AnimalAIEnv, build_selector
@@ -89,6 +90,7 @@ def make_animalai_env(
         continuous_action=continuous_action,
         topdown_camera=topdown_camera,
         topdown_resolution=topdown_resolution,
+        colored_walls=colored_walls,
         end_at_pass_mark=end_at_pass_mark,
         selector=selector,
     )

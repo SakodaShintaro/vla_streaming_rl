@@ -71,6 +71,11 @@ env_factory:
   #   `resolution` since only a human looks at it. Cost grows with the pixel
   #   count, so this is the knob to turn when the view is too slow or too coarse.
   topdown_resolution: 96
+  # - colored_walls: tint the arena's four outer walls four different colors, so
+  #   that a view of a wall says which side of the arena the agent is facing.
+  #   false leaves every wall the shade it has always had. Requires a binary
+  #   rebuilt from animal-ai-unity; ignored by an official one.
+  colored_walls: true
   # - end_at_pass_mark: end the episode once a collected reward reaches the
   #   arena's pass mark. Unity never does, so in an arena with no episode-ending
   #   goal the agent bleeds 1/t per step until its health expires -- 1.0 of

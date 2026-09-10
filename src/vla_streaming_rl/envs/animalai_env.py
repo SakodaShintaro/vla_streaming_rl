@@ -814,6 +814,7 @@ class AnimalAIEnv(gym.Env):
         continuous_action: bool,
         topdown_camera: bool,
         topdown_resolution: int,
+        colored_walls: bool,
         end_at_pass_mark: bool,
         selector: ArenaSelector,
     ):
@@ -821,6 +822,7 @@ class AnimalAIEnv(gym.Env):
         self.continuous_action = continuous_action
         self.topdown_camera = topdown_camera
         self.topdown_resolution = topdown_resolution
+        self.colored_walls = colored_walls
         self.end_at_pass_mark = end_at_pass_mark
         self.selector = selector
         self._arena_by_name = {arena.name: arena for arena in selector.arenas}
@@ -857,6 +859,9 @@ class AnimalAIEnv(gym.Env):
         # (x, y, z) agent position in arena coords; populated each step from
         # the AAI vector observation. None before the first reset.
         self._agent_xyz: tuple[float, float, float] | None = None
+        # (pitch, yaw, roll) agent orientation in degrees, from the AAI vector
+        # observation's Unity euler angles. None before the first reset.
+        self._agent_rotation: tuple[float, float, float] | None = None
         # (vx, vy, vz) agent velocity from the AAI vector observation.
         self._agent_velocity: np.ndarray = np.zeros(3, dtype=np.float32)
         # Agent health from the AAI vector observation: it decays at a rate set
@@ -898,6 +903,8 @@ class AnimalAIEnv(gym.Env):
                 str(int(self.topdown_camera)),
                 "--topDownResolution",
                 str(self.topdown_resolution),
+                "--coloredWalls",
+                str(int(self.colored_walls)),
             ]
         )
         self._aai = environment_class(
@@ -942,6 +949,11 @@ class AnimalAIEnv(gym.Env):
         # last either way.
         self._observation_count = len(spec.observation_specs)
         assert self._observation_count in (2, 3), self._observation_count
+        self._vector_size = spec.observation_specs[self._observation_count - 1].shape[0]
+        assert self._vector_size == 10, (
+            f"{self.binary_path} emits a {self._vector_size}-element vector observation; "
+            "the agent's rotation needs a binary rebuilt from animal-ai-unity."
+        )
         self._continuous_size = spec.action_spec.continuous_size
         assert self._continuous_size == 2 or not self.continuous_action, (
             f"{self.binary_path} exposes {self._continuous_size} continuous actions; "
@@ -954,7 +966,7 @@ class AnimalAIEnv(gym.Env):
 
     def _read_observation(self, steps) -> None:
         # Vector obs layout (useCamera=True, useRayCasts=False): the last
-        # observation is [health, vx, vy, vz, x, y, z].
+        # observation is [health, vx, vy, vz, x, y, z, pitch, yaw, roll].
         vec = steps.obs[self._observation_count - 1][0]
         self._latest_image = self._decode_obs(steps.obs[0][0])
         # Watched in `render`, never handed to the policy.
@@ -963,6 +975,7 @@ class AnimalAIEnv(gym.Env):
         )
         self._agent_health = float(vec[0])
         self._agent_xyz = (float(vec[4]), float(vec[5]), float(vec[6]))
+        self._agent_rotation = (float(vec[7]), float(vec[8]), float(vec[9]))
         self._agent_velocity = np.array(
             [float(vec[1]), float(vec[2]), float(vec[3])], dtype=np.float32
         )
@@ -994,6 +1007,7 @@ class AnimalAIEnv(gym.Env):
             "health": self._agent_health,
             "velocity": self._agent_velocity,
             "agent_xyz": self._agent_xyz,
+            "agent_rotation": self._agent_rotation,
         }
         info.update(self.selector.info(self.global_step))
         return info
@@ -1115,6 +1129,7 @@ if __name__ == "__main__":
         continuous_action=False,
         topdown_camera=False,
         topdown_resolution=96,
+        colored_walls=True,
         end_at_pass_mark=True,
         selector=StagedSelector(variant="01", steps_per_stage=2_000_000, seed=0),
     )
