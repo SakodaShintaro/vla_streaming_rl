@@ -5,8 +5,10 @@ Both backends take the same neutral chat messages and return the same
 `VLMResponse`, so `ZeroShotVLMAgent` builds one prompt and reports one set of
 telemetry whichever is in use. A message's ``content`` is always a list of
 ``{"type": "text", "text": ...}`` / ``{"type": "image", "image": <PIL image>}``
-parts -- the format transformers' chat templates require -- which
-`OpenRouterBackend` converts into the OpenAI wire format's data URLs.
+parts -- the format transformers' chat templates require -- plus
+``{"type": "video", "video": <path to an mp4>}``, which is how a whole episode
+goes over at once (see `episode_critic`). `OpenRouterBackend` converts them
+into the OpenAI wire format's data URLs; a local backend reads images only.
 """
 
 import base64
@@ -14,6 +16,7 @@ import io
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from omegaconf import DictConfig
@@ -47,17 +50,25 @@ def _png_data_url(image: Image.Image) -> str:
     return f"data:image/png;base64,{payload}"
 
 
+def _mp4_data_url(path: Path) -> str:
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:video/mp4;base64,{payload}"
+
+
+def _to_openai_part(part: dict) -> dict:
+    if part["type"] == "text":
+        return part
+    if part["type"] == "video":
+        return {"type": "video_url", "video_url": {"url": _mp4_data_url(part["video"])}}
+    return {"type": "image_url", "image_url": {"url": _png_data_url(part["image"])}}
+
+
 def _to_openai_content(content: list[dict]):
     # A text-only turn goes over the wire as a plain string: some models reject
     # a parts list on the system and assistant roles.
     if all(part["type"] == "text" for part in content):
         return "\n".join(part["text"] for part in content)
-    return [
-        part
-        if part["type"] == "text"
-        else {"type": "image_url", "image_url": {"url": _png_data_url(part["image"])}}
-        for part in content
-    ]
+    return [_to_openai_part(part) for part in content]
 
 
 def _to_openai_messages(messages: list[dict]) -> list[dict]:

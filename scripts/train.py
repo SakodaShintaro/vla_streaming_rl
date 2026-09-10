@@ -27,6 +27,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_agent
+from vla_streaming_rl.agents.episode_critic import build_episode_critic
 from vla_streaming_rl.agents.prompt import build_prompt_builder
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
@@ -329,6 +330,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     # The chain of thought writes into the same conversation, so the builder is
     # made before the network that carries the chain.
     prompt_builder = build_prompt_builder(env, args)
+    episode_critic = build_episode_critic(args, result_dir) if args.episode_critic else None
 
     trains_a_network = args.agent_type != "zeroshot_vlm"
     network = (
@@ -562,6 +564,26 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         wandb.log(episode_end_info)
 
         arena_name = env_info["arena_name"] if "arena_name" in env_info else ""
+
+        # An arena the run just failed is asked in different words next time:
+        # the episode goes to a hosted model as video and what it writes back
+        # replaces this arena's task sentence (see `episode_critic`).
+        if (
+            episode_critic is not None
+            and arena_name
+            and "pass_mark" in env_info
+            and score < env_info["pass_mark"]
+        ):
+            advice = episode_critic.review(
+                arena_name=arena_name,
+                task=prompt_builder.arena_task(arena_name),
+                obs_list=obs_list,
+                score=score,
+                pass_mark=env_info["pass_mark"],
+                episode_id=episode_id,
+            )
+            prompt_builder.override_task(arena_name, advice)
+            print(f"[critic] {arena_name}: {advice}")
 
         if arena_name:
             arena_is_best = (

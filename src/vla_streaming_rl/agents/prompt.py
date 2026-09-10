@@ -83,6 +83,11 @@ class PromptBuilder(ABC):
         del env
         assert history_turns >= 0, history_turns
         self.history_turns = history_turns
+        # What an arena asks, once a critic has rewritten it off a failed
+        # attempt (see `episode_critic`): keyed by arena name, empty until one
+        # does. The framing and the protocol around it are the run's own and are
+        # never rewritten.
+        self.task_overrides = {}
         self._turns = []
         self._current = {}
         self._task_text = ""
@@ -119,6 +124,10 @@ class PromptBuilder(ABC):
             {"role": "assistant", "content": [{"type": "text", "text": text}]},
         ]
         self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
+
+    def override_task(self, arena_name: str, text: str) -> None:
+        """Ask this arena in these words from now on."""
+        self.task_overrides[arena_name] = text
 
     def task_text(self) -> str:
         """The standing task: what the policy reads, and what it tokenizes.
@@ -243,11 +252,20 @@ class AnimalAIPromptBuilder(PromptBuilder):
             "turn right / turn left.)"
         )
 
+    def arena_task(self, arena_name: str) -> str:
+        """What this arena asks: the instruction it came with, or what a critic
+        wrote in its place after the run failed it."""
+        return (
+            self.task_overrides[arena_name]
+            if arena_name in self.task_overrides
+            else self.tasks[arena_name.rsplit("-", 1)[0]]
+        )
+
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs
         return (
             f"{ANIMALAI_FRAMING} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
+            f"Task: {self.arena_task(info['arena_name'])}. "
             f"{TEXT_ACTION_PROTOCOL}"
         )
 

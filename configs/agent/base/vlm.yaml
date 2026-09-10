@@ -5,6 +5,28 @@ num_state_queries: 100
 state_out_dim: 4
 text_action_mode: none
 prompt_history_turns: 16
+# After an episode that fell short of its pass mark, hand the episode to a
+# hosted model as video and prompt the next attempt at that arena with the
+# instruction it writes back, in place of the arena's own (agents/episode_critic).
+# One API call per failed episode, so it costs what the run fails.
+episode_critic: false
+critic_model_id: qwen/qwen3.7-flash
+critic_max_new_tokens: 256
+# The critic writes one short instruction, so its own thinking buys nothing and
+# only competes with that for the budget.
+critic_reasoning_max_tokens: 0
+critic_temperature: 0.5
+# Playback rate of the episode it is shown. The run renders its own videos at
+# 10, so this is one second of video per ten env steps; a short episode is
+# slowed down to make the provider's minimum clip length.
+critic_fps: 10
+# Retries the OpenAI SDK makes per hosted request (exponential backoff). A
+# zero-shot run is one API call per env step, so an upstream 429 / 5xx must not
+# abort it; the critic borrows the same allowance.
+api_max_retries: 16
+# Retries for a 200 whose body carries an upstream error (no `choices`), which
+# the SDK's own retries never see.
+body_max_retries: 5
 max_new_tokens: 128
 temperature: 0.5
 max_prompt_tokens: 512
