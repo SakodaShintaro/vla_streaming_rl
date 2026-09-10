@@ -22,7 +22,6 @@ velocity_scale: [1.0, 1.0, 16.0]
 health_scale: 100.0
 
 # Read by scripts/train.py for every agent.
-use_prompt: 0
 # Unused here (there is no replay buffer and no warmup), but debug mode assigns
 # them, so they have to exist.
 learning_starts: 0

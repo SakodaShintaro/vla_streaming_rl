@@ -5,8 +5,7 @@ The environment reports state; the agent decides what to say about it. Every
 string a policy reads as language is built here out of the structured
 observation the env already publishes, so the prompt belongs to the run's agent
 config rather than to the simulator: two agents can drive the same env with
-different framing, the env carries no text of its own, and ``use_prompt`` is a
-choice of builder instead of a blanking step in the trainer.
+different framing, and the env carries no text of its own.
 
 There is one builder per environment, and it always writes the prompt of an
 agent about to act: what the env asks, the action vocabulary it is asked in, the
@@ -159,19 +158,6 @@ class PromptBuilder(ABC):
         """What this tick alone says: the live numbers under the frame."""
 
 
-class EmptyPromptBuilder(PromptBuilder):
-    """No language at all: what ``use_prompt: 0`` selects, and the ablation a
-    language-conditioned run is measured against."""
-
-    def _task(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
-        return ""
-
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward, info
-        return ""
-
-
 # --- CarRacing ---------------------------------------------------------------
 
 CAR_RACING_TEXT_ACTION_PROMPT = (
@@ -312,8 +298,5 @@ PROMPT_BUILDERS = {
 
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
-    if not args.use_prompt:
-        return EmptyPromptBuilder(env, args.prompt_history_turns)
-
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
     return PROMPT_BUILDERS[args.env_id](env, args.prompt_history_turns)
