@@ -34,11 +34,7 @@ vlm_backend: local
 # qwen/qwen3.6-27b                                    262,144      0.600      3.600
 # qwen/qwen3.8-max                                  1,000,000      2.000      6.000
 openrouter_model_id: qwen/qwen3.7-flash
-# The model's own hidden thinking: a cap on OpenRouter's `reasoning`, and on the
-# local backend the switch the chat template's own block reads. The prompt already asks for the chain
-# of thought inside <think>, so the hidden copy only competes for max_new_tokens:
-# with no cap the budget runs out before <answer> and the response comes back
-# empty. 0 disables thinking entirely.
+# The model's own hidden thinking
 reasoning_max_tokens: 0
 # Retries the OpenAI SDK makes per request (exponential backoff). A run is one
 # API call per env step, so an upstream 429 / 5xx must not abort it.

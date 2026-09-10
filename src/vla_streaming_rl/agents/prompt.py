@@ -17,11 +17,13 @@ reading the same words a run that acts on it would, so the two are comparable
 without a second wording to keep in step.
 
 A builder is called once per environment step with the observation, the reward
-and the info the agent itself received, and returns the conversation as it then
-stands: the standing task, every turn a chain has already answered, and this
-tick's own turn. Holding the conversation here is what keeps the VLM modules
-free of any environment's vocabulary -- they run a model over what they are
-handed and compose no text of their own beyond how a chain is continued.
+and the info the agent itself received. What a model then reads is ``frames``,
+the history as one clip, and ``conversation``, the standing task and this tick's
+own numbers around the place that clip goes. What a person reads is
+``transcript``, which keeps the replies the model wrote and is drawn as the run's
+conversation panel; no model is given it. Holding all of this here is what keeps
+the VLM modules free of any environment's vocabulary -- they run a model over
+what they are handed and compose no text of their own.
 """
 
 import csv
@@ -35,11 +37,11 @@ from omegaconf import DictConfig
 ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 
 TEXT_ACTION_PROTOCOL = (
-    "Reply with exactly two sections and no other text. "
-    "First, in AT MOST two short sentences inside <think>...</think>, say what in "
-    "the current image decides your next action, taking the previous reward (if "
-    "shown) into account. Do not describe the scene in general, do not restate "
-    "the task, and do not repeat your earlier reasoning. "
+    "Reply with exactly two parts and no other text. "
+    "First, in AT MOST two short sentences, say what in the latest frame decides "
+    "your next action, taking the previous reward (if shown) into account. Do not "
+    "describe the scene in general, do not restate the task, and do not repeat "
+    "your earlier reasoning. "
     "Then output the action inside <answer>...</answer>, which must contain ONLY "
     "the action -- no commentary, no labels."
 )
@@ -65,86 +67,98 @@ def _load_arena_tasks(env: Env) -> dict[str, str]:
 
 
 class PromptBuilder(ABC):
-    """The conversation this run's VLMs read, carried across environment steps.
+    """What this run's VLMs read, carried across environment steps.
 
-    Every tick ``observe`` records what the agent is looking at. A chain reads
-    that through ``conversation`` on the steps it actually writes -- one step in
-    ``cot_steps_per_chain`` -- and hands back what it wrote through
-    ``add_reply``, which is what puts the turn it answered into the conversation
-    for good. The ticks in between are overwritten rather than accumulated, so
-    the conversation holds the turns a chain saw and not every step of the run.
+    Every tick ``observe`` records what the agent is looking at as the pending
+    frame and the pending turn. A chain reads them on the steps it actually
+    writes -- one step in ``cot_steps_per_chain`` -- and hands back what it wrote
+    through ``add_reply``, which is what keeps that tick's pair for good. The
+    ticks in between are overwritten rather than accumulated, so what is kept is
+    what a chain saw and not every step of the run.
 
-    ``history_turns`` is how many of those exchanges it keeps. Every turn still
-    held is re-read on every step that follows, so a conversation left to grow
-    charges the whole episode for its own beginning; the oldest exchange is
-    dropped instead.
+    ``history_turns`` is how many of those kept pairs it holds. Everything still
+    held is re-read on every step that follows, so a history left to grow charges
+    the whole episode for its own beginning; the oldest pair is dropped instead.
     """
 
     def __init__(self, env: Env, history_turns: int) -> None:
-        del env
         assert history_turns >= 0, history_turns
         self.history_turns = history_turns
-        self._turns = []
-        self._current = {}
+        self.decision_fps = env.metadata["decision_fps"]
+        self._transcript = []
+        self._kept_frames = []
+        self._pending_turn = {}
+        self._pending_frame = {}
         self._task_text = ""
+        self._step = 0
 
     def reset(self) -> None:
-        """A finished episode ends the conversation; the next one opens its own."""
-        self._turns = []
-        self._current = {}
+        self._transcript = []
+        self._kept_frames = []
+        self._pending_turn = {}
+        self._pending_frame = {}
+        self._step = 0
 
     def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
-        """What the agent is looking at this tick: the turn a chain would read if
-        it wrote one now. Overwritten every step until one does."""
         self._task_text = self._task(obs, info)
-        self._current = {
+        self._pending_turn = {
             "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": self._turn(obs, reward, info)},
-            ],
+            "text": self._tick_text(obs, reward, info),
+            "step": self._step,
         }
+        self._pending_frame = {"step": self._step, "image": image}
+        self._step += 1
+
+    def tick_text(self) -> str:
+        return self._pending_turn["text"] if self._pending_turn else ""
+
+    def transcript(self) -> list[dict]:
+        turns = self._transcript + ([self._pending_turn] if self._pending_turn else [])
+        return [
+            {"role": entry["role"], "content": [{"type": "text", "text": entry["text"]}]}
+            for entry in turns
+        ]
+
+    def frames(self) -> list[dict]:
+        if not self._pending_frame:
+            return list(self._kept_frames)
+        return self._kept_frames + [self._pending_frame]
 
     def conversation(self) -> list[dict]:
-        """What a chain about to write reads: the standing task, the turns it has
-        already answered, and the turn it is being asked about now."""
         opening = {"role": "system", "content": [{"type": "text", "text": self._task_text}]}
-        return [opening] + self._turns + [self._current]
+        content = []
+        if self.frames():
+            content.append({"type": "text", "text": "History camera:"})
+            content.append({"type": "video"})
+        standing = (
+            "The video above is what you have seen so far, oldest frame first; "
+            "each frame is tagged with the seconds since the episode began, and "
+            "its last frame is now."
+        )
+        now = self.tick_text()
+        content.append({"type": "text", "text": f"{standing}\n\n{now}" if now else standing})
+        return [opening, {"role": "user", "content": content}]
 
     def add_reply(self, text: str) -> None:
-        """What the chain wrote about that turn, which settles the pair into the
-        conversation, dropping the oldest exchange once ``history_turns`` are
-        held."""
-        turns = self._turns + [
-            self._current,
-            {"role": "assistant", "content": [{"type": "text", "text": text}]},
-        ]
-        self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
+        entry = {"role": "assistant", "text": text, "step": self._pending_turn["step"]}
+        turns = self._transcript + [entry]
+        self._transcript = turns[max(0, len(turns) - self.history_turns) :]
+        frames = self._kept_frames + [self._pending_frame]
+        self._kept_frames = frames[max(0, len(frames) - self.history_turns) :]
 
     def task_text(self) -> str:
-        """The standing task: what the policy reads, and what it tokenizes.
-
-        The same string on every tick of an episode, so a network that tokenizes
-        it gets the same token ids throughout. The live numbers are not in it;
-        they reach the policy through the scalar branch and the chain through
-        the turns.
-        """
         return self._task_text
 
     def close_episode(self, text: str) -> None:
-        """End the episode inside the conversation instead of dropping it: the
-        turns stay and ``text`` says how it went, so the attempt that follows
-        reads what the ones before it did and what came of them."""
-        self._turns = self._turns + [{"role": "user", "content": [{"type": "text", "text": text}]}]
-        self._current = {}
+        self._transcript = self._transcript + [
+            {"role": "user", "text": text, "step": self._step - 1}
+        ]
+        self._pending_turn = {}
+        self._pending_frame = {}
 
     def reject(self, answer: str) -> None:
-        """Say, as the env and not as the agent, that the last reply named no
-        action it could run. A complaint folded into the assistant's own turn
-        reads back as something the agent chose to say; this is what it was
-        told."""
-        self._turns = self._turns + [
-            {"role": "user", "content": [{"type": "text", "text": self._rejection_text(answer)}]}
+        self._transcript = self._transcript + [
+            {"role": "user", "text": self._rejection_text(answer), "step": self._step - 1}
         ]
 
     def _rejection_text(self, answer: str) -> str:
@@ -155,7 +169,7 @@ class PromptBuilder(ABC):
         """The standing task: what the env asks, unchanged through an episode."""
 
     @abstractmethod
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _tick_text(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         """What this tick alone says: the live numbers under the frame."""
 
 
@@ -167,7 +181,7 @@ class EmptyPromptBuilder(PromptBuilder):
         del obs, info
         return ""
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _tick_text(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward, info
         return ""
 
@@ -189,7 +203,7 @@ class CarRacingPromptBuilder(PromptBuilder):
         del obs, info
         return f"{CAR_RACING_TEXT_ACTION_PROMPT}"
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _tick_text(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward, info
         return ""
 
@@ -265,7 +279,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
             f"{TEXT_ACTION_PROTOCOL}"
         )
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _tick_text(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del info
         return _animalai_turn(obs, reward)
 
@@ -298,7 +312,7 @@ class CarlaPromptBuilder(PromptBuilder):
         del obs, info
         return f"{CARLA_TEXT_ACTION_FRAMING} {TEXT_ACTION_PROTOCOL}"
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _tick_text(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward
         return CARLA_TEXT_ACTION_MANEUVER[info["maneuver_command"]]
 

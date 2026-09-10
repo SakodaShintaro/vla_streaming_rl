@@ -7,6 +7,42 @@ from transformers.video_utils import VideoMetadata
 FRAME_SIZE = 256
 
 
+def build_video_media(processor: AutoProcessor, frames: list[dict], decision_fps: float) -> dict:
+    """The frames as the processor takes them: one clip, with the timestamps read
+    off the episode steps they were seen on.
+
+    Shared so that every reader of a ``PromptBuilder`` conversation sends the
+    same pixels and the same timestamps. A probe that packs them differently from
+    the run it is probing measures a different prompt.
+
+    The processor pairs adjacent frames into temporal patches, so an odd count
+    has no packing; the oldest frame is dropped rather than the newest, which is
+    the one being asked about. A lone first frame has no oldest to drop, so it is
+    repeated to fill the patch, which is what the image channel does to a single
+    image anyway.
+    """
+    assert frames, "no frame to build a clip from"
+    assert decision_fps > 0.0, decision_fps
+    temporal_patch_size = processor.video_processor.temporal_patch_size
+    clip = frames[len(frames) % temporal_patch_size :]
+    if not clip:
+        clip = frames + frames[-1:] * (temporal_patch_size - len(frames))
+    pixels = F.interpolate(
+        torch.stack([frame["image"].to(torch.float32) for frame in clip]),
+        size=(FRAME_SIZE, FRAME_SIZE),
+        mode="bicubic",
+        align_corners=False,
+    ).clamp(0.0, 1.0)
+    metadata = VideoMetadata(
+        total_num_frames=len(clip),
+        fps=decision_fps,
+        duration=len(clip) / decision_fps,
+        frames_indices=[frame["step"] for frame in clip],
+        video_backend="tensor",
+    )
+    return {"videos": [pixels], "video_metadata": [metadata], "do_sample_frames": False}
+
+
 def build_vlm_inputs(
     processor: AutoProcessor,
     images: torch.Tensor,

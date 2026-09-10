@@ -14,7 +14,7 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
-from PIL import Image
+import torch
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder
@@ -26,14 +26,15 @@ from vla_streaming_rl.utils import render_conversation_panel
 ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
 
 
-def preprocess_image(image: np.ndarray) -> Image.Image:
-    """A CHW float observation as an RGB image, which is what a backend takes.
+def preprocess_image(image: np.ndarray) -> torch.Tensor:
+    """A CHW float observation as the tensor a ``PromptBuilder`` frame holds.
 
-    The resolution is left alone: both backends resize for themselves -- the
-    local processor to a multiple of its patch size, the hosted one server-side
-    -- so scaling here only moves bytes without changing what the model sees.
+    The same form the trained agents record, so the conversation this agent
+    builds is the one they build and the local backend can send it unchanged.
+    Resolution is left alone: the processor resizes for itself, and the hosted
+    backend server-side.
     """
-    return Image.fromarray((image.transpose(1, 2, 0) * 255).astype(np.uint8))
+    return torch.from_numpy(image)
 
 
 class ZeroShotVLMAgent(Agent):
@@ -106,7 +107,7 @@ class ZeroShotVLMAgent(Agent):
 
         panels = {
             "conversation": render_conversation_panel(
-                self.prompt_builder.conversation(),
+                self.prompt_builder.transcript(),
                 self.held_status,
                 self.PANEL_WIDTH,
                 self.PANEL_HEIGHT,
@@ -126,7 +127,11 @@ class ZeroShotVLMAgent(Agent):
         action are not the steps that paid for it.
         """
         request_start = time.time()
-        response = self.backend.generate(self.prompt_builder.conversation())
+        response = self.backend.generate(
+            self.prompt_builder.conversation(),
+            self.prompt_builder.frames(),
+            self.prompt_builder.decision_fps,
+        )
         api_msec = (time.time() - request_start) * 1000
 
         response_text = response.text
@@ -142,7 +147,7 @@ class ZeroShotVLMAgent(Agent):
             else np.zeros(self.action_dim, dtype=np.float32)
         )
 
-        # The reply is handed back as written, <think> section and all, so the
+        # The reply is handed back as written, reasoning and all, so the
         # conversation is the whole record of what the model said -- what the
         # render panel draws is then what the model itself reads. A reply that
         # named no runnable action is answered by the env in its own turn.
@@ -193,7 +198,7 @@ class ZeroShotVLMAgent(Agent):
     def load_optimizer_state_dict(self, state: dict) -> None:
         del state
 
-    def _preprocess(self, obs: dict[str, Any], info: dict) -> Image.Image:
+    def _preprocess(self, obs: dict[str, Any], info: dict) -> torch.Tensor:
         del info
         return preprocess_image(obs["image"])
 

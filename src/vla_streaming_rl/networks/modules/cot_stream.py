@@ -196,18 +196,21 @@ class CoTStream:
         # and the turn being opened on. Everything before those is dropped rather
         # than sent: a prefill has to fit ``PROMPT_BUDGET`` however long the
         # conversation has grown, and the only frame it carries is the current.
-        turn = conversation[-1]
-        image = turn["content"][0]["image"]
-        replies = [reply for reply in conversation if reply["role"] == "assistant"]
+        image = self.prompt_builder.frames()[-1]["image"]
+        replies = [
+            reply for reply in self.prompt_builder.transcript() if reply["role"] == "assistant"
+        ]
         current = {
             "role": "user",
             "content": [
                 {"type": "image"},
-                {"type": "text", "text": turn["content"][1]["text"]},
+                {"type": "text", "text": self.prompt_builder.tick_text()},
             ],
         }
-        # Thinking off: with the <think> block left open the model spends the
-        # chain reasoning about the request rather than about the scene.
+        # Thinking off: the template then renders a closed, empty block and the
+        # reply starts after it, which is where the protocol asks for the
+        # reasoning. Left open, the chain reasons about the request instead of
+        # about the scene.
         text = self.processor.apply_chat_template(
             [conversation[0]] + replies[-1:] + [current],
             tokenize=False,

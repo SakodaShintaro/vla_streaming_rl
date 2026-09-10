@@ -21,6 +21,7 @@ from openai import BadRequestError, OpenAI
 from PIL import Image
 
 from vla_streaming_rl.networks.modules.vlm_backbone import load_model, sampling_kwargs
+from vla_streaming_rl.networks.modules.vlm_inputs import build_video_media
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -40,9 +41,34 @@ class VLMResponse:
     completion_tokens: int
 
 
-def _png_data_url(image: Image.Image) -> str:
+def _expand_video_to_images(conversation: list[dict], frames: list[dict]) -> list[dict]:
+    """The conversation with its video part expanded back into single images.
+
+    The wire format speaks in images and has no clip, so the history video is
+    unpacked into the frames it holds. This is the one reader that cannot be
+    given the prompt the run itself sends.
+    """
+    expanded = []
+    for turn in conversation:
+        content = []
+        for part in turn["content"]:
+            if part["type"] == "video":
+                content += [{"type": "image", "image": frame["image"]} for frame in frames]
+            else:
+                content.append(part)
+        expanded.append({"role": turn["role"], "content": content})
+    return expanded
+
+
+def _png_data_url(frame: torch.Tensor) -> str:
+    """A CHW float frame as a data URL, which is how the wire format takes pixels.
+
+    The conversation carries tensors so that the local backend can send the run's
+    own prompt unchanged; PNG is this backend's concern alone.
+    """
+    array = (frame.detach().float().clamp(0.0, 1.0).permute(1, 2, 0) * 255).to(torch.uint8)
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
+    Image.fromarray(array.cpu().numpy()).save(buffer, format="PNG")
     payload = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{payload}"
 
@@ -92,7 +118,7 @@ class OpenRouterBackend:
         )
         self.model_id = model_id
         self.max_new_tokens = max_new_tokens
-        # The protocol already asks for the chain of thought in <think>, so a
+        # The protocol already asks for the reasoning in the reply itself, so a
         # Qwen model's own thinking is a second, hidden copy of it that eats the
         # same token budget: with no cap it routinely burns the whole budget and
         # returns an empty `content` (finish_reason=length). 0 turns it off.
@@ -124,7 +150,14 @@ class OpenRouterBackend:
             return None, str(error)
         return completion, None if completion.choices else f"no choices: {completion}"
 
-    def generate(self, messages: list[dict]) -> VLMResponse:
+    def generate(
+        self, messages: list[dict], frames: list[dict], decision_fps: float
+    ) -> VLMResponse:
+        # The wire format has images and no clip, so the history video is unpacked
+        # back into the frames it holds. This is the one reader that cannot be
+        # given the prompt the run itself sends.
+        del decision_fps
+        messages = _expand_video_to_images(messages, frames)
         # A provider hiccup (a shared-pool 400, a multimodal download that timed
         # out upstream) must not lose a run that is hours deep, so it is waited
         # out here; what the last attempt said is the only account of it.
@@ -168,14 +201,24 @@ class LocalVLMBackend:
         self.temperature = temperature
 
     @torch.inference_mode()
-    def generate(self, messages: list[dict]) -> VLMResponse:
-        inputs = self.processor.apply_chat_template(
+    def generate(
+        self, messages: list[dict], frames: list[dict], decision_fps: float
+    ) -> VLMResponse:
+        # Rendered and packed exactly as ``CoTBatch`` does it, through the same
+        # ``build_video_media``: this backend exists to read the prompt the run
+        # sends, and a probe that packs the frames differently probes a different
+        # prompt.
+        text = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
+            tokenize=False,
             enable_thinking=self.enable_thinking,
+        )
+        inputs = self.processor(
+            text=[text],
+            **build_video_media(self.processor, frames, decision_fps),
+            return_tensors="pt",
+            do_rescale=False,
         ).to(self.device)
         prompt_tokens = int(inputs["input_ids"].shape[1])
         generated = self.model.generate(

@@ -253,7 +253,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
         return {
             "conversation": render_conversation_panel(
-                self.cot_module.prompt_builder.conversation(),
+                self.cot_module.prompt_builder.transcript(),
                 status,
                 self.COT_PANEL_WIDTH,
                 self.COT_PANEL_HEIGHT,
