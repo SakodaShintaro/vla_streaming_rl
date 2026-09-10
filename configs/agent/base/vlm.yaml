@@ -9,7 +9,7 @@ prompt_history_turns: 16
 # hosted model as video and prompt the next attempt at that arena with the
 # instruction it writes back, in place of the arena's own (agents/episode_critic).
 # One API call per failed episode, so it costs what the run fails.
-episode_critic: false
+episode_critic: true
 critic_model_id: qwen/qwen3.7-flash
 critic_max_new_tokens: 256
 # The critic writes one short instruction, so its own thinking buys nothing and
