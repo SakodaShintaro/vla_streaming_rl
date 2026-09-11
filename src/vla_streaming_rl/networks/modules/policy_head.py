@@ -531,6 +531,108 @@ class MeanFlowPolicy(nn.Module):
         return actor_loss, info_dict
 
 
+class IMLEPolicy(nn.Module):
+    """Single-step generator a = G(s, z), z ~ N(0, I), after cIMLE (IMLE-VLA).
+
+    cIMLE draws ``sample_num`` candidates per state and trains only the one
+    nearest the ground truth. Here the ground truth is replaced by the critic:
+    the candidate with the highest Q is pushed up by Q-gradient ascent, while
+    the others are left untouched, so different z can settle on different modes.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        block_num: int,
+        horizon: int,
+        sparsity: float,
+        sample_num: int,
+    ) -> None:
+        super().__init__()
+        self.horizon = horizon
+        self.action_dim = action_dim
+        self.sample_num = sample_num
+        total_action_dim = action_dim * horizon
+        self.fc_in = nn.Linear(state_dim + total_action_dim, hidden_dim)
+        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.fc_out = nn.Linear(hidden_dim, total_action_dim)
+        self.sparse_mask = (
+            None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
+        )
+
+    def forward(self, z: torch.Tensor, state: torch.Tensor) -> HeadOutput:
+        """
+        Args:
+            z: latent noise (B, horizon * action_dim)
+            state: state embedding (B, state_dim)
+        """
+        x = torch.cat([z, state], 1)
+        x = self.fc_in(x)
+        x = self.fc_mid(x)
+        x = self.norm(x)
+        activation = x
+        x = self.fc_out(x)
+        x = torch.tanh(x)
+        return HeadOutput(output=x, activation=activation)
+
+    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        bs = x.size(0)
+        z = torch.randn(bs, self.horizon * self.action_dim, device=x.device)
+        head_out = self.forward(z, x)
+        action = head_out.output.view(bs, self.horizon, self.action_dim)
+        return action, head_out.activation
+
+    def compute_actor_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        *,
+        value_head: nn.Module,
+        detach_actor: bool,
+    ) -> tuple[torch.Tensor, dict]:
+        """Maximize Q of the best of ``sample_num`` candidates per state."""
+        del action_chunk
+        if detach_actor:
+            state = state.detach()
+        B = state.shape[0]
+        m = self.sample_num
+
+        state_rep = state.repeat_interleave(m, dim=0)  # (B*m, state_dim)
+        z = torch.randn(B * m, self.horizon * self.action_dim, device=state.device)
+        action = self.forward(z, state_rep).output.view(B * m, self.horizon, self.action_dim)
+
+        # The critic only scores the candidates: no gradient into its weights,
+        # and none into the encoder through its state input.
+        for param in value_head.parameters():
+            param.requires_grad_(False)
+        q_output = value_head(state_rep.detach(), action).output
+        q = value_head.to_value(q_output).view(B, m)
+        for param in value_head.parameters():
+            param.requires_grad_(True)
+
+        # Only the winning candidate receives the ascent gradient.
+        best = q.argmax(dim=1, keepdim=True)
+        best_q = q.gather(1, best)
+        actor_loss = -best_q.mean()
+
+        # Mean pairwise L2 distance between the candidates of the same state.
+        candidates = action.detach().view(B, m, -1)
+        pairwise = torch.cdist(candidates, candidates)  # (B, m, m), zero diagonal
+        action_gap = pairwise.sum(dim=(1, 2)) / (m * (m - 1))
+
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "dacer_loss": 0.0,
+            "advantage": best_q.mean().item(),
+            "imle_q_gap": (q.max(dim=1).values - q.min(dim=1).values).mean().item(),
+            "imle_action_gap": action_gap.mean().item(),
+        }
+        return actor_loss, info_dict
+
+
 def build_policy_head(
     *,
     policy_type: str,
@@ -586,5 +688,15 @@ def build_policy_head(
             sparsity=sparsity,
             som_alpha=som_alpha,
             som_w=som_w,
+        )
+    if policy_type == "imle":
+        return IMLEPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dim=hidden_dim,
+            block_num=block_num,
+            horizon=horizon,
+            sparsity=sparsity,
+            sample_num=2,
         )
     raise ValueError(f"Unknown policy_type: {policy_type}")
