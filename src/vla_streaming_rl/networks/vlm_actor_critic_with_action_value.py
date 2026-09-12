@@ -191,6 +191,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.state_to_predictor_proj = nn.Linear(state_out_dim, hidden_image_dim)
 
         self._dummy_state = torch.zeros(1, 1, 1)
+        self._last_reasoning_text = ""
+
+    def render_texts(self) -> dict[str, str]:
+        if self.reasoning_max_tokens == 0:
+            return {}
+        return {"reasoning": self._last_reasoning_text}
 
     def init_state(self) -> torch.Tensor:
         return self._dummy_state.clone()
@@ -505,7 +511,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             inputs_embeds=inputs_embeds,
         )
 
-    def _reason(self, prompt: PromptForward) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _reason(
+        self, prompt: PromptForward
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sample a reasoning chain on top of the prompt and score it.
 
         Sampling extends the prompt's KV cache in place -- Qwen3.5's hybrid
@@ -515,9 +523,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         linear-attention layers has no backward. That second pass also yields the
         reasoning-conditioned hidden states.
 
-        Returns (mean token log-prob, reasoning-conditioned state, valid_mask);
-        ``valid_mask`` is False for the padding that follows the EOS token of an
-        already finished row.
+        Returns (mean token log-prob, reasoning-conditioned state, token_ids,
+        valid_mask); ``valid_mask`` is False for the padding that follows the EOS
+        token of an already finished row.
         """
         vlm_inner = self._get_vlm_model_inner()
         eos_token_id = self.processor.tokenizer.eos_token_id
@@ -607,14 +615,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         sequence_log_prob = (token_log_probs * mask).sum(dim=1) / token_num
 
         state = self._state_from_hidden_states(scored.hidden_states)
-        return sequence_log_prob, state, valid_mask
+        return sequence_log_prob, state, token_ids, valid_mask
 
     def _reasoning_loss_or_zero(self, prompt: PromptForward) -> tuple[torch.Tensor, dict]:
         """REINFORCE on the reasoning chain with Q(with reasoning) - Q(without) as return."""
         if self.reasoning_max_tokens == 0:
             return torch.zeros((), device=prompt.state.device), {"reasoning_loss": 0.0}
 
-        sequence_log_prob, state_with_reasoning, valid_mask = self._reason(prompt)
+        sequence_log_prob, state_with_reasoning, _, valid_mask = self._reason(prompt)
         state_without_reasoning = prompt.state
 
         with torch.no_grad():
@@ -646,7 +654,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self, obs: torch.Tensor, task_prompts: list[str]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
         prompt = self._forward_prompt(obs, task_prompts)
-        state = prompt.state if self.reasoning_max_tokens == 0 else self._reason(prompt)[1]
+        if self.reasoning_max_tokens == 0:
+            state = prompt.state
+        else:
+            _, state, token_ids, valid_mask = self._reason(prompt)
+            self._last_reasoning_text = self.processor.tokenizer.decode(
+                token_ids[0][valid_mask[0]].tolist(), skip_special_tokens=True
+            ).strip()
 
         action, actor_activation = self.policy_head.get_action(state)
 
