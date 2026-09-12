@@ -56,6 +56,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         som_w: float,
         text_q_margin: float,
         text_action_mode: str,
+        use_reasoning: bool,
+        reasoning_loss_weight: float,
+        reasoning_max_tokens: int,
+        reasoning_temperature: float,
         predictor_step_num: int,
         disable_state_predictor: bool,
         detach_actor: bool,
@@ -90,6 +94,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.text_q_margin = text_q_margin
         self.text_action_mode = text_action_mode
         self.decision_fps = decision_fps
+        self.use_reasoning = bool(use_reasoning)
+        self.reasoning_loss_weight = reasoning_loss_weight
+        self.reasoning_max_tokens = reasoning_max_tokens
+        self.reasoning_temperature = reasoning_temperature
+        assert not (self.use_reasoning and text_action_mode != "none"), (
+            "reasoning already spends the generation budget, so text_action_mode must be "
+            f'"none", not {text_action_mode!r}'
+        )
 
         self.predictor_step_num = predictor_step_num
         self.disable_state_predictor = disable_state_predictor
@@ -114,6 +126,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Load VLM
         device = "cuda"
         self.use_lora = bool(use_lora)
+        assert not (self.use_reasoning and not self.use_lora), (
+            "use_reasoning trains the VLM through the reasoning tokens, so use_lora must be on"
+        )
         self.vlm_model, self.processor = load_model(
             vlm_model_id,
             use_lora=self.use_lora,
@@ -261,7 +276,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
         curr_obs = data.observations[:, : -self.horizon]
-        state, _ = self._forward_state(curr_obs, curr_prompts)
+        state, prompt_kv, prompt_inputs, prompt_embeds = self._forward_state_with_prompt(
+            curr_obs, curr_prompts
+        )
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
 
         # Critic loss
@@ -286,11 +303,20 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             self.disable_state_predictor,
         )
 
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
+        reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(
+            state, prompt_kv, prompt_inputs, prompt_embeds
+        )
+
+        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss + reasoning_loss
 
         info_dict = {
             f"losses/{key}": value
-            for key, value in {**critic_info, **actor_info, **seq_info}.items()
+            for key, value in {
+                **critic_info,
+                **actor_info,
+                **seq_info,
+                **reasoning_info,
+            }.items()
         }
 
         return LossResult(loss=total_loss, info=info_dict)
@@ -312,7 +338,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
         curr_obs = data.observations[:, : -self.horizon]
-        state, _ = self._forward_state(curr_obs, curr_prompts)
+        state, prompt_kv, prompt_inputs, prompt_embeds = self._forward_state_with_prompt(
+            curr_obs, curr_prompts
+        )
         action_chunk = data.actions[:, -self.horizon :]
 
         # Critic loss
@@ -337,10 +365,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             self.disable_state_predictor,
         )
 
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
+        reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(
+            state, prompt_kv, prompt_inputs, prompt_embeds
+        )
+
+        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss + reasoning_loss
 
         # Actor-only loss (no critic component)
-        actor_entropy_loss = actor_loss + seq_loss
+        actor_entropy_loss = actor_loss + seq_loss + reasoning_loss
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         et_critic_out = self.value_head(state.detach(), action_chunk.detach())
@@ -373,7 +405,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
         info_dict = {
             f"losses/{key}": value
-            for key, value in {**critic_info, **actor_info, **seq_info}.items()
+            for key, value in {
+                **critic_info,
+                **actor_info,
+                **seq_info,
+                **reasoning_info,
+            }.items()
         }
 
         et_info = EligibilityTraceInfo(
@@ -449,10 +486,24 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # language_model forward via the outer model (handles lm_head, cache wrapping)
         return self.vlm_model.forward(**forward_kwargs)
 
-    def _forward_state(
+    def _state_from_hidden_states(self, hidden_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """Softmax-weighted sum across embedding + per-layer hidden states -> state."""
+        stacked = torch.stack([h.to(torch.float32).detach() for h in hidden_states], dim=0)
+        weights = F.softmax(self.layer_logits, dim=0)
+        hidden = (weights.view(-1, 1, 1, 1) * stacked).sum(dim=0)
+
+        state = self.state_out_proj(hidden)  # (B, T, state_out_dim)
+        # AdaptiveAvgPool1d folds the variable T into a fixed num_state_queries
+        # so the downstream policy/critic sees a constant state dim.
+        state = state.transpose(1, 2)  # (B, state_out_dim, T)
+        state = F.adaptive_avg_pool1d(state, self.num_state_queries)
+        state = state.transpose(1, 2)  # (B, num_state_queries, state_out_dim)
+        return state.flatten(start_dim=1)
+
+    def _forward_state_with_prompt(
         self, obs: torch.Tensor, task_prompts: list[str]
-    ) -> tuple[torch.Tensor, object]:
-        """Run VLM forward and return (state, past_key_values)."""
+    ) -> tuple[torch.Tensor, object, dict, torch.Tensor]:
+        """Run VLM forward and return (state, past_key_values, inputs, inputs_embeds)."""
         inputs = build_vlm_inputs(
             processor=self.processor,
             images=obs,
@@ -469,18 +520,15 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Store last input_id for text generation seeding
         self._last_input_ids = inputs["input_ids"]
 
-        # Compute state representation: softmax-weighted sum across embedding + each layer's hidden states
-        stacked = torch.stack([h.to(torch.float32).detach() for h in outputs.hidden_states], dim=0)
-        weights = F.softmax(self.layer_logits, dim=0)
-        hidden = (weights.view(-1, 1, 1, 1) * stacked).sum(dim=0)
+        state = self._state_from_hidden_states(outputs.hidden_states)
+        return state, outputs.past_key_values, inputs, inputs_embeds
 
-        state = self.state_out_proj(hidden)  # (B, T, state_out_dim)
-        # AdaptiveAvgPool1d folds the variable T into a fixed num_state_queries
-        # so the downstream policy/critic sees a constant state dim.
-        state = state.transpose(1, 2)  # (B, state_out_dim, T)
-        state = F.adaptive_avg_pool1d(state, self.num_state_queries)
-        state = state.transpose(1, 2)  # (B, num_state_queries, state_out_dim)
-        return state.flatten(start_dim=1), outputs.past_key_values
+    def _forward_state(
+        self, obs: torch.Tensor, task_prompts: list[str]
+    ) -> tuple[torch.Tensor, object]:
+        """Run VLM forward and return (state, past_key_values)."""
+        state, past_key_values, _, _ = self._forward_state_with_prompt(obs, task_prompts)
+        return state, past_key_values
 
     def _generate_text_and_extend_kv(self, vlm_past_kv, max_new_tokens: int):
         """Generate text via manual forward loop (supports batched KV cache).
@@ -554,6 +602,169 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         first_text = tokenizer.decode(generated_tokens[0], skip_special_tokens=True).strip()
         return first_text, vlm_past_kv
 
+    def _reasoning_positions(
+        self, cur_pos: int, seq_len: int, batch_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """(cache_position, 3D mrope position_ids) for tokens appended after the prompt."""
+        cache_position = torch.arange(cur_pos, cur_pos + seq_len, device=self.device)
+        text_pos = cache_position.view(1, 1, -1).expand(1, batch_size, -1)
+        rope_deltas = self._get_vlm_model_inner().rope_deltas
+        if rope_deltas is not None:
+            text_pos = text_pos + rope_deltas.unsqueeze(0)
+        return cache_position, text_pos.expand(3, -1, -1)
+
+    @torch.no_grad()
+    def _sample_reasoning(self, prompt_kv) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample a reasoning chain from the prompt KV cache.
+
+        ``prompt_kv`` is extended in place: Qwen3.5's hybrid linear-attention cache
+        is not copyable, so the caller must not reuse it afterwards.
+
+        Returns (token_ids, valid_mask); ``valid_mask`` is False for the padding
+        that follows the EOS token of an already finished row.
+        """
+        eos_token_id = self.processor.tokenizer.eos_token_id
+        next_ids = self._last_input_ids[:, -1:].to(self.device)
+        batch_size = next_ids.shape[0]
+        cur_pos = prompt_kv.get_seq_length() - 1
+        kv = prompt_kv
+
+        tokens: list[torch.Tensor] = []
+        masks: list[torch.Tensor] = []
+        alive = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+
+        was_training = self.vlm_model.training
+        self.vlm_model.eval()
+        for _ in range(self.reasoning_max_tokens):
+            seq_len = next_ids.shape[1]
+            cache_position, position_ids = self._reasoning_positions(cur_pos, seq_len, batch_size)
+            outputs = self.vlm_model(
+                input_ids=next_ids,
+                attention_mask=torch.ones(batch_size, cur_pos + seq_len, device=self.device),
+                past_key_values=kv,
+                cache_position=cache_position,
+                position_ids=position_ids,
+            )
+            kv = outputs.past_key_values
+            cur_pos = cur_pos + seq_len
+
+            logits = outputs.logits[:, -1, :].to(torch.float32) / self.reasoning_temperature
+            sampled = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)  # (B, 1)
+
+            tokens.append(sampled)
+            masks.append(alive.clone())
+            alive = alive & (sampled[:, 0] != eos_token_id)
+            if not bool(alive.any()):
+                break
+            next_ids = sampled
+        if was_training:
+            self.vlm_model.train()
+
+        return torch.cat(tokens, dim=1), torch.stack(masks, dim=1)
+
+    def _score_reasoning(
+        self,
+        inputs: dict,
+        inputs_embeds: torch.Tensor,
+        token_ids: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Teacher-force prompt + reasoning in one forward.
+
+        Incremental decoding cannot be differentiated through -- the fused
+        recurrent kernel of the linear-attention layers has no backward -- so the
+        sampled chain is re-run as a full sequence, which also yields the
+        reasoning-conditioned hidden states in the same pass.
+
+        Returns (mean token log-prob, reasoning-conditioned state).
+        """
+        length = token_ids.shape[1]
+        vlm_inner = self._get_vlm_model_inner()
+        reasoning_embeds = vlm_inner.get_input_embeddings()(token_ids).to(inputs_embeds.dtype)
+
+        full_embeds = torch.cat([inputs_embeds, reasoning_embeds], dim=1)
+        full_ids = torch.cat([inputs["input_ids"], token_ids], dim=1)
+        full_mask = torch.cat([inputs["attention_mask"], torch.ones_like(token_ids)], dim=1)
+        full_mm_type = torch.cat([inputs["mm_token_type_ids"], torch.zeros_like(token_ids)], dim=1)
+
+        position_ids = vlm_inner.compute_3d_position_ids(
+            input_ids=full_ids,
+            image_grid_thw=inputs["image_grid_thw"],
+            video_grid_thw=inputs["video_grid_thw"],
+            inputs_embeds=full_embeds,
+            attention_mask=full_mask,
+            past_key_values=None,
+            mm_token_type_ids=full_mm_type,
+        )
+        outputs = self.vlm_model.forward(
+            input_ids=None,
+            inputs_embeds=full_embeds,
+            position_ids=position_ids,
+            attention_mask=full_mask,
+            output_hidden_states=True,
+            use_cache=False,
+            return_dict=True,
+            logits_to_keep=length + 1,
+        )
+
+        # logits_to_keep keeps the last length+1 positions; dropping the final one
+        # leaves exactly the positions that predict token_ids.
+        logits = outputs.logits[:, :-1].to(torch.float32) / self.reasoning_temperature
+        token_log_probs = F.log_softmax(logits, dim=-1).gather(2, token_ids.unsqueeze(-1))
+        token_log_probs = token_log_probs.squeeze(-1)  # (B, L)
+
+        mask = valid_mask.to(token_log_probs.dtype)
+        token_num = mask.sum(dim=1).clamp(min=1.0)
+        sequence_log_prob = (token_log_probs * mask).sum(dim=1) / token_num
+
+        return sequence_log_prob, self._state_from_hidden_states(outputs.hidden_states)
+
+    def _compute_reasoning_loss(
+        self,
+        state_without_reasoning: torch.Tensor,
+        prompt_kv,
+        inputs: dict,
+        inputs_embeds: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        """REINFORCE on the reasoning chain with Q(with reasoning) - Q(without) as return."""
+        token_ids, valid_mask = self._sample_reasoning(prompt_kv)
+        sequence_log_prob, state_with_reasoning = self._score_reasoning(
+            inputs, inputs_embeds, token_ids, valid_mask
+        )
+
+        with torch.no_grad():
+            action_with, _ = self.policy_head.get_action(state_with_reasoning)
+            action_without, _ = self.policy_head.get_action(state_without_reasoning)
+            q_with = self._compute_q(state_with_reasoning, action_with)
+            q_without = self._compute_q(state_without_reasoning, action_without)
+        advantage = q_with - q_without
+
+        reasoning_loss = -(advantage * sequence_log_prob).mean() * self.reasoning_loss_weight
+
+        info_dict = {
+            "reasoning_loss": reasoning_loss.item(),
+            "reasoning_advantage": advantage.mean().item(),
+            "reasoning_q_with": q_with.mean().item(),
+            "reasoning_q_without": q_without.mean().item(),
+            "reasoning_log_prob": sequence_log_prob.mean().item(),
+            "reasoning_token_num": valid_mask.sum(dim=1).to(torch.float32).mean().item(),
+        }
+        return reasoning_loss, info_dict
+
+    def _reasoning_loss_or_zero(
+        self,
+        state_without_reasoning: torch.Tensor,
+        prompt_kv,
+        inputs: dict,
+        inputs_embeds: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        if self.use_reasoning:
+            return self._compute_reasoning_loss(
+                state_without_reasoning, prompt_kv, inputs, inputs_embeds
+            )
+        zero = torch.zeros((), device=state_without_reasoning.device)
+        return zero, {"reasoning_loss": 0.0}
+
     def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Compute scalar Q-value for a (state, action) pair."""
         q_out = self.value_head(state, action)
@@ -563,17 +774,21 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def _infer(
         self, obs: torch.Tensor, task_prompts: list[str]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
-        state, vlm_past_kv = self._forward_state(obs, task_prompts)
+        state, vlm_past_kv, prompt_inputs, prompt_embeds = self._forward_state_with_prompt(
+            obs, task_prompts
+        )
         mode = self.text_action_mode
+
+        if self.use_reasoning:
+            token_ids, valid_mask = self._sample_reasoning(vlm_past_kv)
+            _, state = self._score_reasoning(prompt_inputs, prompt_embeds, token_ids, valid_mask)
 
         if mode == "high_level":
             generated_text, _ = self._generate_text_and_extend_kv(vlm_past_kv, max_new_tokens=30)
-            print(f"[HighLevel] {generated_text}")
         elif mode == "text_action":
             generated_text, _ = self._generate_text_and_extend_kv(
                 vlm_past_kv, max_new_tokens=self.max_new_tokens
             )
-            print(f"[TextAction] {generated_text}")
         elif mode != "none":
             raise ValueError(f"Unknown text_action_mode: {mode}")
 
@@ -586,11 +801,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             text_q = self._compute_q(state, text_action)
             use_text = text_q > diff_q + self.text_q_margin
             action = torch.where(use_text.unsqueeze(-1).unsqueeze(-1), text_action, diff_action)
-            print(
-                f"[ActionSelect] diff_q={diff_q.item():.3f}, text_q={text_q.item():.3f}, "
-                f"use_text={use_text.item()}, parse_success={parse_success}, "
-                f"action_text={generated_text}"
-            )
         else:
             action = diff_action
 

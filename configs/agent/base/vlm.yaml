@@ -10,3 +10,7 @@ temperature: 0.5
 max_prompt_tokens: 512
 pad_token_id: 0
 text_q_margin: 1.0
+use_reasoning: false
+reasoning_loss_weight: 1.0
+reasoning_max_tokens: 32
+reasoning_temperature: 1.0
