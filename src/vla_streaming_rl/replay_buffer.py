@@ -185,14 +185,73 @@ class ReplayBuffer:
         self.idx = (self.idx + 1) % self.size
         self.full = self.full or self.idx == 0
 
+    def valid_start_indices(self) -> torch.Tensor:
+        """Window starts a learning batch may be drawn from.
+
+        ``seq_len`` here is the whole window the learner reads: the state window
+        plus the action chunk that follows it. Two things make a start invalid.
+
+        A ``done`` anywhere but the window's last slot means the window straddles
+        an episode boundary: the states would come from two episodes, and the
+        chunk would carry actions the agent never took in the episode its state
+        belongs to. A ``done`` on the last slot is the wanted case -- the episode
+        ends on the chunk's final action -- and the value head truncates the
+        bootstrap there itself.
+
+        A window containing the write head has the same problem in time: the
+        slots on either side of it are the newest and the oldest transitions in
+        the ring, with nothing connecting them.
+        """
+        curr_size = self.size if self.full else self.idx
+        starts = torch.arange(
+            0, curr_size - self.seq_len + 1, device=self.storage_device, dtype=torch.long
+        )
+
+        # Sum of dones over slots ``start`` .. ``start + seq_len - 2``.
+        cumulative_dones = torch.cat(
+            [
+                torch.zeros(1, device=self.storage_device),
+                self.dones[:curr_size, 0].cumsum(dim=0),
+            ]
+        )
+        crosses_episode = (
+            cumulative_dones[starts + self.seq_len - 1] - cumulative_dones[starts]
+        ) > 0
+
+        if self.full:
+            # The head sits between slot ``idx - 1`` (newest) and ``idx`` (oldest).
+            crosses_head = (starts <= self.idx - 1) & (starts + self.seq_len - 1 >= self.idx)
+        else:
+            crosses_head = torch.zeros_like(crosses_episode)
+
+        return starts[~(crosses_episode | crosses_head)]
+
+    def latest_window_is_clean(self, window_len: int) -> bool:
+        """Whether the newest ``window_len`` slots are one unbroken stretch of a
+        single episode, by the rule :meth:`valid_start_indices` draws under: a
+        ``done`` only on the last slot, which is the episode ending on the
+        window's own final action. The learner that reads the newest window
+        instead of sampling asks this before it trains on it.
+        """
+        if not self.full and self.idx < window_len:
+            return False
+        indices = (
+            self.idx - window_len + torch.arange(window_len, device=self.storage_device)
+        ) % self.size
+        return bool(self.dones[indices[:-1], 0].sum() == 0)
+
     def sample(self, batch_size: int) -> ReplayBufferData:
         curr_size = self.size if self.full else self.idx
         assert curr_size >= self.seq_len, "Not enough data to sample a sequence."
 
-        # Generate base indices for each batch element
-        indices = torch.randint(
-            0, curr_size - self.seq_len, (batch_size,), device=self.storage_device
+        valid_starts = self.valid_start_indices()
+        assert valid_starts.numel() > 0, (
+            "No window of the buffer stays inside one episode: every start of "
+            f"length {self.seq_len} crosses a done or the write head."
         )
+        indices = valid_starts[
+            torch.randint(0, valid_starts.numel(), (batch_size,), device=self.storage_device)
+        ]
 
         # Create vectorized sequence indices: (batch_size, seq_len)
         seq_indices = (

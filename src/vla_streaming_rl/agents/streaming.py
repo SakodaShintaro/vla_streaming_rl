@@ -211,6 +211,14 @@ class StreamingAgent(Agent):
                 texts={"prompt": prompt, **self.network.render_texts()},
             )
 
+        # Right after an episode boundary the newest window spans two episodes:
+        # its states come from both and its chunk carries actions the agent never
+        # took in the episode the state belongs to. There is nothing to learn from
+        # it, but a chunk still has to be started, so the tick acts without a
+        # learning step.
+        if not self.rb.latest_window_is_clean(self.seq_len + self.horizon):
+            return self._act(prompt, metrics)
+
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
         data = self.rb.get_latest(self.seq_len + self.horizon)
@@ -245,6 +253,45 @@ class StreamingAgent(Agent):
             self.actor_optimizer.step()
             self.critic_optimizer.step()
 
+        return StepResult(
+            action=action,
+            metrics=metrics,
+            panels=self.network.render_panels(),
+            texts={"prompt": prompt, **self.network.render_texts()},
+        )
+
+    def _act(self, prompt: str, metrics: dict) -> StepResult:
+        """Start a chunk from the newest state window, with no learning step."""
+        latest_data = self.rb.get_latest(self.seq_len)
+        infer_result = self.network.infer(
+            InferInput(
+                s_seq=latest_data.observations,
+                a_seq=latest_data.actions,
+                r_seq=latest_data.rewards,
+                rnn_state=self.rnn_state,
+                task_prompts=[prompt],
+                velocity_x_seq=latest_data.velocity_x,
+                velocity_y_seq=latest_data.velocity_y,
+                velocity_z_seq=latest_data.velocity_z,
+                episode_return_seq=latest_data.episode_return,
+                pass_mark_seq=latest_data.pass_mark,
+                remaining_return_seq=latest_data.remaining_return,
+                global_step_seq=latest_data.global_step,
+                episode_step_seq=latest_data.episode_step,
+                health_seq=latest_data.health,
+                cot_activations_seq=latest_data.cot_activations,
+                cot_age_seq=latest_data.cot_age,
+            )
+        )
+        self.rnn_state = infer_result.rnn_state
+        self.last_features = infer_result.features
+        metrics.update(infer_result.value_report)
+        action_chunk = infer_result.action[0].cpu().numpy()
+        self.action_chunk = action_chunk
+        self.chunk_step = 1
+        action = self._to_env_action(action_chunk[0])
+        self.prev_action = action
+        metrics["chunk_step"] = self.chunk_step
         return StepResult(
             action=action,
             metrics=metrics,
@@ -362,42 +409,7 @@ class StreamingAgent(Agent):
                 texts={"prompt": prompt, **self.network.render_texts()},
             )
 
-        latest_data = self.rb.get_latest(self.seq_len)
-        infer_result = self.network.infer(
-            InferInput(
-                s_seq=latest_data.observations,
-                a_seq=latest_data.actions,
-                r_seq=latest_data.rewards,
-                rnn_state=self.rnn_state,
-                task_prompts=[prompt],
-                velocity_x_seq=latest_data.velocity_x,
-                velocity_y_seq=latest_data.velocity_y,
-                velocity_z_seq=latest_data.velocity_z,
-                episode_return_seq=latest_data.episode_return,
-                pass_mark_seq=latest_data.pass_mark,
-                remaining_return_seq=latest_data.remaining_return,
-                global_step_seq=latest_data.global_step,
-                episode_step_seq=latest_data.episode_step,
-                health_seq=latest_data.health,
-                cot_activations_seq=latest_data.cot_activations,
-                cot_age_seq=latest_data.cot_age,
-            )
-        )
-        self.rnn_state = infer_result.rnn_state
-        self.last_features = infer_result.features
-        metrics.update(infer_result.value_report)
-        action_chunk = infer_result.action[0].cpu().numpy()
-        self.action_chunk = action_chunk
-        self.chunk_step = 1
-        action = self._to_env_action(action_chunk[0])
-        self.prev_action = action
-        metrics["chunk_step"] = self.chunk_step
-        return StepResult(
-            action=action,
-            metrics=metrics,
-            panels=self.network.render_panels(),
-            texts={"prompt": prompt, **self.network.render_texts()},
-        )
+        return self._act(prompt, metrics)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:
