@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
 from collections.abc import Callable
-from contextlib import nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -450,11 +449,21 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     def _state_from_hidden_states(self, hidden_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
         """Softmax-weighted sum across embedding + per-layer hidden states -> state."""
-        stacked = torch.stack([h.to(torch.float32).detach() for h in hidden_states], dim=0)
+        # Projecting each layer before the weighted sum rather than after is the
+        # same number by linearity, but it never holds all (num_layers + 1)
+        # hidden states at once: the running sum is state_out_dim wide, not
+        # vlm_hidden_size, which for a long prompt is the difference between
+        # gigabytes and megabytes. The bias is added once, since the softmax
+        # weights sum to one.
         weights = F.softmax(self.layer_logits, dim=0)
-        hidden = (weights.view(-1, 1, 1, 1) * stacked).sum(dim=0)
+        projected = None
+        for weight, hidden_state in zip(weights, hidden_states, strict=True):
+            term = weight * F.linear(
+                hidden_state.detach().to(torch.float32), self.state_out_proj.weight, None
+            )
+            projected = term if projected is None else projected + term
 
-        state = self.state_out_proj(hidden)  # (B, T, state_out_dim)
+        state = projected + self.state_out_proj.bias  # (B, T, state_out_dim)
         # AdaptiveAvgPool1d folds the variable T into a fixed num_state_queries
         # so the downstream policy/critic sees a constant state dim.
         state = state.transpose(1, 2)  # (B, state_out_dim, T)
@@ -486,9 +495,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
         inputs_embeds = inputs_embeds.masked_scatter(vision_mask, vision_embeds)
 
-        # When the VLM weights themselves are frozen we can save a lot of memory
-        # by skipping autograd through them.
-        with nullcontext() if self.use_lora else torch.no_grad():
+        # Nothing downstream differentiates this pass: the state is detached off
+        # the hidden states, and the reasoning log-prob comes from the scoring
+        # pass in ``_reason``. Keeping its activations would be a graph the size
+        # of the whole prompt that no backward ever reaches.
+        with torch.no_grad():
             # 3D position_ids are what m-rope reads the image token positions off.
             position_ids = vlm_inner.compute_3d_position_ids(
                 input_ids=inputs["input_ids"],
@@ -604,6 +615,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             past_key_values=None,
             mm_token_type_ids=full_mm_type,
         )
+        # Only this pass is differentiated, and its graph spans the whole prompt,
+        # so it is the one that has to trade compute for memory. Checkpointing is
+        # turned on around it alone: with it on, a cached forward (the prompt
+        # pass, the sampling loop) would have its cache silently disabled.
+        self.vlm_model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
         scored = self.vlm_model.forward(
             input_ids=None,
             inputs_embeds=full_embeds,
@@ -614,6 +632,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             return_dict=True,
             logits_to_keep=length + 1,
         )
+        self.vlm_model.gradient_checkpointing_disable()
 
         # logits_to_keep keeps the last length+1 positions; dropping the final one
         # leaves exactly the positions that predict token_ids.
