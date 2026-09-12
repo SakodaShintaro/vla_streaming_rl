@@ -10,7 +10,7 @@ agent_type: streaming
 network_class: vlm_actor_critic_with_action_value
 policy_type: imle
 use_lora: true
-use_reasoning: true
+reasoning_max_tokens: 32
 batch_size: 1
 actor_lr: 1e-6
 critic_lr: 1e-6

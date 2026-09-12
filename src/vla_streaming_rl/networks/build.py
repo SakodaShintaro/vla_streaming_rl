@@ -221,7 +221,6 @@ def build_network(
             dacer_loss_weight=args.dacer_loss_weight,
             som_alpha=args.som_alpha,
             som_w=args.som_w,
-            use_reasoning=args.use_reasoning,
             reasoning_loss_weight=args.reasoning_loss_weight,
             reasoning_max_tokens=args.reasoning_max_tokens,
             reasoning_temperature=args.reasoning_temperature,

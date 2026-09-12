@@ -68,7 +68,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         dacer_loss_weight: float,
         som_alpha: float,
         som_w: float,
-        use_reasoning: bool,
         reasoning_loss_weight: float,
         reasoning_max_tokens: int,
         reasoning_temperature: float,
@@ -103,7 +102,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
         self.decision_fps = decision_fps
-        self.use_reasoning = bool(use_reasoning)
         self.reasoning_loss_weight = reasoning_loss_weight
         self.reasoning_max_tokens = reasoning_max_tokens
         self.reasoning_temperature = reasoning_temperature
@@ -131,8 +129,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Load VLM
         device = "cuda"
         self.use_lora = bool(use_lora)
-        assert not (self.use_reasoning and not self.use_lora), (
-            "use_reasoning trains the VLM through the reasoning tokens, so use_lora must be on"
+        assert not (self.reasoning_max_tokens > 0 and not self.use_lora), (
+            "a reasoning chain trains the VLM through its own tokens, so a nonzero "
+            "reasoning_max_tokens needs use_lora on"
         )
         self.vlm_model, self.processor = load_model(
             vlm_model_id,
@@ -612,7 +611,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     def _reasoning_loss_or_zero(self, prompt: PromptForward) -> tuple[torch.Tensor, dict]:
         """REINFORCE on the reasoning chain with Q(with reasoning) - Q(without) as return."""
-        if not self.use_reasoning:
+        if self.reasoning_max_tokens == 0:
             return torch.zeros((), device=prompt.state.device), {"reasoning_loss": 0.0}
 
         sequence_log_prob, state_with_reasoning, valid_mask = self._reason(prompt)
@@ -647,7 +646,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self, obs: torch.Tensor, task_prompts: list[str]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
         prompt = self._forward_prompt(obs, task_prompts)
-        state = self._reason(prompt)[1] if self.use_reasoning else prompt.state
+        state = prompt.state if self.reasoning_max_tokens == 0 else self._reason(prompt)[1]
 
         action, actor_activation = self.policy_head.get_action(state)
 
