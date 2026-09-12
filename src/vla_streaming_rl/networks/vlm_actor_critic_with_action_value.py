@@ -3,11 +3,13 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 from ..replay_buffer import ReplayBufferData
+from ..utils import render_text_panel
 from .interface import (
     ActivationFeatures,
     EligibilityTraceInfo,
@@ -192,6 +194,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
         self._dummy_state = torch.zeros(1, 1, 1)
         self._last_reasoning_text = ""
+
+    def render_panels(self) -> dict[str, np.ndarray]:
+        """The reasoning chain, drawn on a panel of a size fixed for the whole
+        run so the render strip keeps one shape, wide and tall enough to read a
+        chain of ``reasoning_max_tokens`` tokens."""
+        if self.reasoning_max_tokens == 0:
+            return {}
+        return {"reasoning": render_text_panel(self._last_reasoning_text, 480, 360)}
 
     def render_texts(self) -> dict[str, str]:
         if self.reasoning_max_tokens == 0:
