@@ -52,7 +52,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         dacer_loss_weight: float,
         som_alpha: float,
         som_w: float,
-        text_action_mode: str,
         use_reasoning: bool,
         reasoning_loss_weight: float,
         reasoning_max_tokens: int,
@@ -64,7 +63,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         detach_predictor: bool,
         use_lora: bool,
         vlm_model_id: str,
-        max_new_tokens: int,
         max_prompt_tokens: int,
         pad_token_id: int,
         num_state_queries: int,
@@ -88,16 +86,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_dim = action_space_shape[0]
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
-        self.text_action_mode = text_action_mode
         self.decision_fps = decision_fps
         self.use_reasoning = bool(use_reasoning)
         self.reasoning_loss_weight = reasoning_loss_weight
         self.reasoning_max_tokens = reasoning_max_tokens
         self.reasoning_temperature = reasoning_temperature
-        assert not (self.use_reasoning and text_action_mode != "none"), (
-            "reasoning already spends the generation budget, so text_action_mode must be "
-            f'"none", not {text_action_mode!r}'
-        )
 
         self.predictor_step_num = predictor_step_num
         self.disable_state_predictor = disable_state_predictor
@@ -142,7 +135,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Input-independent learnable logits over all (embedding + per-layer) hidden
         # states; softmax-weighted sum forms the representation used downstream.
         self.layer_logits = nn.Parameter(torch.zeros(num_layers + 1, device=device))
-        self.max_new_tokens = max_new_tokens
         self.max_prompt_tokens = max_prompt_tokens
         self.pad_token_id = pad_token_id
 
@@ -525,78 +517,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state, past_key_values, _, _ = self._forward_state_with_prompt(obs, task_prompts)
         return state, past_key_values
 
-    def _generate_text_and_extend_kv(self, vlm_past_kv, max_new_tokens: int):
-        """Generate text via manual forward loop (supports batched KV cache).
-
-        Uses greedy decoding (argmax) with manual model.forward() calls
-        instead of generate() to avoid rope_deltas batch mismatch issues.
-        Returns (first_item_text, extended_kv_cache).
-        """
-        tokenizer = self.processor.tokenizer
-        # How many tokens the prompt left cached. Asked of the cache rather than
-        # measured off one attention layer's key tensor, which the cache no
-        # longer exposes as a list.
-        kv_len = vlm_past_kv.get_seq_length()
-        eos_token_id = tokenizer.eos_token_id
-
-        next_ids = self._last_input_ids[:, -1:].to(self.device)  # (B, 1)
-        B = next_ids.shape[0]
-        cur_pos = kv_len - 1  # re-feed last cached token
-
-        # rope_deltas from the initial VLM forward (accounts for image token positions)
-        rope_deltas = self._get_vlm_model_inner().rope_deltas  # (B, 1)
-
-        self.vlm_model.eval()
-
-        generated_tokens = [[] for _ in range(B)]
-        finished = [False] * B
-
-        for step in range(max_new_tokens + 1):  # +1 for initial seed step
-            seq_len = next_ids.shape[1]
-            cache_position = torch.arange(cur_pos, cur_pos + seq_len, device=self.device)
-
-            # Build 3D position_ids: (3, B, seq_len) for mrope
-            text_pos = cache_position.view(1, 1, -1).expand(1, B, -1)  # (1, B, seq_len)
-            if rope_deltas is not None:
-                text_pos = text_pos + rope_deltas.unsqueeze(0)  # broadcast (1, B, 1)
-            position_ids = text_pos.expand(3, -1, -1)  # (3, B, seq_len)
-
-            outputs = self.vlm_model(
-                input_ids=next_ids,
-                attention_mask=torch.ones(B, cur_pos + seq_len, device=self.device),
-                past_key_values=vlm_past_kv,
-                cache_position=cache_position,
-                position_ids=position_ids,
-            )
-
-            vlm_past_kv = outputs.past_key_values
-            cur_pos = cur_pos + seq_len
-
-            # Skip collecting tokens on seed step (step 0 when no prompt)
-            if step == 0:
-                next_ids = outputs.logits[:, -1:, :].argmax(dim=-1)
-                continue
-
-            next_token = outputs.logits[:, -1:, :].argmax(dim=-1)  # (B, 1)
-
-            for b in range(B):
-                if not finished[b]:
-                    tid = next_token[b, 0].item()
-                    if tid == eos_token_id:
-                        finished[b] = True
-                    else:
-                        generated_tokens[b].append(tid)
-
-            if all(finished):
-                break
-
-            next_ids = next_token
-
-        self.vlm_model.train()
-
-        first_text = tokenizer.decode(generated_tokens[0], skip_special_tokens=True).strip()
-        return first_text, vlm_past_kv
-
     def _reasoning_positions(
         self, cur_pos: int, seq_len: int, batch_size: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -768,19 +688,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     @torch.inference_mode()
     def _infer(
         self, obs: torch.Tensor, task_prompts: list[str]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
         state, vlm_past_kv, prompt_inputs, prompt_embeds = self._forward_state_with_prompt(
             obs, task_prompts
         )
-        mode = self.text_action_mode
-
         if self.use_reasoning:
             token_ids, valid_mask = self._sample_reasoning(vlm_past_kv)
             _, state = self._score_reasoning(prompt_inputs, prompt_embeds, token_ids, valid_mask)
-
-        assert mode in ("none", "high_level"), f"Unknown text_action_mode: {mode}"
-        if mode == "high_level":
-            self._generate_text_and_extend_kv(vlm_past_kv, max_new_tokens=30)
 
         action, actor_activation = self.policy_head.get_action(state)
 
