@@ -97,6 +97,20 @@ class DistributionalValueHead(nn.Module):
         """
         return self.to_values(logits).mean(dim=1)
 
+    def scalar_value(self, x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        """Gamma-averaged scalar value of ``(x, a)``, shape ``(B,)``.
+
+        The read-out every actor / eligibility-trace / rollout caller wants, so
+        that pairing a forward with :meth:`to_value` is not repeated at each of
+        them. Reach for the two steps separately only when the forward's
+        ``HeadOutput.activation`` or its per-gamma logits are needed too.
+        """
+        return self.to_value(self(x, a).output)
+
+    def scalar_advantage(self, x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        """:meth:`scalar_value` off the advantage stream — shape ``(B,)``."""
+        return self.to_value(self.get_advantage(x, a).output)
+
     def value_report(self, logits: torch.Tensor) -> dict[str, float]:
         """Per-sample value diagnostics for inference / rollout logging.
 

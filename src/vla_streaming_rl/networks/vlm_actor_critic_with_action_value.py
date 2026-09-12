@@ -387,8 +387,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         actor_entropy_loss = actor_loss + seq_loss + reasoning_loss
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
-        et_critic_out = self.value_head(state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
+        neg_value_detached = -self.value_head.scalar_value(
+            state.detach(), action_chunk.detach()
+        ).mean()
 
         next_image_latent, next_reward_latent, predictor_activation = (
             self.prediction_head.predict_next_state(
@@ -638,8 +639,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         with torch.no_grad():
             action_with, _ = self.policy_head.get_action(state_with_reasoning)
             action_without, _ = self.policy_head.get_action(state_without_reasoning)
-            q_with = self._compute_q(state_with_reasoning, action_with)
-            q_without = self._compute_q(state_without_reasoning, action_without)
+            q_with = self.value_head.scalar_value(state_with_reasoning, action_with)
+            q_without = self.value_head.scalar_value(state_without_reasoning, action_without)
         advantage = q_with - q_without
 
         reasoning_loss = -(advantage * sequence_log_prob).mean() * self.reasoning_loss_weight
@@ -653,11 +654,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             "reasoning_token_num": valid_mask.sum(dim=1).to(torch.float32).mean().item(),
         }
         return reasoning_loss, info_dict
-
-    def _compute_q(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        """Compute scalar Q-value for a (state, action) pair."""
-        q_out = self.value_head(state, action)
-        return self.value_head.to_value(q_out.output).view(-1)
 
     @torch.inference_mode()
     def _infer(

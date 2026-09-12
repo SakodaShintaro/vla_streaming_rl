@@ -170,8 +170,7 @@ class DiffusionPolicy(nn.Module):
         # Advantage term: maximize E[Q(s, π(s))] via the dueling advantage stream.
         for param in value_head.parameters():
             param.requires_grad_(False)
-        advantage_dict = value_head.get_advantage(state, action)
-        advantage = value_head.to_value(advantage_dict.output).view(-1, 1)
+        advantage = value_head.scalar_advantage(state, action).view(-1, 1)
         actor_loss = -advantage.mean()
         for param in value_head.parameters():
             param.requires_grad_(True)
@@ -184,8 +183,7 @@ class DiffusionPolicy(nn.Module):
 
         actions = action.view(B, -1).clone().detach().requires_grad_(True)
         actions_chunk = actions.view(B, horizon, action_dim)
-        q_output_dict = value_head(state, actions_chunk)
-        q_values = value_head.to_value(q_output_dict.output).unsqueeze(-1)
+        q_values = value_head.scalar_value(state, actions_chunk).unsqueeze(-1)
         q_grad = torch.autograd.grad(q_values.sum(), actions, create_graph=True)[0]
 
         noise = torch.randn_like(actions).clamp(-3.0, 3.0)
@@ -333,8 +331,7 @@ class CFGDiffusionPolicy(nn.Module):
         action_flat = action_chunk.view(batch_size, -1)
 
         with torch.no_grad():
-            advantage_dict = value_head.get_advantage(state, action_chunk)
-            advantage = value_head.to_value(advantage_dict.output).view(-1)
+            advantage = value_head.scalar_advantage(state, action_chunk).view(-1)
             threshold = advantage.median()
             condition = (advantage >= threshold).long()
             drop_mask = torch.rand(batch_size, device=device) < self.condition_drop_prob
@@ -495,8 +492,7 @@ class MeanFlowPolicy(nn.Module):
         a0_proposal = at_grad.unsqueeze(0) / mu_t.unsqueeze(0).unsqueeze(2) + delta
         state_exp = state.detach().unsqueeze(0).expand(som_mc_K, B, -1).reshape(-1, state.shape[1])
         a0_chunk_mc = a0_proposal.reshape(som_mc_K * B, horizon, action_dim)
-        q_dict = value_head(state_exp, a0_chunk_mc)
-        q_vals = value_head.to_value(q_dict.output).view(som_mc_K, B)
+        q_vals = value_head.scalar_value(state_exp, a0_chunk_mc).view(som_mc_K, B)
         # GRPO-style batch-wise normalization for scale-invariant training.
         q_norm = (q_vals - q_vals.mean()) / (q_vals.std() + 1e-6)
         log_sum_exp = torch.logsumexp(som_alpha * q_norm, dim=0)
@@ -608,8 +604,7 @@ class IMLEPolicy(nn.Module):
         # and none into the encoder through its state input.
         for param in value_head.parameters():
             param.requires_grad_(False)
-        q_output = value_head(state_rep.detach(), action).output
-        q = value_head.to_value(q_output).view(B, m)
+        q = value_head.scalar_value(state_rep.detach(), action).view(B, m)
         for param in value_head.parameters():
             param.requires_grad_(True)
 

@@ -511,8 +511,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         actor_entropy_loss = actor_loss + seq_loss
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
-        et_critic_out = self.value_head(prev_state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
+        neg_value_detached = -self.value_head.scalar_value(
+            prev_state.detach(), action_chunk.detach()
+        ).mean()
 
         next_image_latent, next_reward_latent, predictor_activation = (
             self.prediction_head.predict_next_state(

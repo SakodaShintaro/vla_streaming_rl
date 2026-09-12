@@ -374,8 +374,9 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         )
 
         # -Q(s, a) for the eligibility-trace critic step, detached from the encoder.
-        et_critic_out = self.value_head(prev_state.detach(), action_chunk.detach())
-        neg_value_detached = -self.value_head.to_value(et_critic_out.output).mean()
+        neg_value_detached = -self.value_head.scalar_value(
+            prev_state.detach(), action_chunk.detach()
+        ).mean()
 
         next_image_latent, next_reward_latent = self._empty_prediction(next_state)
 
