@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: MIT
 import functools
-from collections.abc import Callable
 
-import numpy as np
 import torch
 from omegaconf import DictConfig
 from torch import nn
@@ -71,7 +69,6 @@ def build_network(
     observation_space_shape: tuple[int, ...],
     action_space_shape: tuple[int, ...],
     decision_fps: float,
-    parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
     prompt_builder,
     device: torch.device,
 ) -> nn.Module:
@@ -215,7 +212,6 @@ def build_network(
         network = VLMActorCriticWithActionValue(
             observation_space_shape=observation_space_shape,
             action_space_shape=action_space_shape,
-            parse_action_text=parse_action_text,
             value_head_factory=value_head_factory,
             seq_len=args.seq_len,
             horizon=args.horizon,
@@ -225,7 +221,6 @@ def build_network(
             dacer_loss_weight=args.dacer_loss_weight,
             som_alpha=args.som_alpha,
             som_w=args.som_w,
-            text_q_margin=args.text_q_margin,
             text_action_mode=args.text_action_mode,
             use_reasoning=args.use_reasoning,
             reasoning_loss_weight=args.reasoning_loss_weight,

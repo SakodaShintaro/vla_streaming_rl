@@ -2,7 +2,6 @@
 from collections.abc import Callable
 from contextlib import nullcontext
 
-import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -44,7 +43,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         *,
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
-        parse_action_text: Callable[[str], tuple[np.ndarray, bool]] | None,
         value_head_factory: Callable[[int, int], DistributionalValueHead],
         seq_len: int,
         horizon: int,
@@ -54,7 +52,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         dacer_loss_weight: float,
         som_alpha: float,
         som_w: float,
-        text_q_margin: float,
         text_action_mode: str,
         use_reasoning: bool,
         reasoning_loss_weight: float,
@@ -91,7 +88,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_dim = action_space_shape[0]
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
-        self.text_q_margin = text_q_margin
         self.text_action_mode = text_action_mode
         self.decision_fps = decision_fps
         self.use_reasoning = bool(use_reasoning)
@@ -146,7 +142,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Input-independent learnable logits over all (embedding + per-layer) hidden
         # states; softmax-weighted sum forms the representation used downstream.
         self.layer_logits = nn.Parameter(torch.zeros(num_layers + 1, device=device))
-        self.parse_action_text = parse_action_text
         self.max_new_tokens = max_new_tokens
         self.max_prompt_tokens = max_prompt_tokens
         self.pad_token_id = pad_token_id
@@ -783,26 +778,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             token_ids, valid_mask = self._sample_reasoning(vlm_past_kv)
             _, state = self._score_reasoning(prompt_inputs, prompt_embeds, token_ids, valid_mask)
 
+        assert mode in ("none", "high_level"), f"Unknown text_action_mode: {mode}"
         if mode == "high_level":
-            generated_text, _ = self._generate_text_and_extend_kv(vlm_past_kv, max_new_tokens=30)
-        elif mode == "text_action":
-            generated_text, _ = self._generate_text_and_extend_kv(
-                vlm_past_kv, max_new_tokens=self.max_new_tokens
-            )
-        elif mode != "none":
-            raise ValueError(f"Unknown text_action_mode: {mode}")
+            self._generate_text_and_extend_kv(vlm_past_kv, max_new_tokens=30)
 
-        diff_action, actor_activation = self.policy_head.get_action(state)
-        diff_q = self._compute_q(state, diff_action)
-
-        if mode == "text_action":
-            action_array, parse_success = self.parse_action_text(generated_text)
-            text_action = torch.from_numpy(action_array).unsqueeze(0).to(obs.device)
-            text_q = self._compute_q(state, text_action)
-            use_text = text_q > diff_q + self.text_q_margin
-            action = torch.where(use_text.unsqueeze(-1).unsqueeze(-1), text_action, diff_action)
-        else:
-            action = diff_action
+        action, actor_activation = self.policy_head.get_action(state)
 
         critic_out = self.value_head(state, action)
         return state, action, actor_activation, critic_out

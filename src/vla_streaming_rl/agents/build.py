@@ -13,13 +13,6 @@ def build_agent(
         from vla_streaming_rl.agents.vlm_backends import build_vlm_backend
         from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent
 
-        # This baseline only ever acts by writing the action out, so it is the
-        # one agent whose regime is fixed rather than configured.
-        assert args.text_action_mode == "text_action", (
-            f"zeroshot_vlm writes its action as text, so text_action_mode has to be "
-            f'"text_action", not {args.text_action_mode!r}'
-        )
-
         return ZeroShotVLMAgent(
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,

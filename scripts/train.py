@@ -330,7 +330,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             observation_space_shape=env.observation_space["image"].shape,
             action_space_shape=env.action_space.shape,
             decision_fps=env.metadata["decision_fps"],
-            parse_action_text=getattr(env.unwrapped, "parse_action_text", None),
             prompt_builder=prompt_builder,
             device=torch.device("cuda"),
         )
