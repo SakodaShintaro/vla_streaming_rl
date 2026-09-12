@@ -71,8 +71,7 @@ def save_episode_texts(episode_log_dir: Path, text_list: list[dict[str, str]]) -
 
 
 def save_episode_data(
-    video_dir: Path,
-    log_dir: Path,
+    episode_dir: Path,
     name: str,
     bgr_image_list: list[np.ndarray],
     action_list: list[np.ndarray],
@@ -102,7 +101,10 @@ def save_episode_data(
             np.pad(img, ((0, h % 2), (0, w % 2), (0, 0)), mode="constant") for img in bgr_image_list
         ]
 
-    video_path = video_dir / f"{name}.mp4"
+    episode_log_dir = episode_dir / f"{name}"
+    episode_log_dir.mkdir(parents=True, exist_ok=True)
+
+    video_path = episode_log_dir / "render.mp4"
     rgb_images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in bgr_image_list]
     imageio.mimsave(str(video_path), rgb_images, fps=10, macro_block_size=1)
 
@@ -117,11 +119,9 @@ def save_episode_data(
             np.pad(img, ((0, obs_h % 2), (0, obs_w % 2), (0, 0)), mode="constant")
             for img in obs_rgb_images
         ]
-    obs_video_path = video_dir / f"{name}_obs.mp4"
+    obs_video_path = episode_log_dir / "obs.mp4"
     imageio.mimsave(str(obs_video_path), obs_rgb_images, fps=10, macro_block_size=1)
 
-    episode_log_dir = log_dir / f"{name}"
-    episode_log_dir.mkdir(parents=True, exist_ok=True)
     save_episode_texts(episode_log_dir, text_list)
 
     # One row per step: the action taken, the reward it drew, and where the
@@ -281,9 +281,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         f.write(f"branch:\n{branch_name}\n")
         f.write(f"git show -s:\n{git_show}\n")
         f.write(f"git diff:\n{git_diff}\n")
-
-    video_dir = result_dir / "video"
-    video_dir.mkdir(parents=True, exist_ok=True)
 
     episode_log_dir = result_dir / "episode_log"
     episode_log_dir.mkdir(parents=True, exist_ok=True)
@@ -566,7 +563,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             if arena_is_best:
                 best_score_per_arena[arena_name] = score
                 save_episode_data(
-                    video_dir,
                     episode_log_dir,
                     f"best_{arena_name}",
                     bgr_image_list,
@@ -583,7 +579,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                     f.write(f"{episode_id + 1}\t{score:.2f}")
                 best_score = score
                 save_episode_data(
-                    video_dir,
                     episode_log_dir,
                     "best_episode",
                     bgr_image_list,
@@ -596,7 +591,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         if episode_id == 0 or (episode_id + 1) % args.image_save_interval == 0:
             save_episode_data(
-                video_dir,
                 episode_log_dir,
                 f"ep_{episode_id + 1:08d}",
                 bgr_image_list,
