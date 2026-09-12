@@ -1,6 +1,6 @@
 # @package _global_
 use_lora: false
-vlm_model_id: Qwen/Qwen3.5-2B
+vlm_model_id: Qwen/Qwen3.5-0.8B
 num_state_queries: 100
 state_out_dim: 4
 prompt_history_turns: 16

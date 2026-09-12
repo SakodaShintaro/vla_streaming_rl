@@ -8,9 +8,8 @@ defaults:
 
 agent_type: off_policy
 network_class: vlm_actor_critic_with_action_value
-policy_type: imle
 use_lora: true
-reasoning_max_tokens: 32
+reasoning_max_tokens: 0
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
