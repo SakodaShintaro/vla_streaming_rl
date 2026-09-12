@@ -48,7 +48,7 @@ def _viz_resize(image: np.ndarray, scale: float) -> np.ndarray:
     return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
-def save_episode_texts(curr_image_dir: Path, text_list: list[dict[str, str]]) -> None:
+def save_episode_texts(episode_log_dir: Path, text_list: list[dict[str, str]]) -> None:
     """The free-form text agents emitted, one row per rendered frame.
 
     Text a network draws into a panel is legible in the video but not
@@ -63,7 +63,7 @@ def save_episode_texts(curr_image_dir: Path, text_list: list[dict[str, str]]) ->
     def escape(text: str) -> str:
         return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
 
-    tsv_path = curr_image_dir / "texts.tsv"
+    tsv_path = episode_log_dir / "texts.tsv"
     with open(tsv_path, "w", encoding="utf-8") as f:
         f.write("step\t" + "\t".join(keys) + "\n")
         for step, texts in enumerate(text_list):
@@ -72,8 +72,7 @@ def save_episode_texts(curr_image_dir: Path, text_list: list[dict[str, str]]) ->
 
 def save_episode_data(
     video_dir: Path,
-    image_dir: Path,
-    obs_dir: Path,
+    log_dir: Path,
     name: str,
     bgr_image_list: list[np.ndarray],
     action_list: list[np.ndarray],
@@ -82,7 +81,7 @@ def save_episode_data(
     text_list: list[dict[str, str]],
     xyz_list: list[tuple[float, float, float]],
 ) -> None:
-    """Save episode video, images, actions, rewards and positions"""
+    """Save episode videos, actions, rewards and positions"""
     if not bgr_image_list:
         return
 
@@ -107,23 +106,23 @@ def save_episode_data(
     rgb_images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in bgr_image_list]
     imageio.mimsave(str(video_path), rgb_images, fps=10, macro_block_size=1)
 
-    # Save as images
-    curr_image_dir = image_dir / f"{name}"
-    curr_image_dir.mkdir(parents=True, exist_ok=True)
-    for idx, img in enumerate(bgr_image_list):
-        image_path = curr_image_dir / f"{idx:08d}.png"
-        cv2.imwrite(str(image_path), img)
+    obs_rgb_images = [(obs.transpose(1, 2, 0) * 255).astype(np.uint8) for obs in obs_list]
+    obs_sizes = {img.shape for img in obs_rgb_images}
+    assert len(obs_sizes) == 1, (
+        f"Episode '{name}' produced observations of differing sizes {obs_sizes}"
+    )
+    obs_h, obs_w = obs_rgb_images[0].shape[:2]
+    if obs_h % 2 or obs_w % 2:
+        obs_rgb_images = [
+            np.pad(img, ((0, obs_h % 2), (0, obs_w % 2), (0, 0)), mode="constant")
+            for img in obs_rgb_images
+        ]
+    obs_video_path = video_dir / f"{name}_obs.mp4"
+    imageio.mimsave(str(obs_video_path), obs_rgb_images, fps=10, macro_block_size=1)
 
-    # Save raw observations as images
-    obs_image_dir = obs_dir / f"{name}"
-    obs_image_dir.mkdir(parents=True, exist_ok=True)
-    for idx, obs in enumerate(obs_list):
-        obs_hwc = (obs.transpose(1, 2, 0) * 255).astype(np.uint8)
-        obs_bgr = cv2.cvtColor(obs_hwc, cv2.COLOR_RGB2BGR)
-        obs_path = obs_image_dir / f"{idx:08d}.png"
-        cv2.imwrite(str(obs_path), obs_bgr)
-
-    save_episode_texts(curr_image_dir, text_list)
+    episode_log_dir = log_dir / f"{name}"
+    episode_log_dir.mkdir(parents=True, exist_ok=True)
+    save_episode_texts(episode_log_dir, text_list)
 
     # One row per step: the action taken, the reward it drew, and where the
     # agent stood after it, so an episode's trajectory can be drawn from the
@@ -139,7 +138,7 @@ def save_episode_data(
         columns = columns + ["x", "y", "z"]
         rows = [row + [f"{float(v):.4f}" for v in xyz] for row, xyz in zip(rows, xyz_list)]
 
-    with open(curr_image_dir / "log.tsv", "w", encoding="utf-8") as f:
+    with open(episode_log_dir / "log.tsv", "w", encoding="utf-8") as f:
         f.write("step\t" + "\t".join(columns) + "\n")
         for step, row in enumerate(rows):
             f.write(f"{step}\t" + "\t".join(row) + "\n")
@@ -286,11 +285,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     video_dir = result_dir / "video"
     video_dir.mkdir(parents=True, exist_ok=True)
 
-    image_dir = result_dir / "images"
-    image_dir.mkdir(parents=True, exist_ok=True)
-
-    obs_dir = result_dir / "obs"
-    obs_dir.mkdir(parents=True, exist_ok=True)
+    episode_log_dir = result_dir / "episode_log"
+    episode_log_dir.mkdir(parents=True, exist_ok=True)
 
     log_episode_path = result_dir / "log_episode.tsv"
     log_episode_file = None
@@ -571,8 +567,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 best_score_per_arena[arena_name] = score
                 save_episode_data(
                     video_dir,
-                    image_dir,
-                    obs_dir,
+                    episode_log_dir,
                     f"best_{arena_name}",
                     bgr_image_list,
                     action_list,
@@ -589,8 +584,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 best_score = score
                 save_episode_data(
                     video_dir,
-                    image_dir,
-                    obs_dir,
+                    episode_log_dir,
                     "best_episode",
                     bgr_image_list,
                     action_list,
@@ -603,8 +597,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         if episode_id == 0 or (episode_id + 1) % args.image_save_interval == 0:
             save_episode_data(
                 video_dir,
-                image_dir,
-                obs_dir,
+                episode_log_dir,
                 f"ep_{episode_id + 1:08d}",
                 bgr_image_list,
                 action_list,
