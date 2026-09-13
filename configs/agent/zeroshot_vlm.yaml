@@ -7,6 +7,9 @@ defaults:
   - _self_
 
 agent_type: zeroshot_vlm
+# The window the conversation is read off: every cot_steps_per_chain ticks one
+# exchange, so 16 exchanges of history plus the current frame.
+seq_len: 129
 # Where generation runs:
 #   openrouter : a hosted model, one API call per env step (`openrouter_model_id`).
 #   local      : a Qwen3.5 checkpoint generating in this process on the GPU

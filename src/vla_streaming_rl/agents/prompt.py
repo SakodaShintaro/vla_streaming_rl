@@ -304,4 +304,8 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
-    return PROMPT_BUILDERS[args.env_id](env, args.prompt_history_turns)
+    # The exchanges a window of ``seq_len`` ticks holds at the chain's cadence:
+    # the same count the trained network reads off its replay buffer, so the
+    # two see the same history for the same config.
+    history_turns = (args.seq_len - 1) // args.cot_steps_per_chain
+    return PROMPT_BUILDERS[args.env_id](env, history_turns)

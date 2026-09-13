@@ -239,7 +239,6 @@ def build_network(
             predictor_hidden_dim=args.predictor_hidden_dim,
             predictor_block_num=args.predictor_block_num,
             sparsity=args.sparsity,
-            prompt_history_turns=args.prompt_history_turns,
             cot_steps_per_chain=args.cot_steps_per_chain,
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,

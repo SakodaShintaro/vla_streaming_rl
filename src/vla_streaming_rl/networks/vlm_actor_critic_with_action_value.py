@@ -106,7 +106,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         predictor_hidden_dim: int,
         predictor_block_num: int,
         sparsity: float,
-        prompt_history_turns: int,
         cot_steps_per_chain: int,
         predictor_type: str,
         policy_type: str,
@@ -123,11 +122,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.critic_loss_weight = critic_loss_weight
         # The prompt of a tick is the conversation the zero-shot controller
         # would read there: its turns are the buffer rows ``cot_steps_per_chain``
-        # apart ending on the tick, up to ``prompt_history_turns`` of them, each
+        # apart ending on the tick, as many as ``seq_len`` ticks hold, each
         # a frame under its own text answered by the chain its tick wrote.
-        assert prompt_history_turns >= 0, prompt_history_turns
         assert cot_steps_per_chain >= 1, cot_steps_per_chain
-        self.prompt_history_turns = prompt_history_turns
         self.cot_steps_per_chain = cot_steps_per_chain
         self._since_write = cot_steps_per_chain
         self.reasoning_loss_weight = reasoning_loss_weight
@@ -310,16 +307,18 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
         Its turns are the rows ``cot_steps_per_chain`` apart ending on the slot:
         each a frame under its own text, the earlier ones answered by the reply
-        their tick wrote. Up to ``prompt_history_turns`` earlier turns, as many
-        as the window holds; an episode boundary does not cut them, so what the
-        episodes before did and what came of them stays in view.
+        their tick wrote, as many as ``seq_len`` ticks hold; an episode boundary
+        does not cut them, so what the episodes before did and what came of them
+        stays in view.
         """
         cursor = slot % observations.shape[1]
         stride = self.cot_steps_per_chain
         system_texts = self._decode(system_token_ids[:, cursor])
         texts, images = [], []
         for b in range(observations.shape[0]):
-            turns_num = min(self.prompt_history_turns, cursor // stride)
+            # Capped by the state window rather than the rows behind the slot,
+            # so the next state's prompt holds no turn the current's could not.
+            turns_num = min((self.seq_len - 1) // stride, cursor // stride)
             rows = [cursor - stride * k for k in range(turns_num, -1, -1)]
             turn_texts = self._decode(turn_token_ids[b, rows])
             reply_texts = self._decode(reply_token_ids[b, rows[:-1]])
