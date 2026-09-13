@@ -10,3 +10,4 @@ pad_token_id: 0
 reasoning_loss_weight: 1.0
 reasoning_max_tokens: 0
 reasoning_temperature: 1.0
+seq_len: 1
