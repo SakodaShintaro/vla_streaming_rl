@@ -182,6 +182,24 @@ def write_arena_stats(path: Path, curriculum: dict, best_score_per_arena: dict) 
             )
 
 
+def write_success_rate(path: Path, curriculum: dict) -> None:
+    """Cleared-arena rate per Olympics level ("category") plus the total.
+
+    One row per level the run has attempted so far, keyed by the "XX" prefix of
+    the arena label, and an "all" row over every attempted arena."""
+    cleared = curriculum["arena_cleared"]
+    arenas_by_level: dict[str, list[str]] = {}
+    for arena in sorted(cleared):
+        arenas_by_level.setdefault(arena.split("-")[0], []).append(arena)
+    with open(path, "w") as f:
+        f.write("category,arenas,successes,success_rate\n")
+        for level, arenas in sorted(arenas_by_level.items()):
+            successes = sum(int(cleared[arena]) for arena in arenas)
+            f.write(f"{level},{len(arenas)},{successes},{successes / len(arenas):.4f}\n")
+        successes = sum(int(cleared[arena]) for arena in cleared)
+        f.write(f"all,{len(cleared)},{successes},{successes / len(cleared):.4f}\n")
+
+
 def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
     """Restore weights / optimizer / counters / curriculum from a previous run dir.
 
@@ -617,6 +635,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             curriculum = get_curriculum()
             train_state["curriculum_progress"] = curriculum["progress"]
             write_arena_stats(result_dir / "arena_stats.tsv", curriculum, best_score_per_arena)
+            write_success_rate(result_dir / "success_rate.csv", curriculum)
         (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
 
         episode_id += 1
