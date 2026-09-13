@@ -51,6 +51,7 @@ class OffPolicyAgent(Agent):
         max_prompt_tokens: int,
         pad_token_id: int,
         reset_on_episode_end: bool,
+        format_action_text,
         prompt_builder: PromptBuilder,
     ) -> None:
         super().__init__(
@@ -61,6 +62,8 @@ class OffPolicyAgent(Agent):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.observation_space = observation_space
+        # The action the way the prompt writes it, quoted back in the next prompt.
+        self.format_action_text = format_action_text
 
         # action properties
         self.action_space = action_space
@@ -184,9 +187,9 @@ class OffPolicyAgent(Agent):
         metrics = {}
         episode_done = terminated or truncated
         # A terminal observation still belongs to the episode that ended, so the
-        # conversation and the chain are dropped on the tick after it rather than
-        # on it -- the same boundary the rnn state resets on. Dropped on the
-        # terminal tick instead, the turn that tick then writes would be the one
+        # prompt's last exchange and the chain are dropped on the tick after it
+        # rather than on it -- the same boundary the rnn state resets on. Dropped
+        # on the terminal tick instead, what that tick then records would be what
         # the next episode opens on.
         episode_started = self._previous_done
         # What the agent trains on, against what the env reported as its score.
@@ -220,12 +223,11 @@ class OffPolicyAgent(Agent):
             health_obs,
         ) = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
-        # the observation. The chain reads the same conversation on the steps it
-        # writes, and writes its own turn back into it.
-        self.prompt_builder.observe(obs, reward, info, image)
-        prompt = self.prompt_builder.task_text()
-        task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
-        cot_activation, cot_age = self.network.advance_cot(episode_started)
+        # the observation. The chain reads the same prompt on the steps it writes.
+        self.prompt_builder.observe(obs, reward, info)
+        system_text = self.prompt_builder.system_text()
+        turn_text = self.prompt_builder.turn_text()
+        cot_activation, cot_age = self.network.advance_cot(episode_started, image)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -233,7 +235,8 @@ class OffPolicyAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            task_prompt_token_ids,
+            self.network.tokenize(system_text),
+            self.network.tokenize(turn_text),
             velocity_x,
             velocity_y,
             velocity_z,
@@ -247,20 +250,30 @@ class OffPolicyAgent(Agent):
             cot_age,
         )
 
-        warmup = global_step < self.learning_starts
+        if self.action_chunk is None or self.chunk_step >= self.horizon:
+            self._start_chunk(system_text, turn_text, metrics)
+        action = self._to_env_action(self.action_chunk[self.chunk_step])
+        self.chunk_step += 1
+        if global_step < self.learning_starts:
+            # The network was queried anyway so its recurrent state keeps
+            # following the episode; only the action it chose is dropped.
+            action = self.action_space.sample()
+            self.action_chunk = None
+            self.chunk_step = 0
+        self.prev_action = action
+        metrics["chunk_step"] = self.chunk_step
+        # What ran this tick and what the network thought beside it, quoted back
+        # in the next prompt.
+        self.prompt_builder.record(self.network.thought_text(), self.format_action_text(action))
+        return StepResult(
+            action=action,
+            metrics=metrics,
+            panels=self.network.render_panels(),
+            texts={"task": system_text, "prompt": turn_text, **self.network.render_texts()},
+        )
 
-        if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self._to_env_action(self.action_chunk[self.chunk_step])
-            self.prev_action = action
-            self.chunk_step += 1
-            metrics["chunk_step"] = self.chunk_step
-            return StepResult(
-                action=action,
-                metrics=metrics,
-                panels=self.network.render_panels(),
-                texts={"prompt": prompt, **self.network.render_texts()},
-            )
-
+    def _start_chunk(self, system_text: str, turn_text: str, metrics: dict) -> None:
+        """Infer a fresh action chunk from the newest state window."""
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
             InferInput(
@@ -268,7 +281,8 @@ class OffPolicyAgent(Agent):
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
-                task_prompts=[prompt],
+                system_texts=[system_text],
+                turn_texts=[turn_text],
                 velocity_x_seq=latest_data.velocity_x,
                 velocity_y_seq=latest_data.velocity_y,
                 velocity_z_seq=latest_data.velocity_z,
@@ -285,27 +299,8 @@ class OffPolicyAgent(Agent):
         self.rnn_state = infer_result.rnn_state
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
-        action_chunk = infer_result.action[0].cpu().numpy()
-        self.action_chunk = action_chunk
-        self.chunk_step = 1
-        action = self._to_env_action(action_chunk[0])
-        self.prev_action = action
-        metrics["chunk_step"] = self.chunk_step
-
-        if warmup:
-            # The network was queried anyway so its recurrent state keeps
-            # following the episode; only the action it chose is dropped.
-            action = self.action_space.sample()
-            self.action_chunk = None
-            self.chunk_step = 0
-            self.prev_action = action
-            metrics["chunk_step"] = self.chunk_step
-        return StepResult(
-            action=action,
-            metrics=metrics,
-            panels=self.network.render_panels(),
-            texts={"prompt": prompt, **self.network.render_texts()},
-        )
+        self.action_chunk = infer_result.action[0].cpu().numpy()
+        self.chunk_step = 0
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

@@ -22,7 +22,8 @@ class ReplayBufferData:
     dones: torch.Tensor  # (B, T)
     rnn_state: torch.Tensor  # (B, T, space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
-    task_prompt_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
+    system_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
+    turn_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     velocity_x: torch.Tensor  # (B, T, 1)
     velocity_y: torch.Tensor  # (B, T, 1)
     velocity_z: torch.Tensor  # (B, T, 1)
@@ -94,15 +95,22 @@ class ReplayBuffer:
         # age cannot be recovered from one: it is periodic in the writing
         # cadence, which no other stored field carries.
         self.cot_age = init_tensor((size, 1))
-        self.task_prompt_token_ids = torch.full(
-            (size, max_prompt_tokens),
-            pad_token_id,
-            dtype=torch.long,
-            device=self.storage_device,
-        )
+        # The prompt builder's two turns, tokenized: the standing task and what
+        # follows the frames, which quotes the tick before and so differs every
+        # step.
+        self.system_token_ids = self._init_token_ids()
+        self.turn_token_ids = self._init_token_ids()
 
         self.idx = 0
         self.full = False
+
+    def _init_token_ids(self) -> torch.Tensor:
+        return torch.full(
+            (self.size, self.max_prompt_tokens),
+            self.pad_token_id,
+            dtype=torch.long,
+            device=self.storage_device,
+        )
 
     def is_full(self) -> bool:
         return self.full
@@ -123,7 +131,8 @@ class ReplayBuffer:
             self.dones[:curr_size].to(self.output_device, non_blocking=True),
             self.rnn_states[:curr_size].to(self.output_device, non_blocking=True),
             self.actions[:curr_size].to(self.output_device, non_blocking=True),
-            self.task_prompt_token_ids[:curr_size].to(self.output_device, non_blocking=True),
+            self.system_token_ids[:curr_size].to(self.output_device, non_blocking=True),
+            self.turn_token_ids[:curr_size].to(self.output_device, non_blocking=True),
             self.velocity_x[:curr_size].to(self.output_device, non_blocking=True),
             self.velocity_y[:curr_size].to(self.output_device, non_blocking=True),
             self.velocity_z[:curr_size].to(self.output_device, non_blocking=True),
@@ -144,7 +153,8 @@ class ReplayBuffer:
         done: bool,
         rnn_state: torch.Tensor,
         action: torch.Tensor,
-        task_prompt_token_ids: list[int],
+        system_token_ids: list[int],
+        turn_token_ids: list[int],
         velocity_x: float,
         velocity_y: float,
         velocity_z: float,
@@ -175,18 +185,23 @@ class ReplayBuffer:
         self.cot_activations[self.idx].copy_(cot_activation)
         self.cot_age[self.idx].fill_(cot_age)
 
-        self.task_prompt_token_ids[self.idx].fill_(self.pad_token_id)
-        if len(task_prompt_token_ids) > self.max_prompt_tokens:
-            print(
-                f"[WARNING] task_prompt_token_ids exceeds max_prompt_tokens: len={len(task_prompt_token_ids)}, max_prompt_tokens={self.max_prompt_tokens}"
-            )
-        prompt_len = min(len(task_prompt_token_ids), self.max_prompt_tokens)
-        self.task_prompt_token_ids[self.idx, :prompt_len] = torch.tensor(
-            task_prompt_token_ids[:prompt_len], dtype=torch.long, device=self.storage_device
-        )
+        self._store_token_ids(self.system_token_ids, system_token_ids)
+        self._store_token_ids(self.turn_token_ids, turn_token_ids)
 
         self.idx = (self.idx + 1) % self.size
         self.full = self.full or self.idx == 0
+
+    def _store_token_ids(self, storage: torch.Tensor, token_ids: list[int]) -> None:
+        storage[self.idx].fill_(self.pad_token_id)
+        if len(token_ids) > self.max_prompt_tokens:
+            print(
+                f"[WARNING] prompt exceeds max_prompt_tokens: len={len(token_ids)}, "
+                f"max_prompt_tokens={self.max_prompt_tokens}"
+            )
+        prompt_len = min(len(token_ids), self.max_prompt_tokens)
+        storage[self.idx, :prompt_len] = torch.tensor(
+            token_ids[:prompt_len], dtype=torch.long, device=self.storage_device
+        )
 
     def valid_start_indices(self) -> torch.Tensor:
         """Window starts a learning batch may be drawn from.
@@ -273,7 +288,8 @@ class ReplayBuffer:
             self.dones[seq_indices].to(self.output_device, non_blocking=True),
             self.rnn_states[seq_indices].to(self.output_device, non_blocking=True),
             self.actions[seq_indices].to(self.output_device, non_blocking=True),
-            self.task_prompt_token_ids[seq_indices].to(self.output_device, non_blocking=True),
+            self.system_token_ids[seq_indices].to(self.output_device, non_blocking=True),
+            self.turn_token_ids[seq_indices].to(self.output_device, non_blocking=True),
             self.velocity_x[seq_indices].to(self.output_device, non_blocking=True),
             self.velocity_y[seq_indices].to(self.output_device, non_blocking=True),
             self.velocity_z[seq_indices].to(self.output_device, non_blocking=True),
@@ -300,9 +316,8 @@ class ReplayBuffer:
             self.dones[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.rnn_states[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.actions[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.task_prompt_token_ids[indices]
-            .unsqueeze(0)
-            .to(self.output_device, non_blocking=True),
+            self.system_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
+            self.turn_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.velocity_x[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.velocity_y[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
             self.velocity_z[indices].unsqueeze(0).to(self.output_device, non_blocking=True),

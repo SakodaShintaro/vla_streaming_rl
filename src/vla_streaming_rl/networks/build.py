@@ -174,6 +174,7 @@ def build_network(
             cot_dropout=args.cot_dropout,
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
+            decision_fps=decision_fps,
             prompt_builder=prompt_builder,
         ).to(device)
 
@@ -241,6 +242,7 @@ def build_network(
             predictor_block_num=args.predictor_block_num,
             sparsity=args.sparsity,
             decision_fps=decision_fps,
+            frame_stride=args.cot_steps_per_chain,
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,
             image_encoder_type=args.image_encoder_type,

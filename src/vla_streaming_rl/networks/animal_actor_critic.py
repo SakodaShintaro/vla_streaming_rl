@@ -177,7 +177,7 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
-    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
+    def tokenize(self, text: str) -> list[int]:
         return []
 
     def observe_scalar_obs(

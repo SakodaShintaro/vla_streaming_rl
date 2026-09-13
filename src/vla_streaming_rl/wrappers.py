@@ -18,6 +18,12 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
     return action_array, len(matches) > 0
 
 
+def _car_racing_format_action(action: np.ndarray) -> str:
+    """The action the way the prompt asks for it written, so what ran can be
+    quoted back in the next prompt in the model's own vocabulary."""
+    return f"steer={action[0]:+.2f}, accel={action[1]:+.2f}"
+
+
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
 # Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
@@ -39,6 +45,24 @@ _ANIMALAI_ACTION_RE = re.compile(
     f"({'|'.join(_ANIMALAI_MOVE | _ANIMALAI_ROTATE)})",
     re.IGNORECASE,
 )
+
+
+_ANIMALAI_MOVE_BY_LEVEL = {level: name for name, level in _ANIMALAI_MOVE.items()}
+_ANIMALAI_ROTATE_BY_LEVEL = {level: name for name, level in _ANIMALAI_ROTATE.items()}
+
+
+def _animalai_level(value: float) -> float:
+    """The Box value folded onto the extreme the env's +/-1/3 dead-zone
+    discretizes it to: -1, 0 or 1."""
+    return float(np.sign(value)) * float(abs(value) >= 1.0 / 3.0)
+
+
+def _animalai_format_action(action: np.ndarray) -> str:
+    """The `<move>, <rotation>` phrase pair the env's discretization reads
+    off a Box action, the inverse of `_animalai_parse_action`."""
+    move = _ANIMALAI_MOVE_BY_LEVEL[_animalai_level(action[0])]
+    rotation = _ANIMALAI_ROTATE_BY_LEVEL[_animalai_level(action[1])]
+    return f"{move}, {rotation}"
 
 
 def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
@@ -169,6 +193,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
+        env.unwrapped.format_action_text = _car_racing_format_action
         return env
 
     elif env_id == "CARLA-Leaderboard-v0":
@@ -182,6 +207,8 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = StepCountObsWrapper(env)
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 220
+        # CARLA's action is (steer, gas_or_brake), the CarRacing convention.
+        env.unwrapped.format_action_text = _car_racing_format_action
         return env
 
     elif env_id == "AnimalAI-v0":
@@ -197,6 +224,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = RemainingReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _animalai_parse_action
+        env.unwrapped.format_action_text = _animalai_format_action
         return env
 
     else:

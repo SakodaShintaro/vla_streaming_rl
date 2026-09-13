@@ -141,7 +141,7 @@ def render_text_panel(text: str, width: int, height: int) -> np.ndarray:
     return panel
 
 
-# The chain's conversation, drawn the way a chat log reads: what the agent was
+# The prompt and the reply, drawn the way a chat log reads: what the agent was
 # shown on one side, what it wrote on the other.
 _USER_BUBBLE = (78, 62, 48)
 _ASSISTANT_BUBBLE = (52, 84, 52)
@@ -150,21 +150,16 @@ _BUBBLE_FRACTION = 0.78
 
 
 def render_conversation_panel(
-    turns: list[dict], status: str, width: int, height: int
+    user_text: str, assistant_text: str, status: str, width: int, height: int
 ) -> np.ndarray:
-    """A conversation drawn as chat bubbles on a panel of exactly ``width`` x
-    ``height``, under a line of ``status``.
+    """The user turn and the reply drawn as chat bubbles on a panel of exactly
+    ``width`` x ``height``, under a line of ``status``.
 
-    The standing task is not drawn: it is the same every tick and the trainer
-    already captions the environment panel with it. What is drawn is what
-    changes -- the turn the agent was shown this tick and what the chain wrote
-    about the ones before it.
-
-    The newest turn sits at the bottom and older ones are laid above it until the
-    panel is full, so the latest exchange is always visible however long the
-    conversation has grown. User turns are left-aligned, the chain's own replies
-    right-aligned, each on its own colour. ``status`` is drawn as a strip along
-    the top, where it stays put as the turns scroll under it.
+    The standing task is not drawn: it is the same every tick. What is drawn is
+    what changes -- the text under the frames this tick and what the model last
+    wrote. The reply sits at the bottom and the turn above it; the user turn is
+    left-aligned, the reply right-aligned, each on its own colour. ``status`` is
+    drawn as a strip along the top.
     """
     font_scale = 0.45
     thickness = 1
@@ -188,17 +183,13 @@ def render_conversation_panel(
     )
 
     bottom = height - gap
-    said = [turn for turn in turns if turn and turn["role"] in ("user", "assistant")]
-    for turn in reversed(said):
-        text = " ".join(
-            part["text"] for part in turn["content"] if part["type"] == "text" and part["text"]
-        )
-        lines = wrap_text(text if text else "(frame only)", bubble_width, font_scale, thickness)
+    said = [(False, user_text), (True, assistant_text)]
+    for assistant, text in reversed(said):
+        lines = wrap_text(text if text else "(empty)", bubble_width, font_scale, thickness)
         bubble_height = line_height * len(lines) + padding * 2
         top = bottom - bubble_height
         if top < status_height + gap:
             break
-        assistant = turn["role"] == "assistant"
         left = width - gap - bubble_width if assistant else gap
         cv2.rectangle(
             panel,

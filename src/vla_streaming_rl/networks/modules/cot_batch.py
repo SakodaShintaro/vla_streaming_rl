@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from vla_streaming_rl.agents.prompt import PromptBuilder
 
 from .vlm_backbone import load_model, sampling_kwargs
+from .vlm_inputs import FrameWindow, build_vlm_inputs
 
 
 class CoTBatch:
@@ -17,6 +18,9 @@ class CoTBatch:
         max_len: int,
         temperature: float,
         steps_per_chain: int,
+        frames_num: int,
+        frame_stride: int,
+        decision_fps: float,
         prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
@@ -31,14 +35,18 @@ class CoTBatch:
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len
         # Decoded the way the zero-shot controller decodes: it reads the same
-        # conversation through the same model, so a chain written any other way
+        # prompt through the same model, so a chain written any other way
         # would not be the baseline's reasoning measured under RL. 0 is greedy,
         # which `generate` spells as do_sample=False rather than a zero divisor.
         assert temperature >= 0.0, temperature
         self.temperature = temperature
         self.steps_per_chain = steps_per_chain
-        # The conversation is the agent's; a chain reads it on the steps it
-        # writes and puts what it wrote back as that turn's reply.
+        self.decision_fps = decision_fps
+        self.frame_stride = frame_stride
+        # The frames a chain reads: the network's own window, at the chain's
+        # own interval.
+        self._window = FrameWindow(frames_num)
+        # The prompt is the agent's; a chain reads it on the steps it writes.
         self.prompt_builder = prompt_builder
         self.device = device
         text_config = self.model.config.text_config
@@ -48,9 +56,10 @@ class CoTBatch:
         self.reset()
 
     def reset(self) -> None:
-        """Drop the chain. The next advance writes a new one on the frame it is
-        given; the conversation it is written into is the builder's to reset."""
+        """Drop the chain. The next advance writes a new one on the frames it is
+        given."""
         self._tokens = []
+        self._window.reset()
         # What the last chain cost. Kept between writes, since the steps that
         # hold one are not the steps that paid for it.
         self._input_tokens = 0
@@ -77,16 +86,17 @@ class CoTBatch:
         return self.steps_per_chain - 1 - self._until_next
 
     @torch.inference_mode()
-    def advance(self) -> torch.Tensor:
+    def advance(self, frame: torch.Tensor) -> torch.Tensor:
         """This environment step's activations, writing a fresh chain when due.
 
-        The builder's conversation is read on the steps that write a chain and
-        not at all in between, which is what makes the chain the slow loop.
+        The builder's prompt is read on the steps that write a chain and not at
+        all in between, which is what makes the chain the slow loop.
 
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16. The same tensor
             on every step until the next chain is written.
         """
+        self._window.push(frame)
         if self._until_next == 0:
             self._write_chain()
             self._until_next = self.steps_per_chain
@@ -95,24 +105,20 @@ class CoTBatch:
 
     def _write_chain(self) -> None:
         start = time.perf_counter()
-        messages, images = self._render(self.prompt_builder.conversation())
-        text = self.processor.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=False,
-            # Thinking off: with the <think> block left open the model spends the
-            # chain reasoning about the request rather than about the scene.
+        # Thinking off: with the <think> block left open the model spends the
+        # chain reasoning about the request rather than about the scene.
+        inputs = build_vlm_inputs(
+            self.processor,
+            self._window.frames()[None].to(self.device),
+            [self.prompt_builder.system_text()],
+            [self.prompt_builder.turn_text()],
+            self.decision_fps,
+            self.frame_stride,
             enable_thinking=False,
         )
-        inputs = self.processor(
-            text=[text],
-            images=images,
-            return_tensors="pt",
-            do_rescale=False,
-        ).to(self.device)
 
         outputs = self.model.generate(
-            **inputs,
+            **inputs["encoded"],
             max_new_tokens=self.max_len,
             **sampling_kwargs(self.temperature),
             output_hidden_states=True,
@@ -123,29 +129,6 @@ class CoTBatch:
         self._activations = self._read_activations(outputs.hidden_states)
         self._input_tokens = int(prompt_len)
         self._msec = (time.perf_counter() - start) * 1000.0
-        self.prompt_builder.add_reply(self.text())
-
-    def _render(self, turns: list[dict]) -> tuple[list[dict], list[torch.Tensor]]:
-        """The turns as the processor takes them: the frames pulled out into
-        their own list, since the chat template wants a placeholder where each
-        one goes and the pixels handed over beside it."""
-        images = [
-            part["image"].to(torch.float32)
-            for turn in turns
-            for part in turn["content"]
-            if part["type"] == "image"
-        ]
-        messages = [
-            {
-                "role": turn["role"],
-                "content": [
-                    {key: value for key, value in part.items() if key != "image"}
-                    for part in turn["content"]
-                ],
-            }
-            for turn in turns
-        ]
-        return messages, images
 
     def _read_activations(self, hidden_states) -> torch.Tensor:
         """The whole chain, every depth kept, pooled to one step's read:

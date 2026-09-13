@@ -25,8 +25,8 @@ class InferInput:
 
     Unlike ``compute_loss`` / ``infer_and_compute_loss`` — which read a replay
     batch (:class:`ReplayBufferData`) — inference assembles its window from the
-    buffer's latest frames but carries the *live* recurrent state and task prompt
-    held by the agent. Those two therefore are explicit fields here rather than
+    buffer's latest frames but carries the *live* recurrent state and prompt
+    held by the agent. Those therefore are explicit fields here rather than
     read off the buffer. Batch size is 1.
     """
 
@@ -34,7 +34,8 @@ class InferInput:
     a_seq: torch.Tensor  # (B, T, action_dim)
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
-    task_prompts: list[str]  # one prompt per batch element
+    system_texts: list[str]  # the prompt builder's standing task, one per batch element
+    turn_texts: list[str]  # what follows the frames, one per batch element
     velocity_x_seq: torch.Tensor  # (B, T, 1)
     velocity_y_seq: torch.Tensor  # (B, T, 1)
     velocity_z_seq: torch.Tensor  # (B, T, 1)
@@ -130,12 +131,18 @@ class NetworkInterface(nn.Module, abc.ABC):
     # verbatim. Everything else contributes no tokens.
     cot_shape: tuple[int, int] = (0, 0)
 
-    def advance_cot(self, episode_started: bool) -> tuple[torch.Tensor, int]:
+    def advance_cot(self, episode_started: bool, frame: torch.Tensor) -> tuple[torch.Tensor, int]:
         """This step's chain-of-thought activations and how many steps ago they
         were generated, empty and 0 unless the network carries a chain (see
-        ``networks/cot_actor_critic.py``)."""
-        del episode_started
+        ``networks/cot_actor_critic.py``). ``frame`` is what the agent is
+        looking at this tick, (C, H, W) in [0, 1]."""
+        del episode_started, frame
         return torch.zeros(self.cot_shape), 0
+
+    def thought_text(self) -> str:
+        """What the network's chain of thought wrote last, empty without one.
+        The agent quotes it back in the next prompt."""
+        return ""
 
     def render_panels(self) -> dict[str, np.ndarray]:
         """Named RGB panels this network contributes to the render strip. The
@@ -154,8 +161,8 @@ class NetworkInterface(nn.Module, abc.ABC):
         """Initial recurrent state the agent carries between steps."""
 
     @abc.abstractmethod
-    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
-        """Token ids for a task-prompt string (empty for non-VLM networks)."""
+    def tokenize(self, text: str) -> list[int]:
+        """Token ids for a prompt string (empty for non-VLM networks)."""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:

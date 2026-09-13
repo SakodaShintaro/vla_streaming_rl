@@ -35,6 +35,8 @@ def build_cot(
     temperature: float,
     steps_per_chain: int,
     use_cuda_graph: bool,
+    frames_num: int,
+    decision_fps: float,
     prompt_builder,
     device: torch.device,
 ):
@@ -42,8 +44,9 @@ def build_cot(
 
     "stream" keeps one chain mid-thought and issues `tokens_per_step` of it per
     environment step; "batch" writes a whole chain every `steps_per_chain` steps
-    and holds it in between. Every mode's parameters are always supplied; a mode
-    ignores the ones that do not apply to it.
+    and holds it in between. Both read their video off the last `frames_num`
+    ticks at an interval of `steps_per_chain`. Every mode's parameters are
+    always supplied; a mode ignores the ones that do not apply to it.
     """
     builders = {
         "stream": lambda: CoTStream(
@@ -52,6 +55,9 @@ def build_cot(
             max_len=max_len,
             temperature=temperature,
             use_cuda_graph=use_cuda_graph,
+            frames_num=frames_num,
+            frame_stride=steps_per_chain,
+            decision_fps=decision_fps,
             prompt_builder=prompt_builder,
             device=device,
         ),
@@ -61,6 +67,9 @@ def build_cot(
             max_len=max_len,
             temperature=temperature,
             steps_per_chain=steps_per_chain,
+            frames_num=frames_num,
+            frame_stride=steps_per_chain,
+            decision_fps=decision_fps,
             prompt_builder=prompt_builder,
             device=device,
         ),
@@ -111,6 +120,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_dropout: float,
         cot_pool: str,
         cot_cuda_graph: bool,
+        decision_fps: float,
         prompt_builder,
         layer_scale_init: float,
     ) -> None:
@@ -161,6 +171,8 @@ class ActorCriticWithActionValue(NetworkInterface):
                 temperature=temperature,
                 steps_per_chain=cot_steps_per_chain,
                 use_cuda_graph=cot_cuda_graph,
+                frames_num=seq_len,
+                decision_fps=decision_fps,
                 prompt_builder=prompt_builder,
                 device=torch.device("cuda"),
             )
@@ -223,7 +235,7 @@ class ActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
-    def advance_cot(self, episode_started: bool) -> tuple[torch.Tensor, int]:
+    def advance_cot(self, episode_started: bool, frame: torch.Tensor) -> tuple[torch.Tensor, int]:
         """This step's chain-of-thought activations and how many steps ago they
         were generated, or nothing when the chain is off. The first tick of an
         episode ends whatever chain was running, so an episode's commentary
@@ -235,15 +247,20 @@ class ActorCriticWithActionValue(NetworkInterface):
             self.cot_module.reset()
         # Advanced first: `age` is about the chain the call hands back, which is
         # a fresh one on the steps that write.
-        activations = self.cot_module.advance()
+        activations = self.cot_module.advance(frame)
         return activations, self.cot_module.age()
 
+    def thought_text(self) -> str:
+        if self.cot_module is None:
+            return ""
+        return self.cot_module.text()
+
     def render_panels(self) -> dict[str, np.ndarray]:
-        """The conversation as it currently stands, drawn for the render strip:
-        the turn the agent was shown this tick and the chains written about the
-        ones before it, under what the last run of the VLM cost. Without a chain
-        there is no panel at all rather than a blank one, which keeps that run's
-        strip the width of what it has."""
+        """The prompt as it currently stands, drawn for the render strip: the
+        text under the frames this tick and the chain written last, under what
+        the last run of the VLM cost. Without a chain there is no panel at all
+        rather than a blank one, which keeps that run's strip the width of what
+        it has."""
         if self.cot_module is None:
             return {}
         stats = self.cot_module.stats()
@@ -253,7 +270,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
         return {
             "conversation": render_conversation_panel(
-                self.cot_module.prompt_builder.conversation(),
+                self.cot_module.prompt_builder.turn_text(),
+                self.cot_module.text(),
                 status,
                 self.COT_PANEL_WIDTH,
                 self.COT_PANEL_HEIGHT,
@@ -305,7 +323,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.cot_age[:, start:stop],
         )
 
-    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
+    def tokenize(self, text: str) -> list[int]:
         return []
 
     def observe_scalar_obs(

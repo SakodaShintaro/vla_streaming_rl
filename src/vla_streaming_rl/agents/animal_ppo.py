@@ -210,8 +210,11 @@ class AnimalPPOAgent(Agent):
     ) -> StepResult:
         del global_step
         visual, vels = self._preprocess(obs, info)
-        self.prompt_builder.observe(obs, reward, info, visual)
-        prompt = self.prompt_builder.task_text()
+        self.prompt_builder.observe(obs, reward, info)
+        texts = {
+            "task": self.prompt_builder.system_text(),
+            "prompt": self.prompt_builder.turn_text(),
+        }
         shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
         # tick, so that transition can only be completed now
@@ -235,7 +238,7 @@ class AnimalPPOAgent(Agent):
             self.buffer = RolloutBuffer()
             metrics.update(self._update(rollout))
 
-        return StepResult(action=action, metrics=metrics, panels={}, texts={"prompt": prompt})
+        return StepResult(action=action, metrics=metrics, panels={}, texts=texts)
 
     @torch.no_grad()
     def select_action(
@@ -253,14 +256,17 @@ class AnimalPPOAgent(Agent):
         dropped simply by never being buffered."""
         del global_step
         visual, vels = self._preprocess(obs, info)
-        self.prompt_builder.observe(obs, reward, info, visual)
-        prompt = self.prompt_builder.task_text()
+        self.prompt_builder.observe(obs, reward, info)
+        texts = {
+            "task": self.prompt_builder.system_text(),
+            "prompt": self.prompt_builder.turn_text(),
+        }
         fresh = self._episode_boundary(terminated, truncated)
         return StepResult(
             action=self._act(visual, vels, fresh),
             metrics={},
             panels={},
-            texts={"prompt": prompt},
+            texts=texts,
         )
 
     def _episode_boundary(self, terminated: bool, truncated: bool) -> float:

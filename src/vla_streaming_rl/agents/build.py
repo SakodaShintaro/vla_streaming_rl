@@ -16,10 +16,11 @@ def build_agent(
         return ZeroShotVLMAgent(
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,
-            backend=build_vlm_backend(args),
+            backend=build_vlm_backend(args, env.metadata["decision_fps"]),
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
             steps_per_action=args.cot_steps_per_chain,
+            frames_num=args.seq_len,
         )
 
     if args.agent_type == "animal_ppo":
@@ -70,6 +71,7 @@ def build_agent(
             max_prompt_tokens=args.max_prompt_tokens,
             pad_token_id=args.pad_token_id,
             reset_on_episode_end=args.reset_on_episode_end,
+            format_action_text=env.unwrapped.format_action_text,
             prompt_builder=prompt_builder,
         )
 
@@ -95,5 +97,6 @@ def build_agent(
         max_prompt_tokens=args.max_prompt_tokens,
         pad_token_id=args.pad_token_id,
         reset_on_episode_end=args.reset_on_episode_end,
+        format_action_text=env.unwrapped.format_action_text,
         prompt_builder=prompt_builder,
     )

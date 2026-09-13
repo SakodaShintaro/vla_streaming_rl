@@ -253,6 +253,7 @@ def main(
         args,
         observation_space_shape=env.observation_space["image"].shape,
         action_space_shape=env.action_space.shape,
+        decision_fps=env.metadata["decision_fps"],
         prompt_builder=prompt_builder,
         device=torch.device("cuda"),
     )

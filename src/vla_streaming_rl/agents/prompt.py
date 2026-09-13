@@ -8,19 +8,21 @@ config rather than to the simulator: two agents can drive the same env with
 different framing, and the env carries no text of its own.
 
 There is one builder per environment, and it always writes the prompt of an
-agent about to act: what the env asks, the action vocabulary it is asked in, the
-arena's own instruction, and the two sections the answer is read out of. Whether
-the action then comes from the reply or from a policy head is the reader's
-business, not the prompt's -- a run that reads the language as conditioning is
-reading the same words a run that acts on it would, so the two are comparable
-without a second wording to keep in step.
+agent about to act, as two turns. The system turn is the standing task: what the
+env asks, the action vocabulary it is asked in, the arena's own instruction, and
+the two sections the answer is read out of. The user turn is the frames the
+agent is looking at, followed by this tick's text: the live numbers under the
+frames and the thought and action of the tick before, which is all the history
+a prompt carries. Whether the action then comes from the reply or from a policy
+head is the reader's business, not the prompt's -- a run that reads the language
+as conditioning is reading the same words a run that acts on it would, so the
+two are comparable without a second wording to keep in step.
 
 A builder is called once per environment step with the observation, the reward
-and the info the agent itself received, and returns the conversation as it then
-stands: the standing task, every turn a chain has already answered, and this
-tick's own turn. Holding the conversation here is what keeps the VLM modules
-free of any environment's vocabulary -- they run a model over what they are
-handed and compose no text of their own beyond how a chain is continued.
+and the info the agent itself received, and whoever acted then records what it
+thought and what ran. Holding the text here is what keeps the VLM modules free
+of any environment's vocabulary -- they run a model over what they are handed
+and compose no text of their own beyond how a chain is continued.
 """
 
 import csv
@@ -38,7 +40,7 @@ TEXT_ACTION_PROTOCOL = (
     "First, in AT MOST two short sentences inside <think>...</think>, say what in "
     "the current image decides your next action, taking the previous reward (if "
     "shown) into account. Do not describe the scene in general, do not restate "
-    "the task, and do not repeat your earlier reasoning. "
+    "the task, and do not repeat your previous thought. "
     "Then output the action inside <answer>...</answer>, which must contain ONLY "
     "the action -- no commentary, no labels."
 )
@@ -64,89 +66,50 @@ def _load_arena_tasks(env: Env) -> dict[str, str]:
 
 
 class PromptBuilder(ABC):
-    """The conversation this run's VLMs read, carried across environment steps.
+    """The two turns this run's VLMs read, composed once per environment step.
 
-    Every tick ``observe`` records what the agent is looking at. A chain reads
-    that through ``conversation`` on the steps it actually writes -- one step in
-    ``cot_steps_per_chain`` -- and hands back what it wrote through
-    ``add_reply``, which is what puts the turn it answered into the conversation
-    for good. The ticks in between are overwritten rather than accumulated, so
-    the conversation holds the turns a chain saw and not every step of the run.
-
-    ``history_turns`` is how many of those exchanges it keeps. Every turn still
-    held is re-read on every step that follows, so a conversation left to grow
-    charges the whole episode for its own beginning; the oldest exchange is
-    dropped instead.
+    Every tick ``observe`` writes the standing task and this tick's live
+    numbers. ``record`` is how the previous exchange gets in: whoever acted --
+    a reply parsed for an action, or a policy head with a chain beside it --
+    hands over what it thought and what ran, and the ticks that follow quote
+    that back until the next record. Only the latest exchange is kept, so a
+    prompt costs the same however long the episode has run.
     """
 
-    def __init__(self, env: Env, history_turns: int) -> None:
+    def __init__(self, env: Env) -> None:
         del env
-        assert history_turns >= 0, history_turns
-        self.history_turns = history_turns
-        self._turns = []
-        self._current = {}
-        self._task_text = ""
+        self._system_text = ""
+        self._state_text = ""
+        self._previous_text = ""
 
     def reset(self) -> None:
-        """A finished episode ends the conversation; the next one opens its own."""
-        self._turns = []
-        self._current = {}
+        """A finished episode drops its last exchange; the next one opens without one."""
+        self._previous_text = ""
 
-    def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
-        """What the agent is looking at this tick: the turn a chain would read if
-        it wrote one now. Overwritten every step until one does."""
-        self._task_text = self._task(obs, info)
-        self._current = {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": self._turn(obs, reward, info)},
-            ],
-        }
+    def observe(self, obs: dict[str, Any], reward: float, info: dict) -> None:
+        """What the agent is looking at this tick. Overwritten every step."""
+        self._system_text = self._task(obs, info)
+        self._state_text = self._turn(obs, reward, info)
 
-    def conversation(self) -> list[dict]:
-        """What a chain about to write reads: the standing task, the turns it has
-        already answered, and the turn it is being asked about now."""
-        opening = {"role": "system", "content": [{"type": "text", "text": self._task_text}]}
-        return [opening] + self._turns + [self._current]
+    def system_text(self) -> str:
+        """The standing task: the same string on every tick of an episode."""
+        return self._system_text
 
-    def add_reply(self, text: str) -> None:
-        """What the chain wrote about that turn, which settles the pair into the
-        conversation, dropping the oldest exchange once ``history_turns`` are
-        held."""
-        turns = self._turns + [
-            self._current,
-            {"role": "assistant", "content": [{"type": "text", "text": text}]},
-        ]
-        self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
+    def turn_text(self) -> str:
+        """What follows the frames in the user turn: this tick's live numbers
+        and the exchange of the tick before."""
+        return " ".join(text for text in (self._state_text, self._previous_text) if text)
 
-    def task_text(self) -> str:
-        """The standing task: what the policy reads, and what it tokenizes.
+    def record(self, thought: str, action: str) -> None:
+        """What the last tick thought and what ran on it. ``thought`` is empty
+        when nothing reasoned; ``action`` is the action as written, or
+        :meth:`rejection_text` when the reply named none."""
+        thought_text = f"Previous thought: {thought} " if thought else ""
+        self._previous_text = f"{thought_text}Previous action: {action}"
 
-        The same string on every tick of an episode, so a network that tokenizes
-        it gets the same token ids throughout. The live numbers are not in it;
-        they reach the policy through the scalar branch and the chain through
-        the turns.
-        """
-        return self._task_text
-
-    def close_episode(self, text: str) -> None:
-        """End the episode inside the conversation instead of dropping it: the
-        turns stay and ``text`` says how it went, so the attempt that follows
-        reads what the ones before it did and what came of them."""
-        self._turns = self._turns + [{"role": "user", "content": [{"type": "text", "text": text}]}]
-        self._current = {}
-
-    def reject(self, answer: str) -> None:
+    def rejection_text(self, answer: str) -> str:
         """Say, as the env and not as the agent, that the last reply named no
-        action it could run. A complaint folded into the assistant's own turn
-        reads back as something the agent chose to say; this is what it was
-        told."""
-        self._turns = self._turns + [
-            {"role": "user", "content": [{"type": "text", "text": self._rejection_text(answer)}]}
-        ]
-
-    def _rejection_text(self, answer: str) -> str:
+        action it could run."""
         return f"({answer!r} is not an action -- nothing ran.)"
 
     @abstractmethod
@@ -232,11 +195,11 @@ class AnimalAIPromptBuilder(PromptBuilder):
     handed over as text by the env, so the env carries no vocabulary of its own.
     """
 
-    def __init__(self, env: Env, history_turns: int) -> None:
-        super().__init__(env, history_turns)
+    def __init__(self, env: Env) -> None:
+        super().__init__(env)
         self.tasks = _load_arena_tasks(env)
 
-    def _rejection_text(self, answer: str) -> str:
+    def rejection_text(self, answer: str) -> str:
         return (
             f"(`{answer}` is not an action -- the agent stood still. First half: "
             "stand still / walk forward / walk backward. Second half: no turn / "
@@ -299,4 +262,4 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
-    return PROMPT_BUILDERS[args.env_id](env, args.prompt_history_turns)
+    return PROMPT_BUILDERS[args.env_id](env)

@@ -4,10 +4,10 @@
 The chain of thought is the slow loop. It is prefilled from one frame and then
 advanced by a fixed budget of tokens per environment step, so a single line of
 reasoning spans many control ticks. When it ends -- EOS, or ``max_len`` tokens --
-the next advance prefills again from whatever frame is current, starting a fresh
-chain on a fresh image. That prefill carries the chain that just ended as the
-model's own turn, so the new one picks up where the last left off instead of
-opening on the scene from scratch.
+the next advance prefills again from whatever frames are current, starting a
+fresh chain on fresh video. The prompt it is prefilled on quotes the chain that
+ended last, as the agent recorded it, so the new one picks up where the last
+left off instead of opening on the scene from scratch.
 
 What leaves this module is not text but the activation feeding the VLM's lm_head
 at each generated position: the state the model was in when it chose that token,
@@ -29,6 +29,7 @@ from transformers import StaticCache
 from vla_streaming_rl.agents.prompt import PromptBuilder
 
 from .vlm_backbone import load_model
+from .vlm_inputs import FrameWindow, build_vlm_inputs
 
 
 class CoTStream:
@@ -50,6 +51,9 @@ class CoTStream:
         max_len: int,
         temperature: float,
         use_cuda_graph: bool,
+        frames_num: int,
+        frame_stride: int,
+        decision_fps: float,
         prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
@@ -58,13 +62,18 @@ class CoTStream:
             f"max_len {max_len} below the per-step budget {tokens_per_step}: "
             "every step would restart the chain"
         )
+        self.frames_num = frames_num
+        self.decision_fps = decision_fps
+        self.frame_stride = frame_stride
+        # The frames a prefill reads: the network's own window, at the chain's
+        # own interval.
+        self._window = FrameWindow(frames_num)
         self.model, self.processor = load_model(model_id, use_lora=False, device=device)
         self.model.eval().requires_grad_(False)
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len
         self.temperature = temperature
-        # The conversation is the agent's; a chain reads it on the steps it
-        # restarts and writes its own turn back when it ends.
+        # The prompt is the agent's; a chain reads it on the steps it restarts.
         self.prompt_builder = prompt_builder
         self.device = device
         text_config = self.model.config.text_config
@@ -74,7 +83,7 @@ class CoTStream:
         self.eos_token_id = self.processor.tokenizer.eos_token_id
         # One cache for the whole run. A new chain resets it in place rather than
         # replacing it, so its buffers keep the addresses a graph records.
-        # The chain that ended last is quoted back into the prompt, so the prefill
+        # The chain that ended last is quoted back in the prompt, so the prefill
         # has to fit one more chain's worth of tokens on top of the standing one.
         self._cache_len = self.PROMPT_BUDGET + max_len + max_len
         self._cache = StaticCache(config=self.model.config, max_cache_len=self._cache_len)
@@ -97,19 +106,10 @@ class CoTStream:
             # cache allocates, and a tensor born in inference mode cannot be
             # written from outside it, which is what recording then does.
             with torch.no_grad():
-                blank_frame = torch.zeros(3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE)
-                self._prefill(
-                    [
-                        {"role": "system", "content": [{"type": "text", "text": ""}]},
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "image", "image": blank_frame},
-                                {"type": "text", "text": ""},
-                            ],
-                        },
-                    ]
+                blank_frames = torch.zeros(
+                    frames_num, 3, self.CAPTURE_FRAME_SIDE, self.CAPTURE_FRAME_SIDE, device=device
                 )
+                self._prefill("", "", blank_frames)
                 self._write_step_inputs(self._position)
 
                 # Capture must follow a few runs on a side stream, which is also
@@ -129,14 +129,12 @@ class CoTStream:
                 # graph's own pool.
                 self._graph_hidden = outputs.hidden_states
                 self._graph_logits = outputs.logits
-                # The throwaway chain may have ended and answered the blank turn
-                # it opened on, so the conversation is reset with it.
                 self.reset()
-                self.prompt_builder.reset()
 
     def reset(self) -> None:
-        """Drop the chain. The next advance prefills from the frame it is given."""
+        """Drop the chain. The next advance prefills from the frames it is given."""
         self._needs_prefill = True
+        self._window.reset()
         self._hidden = None
         self._next_token = None
         self._tokens = []
@@ -160,23 +158,26 @@ class CoTStream:
         """
         return 0
 
-    def advance(self) -> torch.Tensor:
+    def advance(self, frame: torch.Tensor) -> torch.Tensor:
         """The ``tokens_per_step`` activations this environment step issues.
 
-        The builder's conversation is read only where a chain restarts, and only
-        its tail -- the standing task, the chain that ended last, and the turn
-        being opened on -- because a prefill has to fit ``PROMPT_BUDGET``. That
-        the frame is read there and nowhere else is what makes the chain the
-        slow loop.
+        The builder's prompt is read only where a chain restarts. That the
+        frames are read there and nowhere else is what makes the chain the slow
+        loop.
 
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16.
         """
         start = time.perf_counter()
+        self._window.push(frame)
         activations = []
         while len(activations) < self.tokens_per_step:
             if self._needs_prefill:
-                self._prefill(self.prompt_builder.conversation())
+                self._prefill(
+                    self.prompt_builder.system_text(),
+                    self.prompt_builder.turn_text(),
+                    self._window.frames(),
+                )
             activations.append(self._hidden)
             position = self._position
             self._write_step_inputs(position)
@@ -191,35 +192,18 @@ class CoTStream:
         self._msec = (time.perf_counter() - start) * 1000.0
         return torch.stack(activations)
 
-    def _prefill(self, conversation: list[dict]) -> None:
-        # The standing task, the chain that ended last as the model's own turn,
-        # and the turn being opened on. Everything before those is dropped rather
-        # than sent: a prefill has to fit ``PROMPT_BUDGET`` however long the
-        # conversation has grown, and the only frame it carries is the current.
-        turn = conversation[-1]
-        image = turn["content"][0]["image"]
-        replies = [reply for reply in conversation if reply["role"] == "assistant"]
-        current = {
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": turn["content"][1]["text"]},
-            ],
-        }
+    def _prefill(self, system_text: str, turn_text: str, frames: torch.Tensor) -> None:
         # Thinking off: with the <think> block left open the model spends the
         # chain reasoning about the request rather than about the scene.
-        text = self.processor.apply_chat_template(
-            [conversation[0]] + replies[-1:] + [current],
-            tokenize=False,
-            add_generation_prompt=True,
+        inputs = build_vlm_inputs(
+            self.processor,
+            frames[None].to(self.device),
+            [system_text],
+            [turn_text],
+            self.decision_fps,
+            self.frame_stride,
             enable_thinking=False,
         )
-        inputs = self.processor(
-            text=[text],
-            images=[image.detach().float().clamp(0.0, 1.0)],
-            return_tensors="pt",
-            do_rescale=False,
-        ).to(self.device)
         prompt_len = inputs["input_ids"].shape[1]
         assert prompt_len + self.max_len <= self._cache_len, (
             f"prompt of {prompt_len} tokens plus a {self.max_len}-token chain exceeds the "
@@ -230,7 +214,7 @@ class CoTStream:
         self._cache.reset()
         self._needs_prefill = False
         outputs = self.model(
-            **inputs,
+            **inputs["encoded"],
             past_key_values=self._cache,
             use_cache=True,
             output_hidden_states=True,
@@ -277,9 +261,7 @@ class CoTStream:
         self._next_token = torch.multinomial(probs, 1).view(1, 1)
         self._tokens.append(self._next_token.item())
         ended = self._tokens[-1] == self.eos_token_id or len(self._tokens) >= self.max_len
-        if ended:
-            self.prompt_builder.add_reply(self.text())
-            self._needs_prefill = True
+        self._needs_prefill = ended
 
     def stats(self) -> dict:
         """What the chain costs: the prompt it was prefilled on, the tokens it
