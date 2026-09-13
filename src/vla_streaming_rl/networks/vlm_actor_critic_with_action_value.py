@@ -25,7 +25,7 @@ from .modules.prediction_head import StatePredictionHead
 from .modules.reward_processor import RewardProcessor
 from .modules.value_head import DistributionalValueHead
 from .modules.vlm_backbone import load_model
-from .modules.vlm_inputs import build_vlm_inputs
+from .modules.vlm_inputs import build_vlm_inputs, render_conversation
 
 
 @dataclass
@@ -41,6 +41,24 @@ class PromptForward:
     past_key_values: object
     inputs: dict
     inputs_embeds: torch.Tensor
+
+
+def _user_turn(image: torch.Tensor, text: str) -> dict:
+    return {
+        "role": "user",
+        "content": [{"type": "image", "image": image}, {"type": "text", "text": text}],
+    }
+
+
+def _rows(data: ReplayBufferData) -> tuple[torch.Tensor, ...]:
+    """What a replay batch holds of each tick's prompt, in the order
+    ``_prompts_at`` reads them."""
+    return (
+        data.observations,
+        data.system_token_ids,
+        data.turn_token_ids,
+        data.reply_token_ids,
+    )
 
 
 class VLMActorCriticWithActionValue(NetworkInterface):
@@ -88,7 +106,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         predictor_hidden_dim: int,
         predictor_block_num: int,
         sparsity: float,
-        decision_fps: float,
+        prompt_history_turns: int,
+        cot_steps_per_chain: int,
         predictor_type: str,
         policy_type: str,
         image_encoder_type: str,
@@ -102,7 +121,15 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_dim = action_space_shape[0]
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
-        self.decision_fps = decision_fps
+        # The prompt of a tick is the conversation the zero-shot controller
+        # would read there: its turns are the buffer rows ``cot_steps_per_chain``
+        # apart ending on the tick, up to ``prompt_history_turns`` of them, each
+        # a frame under its own text answered by the chain its tick wrote.
+        assert prompt_history_turns >= 0, prompt_history_turns
+        assert cot_steps_per_chain >= 1, cot_steps_per_chain
+        self.prompt_history_turns = prompt_history_turns
+        self.cot_steps_per_chain = cot_steps_per_chain
+        self._since_write = cot_steps_per_chain
         self.reasoning_loss_weight = reasoning_loss_weight
         self.reasoning_max_tokens = reasoning_max_tokens
         self.reasoning_temperature = reasoning_temperature
@@ -225,31 +252,104 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         del velocity_x, velocity_y, velocity_z, episode_return, pass_mark
         del remaining_return, global_step, episode_step, health
 
-    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
-        """Tokenize a task prompt string into token IDs."""
-        return self.processor.tokenizer.encode(task_prompt, add_special_tokens=False)
+    def _enable_thinking(self) -> bool:
+        # As the zero-shot controller: the model's own think block is closed
+        # unless a chain is going to be written.
+        return self.reasoning_max_tokens != 0
 
-    def _decode_task_prompt_ids(self, token_ids: torch.Tensor) -> list[str]:
-        """Decode task prompt token IDs back to strings.
+    def tokenize(self, text: str) -> list[int]:
+        return self.processor.tokenizer.encode(text, add_special_tokens=False)
 
-        Args:
-            token_ids: (B, max_prompt_tokens) tensor of token IDs
-        Returns:
-            List of decoded strings, one per batch element
+    def thought_text(self) -> str:
+        return self._last_reasoning_text
+
+    def advance_cot(
+        self, episode_started: bool, window: ReplayBufferData
+    ) -> tuple[torch.Tensor, int]:
+        """Every ``cot_steps_per_chain`` ticks, write a chain on this tick's
+        prompt, read off ``window`` (the buffer's newest rows, this tick last).
+
+        Returns no activations -- the chain reaches the policy as text, as the
+        reply of this tick's turn in the prompts that follow -- and 0.
         """
+        if episode_started:
+            self._since_write = self.cot_steps_per_chain
+        else:
+            self._since_write += 1
+        if self.reasoning_max_tokens > 0 and self._since_write >= self.cot_steps_per_chain:
+            self._write_chain(window)
+            self._since_write = 0
+        return torch.zeros(self.cot_shape), 0
+
+    @torch.inference_mode()
+    def _write_chain(self, window: ReplayBufferData) -> None:
+        texts, images = self._prompts_at(*_rows(window), -1)
+        prompt = self._forward_prompt(texts, images)
+        _, _, token_ids, valid_mask = self._reason(prompt)
+        self._last_reasoning_text = self.processor.tokenizer.decode(
+            token_ids[0][valid_mask[0]].tolist(), skip_special_tokens=True
+        ).strip()
+
+    def _decode(self, token_ids: torch.Tensor) -> list[str]:
+        """Strings back from their stored token IDs, (N, max_prompt_tokens)."""
         results = []
-        for i in range(token_ids.shape[0]):
-            ids = token_ids[i]
-            # Remove padding tokens
-            mask = ids != self.pad_token_id
-            valid_ids = ids[mask].tolist()
-            text = self.processor.tokenizer.decode(valid_ids, skip_special_tokens=True)
-            results.append(text)
+        for ids in token_ids:
+            valid_ids = ids[ids != self.pad_token_id].tolist()
+            results.append(self.processor.tokenizer.decode(valid_ids, skip_special_tokens=True))
         return results
+
+    def _prompts_at(
+        self,
+        observations: torch.Tensor,
+        system_token_ids: torch.Tensor,
+        turn_token_ids: torch.Tensor,
+        reply_token_ids: torch.Tensor,
+        slot: int,
+    ) -> tuple[list[str], list[list[torch.Tensor]]]:
+        """The conversation of each batch element's ``slot`` tick, rendered.
+
+        Its turns are the rows ``cot_steps_per_chain`` apart ending on the slot:
+        each a frame under its own text, the earlier ones answered by the reply
+        their tick wrote. Up to ``prompt_history_turns`` earlier turns, as many
+        as the window holds; an episode boundary does not cut them, so what the
+        episodes before did and what came of them stays in view.
+        """
+        cursor = slot % observations.shape[1]
+        stride = self.cot_steps_per_chain
+        system_texts = self._decode(system_token_ids[:, cursor])
+        texts, images = [], []
+        for b in range(observations.shape[0]):
+            turns_num = min(self.prompt_history_turns, cursor // stride)
+            rows = [cursor - stride * k for k in range(turns_num, -1, -1)]
+            turn_texts = self._decode(turn_token_ids[b, rows])
+            reply_texts = self._decode(reply_token_ids[b, rows[:-1]])
+            conversation = [
+                {"role": "system", "content": [{"type": "text", "text": system_texts[b]}]}
+            ]
+            for row, turn_text, reply_text in zip(rows, turn_texts, reply_texts, strict=False):
+                conversation.append(_user_turn(observations[b, row], turn_text))
+                if reply_text:
+                    conversation.append(
+                        {"role": "assistant", "content": [{"type": "text", "text": reply_text}]}
+                    )
+            conversation.append(_user_turn(observations[b, rows[-1]], turn_texts[-1]))
+            text, frames = render_conversation(
+                self.processor, conversation, self._enable_thinking()
+            )
+            texts.append(text)
+            images.append(frames)
+        return texts, images
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        state, action, actor_activation, critic_out = self._infer(data.s_seq, data.task_prompts)
+        texts, images = self._prompts_at(
+            data.s_seq,
+            data.system_token_ids_seq,
+            data.turn_token_ids_seq,
+            data.reply_token_ids_seq,
+            -1,
+        )
+        state, action, actor_activation, critic_out = self._infer(texts, images)
 
         next_image_latent, next_reward_latent, predictor_activation = (
             self.prediction_head.predict_next_state(
@@ -278,22 +378,19 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
-        # Decode task prompts from buffer: use last timestep's prompt for next-state
-        next_prompts = self._decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
-        # Use prompt at the boundary between seq and horizon for current state
-        curr_prompts = self._decode_task_prompt_ids(
-            data.task_prompt_token_ids[:, -self.horizon - 1]
-        )
+        # The prompt of each state is the one stored on its own tick: the last
+        # slot for the next state, the slot before the chunk for the current.
+        next_prompts = self._prompts_at(*_rows(data), -1)
+        curr_prompts = self._prompts_at(*_rows(data), -self.horizon - 1)
 
-        _, _, _, next_critic_out = self._infer(data.observations[:, self.horizon :], next_prompts)
+        _, _, _, next_critic_out = self._infer(*next_prompts)
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(
             next_critic_out.output, chunk_rewards, chunk_dones
         )
 
-        curr_obs = data.observations[:, : -self.horizon]
-        prompt = self._forward_prompt(curr_obs, curr_prompts)
+        prompt = self._forward_prompt(*curr_prompts)
         state = prompt.state
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
 
@@ -336,14 +433,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return LossResult(loss=total_loss, info=info_dict)
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
-        next_prompts = self._decode_task_prompt_ids(data.task_prompt_token_ids[:, -1])
-        curr_prompts = self._decode_task_prompt_ids(
-            data.task_prompt_token_ids[:, -self.horizon - 1]
-        )
+        next_prompts = self._prompts_at(*_rows(data), -1)
+        curr_prompts = self._prompts_at(*_rows(data), -self.horizon - 1)
 
-        next_state, next_action, actor_activation, critic_out = self._infer(
-            data.observations[:, self.horizon :], next_prompts
-        )
+        next_state, next_action, actor_activation, critic_out = self._infer(*next_prompts)
         critic_activation = critic_out.activation
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
@@ -351,8 +444,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             critic_out.output, chunk_rewards, chunk_dones
         )
 
-        curr_obs = data.observations[:, : -self.horizon]
-        prompt = self._forward_prompt(curr_obs, curr_prompts)
+        prompt = self._forward_prompt(*curr_prompts)
         state = prompt.state
         action_chunk = data.actions[:, -self.horizon :]
 
@@ -471,14 +563,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state = state.transpose(1, 2)  # (B, num_state_queries, state_out_dim)
         return state.flatten(start_dim=1)
 
-    def _forward_prompt(self, obs: torch.Tensor, task_prompts: list[str]) -> PromptForward:
-        """Run the VLM over the observation window."""
-        inputs = build_vlm_inputs(
-            processor=self.processor,
-            images=obs,
-            task_prompts=task_prompts,
-            decision_fps=self.decision_fps,
-        )
+    def _forward_prompt(self, texts: list[str], images: list[list[torch.Tensor]]) -> PromptForward:
+        """Run the VLM over a batch of rendered conversations."""
+        inputs = build_vlm_inputs(self.processor, texts, images, self.device)
         vlm_inner = self._get_vlm_model_inner()
 
         # The vision tower's tokens are scattered into the placeholder positions
@@ -676,17 +763,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def _infer(
-        self, obs: torch.Tensor, task_prompts: list[str]
+        self, texts: list[str], images: list[list[torch.Tensor]]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
-        prompt = self._forward_prompt(obs, task_prompts)
-        if self.reasoning_max_tokens == 0:
-            state = prompt.state
-        else:
-            _, state, token_ids, valid_mask = self._reason(prompt)
-            self._last_reasoning_text = self.processor.tokenizer.decode(
-                token_ids[0][valid_mask[0]].tolist(), skip_special_tokens=True
-            ).strip()
-
+        # The chain reaches the policy as text in the conversation, not as a
+        # fresh sample here: the state is the prompt's own.
+        state = self._forward_prompt(texts, images).state
         action, actor_activation = self.policy_head.get_action(state)
 
         critic_out = self.value_head(state, action)

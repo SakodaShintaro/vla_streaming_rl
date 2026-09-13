@@ -110,6 +110,11 @@ class PromptBuilder(ABC):
         opening = {"role": "system", "content": [{"type": "text", "text": self._task_text}]}
         return [opening] + self._turns + [self._current]
 
+    def turn_text(self) -> str:
+        """This tick's own text, the live numbers under the frame. What a learner
+        stores beside the frame, so the turn can be rebuilt from its row later."""
+        return self._current["content"][1]["text"]
+
     def add_reply(self, text: str) -> None:
         """What the chain wrote about that turn, which settles the pair into the
         conversation, dropping the oldest exchange once ``history_turns`` are

@@ -68,7 +68,6 @@ def build_network(
     args: DictConfig,
     observation_space_shape: tuple[int, ...],
     action_space_shape: tuple[int, ...],
-    decision_fps: float,
     prompt_builder,
     device: torch.device,
 ) -> nn.Module:
@@ -240,7 +239,8 @@ def build_network(
             predictor_hidden_dim=args.predictor_hidden_dim,
             predictor_block_num=args.predictor_block_num,
             sparsity=args.sparsity,
-            decision_fps=decision_fps,
+            prompt_history_turns=args.prompt_history_turns,
+            cot_steps_per_chain=args.cot_steps_per_chain,
             predictor_type=args.predictor_type,
             policy_type=args.policy_type,
             image_encoder_type=args.image_encoder_type,

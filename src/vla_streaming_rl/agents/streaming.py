@@ -180,8 +180,6 @@ class StreamingAgent(Agent):
         # writes, and writes its own turn back into it.
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
-        task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
-        cot_activation, cot_age = self.network.advance_cot(episode_started)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -189,7 +187,8 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            task_prompt_token_ids,
+            self.network.tokenize(prompt),
+            self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
             velocity_y,
             velocity_z,
@@ -199,8 +198,14 @@ class StreamingAgent(Agent):
             global_step_obs,
             episode_step_obs,
             health_obs,
-            cot_activation,
-            cot_age,
+        )
+        # The chain reads its prompt off the rows just stored, and what it
+        # writes completes this tick's row.
+        cot_activation, cot_age = self.network.advance_cot(
+            episode_started, self.rb.get_latest(self.seq_len)
+        )
+        self.rb.amend_latest(
+            cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
         )
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -272,7 +277,9 @@ class StreamingAgent(Agent):
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
-                task_prompts=[prompt],
+                system_token_ids_seq=latest_data.system_token_ids,
+                turn_token_ids_seq=latest_data.turn_token_ids,
+                reply_token_ids_seq=latest_data.reply_token_ids,
                 velocity_x_seq=latest_data.velocity_x,
                 velocity_y_seq=latest_data.velocity_y,
                 velocity_z_seq=latest_data.velocity_z,
@@ -379,8 +386,6 @@ class StreamingAgent(Agent):
         # writes, and writes its own turn back into it.
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
-        task_prompt_token_ids = self.network.tokenize_task_prompt(prompt)
-        cot_activation, cot_age = self.network.advance_cot(episode_started)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             image,
@@ -388,7 +393,8 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            task_prompt_token_ids,
+            self.network.tokenize(prompt),
+            self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
             velocity_y,
             velocity_z,
@@ -398,8 +404,14 @@ class StreamingAgent(Agent):
             global_step_obs,
             episode_step_obs,
             health_obs,
-            cot_activation,
-            cot_age,
+        )
+        # The chain reads its prompt off the rows just stored, and what it
+        # writes completes this tick's row.
+        cot_activation, cot_age = self.network.advance_cot(
+            episode_started, self.rb.get_latest(self.seq_len)
+        )
+        self.rb.amend_latest(
+            cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
         )
 
         if self.action_chunk is not None and self.chunk_step < self.horizon:

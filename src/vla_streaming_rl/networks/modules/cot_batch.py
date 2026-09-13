@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from vla_streaming_rl.agents.prompt import PromptBuilder
 
 from .vlm_backbone import load_model, sampling_kwargs
+from .vlm_inputs import render_conversation
 
 
 class CoTBatch:
@@ -95,14 +96,10 @@ class CoTBatch:
 
     def _write_chain(self) -> None:
         start = time.perf_counter()
-        messages, images = self._render(self.prompt_builder.conversation())
-        text = self.processor.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=False,
-            # Thinking off: with the <think> block left open the model spends the
-            # chain reasoning about the request rather than about the scene.
-            enable_thinking=False,
+        # Thinking off: with the <think> block left open the model spends the
+        # chain reasoning about the request rather than about the scene.
+        text, images = render_conversation(
+            self.processor, self.prompt_builder.conversation(), enable_thinking=False
         )
         inputs = self.processor(
             text=[text],
@@ -124,28 +121,6 @@ class CoTBatch:
         self._input_tokens = int(prompt_len)
         self._msec = (time.perf_counter() - start) * 1000.0
         self.prompt_builder.add_reply(self.text())
-
-    def _render(self, turns: list[dict]) -> tuple[list[dict], list[torch.Tensor]]:
-        """The turns as the processor takes them: the frames pulled out into
-        their own list, since the chat template wants a placeholder where each
-        one goes and the pixels handed over beside it."""
-        images = [
-            part["image"].to(torch.float32)
-            for turn in turns
-            for part in turn["content"]
-            if part["type"] == "image"
-        ]
-        messages = [
-            {
-                "role": turn["role"],
-                "content": [
-                    {key: value for key, value in part.items() if key != "image"}
-                    for part in turn["content"]
-                ],
-            }
-            for turn in turns
-        ]
-        return messages, images
 
     def _read_activations(self, hidden_states) -> torch.Tensor:
         """The whole chain, every depth kept, pooled to one step's read:

@@ -223,12 +223,16 @@ class ActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
-    def advance_cot(self, episode_started: bool) -> tuple[torch.Tensor, int]:
+    def advance_cot(
+        self, episode_started: bool, window: ReplayBufferData
+    ) -> tuple[torch.Tensor, int]:
         """This step's chain-of-thought activations and how many steps ago they
         were generated, or nothing when the chain is off. The first tick of an
         episode ends whatever chain was running, so an episode's commentary
         starts on its own first frame rather than carrying the one written about
-        the frame the last episode ended on."""
+        the frame the last episode ended on. The chain reads the conversation
+        the builder holds, not ``window``."""
+        del window
         if self.cot_module is None:
             return torch.zeros(self.cot_shape), 0
         if episode_started:
@@ -264,6 +268,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         if self.cot_module is None:
             return {}
         return {"chain_of_thought": self.cot_module.text()}
+
+    def thought_text(self) -> str:
+        if self.cot_module is None:
+            return ""
+        return self.cot_module.text()
 
     def _drop_cot(self, cot_activations: torch.Tensor) -> torch.Tensor:
         """The chain taken away from a share ``cot_dropout`` of the batch.
@@ -305,7 +314,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.cot_age[:, start:stop],
         )
 
-    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
+    def tokenize(self, text: str) -> list[int]:
+        del text
         return []
 
     def observe_scalar_obs(

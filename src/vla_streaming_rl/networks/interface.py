@@ -25,16 +25,18 @@ class InferInput:
 
     Unlike ``compute_loss`` / ``infer_and_compute_loss`` — which read a replay
     batch (:class:`ReplayBufferData`) — inference assembles its window from the
-    buffer's latest frames but carries the *live* recurrent state and task prompt
-    held by the agent. Those two therefore are explicit fields here rather than
-    read off the buffer. Batch size is 1.
+    buffer's latest frames but carries the *live* recurrent state held by the
+    agent, which therefore is an explicit field here rather than read off the
+    buffer. Batch size is 1.
     """
 
     s_seq: torch.Tensor  # (B, T, *obs_shape) image observation window
     a_seq: torch.Tensor  # (B, T, action_dim)
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
-    task_prompts: list[str]  # one prompt per batch element
+    system_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
+    turn_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
+    reply_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
     velocity_x_seq: torch.Tensor  # (B, T, 1)
     velocity_y_seq: torch.Tensor  # (B, T, 1)
     velocity_z_seq: torch.Tensor  # (B, T, 1)
@@ -130,12 +132,20 @@ class NetworkInterface(nn.Module, abc.ABC):
     # verbatim. Everything else contributes no tokens.
     cot_shape: tuple[int, int] = (0, 0)
 
-    def advance_cot(self, episode_started: bool) -> tuple[torch.Tensor, int]:
+    def advance_cot(
+        self, episode_started: bool, window: ReplayBufferData
+    ) -> tuple[torch.Tensor, int]:
         """This step's chain-of-thought activations and how many steps ago they
         were generated, empty and 0 unless the network carries a chain (see
-        ``networks/cot_actor_critic.py``)."""
-        del episode_started
+        ``networks/cot_actor_critic.py``). ``window`` is the buffer's newest
+        rows, this step's last, for a chain that reads its prompt off them."""
+        del episode_started, window
         return torch.zeros(self.cot_shape), 0
+
+    def thought_text(self) -> str:
+        """What the network's chain wrote last, empty without one. Stored as
+        the reply of the step it was written on."""
+        return ""
 
     def render_panels(self) -> dict[str, np.ndarray]:
         """Named RGB panels this network contributes to the render strip. The
@@ -154,8 +164,9 @@ class NetworkInterface(nn.Module, abc.ABC):
         """Initial recurrent state the agent carries between steps."""
 
     @abc.abstractmethod
-    def tokenize_task_prompt(self, task_prompt: str) -> list[int]:
-        """Token ids for a task-prompt string (empty for non-VLM networks)."""
+    def tokenize(self, text: str) -> list[int]:
+        """Token ids of a prompt string for the replay buffer (empty for
+        non-VLM networks)."""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:
