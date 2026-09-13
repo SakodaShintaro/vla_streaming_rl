@@ -74,6 +74,7 @@ class ZeroShotVLMAgent(Agent):
         self.parse_action_text = parse_action_text
 
         self.held_action = np.zeros(self.action_dim, dtype=np.float32)
+        self.hold_steps = 0
         self.held_status = ""
         self.held_metrics = {}
         self.steps_until_next = 0
@@ -100,7 +101,14 @@ class ZeroShotVLMAgent(Agent):
 
         if self.steps_until_next == 0:
             self._write_action()
+            self.hold_steps = int(np.random.randint(1, self.steps_per_action + 1))
             self.steps_until_next = self.steps_per_action
+        steps_since_write = self.steps_per_action - self.steps_until_next
+        action = (
+            self.held_action
+            if steps_since_write < self.hold_steps
+            else np.zeros(self.action_dim, dtype=np.float32)
+        )
         self.steps_until_next -= 1
         self.step_in_episode += 1
 
@@ -113,7 +121,7 @@ class ZeroShotVLMAgent(Agent):
             )
         }
         return StepResult(
-            action=self.held_action,
+            action=action,
             metrics=self.held_metrics,
             panels=panels,
             texts={"prompt": prompt},
@@ -178,6 +186,7 @@ class ZeroShotVLMAgent(Agent):
         if self.reset_on_episode_end:
             self.prompt_builder.reset()
             self.held_action = np.zeros(self.action_dim, dtype=np.float32)
+            self.hold_steps = 0
             self.held_status = ""
             self.held_metrics = {}
             # Zero means "generate now", so the first step of an episode decides
