@@ -312,9 +312,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Sequence (state prediction) loss
         seq_loss, seq_info = self.prediction_head.compute_loss(
             self._state_for_predictor(state),
-            data.actions[:, -1],
-            data.observations[:, -1],
-            data.rewards[:, -1],
+            data.actions[:, -self.horizon],
+            data.observations[:, -self.horizon],
+            data.rewards[:, -self.horizon],
             self.detach_predictor,
             self.disable_state_predictor,
         )
@@ -371,9 +371,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Sequence (state prediction) loss
         seq_loss, seq_info = self.prediction_head.compute_loss(
             self._state_for_predictor(state),
-            data.actions[:, -1],
-            data.observations[:, -1],
-            data.rewards[:, -1],
+            data.actions[:, -self.horizon],
+            data.observations[:, -self.horizon],
+            data.rewards[:, -self.horizon],
             self.detach_predictor,
             self.disable_state_predictor,
         )

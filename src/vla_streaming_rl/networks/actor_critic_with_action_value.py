@@ -448,12 +448,11 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        target_image = data.observations[:, -1]
         seq_loss, seq_info = self.prediction_head.compute_loss(
             curr_state,
-            data.actions[:, -1],
-            target_image,
-            data.rewards[:, -1],
+            data.actions[:, -self.horizon],
+            data.observations[:, -self.horizon],
+            data.rewards[:, -self.horizon],
             self.detach_predictor,
             self.disable_state_predictor,
         )
@@ -495,12 +494,11 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        target_image = data.observations[:, -1]
         seq_loss, seq_info = self.prediction_head.compute_loss(
             prev_state,
-            data.actions[:, -1],
-            target_image,
-            data.rewards[:, -1],
+            data.actions[:, -self.horizon],
+            data.observations[:, -self.horizon],
+            data.rewards[:, -self.horizon],
             self.detach_predictor,
             self.disable_state_predictor,
         )
