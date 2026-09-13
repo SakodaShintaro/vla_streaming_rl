@@ -106,6 +106,7 @@ class StreamingAgent(Agent):
         self.rb = ReplayBuffer(
             size=seq_len + horizon,
             seq_len=self.seq_len + self.horizon,
+            horizon=self.horizon,
             obs_shape=self.network.observation_space_shape,
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
@@ -150,9 +151,11 @@ class StreamingAgent(Agent):
         self._reset_rnn_state_if_fresh(episode_done)
         if episode_started:
             self.prompt_builder.reset()
-        if episode_done:
+            # A chunk begun on the terminal frame would otherwise run into the
+            # new episode; the first action of an episode comes from its own frame.
             self.action_chunk = None
             self.chunk_step = 0
+        if episode_done:
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
@@ -347,9 +350,11 @@ class StreamingAgent(Agent):
         self._reset_rnn_state_if_fresh(episode_done)
         if episode_started:
             self.prompt_builder.reset()
-        if episode_done:
+            # A chunk begun on the terminal frame would otherwise run into the
+            # new episode; the first action of an episode comes from its own frame.
             self.action_chunk = None
             self.chunk_step = 0
+        if episode_done:
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:

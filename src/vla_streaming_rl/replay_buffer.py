@@ -41,6 +41,7 @@ class ReplayBuffer:
         self,
         size: int,
         seq_len: int,
+        horizon: int,
         obs_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
@@ -52,6 +53,7 @@ class ReplayBuffer:
     ) -> None:
         self.size = size
         self.seq_len = seq_len
+        self.horizon = horizon
         self.action_shape = action_shape
         self.output_device = output_device
         self.storage_device = storage_device
@@ -59,6 +61,7 @@ class ReplayBuffer:
         self.pad_token_id = pad_token_id
 
         assert self.seq_len <= self.size, "Replay buffer size must be >= sequence length."
+        assert self.horizon < self.seq_len, "The window needs a state slot before the chunk."
 
         def init_tensor(shape: tuple[int, ...]) -> torch.Tensor:
             return torch.zeros(
@@ -189,14 +192,17 @@ class ReplayBuffer:
         """Window starts a learning batch may be drawn from.
 
         ``seq_len`` here is the whole window the learner reads: the state window
-        plus the action chunk that follows it. Two things make a start invalid.
+        plus the ``horizon`` action chunk that follows it. Two things make a
+        start invalid.
 
-        A ``done`` anywhere but the window's last slot means the window straddles
-        an episode boundary: the states would come from two episodes, and the
-        chunk would carry actions the agent never took in the episode its state
-        belongs to. A ``done`` on the last slot is the wanted case -- the episode
-        ends on the chunk's final action -- and the value head truncates the
-        bootstrap there itself.
+        A ``done`` on the current state slot (the last of the state window) or
+        inside the chunk but not on its last slot means the chunk carries
+        actions the agent never took in the episode its state belongs to. A
+        ``done`` earlier in the state window is allowed: the state encoder then
+        sees frames of the previous episode, which is what it sees at every
+        episode start anyway. A ``done`` on the last slot is the wanted case --
+        the episode ends on the chunk's final action -- and the value head
+        truncates the bootstrap there itself.
 
         A window containing the write head has the same problem in time: the
         slots on either side of it are the newest and the oldest transitions in
@@ -207,7 +213,8 @@ class ReplayBuffer:
             0, curr_size - self.seq_len + 1, device=self.storage_device, dtype=torch.long
         )
 
-        # Sum of dones over slots ``start`` .. ``start + seq_len - 2``.
+        # Sum of dones over slots ``start + state_slot`` .. ``start + seq_len - 2``.
+        state_slot = self.seq_len - self.horizon - 1
         cumulative_dones = torch.cat(
             [
                 torch.zeros(1, device=self.storage_device),
@@ -215,7 +222,7 @@ class ReplayBuffer:
             ]
         )
         crosses_episode = (
-            cumulative_dones[starts + self.seq_len - 1] - cumulative_dones[starts]
+            cumulative_dones[starts + self.seq_len - 1] - cumulative_dones[starts + state_slot]
         ) > 0
 
         if self.full:
@@ -227,18 +234,19 @@ class ReplayBuffer:
         return starts[~(crosses_episode | crosses_head)]
 
     def latest_window_is_clean(self, window_len: int) -> bool:
-        """Whether the newest ``window_len`` slots are one unbroken stretch of a
-        single episode, by the rule :meth:`valid_start_indices` draws under: a
-        ``done`` only on the last slot, which is the episode ending on the
+        """Whether the newest ``window_len`` slots pass the rule
+        :meth:`valid_start_indices` draws under: from the current state slot on,
+        a ``done`` only on the last slot, which is the episode ending on the
         window's own final action. The learner that reads the newest window
         instead of sampling asks this before it trains on it.
         """
         if not self.full and self.idx < window_len:
             return False
+        state_slot = window_len - self.horizon - 1
         indices = (
             self.idx - window_len + torch.arange(window_len, device=self.storage_device)
         ) % self.size
-        return bool(self.dones[indices[:-1], 0].sum() == 0)
+        return bool(self.dones[indices[state_slot:-1], 0].sum() == 0)
 
     def sample(self, batch_size: int) -> ReplayBufferData:
         curr_size = self.size if self.full else self.idx
