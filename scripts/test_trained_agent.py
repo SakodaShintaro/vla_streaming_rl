@@ -124,7 +124,7 @@ def run_arena(
 
     if render:
         panels = {
-            "environment": overlay_caption(env.render(), result.texts["prompt"]),
+            "environment": overlay_caption(env.render(), result.texts["task"]),
             "observation": obs["image"].copy().transpose(1, 2, 0),
             **result.panels,
         }
@@ -138,7 +138,7 @@ def run_arena(
 
         if render:
             panels = {
-                "environment": overlay_caption(env.render(), result.texts["prompt"]),
+                "environment": overlay_caption(env.render(), result.texts["task"]),
                 "observation": obs["image"].copy().transpose(1, 2, 0),
                 **result.panels,
             }

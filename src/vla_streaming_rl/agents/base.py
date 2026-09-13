@@ -29,8 +29,9 @@ class StepResult:
     - ``texts``: named free-form text, written to the episode's ``texts.tsv``.
       What a panel shows as pixels this keeps as characters, so a chain of
       thought can be read back and searched after the run. Every agent puts the
-      language input it composed this tick under ``"prompt"`` (empty when it
-      composes none), which is also what the trainer captions the render with.
+      standing task under ``"task"``, which is what the trainer captions the
+      render with, and the text it composed this tick under ``"prompt"``
+      (both empty when it composes none).
     """
 
     action: np.ndarray

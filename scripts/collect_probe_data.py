@@ -79,7 +79,7 @@ def collect_arena(
 
     obs_viz = (obs["image"].copy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
     panels = {
-        "environment": overlay_caption(env.render(), result.texts["prompt"]),
+        "environment": overlay_caption(env.render(), result.texts["task"]),
         "observation": obs_viz,
     }
     frame_list = [concat_labeled_images(panels)]
@@ -95,7 +95,7 @@ def collect_arena(
 
         obs_viz = (obs["image"].copy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
         panels = {
-            "environment": overlay_caption(env.render(), result.texts["prompt"]),
+            "environment": overlay_caption(env.render(), result.texts["task"]),
             "observation": obs_viz,
         }
         frame_list.append(concat_labeled_images(panels))
