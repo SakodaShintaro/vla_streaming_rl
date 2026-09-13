@@ -34,13 +34,8 @@ from omegaconf import DictConfig
 ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 
 TEXT_ACTION_PROTOCOL = (
-    "Reply with exactly two sections and no other text. "
-    "First, in AT MOST two short sentences inside <reason>...</reason>, say what in "
-    "the current image decides your next action, taking the previous reward (if "
-    "shown) into account. Do not describe the scene in general, do not restate "
-    "the task, and do not repeat your earlier reasoning. "
-    "Then output the action inside <answer>...</answer>, which must contain ONLY "
-    "the action -- no commentary, no labels."
+    "Reply with <reason>one short sentence on what decides the next action</reason> "
+    "then <answer>the action only</answer>."
 )
 
 
@@ -189,20 +184,12 @@ class CarRacingPromptBuilder(PromptBuilder):
 
 ANIMALAI_FRAMING = (
     "You control the agent in Animal-AI (first-person view). "
-    "Find and reach the green or yellow goal sphere; avoid red zones. "
-    "Action space: one move and one rotation, applied on the same tick, "
-    "written as `<move>, <rotation>`. "
-    "The move is one of: stand still, walk forward, walk backward. "
-    "The rotation is one of: no turn, turn right, turn left. "
-    "For example `walk forward, no turn` goes straight ahead, "
-    "`stand still, turn left` turns on the spot, and "
-    "`walk forward, turn right` walks while turning. "
-    "Face what you are heading for before you close on it: while it sits off to "
-    "one side of the view, turn on the spot towards it, and walk forward once "
-    "it is centered. "
-    "You see only what is in front of you while the arena extends all around "
-    "you, so what you are looking for is out of view more often than not, and "
-    "turning on the spot is how it is found. "
+    "Write the action as `<move>, <rotation>`: move is stand still, walk forward "
+    "or walk backward; rotation is no turn, turn right or turn left. "
+    "Health drains every step and the episode fails when it reaches 0. "
+    "Walls are never the goal, whatever their color. "
+    "Walk forward whenever the target is in view, turning while walking if it is "
+    "off center; turn on the spot only when it is out of view. "
 )
 
 
