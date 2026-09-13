@@ -30,6 +30,7 @@ from vla_streaming_rl.utils import render_conversation_panel
 def build_cot(
     mode: str,
     model_id: str,
+    load_in_4bit: bool,
     tokens_per_step: int,
     max_len: int,
     temperature: float,
@@ -48,6 +49,7 @@ def build_cot(
     builders = {
         "stream": lambda: CoTStream(
             model_id=model_id,
+            load_in_4bit=load_in_4bit,
             tokens_per_step=tokens_per_step,
             max_len=max_len,
             temperature=temperature,
@@ -57,6 +59,7 @@ def build_cot(
         ),
         "batch": lambda: CoTBatch(
             model_id=model_id,
+            load_in_4bit=load_in_4bit,
             tokens_per_step=tokens_per_step,
             max_len=max_len,
             temperature=temperature,
@@ -103,6 +106,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         image_encode_mode: str,
         image_encoder_trainable: bool,
         vlm_model_id: str,
+        vlm_load_in_4bit: bool,
         cot_tokens_num: int,
         max_new_tokens: int,
         temperature: float,
@@ -156,6 +160,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             self.cot_module = build_cot(
                 mode=cot_mode,
                 model_id=vlm_model_id,
+                load_in_4bit=vlm_load_in_4bit,
                 tokens_per_step=cot_tokens_num,
                 max_len=max_new_tokens,
                 temperature=temperature,

@@ -46,6 +46,7 @@ class CoTStream:
     def __init__(
         self,
         model_id: str,
+        load_in_4bit: bool,
         tokens_per_step: int,
         max_len: int,
         temperature: float,
@@ -58,7 +59,9 @@ class CoTStream:
             f"max_len {max_len} below the per-step budget {tokens_per_step}: "
             "every step would restart the chain"
         )
-        self.model, self.processor = load_model(model_id, use_lora=False, device=device)
+        self.model, self.processor = load_model(
+            model_id, use_lora=False, load_in_4bit=load_in_4bit, device=device
+        )
         self.model.eval().requires_grad_(False)
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len

@@ -14,6 +14,7 @@ class CoTBatch:
     def __init__(
         self,
         model_id: str,
+        load_in_4bit: bool,
         tokens_per_step: int,
         max_len: int,
         temperature: float,
@@ -27,7 +28,9 @@ class CoTBatch:
             f"max_len {max_len} below {tokens_per_step}: the pool would stretch a chain "
             "shorter than one step's read"
         )
-        self.model, self.processor = load_model(model_id, use_lora=False, device=device)
+        self.model, self.processor = load_model(
+            model_id, use_lora=False, load_in_4bit=load_in_4bit, device=device
+        )
         self.model.eval().requires_grad_(False)
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len

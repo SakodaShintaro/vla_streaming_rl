@@ -97,6 +97,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         detach_predictor: bool,
         use_lora: bool,
         vlm_model_id: str,
+        vlm_load_in_4bit: bool,
         max_prompt_tokens: int,
         pad_token_id: int,
         num_state_queries: int,
@@ -161,6 +162,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.vlm_model, self.processor = load_model(
             vlm_model_id,
             use_lora=self.use_lora,
+            load_in_4bit=vlm_load_in_4bit,
             device=device,
         )
         self.device = device

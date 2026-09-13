@@ -1,6 +1,7 @@
 # @package _global_
 use_lora: false
 vlm_model_id: Qwen/Qwen3.5-0.8B
+vlm_load_in_4bit: false
 num_state_queries: 100
 state_out_dim: 4
 max_new_tokens: 128

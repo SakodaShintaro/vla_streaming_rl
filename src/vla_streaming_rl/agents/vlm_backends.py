@@ -152,13 +152,16 @@ class LocalVLMBackend:
         self,
         *,
         model_id: str,
+        load_in_4bit: bool,
         max_new_tokens: int,
         reasoning_max_tokens: int,
         temperature: float,
     ) -> None:
         assert temperature >= 0.0, temperature
         self.device = torch.device("cuda")
-        self.model, self.processor = load_model(model_id, use_lora=False, device=self.device)
+        self.model, self.processor = load_model(
+            model_id, use_lora=False, load_in_4bit=load_in_4bit, device=self.device
+        )
         self.model.eval()
         self.max_new_tokens = max_new_tokens
         # As on the hosted backend, 0 means the model does no thinking of its
@@ -210,6 +213,7 @@ def build_vlm_backend(args: DictConfig):
         )
     return LocalVLMBackend(
         model_id=args.vlm_model_id,
+        load_in_4bit=args.vlm_load_in_4bit,
         max_new_tokens=args.max_new_tokens,
         reasoning_max_tokens=args.reasoning_max_tokens,
         temperature=args.temperature,
