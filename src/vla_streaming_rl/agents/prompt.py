@@ -35,7 +35,7 @@ ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 
 TEXT_ACTION_PROTOCOL = (
     "Reply with exactly two sections and no other text. "
-    "First, in AT MOST two short sentences inside <think>...</think>, say what in "
+    "First, in AT MOST two short sentences inside <reason>...</reason>, say what in "
     "the current image decides your next action, taking the previous reward (if "
     "shown) into account. Do not describe the scene in general, do not restate "
     "the task, and do not repeat your earlier reasoning. "
