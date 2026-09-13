@@ -219,10 +219,10 @@ def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
     forward_speed = obs["velocity"][2]
     return (
         f"Forward speed: {forward_speed:+.2f}. "
-        f"Reward: {reward:+.2f}. "
-        f"Return so far: {obs['episode_return'][0]:+.2f}. "
-        f"Pass mark: {obs['pass_mark'][0]:+.2f}. "
-        f"Return needed: {obs['remaining_return'][0]:+.2f}. "
+        f"Reward: {reward:+.3f}. "
+        f"Return so far: {obs['episode_return'][0]:+.3f}. "
+        f"Pass mark: {obs['pass_mark'][0]:+.3f}. "
+        f"Return needed: {obs['remaining_return'][0]:+.3f}. "
         f"Health: {obs['health'][0]:.2f}. "
         f"Global step: {int(obs['global_step'][0])}. "
         f"Episode step: {int(obs['episode_step'][0])}."
