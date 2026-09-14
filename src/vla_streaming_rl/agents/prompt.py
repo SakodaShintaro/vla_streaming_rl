@@ -184,12 +184,17 @@ class CarRacingPromptBuilder(PromptBuilder):
 
 ANIMALAI_FRAMING = (
     "You control the agent in Animal-AI (first-person view). "
-    "Write the action as `<move>, <rotation>`: move is stand still, walk forward "
-    "or walk backward; rotation is no turn, turn right or turn left. "
+    "Write the action as a move and a rotation joined by a comma, for example "
+    "`walk forward, turn left`: move is stand still, walk forward or walk "
+    "backward; rotation is no turn, turn right or turn left. "
     "Health drains every step and the episode fails when it reaches 0. "
+    "Green spheres look yellow-green and touching one ends the episode; yellow "
+    "spheres are bright yellow and the episode goes on after touching them; red "
+    "spheres and red zones end the episode as a failure, never touch them. "
     "Walls are never the goal, whatever their color. "
     "Walk forward whenever the target is in view, turning while walking if it is "
-    "off center; turn on the spot only when it is out of view. "
+    "off center; turn on the spot only when it is out of view, and walk to a new "
+    "spot if a full turn shows nothing. "
 )
 
 
