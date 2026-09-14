@@ -28,6 +28,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_agent
 from vla_streaming_rl.agents.prompt import build_prompt_builder
+from vla_streaming_rl.envs.animalai_env import training_levels
 from vla_streaming_rl.networks.build import build_network
 from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
 from vla_streaming_rl.wrappers import make_env
@@ -664,7 +665,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             global_step,
             result_dir / "eval" / "final",
             args.env_factory.train_variant,
-            list(args.env_factory.train_levels),
+            training_levels(
+                args.env_factory.mode,
+                args.env_factory.train_variant,
+                list(args.env_factory.train_levels),
+            ),
         )
         wandb.summary.update({f"testbed/{k}": v for k, v in testbed_metrics.items()})
         eval_env.close()

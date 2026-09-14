@@ -204,13 +204,21 @@ def _all_levels(variant: str) -> list[str]:
     return sorted({arena.name.split("-")[0] for arena in _variant_arenas(variant)})
 
 
+def training_levels(mode: str, variant: str, train_levels: list[str]) -> list[str]:
+    """The levels a run in `mode` trains on: `train_levels` for the sweep modes,
+    every level for the curriculum modes, whose stages are the levels."""
+    if mode in ("sequential", "random"):
+        return list(train_levels)
+    return _all_levels(variant)
+
+
 def _training_arenas(variant: str, levels: list[str]) -> list[Arena]:
     """The training set: the `variant` copy of every task at one of `levels`.
 
     `levels` narrowed below every level is for looking at some levels on their
     own -- what a run scores on levels 01 and 02 without waiting for a
-    curriculum to reach them -- so the curriculum modes reject it: their stages
-    are the levels, and hiding levels from them would leave the stage numbers
+    curriculum to reach them. The curriculum modes ignore it: their stages are
+    the levels, and hiding levels from them would leave the stage numbers
     meaning something else.
     """
     assert len(levels) > 0, "levels must name at least one level"
@@ -613,10 +621,6 @@ def build_selector(
     Every mode's parameters are always supplied; a mode ignores the ones that
     do not apply to it.
     """
-    assert sorted(train_levels) == _all_levels(train_variant) or mode in ("sequential", "random"), (
-        f"train_levels {list(train_levels)} narrows the training set below every level, "
-        f"which the {mode!r} curriculum has no room for: its stages are the levels"
-    )
     builders = {
         "staged": lambda: StagedSelector(
             variant=train_variant, steps_per_stage=steps_per_stage, seed=seed
