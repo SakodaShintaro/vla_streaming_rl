@@ -4,7 +4,7 @@ import time
 import torch
 import torch.nn.functional as F
 
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
 
 from .vlm_backbone import load_model, sampling_kwargs
 from .vlm_inputs import render_conversation
@@ -55,6 +55,7 @@ class CoTBatch:
         """Drop the chain. The next advance writes a new one on the frame it is
         given; the conversation it is written into is the builder's to reset."""
         self._tokens = []
+        self._last_conversation = []
         # What the last chain cost. Kept between writes, since the steps that
         # hold one are not the steps that paid for it.
         self._input_tokens = 0
@@ -101,8 +102,9 @@ class CoTBatch:
         start = time.perf_counter()
         # Thinking off: with the <think> block left open the model spends the
         # chain reasoning about the request rather than about the scene.
+        self._last_conversation = self.prompt_builder.conversation()
         text, images = render_conversation(
-            self.processor, self.prompt_builder.conversation(), enable_thinking=False
+            self.processor, self._last_conversation, enable_thinking=False
         )
         inputs = self.processor(
             text=[text],
@@ -155,3 +157,8 @@ class CoTBatch:
     def text(self) -> str:
         """The chain as written, for logging."""
         return self.processor.tokenizer.decode(self._tokens, skip_special_tokens=True).strip()
+
+    def exchange(self) -> list[dict]:
+        """The last write as it happened: the conversation the model was given
+        and the chain it wrote back, for the render panel."""
+        return self._last_conversation + [assistant_turn(self.text())]

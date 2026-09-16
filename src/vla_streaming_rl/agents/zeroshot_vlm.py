@@ -17,7 +17,7 @@ import numpy as np
 from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
 from vla_streaming_rl.utils import render_conversation_panel
 
 # The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
@@ -75,6 +75,7 @@ class ZeroShotVLMAgent(Agent):
 
         self.held_action = np.zeros(self.action_dim, dtype=np.float32)
         self.hold_steps = 0
+        self.held_exchange = []
         self.held_status = ""
         self.held_metrics = {}
         self.steps_until_next = 0
@@ -114,7 +115,7 @@ class ZeroShotVLMAgent(Agent):
 
         panels = {
             "conversation": render_conversation_panel(
-                self.prompt_builder.conversation(),
+                self.held_exchange,
                 self.held_status,
                 self.PANEL_WIDTH,
                 self.PANEL_HEIGHT,
@@ -134,10 +135,12 @@ class ZeroShotVLMAgent(Agent):
         action are not the steps that paid for it.
         """
         request_start = time.time()
-        response = self.backend.generate(self.prompt_builder.conversation())
+        conversation = self.prompt_builder.conversation()
+        response = self.backend.generate(conversation)
         api_msec = (time.time() - request_start) * 1000
 
         response_text = response.text
+        self.held_exchange = conversation + [assistant_turn(response_text)]
         answer_match = ANSWER_RE.search(response_text)
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
         action_array, parse_ok = self.parse_action_text(answer_text)
@@ -187,6 +190,7 @@ class ZeroShotVLMAgent(Agent):
             self.prompt_builder.reset()
             self.held_action = np.zeros(self.action_dim, dtype=np.float32)
             self.hold_steps = 0
+            self.held_exchange = []
             self.held_status = ""
             self.held_metrics = {}
             # Zero means "generate now", so the first step of an episode decides

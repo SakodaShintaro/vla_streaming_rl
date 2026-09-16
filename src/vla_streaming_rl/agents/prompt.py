@@ -39,6 +39,11 @@ TEXT_ACTION_PROTOCOL = (
 )
 
 
+def assistant_turn(text: str) -> dict:
+    """A reply as the message the conversation holds it as."""
+    return {"role": "assistant", "content": [{"type": "text", "text": text}]}
+
+
 def _load_arena_tasks(env: Env) -> dict[str, str]:
     """The per-task instruction, keyed by the "XX-YY" prefix of an arena label.
 
@@ -114,10 +119,7 @@ class PromptBuilder(ABC):
         """What the chain wrote about that turn, which settles the pair into the
         conversation, dropping the oldest exchange once ``history_turns`` are
         held."""
-        turns = self._turns + [
-            self._current,
-            {"role": "assistant", "content": [{"type": "text", "text": text}]},
-        ]
+        turns = self._turns + [self._current, assistant_turn(text)]
         self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
 
     def task_text(self) -> str:

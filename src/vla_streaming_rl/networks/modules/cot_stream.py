@@ -26,7 +26,7 @@ import time
 import torch
 from transformers import StaticCache
 
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
 
 from .vlm_backbone import load_model
 
@@ -143,6 +143,7 @@ class CoTStream:
         self._hidden = None
         self._next_token = None
         self._tokens = []
+        self._last_conversation = []
         # The prompt the chain was prefilled on, and what this step's tokens
         # cost. Reported to the render panel, not used by the chain itself.
         self._input_tokens = 0
@@ -229,6 +230,7 @@ class CoTStream:
             f"cache length {self._cache_len}; raise CoTStream.PROMPT_BUDGET"
         )
         self._tokens = []
+        self._last_conversation = conversation
         self._input_tokens = int(prompt_len)
         self._cache.reset()
         self._needs_prefill = False
@@ -296,3 +298,8 @@ class CoTStream:
     def text(self) -> str:
         """The chain as written so far, for logging."""
         return self.processor.tokenizer.decode(self._tokens, skip_special_tokens=True).strip()
+
+    def exchange(self) -> list[dict]:
+        """The chain in progress as it stands: the conversation it was prefilled
+        on and what it has written since, for the render panel."""
+        return self._last_conversation + [assistant_turn(self.text())]
