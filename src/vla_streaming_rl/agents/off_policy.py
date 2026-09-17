@@ -136,6 +136,7 @@ class OffPolicyAgent(Agent):
         # Shared representation fed to policy/value/prediction heads on the
         # most recent select_action inference (used by scripts/probe.py).
         self.last_features: torch.Tensor | None = None
+        self.is_learning = False
 
     # --- agent surface -----------------------------------------------------
 
@@ -149,13 +150,14 @@ class OffPolicyAgent(Agent):
         info: dict,
     ) -> StepResult:
         train_metrics = {}
-        if global_step == self.learning_starts:
-            print(f"Start training at global step {global_step}.")
         if (
             global_step >= self.learning_starts
             and global_step % self.horizon == 0
             and self.rb.num_stored() >= self.batch_size + self.rb.seq_len
         ):
+            if not self.is_learning:
+                print(f"Start learning at global step {global_step}.")
+                self.is_learning = True
             data = self.rb.sample(self.batch_size)
             data.rewards = self.reward_processor.normalize(data.rewards)
             result = self.network.compute_loss(data)
