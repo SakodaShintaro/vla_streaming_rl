@@ -208,10 +208,6 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
         self,
         observation_space_shape: tuple[int, ...],
         vels_size: int,
-        image_encoder_type: str,
-        image_encoder_output_dim: int,
-        image_encode_mode: str,
-        image_encoder_trainable: bool,
         temporal_model_type: str,
         latent_dim: int,
         dynamics_depth: int,
@@ -225,10 +221,6 @@ class AnimalWorldCriticNetwork(AnimalPPONetwork):
         super().__init__(
             observation_space_shape,
             vels_size,
-            image_encoder_type,
-            image_encoder_output_dim,
-            image_encode_mode,
-            image_encoder_trainable,
             temporal_model_type,
         )
         self.latent_dim = latent_dim

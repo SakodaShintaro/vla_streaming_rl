@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MIT
 """The Animal-AI Olympics winning network, ported from ``~/work/rl_animal``.
 
-A visual trunk -- the original Fixup residual tower with channel attention, or
-any of the pretrained encoders in ``networks/modules/image_processor.py``, which
-is where both now live -- a small dense branch for the velocity/clock vector, and
+A visual trunk -- the original Fixup residual tower with channel attention,
+trained from scratch -- a small dense branch for the velocity/clock vector, and
 a recurrent cell shared by the policy and value heads. It is deliberately not a
 :class:`NetworkInterface`: that contract is built around a replay batch, while
 this network is driven by an on-policy PPO rollout, so it stays a plain
@@ -17,8 +16,6 @@ NHWC itself.
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
 
 ACTION_NUM = 9
 HIDDEN_NODES = 1024
@@ -114,20 +111,87 @@ def build_temporal_model(temporal_model_type: str, input_size: int, units: int) 
     return SequenceGRUCell(input_size, units)
 
 
+class ChannelAttention(nn.Module):
+    """The channel means through two bias-free 1x1 convolutions, squashed to a
+    per-channel gate."""
+
+    def __init__(self, depth: int) -> None:
+        super().__init__()
+        self.reduce = nn.Conv2d(depth, depth // 4, 1, bias=False)
+        self.expand = nn.Conv2d(depth // 4, depth, 1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = x.mean(dim=(2, 3), keepdim=True)
+        out = self.expand(F.elu(self.reduce(out)))
+        return torch.sigmoid(out)
+
+
+class FixupAttentionBlock(nn.Module):
+    """A residual block with no normalization, four scalar biases and a scalar
+    multiplier, and the channel gate applied between the two convolutions."""
+
+    def __init__(self, depth: int) -> None:
+        super().__init__()
+        self.res1 = nn.Conv2d(depth, depth, 3, padding=1, bias=False)
+        self.res2 = nn.Conv2d(depth, depth, 3, padding=1, bias=False)
+        self.attention = ChannelAttention(depth)
+        self.bias0 = nn.Parameter(torch.zeros(()))
+        self.bias1 = nn.Parameter(torch.zeros(()))
+        self.bias2 = nn.Parameter(torch.zeros(()))
+        self.bias3 = nn.Parameter(torch.zeros(()))
+        self.multiplier = nn.Parameter(torch.ones(()))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = F.elu(x) + self.bias0
+        out = self.res1(out) + self.bias1
+        out = out * self.attention(out)
+        out = F.elu(out) + self.bias2
+        out = self.res2(out) * self.multiplier + self.bias3
+        return out + x
+
+
+class FixupEncoder(nn.Module):
+    """The Animal-AI Olympics winning network's visual trunk -- a Fixup residual
+    tower with channel attention, one stride-2 max pool per stage. Nothing here
+    is pretrained: it trains with the rest of the network."""
+
+    depths = (16, 32, 64, 128)
+
+    def __init__(self, observation_space_shape: tuple[int]) -> None:
+        super().__init__()
+        in_channels = observation_space_shape[0]
+        self.stages = nn.ModuleList()
+        for depth in self.depths:
+            self.stages.append(
+                nn.ModuleDict(
+                    {
+                        "conv": nn.Conv2d(in_channels, depth, 3, padding=1),
+                        "block1": FixupAttentionBlock(depth),
+                        "block2": FixupAttentionBlock(depth),
+                    }
+                )
+            )
+            in_channels = depth
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        out = x
+        for stage in self.stages:
+            out = stage["conv"](out)
+            out = F.max_pool2d(out, 3, 2, padding=1)
+            out = stage["block1"](out)
+            out = stage["block2"](out)
+        return F.elu(out)  # (B, depths[-1], H/16, W/16), rounding up
+
+
 class AnimalBackbone(nn.Module):
     """Everything the winning network is below its heads: the visual trunk, the
     dense branch and the recurrent cell. It is a class of its own so a network
     with other heads -- see ``networks/animal_actor_critic.py`` -- reuses this
     body verbatim instead of copying it.
 
-    Two things are configurable. The trunk is an
-    :class:`ImageProcessor`, so ``image_encoder_type`` picks the original Fixup
-    tower (``"fixup"``, trained from scratch) or one of the frozen pretrained
-    encoders beside it in ``networks/modules/image_processor.py``. Whatever it
-    produces is flattened into the single visual token ``visual_hidden`` reads,
-    so ``image_encode_mode = "single_token"`` pools the image the way that
-    encoder was pretrained to instead of handing the dense layer a patch grid.
-    And ``temporal_model_type`` picks the recurrence: the original LayerNorm
+    The trunk is the :class:`FixupEncoder`, whose grid is flattened into the
+    single visual token ``visual_hidden`` reads. One thing is configurable:
+    ``temporal_model_type`` picks the recurrence, the original LayerNorm
     LSTM (``"lstm"``) or PyTorch's ``nn.GRUCell`` (``"gru"``), whose state is a
     single hidden rather than a (cell, hidden) pair -- hence ``init_state``
     asking the cell for its width instead of writing ``2 * TEMPORAL_UNITS``.
@@ -137,25 +201,17 @@ class AnimalBackbone(nn.Module):
         self,
         observation_space_shape: tuple[int, ...],
         vels_size: int,
-        image_encoder_type: str,
-        image_encoder_output_dim: int,
-        image_encode_mode: str,
-        image_encoder_trainable: bool,
         temporal_model_type: str,
     ) -> None:
         """``observation_space_shape`` is the (C, H, W) of the image observation and
         ``vels_size`` the width of the velocity/clock vector; both come from what
         the environment produces, so neither is written out here."""
         super().__init__()
-        self.image_processor = ImageProcessor(
-            observation_space_shape,
-            image_encoder_type,
-            image_encoder_output_dim,
-            image_encode_mode,
-            image_encoder_trainable,
-        )
-        channels, height, width = self.image_processor.output_shape
-        self.flat_size = channels * height * width
+        self.image_encoder = FixupEncoder(observation_space_shape)
+        with torch.no_grad():
+            self.flat_size = self.image_encoder.encode(
+                torch.zeros(1, *observation_space_shape)
+            ).numel()
 
         self.vels_hidden = nn.Linear(vels_size, VELS_HIDDEN)
         self.visual_hidden = nn.Linear(self.flat_size, HIDDEN_NODES)
@@ -169,7 +225,7 @@ class AnimalBackbone(nn.Module):
 
     def features(self, visual: torch.Tensor) -> torch.Tensor:
         """``visual`` is (B, C, H, W) float, as the wrappers produce it."""
-        out = self.image_processor.encode(visual)
+        out = self.image_encoder.encode(visual)
         # channels last before flattening: the order the dense layer's weights expect
         return out.permute(0, 2, 3, 1).reshape(out.shape[0], -1)
 
@@ -215,19 +271,11 @@ class AnimalPPONetwork(AnimalBackbone):
         self,
         observation_space_shape: tuple[int, ...],
         vels_size: int,
-        image_encoder_type: str,
-        image_encoder_output_dim: int,
-        image_encode_mode: str,
-        image_encoder_trainable: bool,
         temporal_model_type: str,
     ) -> None:
         super().__init__(
             observation_space_shape,
             vels_size,
-            image_encoder_type,
-            image_encoder_output_dim,
-            image_encode_mode,
-            image_encoder_trainable,
             temporal_model_type,
         )
         self.value_head = nn.Linear(TEMPORAL_UNITS, 1)

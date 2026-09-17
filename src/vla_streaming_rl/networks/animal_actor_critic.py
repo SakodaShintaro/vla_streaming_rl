@@ -54,20 +54,12 @@ class AnimalEncoder(torch.nn.Module):
         observation_space_shape: tuple[int, ...],
         action_dim: int,
         scalar_obs_dim: int,
-        image_encoder_type: str,
-        image_encoder_output_dim: int,
-        image_encode_mode: str,
-        image_encoder_trainable: bool,
         temporal_model_type: str,
     ) -> None:
         super().__init__()
         self.backbone = AnimalBackbone(
             observation_space_shape,
             scalar_obs_dim + action_dim + 1,
-            image_encoder_type,
-            image_encoder_output_dim,
-            image_encode_mode,
-            image_encoder_trainable,
             temporal_model_type,
         )
         self.output_dim = TEMPORAL_UNITS
@@ -131,10 +123,6 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
         critic_loss_weight: float,
         detach_actor: bool,
         detach_critic: bool,
-        image_encoder_type: str,
-        image_encoder_output_dim: int,
-        image_encode_mode: str,
-        image_encoder_trainable: bool,
         temporal_model_type: str,
     ) -> None:
         super().__init__()
@@ -150,10 +138,6 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
             observation_space_shape,
             self.action_dim,
             SCALAR_OBS_DIM,
-            image_encoder_type,
-            image_encoder_output_dim,
-            image_encode_mode,
-            image_encoder_trainable,
             temporal_model_type,
         )
 

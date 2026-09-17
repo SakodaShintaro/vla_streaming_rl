@@ -191,91 +191,7 @@ class QwenImageEncoder(nn.Module):
         return self.encode(x).mean(dim=(2, 3), keepdim=True)
 
 
-class ChannelAttention(nn.Module):
-    """The channel means through two bias-free 1x1 convolutions, squashed to a
-    per-channel gate."""
-
-    def __init__(self, depth: int) -> None:
-        super().__init__()
-        self.reduce = nn.Conv2d(depth, depth // 4, 1, bias=False)
-        self.expand = nn.Conv2d(depth // 4, depth, 1, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = x.mean(dim=(2, 3), keepdim=True)
-        out = self.expand(F.elu(self.reduce(out)))
-        return torch.sigmoid(out)
-
-
-class FixupAttentionBlock(nn.Module):
-    """A residual block with no normalization, four scalar biases and a scalar
-    multiplier, and the channel gate applied between the two convolutions."""
-
-    def __init__(self, depth: int) -> None:
-        super().__init__()
-        self.res1 = nn.Conv2d(depth, depth, 3, padding=1, bias=False)
-        self.res2 = nn.Conv2d(depth, depth, 3, padding=1, bias=False)
-        self.attention = ChannelAttention(depth)
-        self.bias0 = nn.Parameter(torch.zeros(()))
-        self.bias1 = nn.Parameter(torch.zeros(()))
-        self.bias2 = nn.Parameter(torch.zeros(()))
-        self.bias3 = nn.Parameter(torch.zeros(()))
-        self.multiplier = nn.Parameter(torch.ones(()))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = F.elu(x) + self.bias0
-        out = self.res1(out) + self.bias1
-        out = out * self.attention(out)
-        out = F.elu(out) + self.bias2
-        out = self.res2(out) * self.multiplier + self.bias3
-        return out + x
-
-
-class FixupEncoder(nn.Module):
-    """The Animal-AI Olympics winning network's visual trunk -- a Fixup residual
-    tower with channel attention, one stride-2 max pool per stage -- as an
-    encoder like the others, so ``networks/animal_ppo.py`` reaches it and the
-    pretrained backbones through the same :class:`ImageProcessor`.
-
-    Nothing here is pretrained, so this is the encoder that wants
-    ``image_encoder_trainable`` set: frozen, it stays a random projection.
-    """
-
-    depths = (16, 32, 64, 128)
-
-    def __init__(self, observation_space_shape: tuple[int]) -> None:
-        super().__init__()
-        in_channels = observation_space_shape[0]
-        self.stages = nn.ModuleList()
-        for depth in self.depths:
-            self.stages.append(
-                nn.ModuleDict(
-                    {
-                        "conv": nn.Conv2d(in_channels, depth, 3, padding=1),
-                        "block1": FixupAttentionBlock(depth),
-                        "block2": FixupAttentionBlock(depth),
-                    }
-                )
-            )
-            in_channels = depth
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        out = x
-        for stage in self.stages:
-            out = stage["conv"](out)
-            out = F.max_pool2d(out, 3, 2, padding=1)
-            out = stage["block1"](out)
-            out = stage["block2"](out)
-        return F.elu(out)  # (B, depths[-1], H/16, W/16), rounding up
-
-    def encode_token(self, x: torch.Tensor) -> torch.Tensor:
-        """Trained from scratch, the trunk has no pooling anyone pretrained for
-        it, so the grid is folded whole into the channel axis -- exactly the
-        flattening the dense layer above it already does."""
-        return fold_grid_into_channels(self.encode(x))
-
-
 IMAGE_ENCODERS = {
-    "fixup": FixupEncoder,
     "taesd": TaesdEncoder,
     "dinov2": Dinov2Encoder,
     "siglip2": Siglip2Encoder,
@@ -306,8 +222,6 @@ class ImageProcessor(nn.Module):
         self.observation_space_shape = observation_space_shape
         self.image_encode_mode = image_encode_mode
         backbone = IMAGE_ENCODERS[image_encoder_type](observation_space_shape)
-        # the pretrained backbones are normally frozen feature extractors and the
-        # fixup trunk is normally trained from scratch, but both are the config's call
         self.backbone = backbone.train(image_encoder_trainable).requires_grad_(
             image_encoder_trainable
         )
