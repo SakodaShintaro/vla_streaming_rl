@@ -103,7 +103,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         predictor_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
-        image_encode_mode: str,
         vlm_model_id: str,
         vlm_load_in_4bit: bool,
         cot_tokens_num: int,
@@ -126,13 +125,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.predictor_step_num = predictor_step_num
         self.observation_space_shape = observation_space_shape
 
-        # this network's spatial-temporal attention is built around the patch
-        # grid; a single pooled token would leave it nothing to attend over, so
-        # "single_token" is for the animal backbone (see ``networks/animal_ppo.py``)
-        assert image_encode_mode == "grid"
-        self.image_processor = ImageProcessor(
-            observation_space_shape, image_encoder_type, image_encode_mode
-        )
+        self.image_processor = ImageProcessor(observation_space_shape, image_encoder_type)
         hidden_image_dim = image_encoder_output_dim
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 

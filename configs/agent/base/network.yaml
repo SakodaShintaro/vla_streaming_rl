@@ -15,11 +15,6 @@ critic_arch: dueling
 image_encoder_type: qwen
 # Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
 image_encoder_output_dim: 16
-# grid         : one token per patch, the spatial grid the encoder produces.
-# single_token : the whole image as one token, pooled the way each backbone
-#                was trained (DINOv2 CLS, SigLIP MAP head, mean pooling for
-#                V-JEPA 2 / Qwen, the folded latent for the VAEs).
-image_encode_mode: grid
 predictor_hidden_dim: 512
 predictor_block_num: 2
 predictor_step_num: 1
@@ -33,15 +28,6 @@ dacer_loss_weight: 0.05
 denoising_steps: 1
 som_alpha: 1.0
 som_w: 25.0
-
-wcm_latent_dim: 256
-wcm_dynamics_depth: 3
-wcm_dynamics_mlp_ratio: 4.0
-wcm_dynamics_dropout: 0.1
-wcm_next_state_coef: 0.1
-wcm_sigreg_coef: 0.01
-wcm_sigreg_knots: 17
-wcm_sigreg_projections: 1024
 
 # Chain-of-thought stream. A frozen VLM keeps
 # one chain of thought running across environment steps: cot_tokens_num tokens

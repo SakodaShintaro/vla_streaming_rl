@@ -83,28 +83,6 @@ def build_network(
             temporal_model_type=args.temporal_model_type,
         ).to(device)
 
-    if args.network_class == "animal_world_critic":
-        from vla_streaming_rl.networks.animal_world_critic import AnimalWorldCriticNetwork
-
-        # a window of n steps carries n - 1 next-state pairs, so 1 trains nothing
-        assert args.seq_len >= 2, (
-            f"seq_len {args.seq_len} leaves no next-state pair for the world-critic loss"
-        )
-
-        return AnimalWorldCriticNetwork(
-            observation_space_shape=observation_space_shape,
-            vels_size=4,
-            temporal_model_type=args.temporal_model_type,
-            latent_dim=args.wcm_latent_dim,
-            dynamics_depth=args.wcm_dynamics_depth,
-            dynamics_mlp_ratio=args.wcm_dynamics_mlp_ratio,
-            dynamics_dropout=args.wcm_dynamics_dropout,
-            next_state_coef=args.wcm_next_state_coef,
-            sigreg_coef=args.wcm_sigreg_coef,
-            sigreg_knots=args.wcm_sigreg_knots,
-            sigreg_projections=args.wcm_sigreg_projections,
-        ).to(device)
-
     # One factory for every network: all critic config comes from ``args`` and is
     # bound here, leaving ``in_channels`` and ``action_dim`` for the network to
     # supply at call time (see ``_build_value_head``).
@@ -154,7 +132,6 @@ def build_network(
             predictor_type=args.predictor_type,
             image_encoder_type=args.image_encoder_type,
             image_encoder_output_dim=args.image_encoder_output_dim,
-            image_encode_mode=args.image_encode_mode,
             vlm_model_id=args.vlm_model_id,
             vlm_load_in_4bit=args.vlm_load_in_4bit,
             cot_tokens_num=args.cot_tokens_num,
@@ -166,29 +143,6 @@ def build_network(
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
             prompt_builder=prompt_builder,
-        ).to(device)
-
-    elif args.network_class == "animal_actor_critic":
-        from vla_streaming_rl.networks.animal_actor_critic import AnimalActorCriticWithActionValue
-
-        network = AnimalActorCriticWithActionValue(
-            observation_space_shape=observation_space_shape,
-            action_space_shape=action_space_shape,
-            value_head_factory=value_head_factory,
-            horizon=args.horizon,
-            policy_type=args.policy_type,
-            actor_hidden_dim=args.actor_hidden_dim,
-            actor_block_num=args.actor_block_num,
-            denoising_time=args.denoising_time,
-            denoising_steps=args.denoising_steps,
-            dacer_loss_weight=args.dacer_loss_weight,
-            som_alpha=args.som_alpha,
-            som_w=args.som_w,
-            sparsity=args.sparsity,
-            critic_loss_weight=args.critic_loss_weight,
-            detach_actor=args.detach_actor,
-            detach_critic=args.detach_critic,
-            temporal_model_type=args.temporal_model_type,
         ).to(device)
 
     elif args.network_class == "vlm_actor_critic_with_action_value":
@@ -233,7 +187,6 @@ def build_network(
             policy_type=args.policy_type,
             image_encoder_type=args.image_encoder_type,
             image_encoder_output_dim=args.image_encoder_output_dim,
-            image_encode_mode=args.image_encode_mode,
         ).to(device)
 
     else:

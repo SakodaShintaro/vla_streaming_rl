@@ -9,7 +9,6 @@ defaults:
 
 agent_type: animal_ppo
 
-# [animal_ppo, animal_world_critic]
 network_class: animal_ppo
 
 # [lstm, gru]

@@ -185,9 +185,7 @@ class FixupEncoder(nn.Module):
 
 class AnimalBackbone(nn.Module):
     """Everything the winning network is below its heads: the visual trunk, the
-    dense branch and the recurrent cell. It is a class of its own so a network
-    with other heads -- see ``networks/animal_actor_critic.py`` -- reuses this
-    body verbatim instead of copying it.
+    dense branch and the recurrent cell.
 
     The trunk is the :class:`FixupEncoder`, whose grid is flattened into the
     single visual token ``visual_hidden`` reads. One thing is configurable:
@@ -229,15 +227,6 @@ class AnimalBackbone(nn.Module):
         # channels last before flattening: the order the dense layer's weights expect
         return out.permute(0, 2, 3, 1).reshape(out.shape[0], -1)
 
-    def embed(self, visual: torch.Tensor, vels: torch.Tensor) -> tuple:
-        """The per-step visual latent the dense branch produces and the joint
-        hidden the recurrent cell reads. Split out of ``forward`` so a head that needs the
-        visual latent -- see ``networks/animal_world_critic.py`` -- reads it off
-        the same pass instead of running the trunk twice."""
-        visual_latent = F.elu(self.visual_hidden(self.features(visual)))
-        hidden = torch.cat([F.elu(self.vels_hidden(vels)), visual_latent], dim=-1)
-        return visual_latent, F.elu(self.joint_hidden(hidden))
-
     def recurrent(
         self, hidden: torch.Tensor, state: torch.Tensor, dones: torch.Tensor, sequence_num: int
     ) -> tuple:
@@ -260,8 +249,9 @@ class AnimalBackbone(nn.Module):
         sequence slicing both assume. Acting is one sequence of one step, the
         update is one per minibatch window. Returns the ``(sequence_num * steps_num,
         TEMPORAL_UNITS)`` recurrent output and the state carried out of the batch."""
-        _, hidden = self.embed(visual, vels)
-        return self.recurrent(hidden, state, dones, sequence_num)
+        visual_latent = F.elu(self.visual_hidden(self.features(visual)))
+        hidden = torch.cat([F.elu(self.vels_hidden(vels)), visual_latent], dim=-1)
+        return self.recurrent(F.elu(self.joint_hidden(hidden)), state, dones, sequence_num)
 
 
 class AnimalPPONetwork(AnimalBackbone):
@@ -298,17 +288,9 @@ class AnimalPPONetwork(AnimalBackbone):
         vels: torch.Tensor,
         state: torch.Tensor,
         dones: torch.Tensor,
-        actions: torch.Tensor,
         sequence_num: int,
     ) -> tuple:
-        """The update pass, in the shape the PPO loss reads: the policy logits,
-        the state values, and whatever auxiliary loss the network carries beyond
-        PPO's own -- nothing here, the world-critic terms in
-        ``networks/animal_world_critic.py``, and the scalar each reports.
-
-        ``actions`` is what separates it from ``forward``: an auxiliary objective
-        may be action-conditioned, while the heads themselves never are.
-        """
-        del actions
+        """The update pass, in the shape the PPO loss reads: the policy logits
+        and the state values."""
         logits, value, _ = self(visual, vels, state, dones, sequence_num)
-        return logits, value.squeeze(-1), torch.zeros((), device=value.device), {}
+        return logits, value.squeeze(-1)

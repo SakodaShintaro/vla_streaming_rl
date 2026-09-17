@@ -19,22 +19,6 @@ def resize_and_normalize(x: torch.Tensor, resolution: int) -> torch.Tensor:
     return (x - IMAGENET_MEAN.to(x.device)) / IMAGENET_STD.to(x.device)
 
 
-def as_token(vector: torch.Tensor) -> torch.Tensor:
-    """(B, C) -> (B, C, 1, 1): a pooled vector kept in the (B, C, H, W) contract
-    every encoder here returns, so the single-token path is a 1x1 grid rather
-    than a separate shape the consumers would have to branch on."""
-    return vector[:, :, None, None]
-
-
-def fold_grid_into_channels(latent: torch.Tensor) -> torch.Tensor:
-    """(B, C, H, W) -> (B, C * H * W, 1, 1). The lossless way to reach one token
-    for encoders whose grid carries no semantic summary (the VAEs): every cell
-    is kept and ``ImageProcessor``'s 1x1 convolution becomes the learned linear
-    layer that mixes them, exactly as ``AnimalBackbone`` flattens its tower
-    output into a single dense layer."""
-    return latent.flatten(1)[:, :, None, None]
-
-
 class TaesdEncoder(nn.Module):
     def __init__(self, observation_space_shape: tuple[int]) -> None:
         super().__init__()
@@ -44,9 +28,6 @@ class TaesdEncoder(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = x * 2.0 - 1.0  # [0, 1] -> [-1, 1]
         return self.vae.encode(x).latents  # (B, 4, H/8, W/8)
-
-    def encode_token(self, x: torch.Tensor) -> torch.Tensor:
-        return fold_grid_into_channels(self.encode(x))  # (B, 4 * H/8 * W/8, 1, 1)
 
 
 class Dinov2Encoder(nn.Module):
@@ -65,12 +46,6 @@ class Dinov2Encoder(nn.Module):
         b, _, c = tokens.shape
         return tokens.transpose(1, 2).reshape(b, c, self.grid_size, self.grid_size)
 
-    def encode_token(self, x: torch.Tensor) -> torch.Tensor:
-        """The CLS token: DINOv2's image-level distillation loss acts on it, and
-        it is what the official linear probes read as the image summary."""
-        x = resize_and_normalize(x, self.resolution)
-        return as_token(self.model(pixel_values=x).pooler_output)  # pooler_output is the CLS token
-
 
 class Siglip2Encoder(nn.Module):
     resolution = 224
@@ -87,14 +62,6 @@ class Siglip2Encoder(nn.Module):
         tokens = self.model(pixel_values=x).last_hidden_state  # no CLS token
         b, _, c = tokens.shape
         return tokens.transpose(1, 2).reshape(b, c, self.grid_size, self.grid_size)
-
-    def encode_token(self, x: torch.Tensor) -> torch.Tensor:
-        """SigLIP has no CLS token; it is pretrained with a MAP head -- one
-        learned query attending over the patches -- and that pooled vector is the
-        embedding its contrastive loss aligns with text, so it is the single
-        token this checkpoint was actually trained to produce."""
-        x = resize_and_normalize(x, self.resolution)
-        return as_token(self.model(pixel_values=x).pooler_output)  # attention pooling head
 
 
 class Vjepa2Encoder(nn.Module):
@@ -114,13 +81,6 @@ class Vjepa2Encoder(nn.Module):
         tokens = self.model(pixel_values_videos=clip).last_hidden_state  # (B, grid*grid, C)
         b, _, c = tokens.shape
         return tokens.transpose(1, 2).reshape(b, c, self.grid_size, self.grid_size)
-
-    def encode_token(self, x: torch.Tensor) -> torch.Tensor:
-        """V-JEPA 2 has neither a CLS token nor a pretrained pooling head -- the
-        attentive probe ships only with the classification checkpoints -- so the
-        mean over the patch tokens is the summary its frozen-encoder evaluations
-        fall back on."""
-        return self.encode(x).mean(dim=(2, 3), keepdim=True)
 
 
 class QwenImageEncoder(nn.Module):
@@ -184,12 +144,6 @@ class QwenImageEncoder(nn.Module):
         merged = merged.view(batch_size, self.grid_h, self.grid_w, hidden_dim)
         return merged.permute(0, 3, 1, 2)  # (B, hidden_dim, grid_h, grid_w)
 
-    def encode_token(self, x: torch.Tensor) -> torch.Tensor:
-        """The ViT hands the LLM a grid of merged patches and has no summary
-        token of its own, so the tokens are averaged after the PatchMerger --
-        i.e. after the 2x2 merge the checkpoint was trained to perform."""
-        return self.encode(x).mean(dim=(2, 3), keepdim=True)
-
 
 IMAGE_ENCODERS = {
     "taesd": TaesdEncoder,
@@ -197,14 +151,6 @@ IMAGE_ENCODERS = {
     "siglip2": Siglip2Encoder,
     "vjepa2": Vjepa2Encoder,
     "qwen": QwenImageEncoder,
-}
-
-
-ENCODE_MODES = {
-    # the patch grid, one token per cell
-    "grid": lambda backbone, x: backbone.encode(x),
-    # the whole image as one token, pooled the way each backbone was trained
-    "single_token": lambda backbone, x: backbone.encode_token(x),
 }
 
 
@@ -222,20 +168,17 @@ class ImageProcessor(nn.Module):
         self,
         observation_space_shape: tuple[int],
         image_encoder_type: str,
-        image_encode_mode: str,
     ) -> None:
         super().__init__()
-        assert image_encode_mode in ENCODE_MODES
         self.observation_space_shape = observation_space_shape
-        self.image_encode_mode = image_encode_mode
         backbone = IMAGE_ENCODERS[image_encoder_type](observation_space_shape)
         self.backbone = backbone.train(False).requires_grad_(False)
         self.output_shape = list(self.encode(torch.zeros(1, *observation_space_shape)).size())[1:]
 
     @torch.no_grad()
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        # (B, 3, H, W) -> (B, C, H', W'); H' = W' = 1 in the single-token mode
-        return ENCODE_MODES[self.image_encode_mode](self.backbone, x)
+        # (B, 3, H, W) -> (B, C, H', W'): one cell per patch of the encoder's grid
+        return self.backbone.encode(x)
 
 
 if __name__ == "__main__":
@@ -251,11 +194,7 @@ if __name__ == "__main__":
         param_num = sum(p.numel() for p in encoder.parameters())
         with torch.inference_mode():
             output = encoder.encode(x)
-            token = encoder.encode_token(x)
-        print(
-            f"{name}: params={param_num:,} output_shape={tuple(output.shape)} "
-            f"token_shape={tuple(token.shape)}"
-        )
+        print(f"{name}: params={param_num:,} output_shape={tuple(output.shape)}")
 
         if measure_speed:
             with torch.inference_mode():

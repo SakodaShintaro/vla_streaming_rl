@@ -379,12 +379,11 @@ class AnimalPPOAgent(Agent):
         sequences: torch.Tensor,
         sequence_num: int,
     ) -> dict:
-        logits, values, auxiliary_loss, auxiliary_reported = self.network.forward_for_update(
+        logits, values = self.network.forward_for_update(
             rollout.visual[flat],
             rollout.vels[flat],
             rollout.states[sequences],
             rollout.dones[flat] * float(self.reset_on_episode_end),
-            rollout.actions[flat],
             sequence_num,
         )
 
@@ -410,12 +409,7 @@ class AnimalPPOAgent(Agent):
         log_probabilities = F.log_softmax(logits, dim=-1)
         entropy = -(log_probabilities.exp() * log_probabilities).sum(dim=-1).mean()
 
-        loss = (
-            actor_loss
-            + 0.5 * self.critic_coef * critic_loss
-            - self.entropy_coef * entropy
-            + auxiliary_loss
-        )
+        loss = actor_loss + 0.5 * self.critic_coef * critic_loss - self.entropy_coef * entropy
 
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -430,5 +424,4 @@ class AnimalPPOAgent(Agent):
             "critic": critic_loss.item(),
             "entropy": entropy.item(),
             "kl": kl.item(),
-            **auxiliary_reported,
         }
