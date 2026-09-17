@@ -7,6 +7,7 @@ exp_name=${2}
 cd $(dirname $0)
 
 export GRPC_VERBOSITY=ERROR
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Fetch the Unity player this run needs, which is a no-op once it is installed.
 # The version and the install path live there and in configs/env/animalai.yaml,
