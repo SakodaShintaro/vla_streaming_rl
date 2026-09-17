@@ -44,3 +44,5 @@ print_interval: 5
 max_step_count: 100
 debug: false
 text_action: false
+use_eligibility_trace: 1
+et_lambda: 0.5
