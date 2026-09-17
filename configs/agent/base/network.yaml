@@ -63,3 +63,16 @@ cot_pool: mean
 # running them, so replaying one call is several times faster. Off falls back to
 # issuing the step normally.
 cot_cuda_graph: true
+
+use_lora: false
+vlm_model_id: Qwen/Qwen3.8-27B
+vlm_load_in_4bit: true
+num_state_queries: 100
+state_out_dim: 4
+max_new_tokens: 128
+temperature: 0.5
+max_prompt_tokens: 512
+pad_token_id: 0
+reasoning_loss_weight: 1.0
+reasoning_max_tokens: 0
+reasoning_temperature: 1.0

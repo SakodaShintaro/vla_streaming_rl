@@ -3,7 +3,6 @@ defaults:
   - base/network
   - base/off_policy
   - base/streaming
-  - base/vlm
   - _self_
 
 agent_type: zeroshot_vlm
@@ -13,7 +12,7 @@ seq_len: 65
 # Where generation runs:
 #   openrouter : a hosted model, one API call per env step (`openrouter_model_id`).
 #   local      : a Qwen3.5 checkpoint generating in this process on the GPU
-#                (`vlm_model_id`, from base/vlm), so no API key and no server.
+#                (`vlm_model_id`, from base/network), so no API key and no server.
 vlm_backend: local
 # OpenRouter model
 # model                                               context   $in/Mtok  $out/Mtok
