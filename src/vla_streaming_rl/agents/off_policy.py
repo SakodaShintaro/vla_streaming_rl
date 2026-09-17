@@ -6,10 +6,10 @@ step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
 before the action of that tick is chosen. Below ``learning_starts`` the env is
 driven by uniform random actions, so the buffer fills with something other than
 an untrained policy's output while the network's recurrent state still follows
-the episode. With ``text_action`` on, the env is instead driven throughout by
-the action the chain of thought names in its ``<answer>``, read the way the
-zero-shot controller reads it and held the same way: for a random number of
-steps out of the chain's cadence, then standing still until the next chain.
+the episode. With ``text_action`` on, the action the chain of thought names in
+its ``<answer>`` is a second candidate, held for the chain's whole cadence: it
+drives the env alone below ``learning_starts``, and from then on every tick
+runs whichever of it and the head's action the critic values higher.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
@@ -31,9 +31,17 @@ from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
+from vla_streaming_rl.utils import render_selection_panel
+
+
+def _format_action(action: np.ndarray) -> str:
+    return "[" + ", ".join(f"{value:+.2f}" for value in action) + "]"
 
 
 class OffPolicyAgent(Agent):
+    SELECTION_PANEL_WIDTH = 320
+    SELECTION_PANEL_HEIGHT = 560
+
     def __init__(
         self,
         *,
@@ -57,7 +65,6 @@ class OffPolicyAgent(Agent):
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
         text_action: bool,
-        cot_steps_per_chain: int,
         parse_action_text,
     ) -> None:
         super().__init__(
@@ -73,12 +80,14 @@ class OffPolicyAgent(Agent):
                 "text_action reads the action off a finished chain, which only "
                 "cot_mode=batch writes; set cot_tokens_num > 0 and cot_mode=batch"
             )
-        assert cot_steps_per_chain >= 1, cot_steps_per_chain
-        self.cot_steps_per_chain = cot_steps_per_chain
         self.parse_action_text = parse_action_text
-        self.held_action = np.zeros(int(np.prod(action_space.shape)), dtype=np.float32)
-        self.hold_steps = 0
+        self.vlm_action = np.zeros(int(np.prod(action_space.shape)), dtype=np.float32)
+        self.vlm_answer_text = ""
         self.text_parse_failed = 0.0
+        self.selection_status = ""
+        self.selection_rows = []
+        self.decisions_num = 0
+        self.vlm_chosen_num = 0
 
         self.observation_space = observation_space
 
@@ -221,6 +230,8 @@ class OffPolicyAgent(Agent):
             # new episode; the first action of an episode comes from its own frame.
             self.action_chunk = None
             self.chunk_step = 0
+            self.decisions_num = 0
+            self.vlm_chosen_num = 0
         if episode_done:
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
@@ -274,10 +285,9 @@ class OffPolicyAgent(Agent):
             cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
         )
         if self.text_action and cot_age == 0:
-            self._read_text_action()
+            self._read_vlm_action()
         if self.text_action:
             metrics["text/parse_failed"] = self.text_parse_failed
-            metrics["text/hold_steps"] = self.hold_steps
 
         warmup = global_step < self.learning_starts
 
@@ -289,7 +299,7 @@ class OffPolicyAgent(Agent):
             return StepResult(
                 action=action,
                 metrics=metrics,
-                panels=self.network.render_panels(),
+                panels=self._panels(),
                 texts={"prompt": prompt, **self.network.render_texts()},
             )
 
@@ -320,52 +330,84 @@ class OffPolicyAgent(Agent):
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
         action_chunk = infer_result.action[0].cpu().numpy()
+        if self.text_action:
+            vlm_chunk = np.repeat(self._to_net_action(self.vlm_action)[None], self.horizon, axis=0)
+            q_vlm = self.network.action_value(infer_result.features, vlm_chunk)
+            q_head = self.network.action_value(infer_result.features, action_chunk)
+            vlm_chosen = warmup or q_vlm >= q_head
+            metrics["select/q_vlm"] = q_vlm
+            metrics["select/q_head"] = q_head
+            metrics["select/vlm_chosen"] = float(vlm_chosen)
+            self.decisions_num += 1
+            self.vlm_chosen_num += int(vlm_chosen)
+            self.selection_status = (
+                f"step {global_step}, chain age {cot_age}, "
+                f"{'warmup: VLM only' if warmup else 'chosen by Q'}. "
+                f"VLM chosen {self.vlm_chosen_num}/{self.decisions_num} this episode."
+            )
+            self.selection_rows = [
+                (
+                    "VLM",
+                    f"{self.vlm_answer_text}  {_format_action(self.vlm_action)}",
+                    q_vlm,
+                    vlm_chosen,
+                ),
+                (
+                    "head",
+                    _format_action(self._to_env_action(action_chunk[0])),
+                    q_head,
+                    not vlm_chosen,
+                ),
+            ]
+            if vlm_chosen:
+                action_chunk = vlm_chunk
+        elif warmup:
+            # The network was queried anyway so its recurrent state keeps
+            # following the episode; only the action it chose is dropped.
+            action_chunk = np.repeat(
+                self._to_net_action(self.action_space.sample())[None], self.horizon, axis=0
+            )
         self.action_chunk = action_chunk
         self.chunk_step = 1
         action = self._to_env_action(action_chunk[0])
         self.prev_action = action
         metrics["chunk_step"] = self.chunk_step
-
-        if self.text_action:
-            action = (
-                self.held_action
-                if cot_age < self.hold_steps
-                else np.zeros(self.action_dim, dtype=np.float32)
-            )
-            self.action_chunk = None
-            self.chunk_step = 0
-            self.prev_action = action
-            metrics["chunk_step"] = self.chunk_step
-        elif warmup:
-            # The network was queried anyway so its recurrent state keeps
-            # following the episode; only the action it chose is dropped.
-            action = self.action_space.sample()
-            self.action_chunk = None
-            self.chunk_step = 0
-            self.prev_action = action
-            metrics["chunk_step"] = self.chunk_step
         return StepResult(
             action=action,
             metrics=metrics,
-            panels=self.network.render_panels(),
+            panels=self._panels(),
             texts={"prompt": prompt, **self.network.render_texts()},
         )
 
-    def _read_text_action(self) -> None:
-        """Read the action the chain just written names, and draw how long it
-        is held. A reply that named no runnable action stands the agent still
-        for the chain's whole cadence and is answered by the env in its own turn."""
+    def _panels(self) -> dict[str, np.ndarray]:
+        """The network's panels, plus the two candidates and their action values
+        when the chain's answer is one: the same keys on every step of a run."""
+        panels = self.network.render_panels()
+        if self.text_action:
+            panels["selection"] = render_selection_panel(
+                self.selection_status,
+                self.selection_rows,
+                self.SELECTION_PANEL_WIDTH,
+                self.SELECTION_PANEL_HEIGHT,
+            )
+        return panels
+
+    def _read_vlm_action(self) -> None:
+        """Read the action the chain just written names, the VLM policy's
+        candidate until the next chain. A reply that named no runnable action
+        makes the candidate standing still, and is answered by the env in its
+        own turn."""
         answer_match = ANSWER_RE.search(self.network.thought_text())
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
         action_array, parse_ok = self.parse_action_text(answer_text)
+        self.vlm_answer_text = answer_text if parse_ok else f"(unparsed: {answer_text})"
         if parse_ok:
-            self.held_action = np.clip(
+            self.vlm_action = np.clip(
                 action_array[0].astype(np.float32), self.action_low, self.action_high
             )
         else:
-            self.held_action = np.zeros(self.action_dim, dtype=np.float32)
+            self.vlm_action = np.zeros(self.action_dim, dtype=np.float32)
             self.prompt_builder.reject(answer_text)
-        self.hold_steps = int(np.random.randint(1, self.cot_steps_per_chain + 1))
         self.text_parse_failed = float(not parse_ok)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
@@ -405,6 +447,10 @@ class OffPolicyAgent(Agent):
             episode_step_obs,
             health_obs,
         )
+
+    def _to_net_action(self, env_action: np.ndarray) -> np.ndarray:
+        """Map a single env action into the policy's normalized action space."""
+        return ((env_action - self.action_bias) / self.action_scale).astype(np.float32)
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         """Map a single normalized policy action into the env's action space."""

@@ -221,6 +221,79 @@ def render_conversation_panel(
     return panel
 
 
+def render_selection_panel(
+    status: str, rows: list[tuple[str, str, float, bool]], width: int, height: int
+) -> np.ndarray:
+    """Which of the candidate actions ran and why, on a panel of exactly
+    ``width`` x ``height``: ``status`` word-wrapped along the top, then one
+    block per candidate -- its name and the action it stands for, wrapped, its
+    action value as a bar scaled to the largest magnitude among the rows, and
+    the chosen one on a green background.
+    """
+    font_scale = 0.45
+    thickness = 1
+    (_, text_height), baseline = cv2.getTextSize("Ag", _FONT, font_scale, thickness)
+    line_height = text_height + baseline + 4
+    padding = 6
+    gap = 6
+    text_width = width - 2 * gap
+
+    panel = np.full((height, width, 3), (30, 30, 30), dtype=np.uint8)
+    status_lines = wrap_text(status, text_width, font_scale, thickness)
+    status_height = line_height * len(status_lines) + padding * 2
+    cv2.rectangle(panel, (0, 0), (width, status_height), (48, 48, 48), cv2.FILLED)
+    for index, line in enumerate(status_lines):
+        cv2.putText(
+            panel,
+            line,
+            (gap, padding + line_height * (index + 1) - baseline),
+            _FONT,
+            font_scale,
+            (190, 190, 190),
+            thickness,
+        )
+    scale = max([abs(q) for _, _, q, _ in rows] + [1e-6])
+    top = status_height + gap
+    for name, description, q, chosen in rows:
+        lines = wrap_text(f"{name}: {description}", text_width, font_scale, thickness)
+        block_height = line_height * (len(lines) + 1) + padding * 2
+        if top + block_height > height:
+            break
+        if chosen:
+            cv2.rectangle(panel, (0, top), (width, top + block_height), (52, 84, 52), cv2.FILLED)
+        for index, line in enumerate(lines):
+            cv2.putText(
+                panel,
+                line,
+                (gap, top + padding + line_height * (index + 1) - baseline),
+                _FONT,
+                font_scale,
+                (238, 238, 238),
+                thickness,
+            )
+        bar_top = top + padding + line_height * len(lines) + 2
+        bar_bottom = bar_top + line_height - 4
+        filled = int(text_width * abs(q) / scale)
+        cv2.rectangle(
+            panel,
+            (gap, bar_top),
+            (gap + filled, bar_bottom),
+            (90, 170, 90) if q >= 0 else (170, 90, 90),
+            cv2.FILLED,
+        )
+        cv2.putText(
+            panel,
+            f"Q = {q:+.4f}",
+            (gap + 4, bar_bottom - 2),
+            _FONT,
+            font_scale,
+            (238, 238, 238),
+            thickness,
+        )
+        top += block_height + gap
+    return panel
+
+
 def overlay_caption(image: np.ndarray, text: str) -> np.ndarray:
     """Append a word-wrapped text caption on a dark band below ``image``.
 

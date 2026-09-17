@@ -218,6 +218,12 @@ class ActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
+    def action_value(self, features: torch.Tensor, action_chunk: np.ndarray) -> float:
+        """Q(s, a) the critic gives one ``(horizon, action_dim)`` chunk at the
+        state ``infer`` handed back as ``features``."""
+        chunk = torch.from_numpy(action_chunk).to(features.device, features.dtype).unsqueeze(0)
+        return self.value_head.scalar_value(features, chunk).item()
+
     def stored_image_shape(self) -> tuple[int, ...]:
         """The frozen encoder's output for the frame, not the frame."""
         return tuple(self.image_processor.output_shape)
