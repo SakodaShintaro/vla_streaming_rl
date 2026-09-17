@@ -18,3 +18,4 @@ learning_starts: 0
 cot_tokens_num: 4
 disable_state_predictor: 1
 text_action: true
+seq_len: 65
