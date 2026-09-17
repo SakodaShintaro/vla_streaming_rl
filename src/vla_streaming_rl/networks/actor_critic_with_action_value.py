@@ -141,7 +141,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_dim = text_config.hidden_size
         # The embedding plus every layer's output.
         cot_layers = text_config.num_hidden_layers + 1
-        self.cot_shape = (cot_tokens_num, cot_layers, cot_dim)
+        self.pool_cot = cot_pool == "mean" and cot_tokens_num > 0
+        self.cot_shape = (1 if self.pool_cot else cot_tokens_num, cot_layers, cot_dim)
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
         self.cot_module = None
         if cot_tokens_num > 0:
@@ -241,6 +242,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         # Advanced first: `age` is about the chain the call hands back, which is
         # a fresh one on the steps that write.
         activations = self.cot_module.advance()
+        if self.pool_cot:
+            activations = activations.float().mean(dim=0, keepdim=True).to(activations.dtype)
         return activations, self.cot_module.age()
 
     def render_panels(self) -> dict[str, np.ndarray]:
