@@ -104,6 +104,9 @@ class ReplayBuffer:
         self.turn_token_ids = self._init_token_ids()
         self.reply_token_ids = self._init_token_ids()
 
+        self.pin_memory = self.storage_device.type == "cpu" and self.output_device.type == "cuda"
+        self._staging = {}
+
         self.idx = 0
         self.full = False
 
@@ -211,6 +214,53 @@ class ReplayBuffer:
             token_ids, dtype=torch.long, device=self.storage_device
         )
 
+    def _gather(self, name: str, storage: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        """``storage[indices]`` on the output device, ``indices`` of any shape.
+
+        Staged through a pinned buffer of the window's shape, reused across
+        calls, so the copy to the device is asynchronous; the previous copy
+        out of the same buffer is waited for before it is overwritten.
+        """
+        flat = indices.reshape(-1)
+        key = (name, tuple(indices.shape))
+        if key not in self._staging:
+            self._staging[key] = torch.empty(
+                (flat.numel(), *storage.shape[1:]),
+                dtype=storage.dtype,
+                device=self.storage_device,
+                pin_memory=self.pin_memory,
+            )
+        staged = self._staging[key]
+        if self.pin_memory:
+            torch.cuda.current_stream(self.output_device).synchronize()
+        torch.index_select(storage, 0, flat, out=staged)
+        return staged.view(*indices.shape, *storage.shape[1:]).to(
+            self.output_device, non_blocking=True
+        )
+
+    def _gather_all(self, indices: torch.Tensor) -> ReplayBufferData:
+        return ReplayBufferData(
+            self._gather("observations", self.observations, indices),
+            self._gather("rewards", self.rewards, indices),
+            self._gather("dones", self.dones, indices),
+            self._gather("rnn_states", self.rnn_states, indices),
+            self._gather("actions", self.actions, indices),
+            self._gather("system_token_ids", self.system_token_ids, indices),
+            self._gather("turn_token_ids", self.turn_token_ids, indices),
+            self._gather("reply_token_ids", self.reply_token_ids, indices),
+            self._gather("velocity_x", self.velocity_x, indices),
+            self._gather("velocity_y", self.velocity_y, indices),
+            self._gather("velocity_z", self.velocity_z, indices),
+            self._gather("episode_return", self.episode_return, indices),
+            self._gather("pass_mark", self.pass_mark, indices),
+            self._gather("remaining_return", self.remaining_return, indices),
+            self._gather("global_step", self.global_step, indices),
+            self._gather("episode_step", self.episode_step, indices),
+            self._gather("health", self.health, indices),
+            self._gather("cot_activations", self.cot_activations, indices),
+            self._gather("cot_age", self.cot_age, indices),
+        )
+
     def valid_start_indices(self) -> torch.Tensor:
         """Window starts a learning batch may be drawn from.
 
@@ -288,55 +338,11 @@ class ReplayBuffer:
         seq_indices = (
             indices[:, None] + torch.arange(self.seq_len, device=self.storage_device)[None, :]
         )
-
-        # Vectorized slicing - much faster than loop + append
-        return ReplayBufferData(
-            self.observations[seq_indices].to(self.output_device, non_blocking=True),
-            self.rewards[seq_indices].to(self.output_device, non_blocking=True),
-            self.dones[seq_indices].to(self.output_device, non_blocking=True),
-            self.rnn_states[seq_indices].to(self.output_device, non_blocking=True),
-            self.actions[seq_indices].to(self.output_device, non_blocking=True),
-            self.system_token_ids[seq_indices].to(self.output_device, non_blocking=True),
-            self.turn_token_ids[seq_indices].to(self.output_device, non_blocking=True),
-            self.reply_token_ids[seq_indices].to(self.output_device, non_blocking=True),
-            self.velocity_x[seq_indices].to(self.output_device, non_blocking=True),
-            self.velocity_y[seq_indices].to(self.output_device, non_blocking=True),
-            self.velocity_z[seq_indices].to(self.output_device, non_blocking=True),
-            self.episode_return[seq_indices].to(self.output_device, non_blocking=True),
-            self.pass_mark[seq_indices].to(self.output_device, non_blocking=True),
-            self.remaining_return[seq_indices].to(self.output_device, non_blocking=True),
-            self.global_step[seq_indices].to(self.output_device, non_blocking=True),
-            self.episode_step[seq_indices].to(self.output_device, non_blocking=True),
-            self.health[seq_indices].to(self.output_device, non_blocking=True),
-            self.cot_activations[seq_indices].to(self.output_device, non_blocking=True),
-            self.cot_age[seq_indices].to(self.output_device, non_blocking=True),
-        )
+        return self._gather_all(seq_indices)
 
     def get_latest(self, seq_len: int) -> ReplayBufferData:
         # Create vectorized indices for the latest sequence
         indices = (
             self.idx - seq_len + torch.arange(seq_len, device=self.storage_device)
         ) % self.size
-
-        # Vectorized slicing
-        return ReplayBufferData(
-            self.observations[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.rewards[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.dones[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.rnn_states[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.actions[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.system_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.turn_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.reply_token_ids[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.velocity_x[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.velocity_y[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.velocity_z[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.episode_return[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.pass_mark[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.remaining_return[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.global_step[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.episode_step[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.health[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.cot_activations[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-            self.cot_age[indices].unsqueeze(0).to(self.output_device, non_blocking=True),
-        )
+        return self._gather_all(indices.unsqueeze(0))
