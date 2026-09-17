@@ -161,6 +161,13 @@ class AnimalActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
+    def stored_image_shape(self) -> tuple[int, ...]:
+        """The image itself: the Fixup trunk trains, so it has to see frames."""
+        return tuple(self.observation_space_shape)
+
+    def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
+        return image
+
     def tokenize(self, text: str) -> list[int]:
         del text
         return []

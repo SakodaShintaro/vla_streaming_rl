@@ -4,14 +4,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .flux_dit import FluxDiT
-from .image_processor import ImageProcessor
 from .reward_processor import RewardProcessor
 
 
 class StatePredictionHead(nn.Module):
     def __init__(
         self,
-        image_processor: ImageProcessor,
+        image_latent_shape: tuple[int, int, int],
         reward_processor: RewardProcessor,
         action_dim: int,
         predictor_hidden_dim: int,
@@ -19,10 +18,10 @@ class StatePredictionHead(nn.Module):
         predictor_type: str,
     ) -> None:
         super().__init__()
-        self.image_processor = image_processor
+        self.image_latent_shape = image_latent_shape
         self.reward_processor = reward_processor
         self.predictor_type = predictor_type
-        hidden_image_dim = image_processor.output_shape[0]
+        hidden_image_dim = image_latent_shape[0]
         self.state_predictor = FluxDiT(
             in_channels=hidden_image_dim,
             out_channels=hidden_image_dim,
@@ -90,9 +89,7 @@ class StatePredictionHead(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device = state_curr.device
         B = state_curr.size(0)
-        C = self.image_processor.output_shape[0]
-        H = self.image_processor.output_shape[1]
-        W = self.image_processor.output_shape[2]
+        C, H, W = self.image_latent_shape
 
         if disable_state_predictor:
             next_image_latent = torch.zeros((B, C, H, W), device=device)
@@ -198,15 +195,15 @@ class StatePredictionHead(nn.Module):
         }
         return loss, activation, info
 
-    def encode_target(self, next_obs: torch.Tensor, next_reward: torch.Tensor) -> torch.Tensor:
+    def encode_target(
+        self, next_image_latent: torch.Tensor, next_reward: torch.Tensor
+    ) -> torch.Tensor:
         """Build the flow-matching regression target ``x1`` (B, H'*W'+1, C')
-        from the next observation and reward, using this head's own image /
-        reward processors. Image tokens are encoded under ``no_grad`` (fixed
-        target); the reward token is appended as the final position.
+        from the next image's latent (B, C', H', W'), which the caller encodes
+        without gradient (fixed target), and the next reward through this
+        head's reward processor, appended as the final position.
         """
-        with torch.no_grad():
-            target_state_next = self.image_processor.encode(next_obs)  # (B, C', H', W')
-            target_state_next = target_state_next.flatten(2).permute(0, 2, 1)  # (B, H'*W', C')
+        target_state_next = next_image_latent.flatten(2).permute(0, 2, 1)  # (B, H'*W', C')
 
         target_reward_next = self.reward_processor.encode(next_reward).squeeze(1)  # (B, C')
         return torch.cat([target_state_next, target_reward_next.unsqueeze(1)], dim=1)
@@ -215,13 +212,13 @@ class StatePredictionHead(nn.Module):
         self,
         predictor_state: torch.Tensor,
         action: torch.Tensor,
-        next_obs: torch.Tensor,
+        next_image_latent: torch.Tensor,
         next_reward: torch.Tensor,
         detach_predictor: bool,
         disable_state_predictor: bool,
     ) -> tuple[torch.Tensor, dict]:
         """Flow-matching transition loss: train the predictor so that
-        ``(predictor_state, action)`` maps to the encoded next ``(obs, reward)``.
+        ``(predictor_state, action)`` maps to the encoded next ``(image, reward)``.
 
         Mirrors ``PolicyHead.compute_actor_loss`` / ``ValueHead.compute_critic_loss``
         — the head owns its loss and logging. ``detach_predictor`` stops the
@@ -238,10 +235,10 @@ class StatePredictionHead(nn.Module):
 
         # Context layout mirrors predict_next_state: (B, tokens, C) where C is
         # the image channel dim (no-op for callers already in that shape).
-        C = self.image_processor.output_shape[0]
+        C = self.image_latent_shape[0]
         predictor_state = predictor_state.view(predictor_state.size(0), -1, C)
 
-        x1 = self.encode_target(next_obs, next_reward)
+        x1 = self.encode_target(next_image_latent, next_reward)
         if self.predictor_type == "flow_matching":
             loss, _, info = self._loss_flow_matching(predictor_state, action, x1)
         elif self.predictor_type == "mean_flow":

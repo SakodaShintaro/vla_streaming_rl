@@ -209,37 +209,33 @@ ENCODE_MODES = {
 
 
 class ImageProcessor(nn.Module):
+    """A frozen pretrained image encoder.
+
+    It never trains, so a replay buffer stores what it produces for a frame
+    rather than the frame: the agents run ``encode`` once when a frame is
+    collected, and a learning step reads ``output_shape`` tensors back. The
+    trainable layer on top, projecting to the network's token width, belongs to
+    the network.
+    """
+
     def __init__(
         self,
         observation_space_shape: tuple[int],
         image_encoder_type: str,
-        image_encoder_output_dim: int,
         image_encode_mode: str,
-        image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
         assert image_encode_mode in ENCODE_MODES
         self.observation_space_shape = observation_space_shape
         self.image_encode_mode = image_encode_mode
         backbone = IMAGE_ENCODERS[image_encoder_type](observation_space_shape)
-        self.backbone = backbone.train(image_encoder_trainable).requires_grad_(
-            image_encoder_trainable
-        )
-        x = torch.zeros(1, *observation_space_shape)
-        with torch.no_grad():
-            backbone_dim = ENCODE_MODES[image_encode_mode](self.backbone, x).size(1)
-        if backbone_dim > image_encoder_output_dim:
-            self.projection = nn.Conv2d(backbone_dim, image_encoder_output_dim, kernel_size=1)
-        else:
-            self.projection = nn.Identity()
-        with torch.no_grad():
-            self.output_shape = list(self.encode(x).size())[1:]
+        self.backbone = backbone.train(False).requires_grad_(False)
+        self.output_shape = list(self.encode(torch.zeros(1, *observation_space_shape)).size())[1:]
 
+    @torch.no_grad()
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        # (B, C, H, W); H = W = 1 in the single-token mode
-        with torch.no_grad() if not self.backbone.training else torch.enable_grad():
-            x = ENCODE_MODES[self.image_encode_mode](self.backbone, x)
-        return self.projection(x)
+        # (B, 3, H, W) -> (B, C, H', W'); H' = W' = 1 in the single-token mode
+        return ENCODE_MODES[self.image_encode_mode](self.backbone, x)
 
 
 if __name__ == "__main__":

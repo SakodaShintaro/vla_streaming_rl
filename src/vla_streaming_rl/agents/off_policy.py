@@ -119,7 +119,7 @@ class OffPolicyAgent(Agent):
             size=buffer_size,
             seq_len=self.seq_len + self.horizon,
             horizon=self.horizon,
-            obs_shape=self.network.observation_space_shape,
+            obs_shape=self.network.stored_image_shape(),
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
             cot_shape=self.network.cot_shape,
@@ -246,7 +246,7 @@ class OffPolicyAgent(Agent):
         prompt = self.prompt_builder.task_text()
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            image,
+            self.network.to_stored_image(image),
             shaped_reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),

@@ -104,7 +104,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         image_encoder_type: str,
         image_encoder_output_dim: int,
         image_encode_mode: str,
-        image_encoder_trainable: bool,
         vlm_model_id: str,
         vlm_load_in_4bit: bool,
         cot_tokens_num: int,
@@ -132,13 +131,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         # "single_token" is for the animal backbone (see ``networks/animal_ppo.py``)
         assert image_encode_mode == "grid"
         self.image_processor = ImageProcessor(
-            observation_space_shape,
-            image_encoder_type,
-            image_encoder_output_dim,
-            image_encode_mode,
-            image_encoder_trainable,
+            observation_space_shape, image_encoder_type, image_encode_mode
         )
-        hidden_image_dim = self.image_processor.output_shape[0]
+        hidden_image_dim = image_encoder_output_dim
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
         assert 0.0 <= cot_dropout < 1.0, cot_dropout
@@ -171,7 +166,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             )
 
         self.encoder = SpatialTemporalEncoder(
-            image_processor=self.image_processor,
+            image_features_shape=tuple(self.image_processor.output_shape),
+            image_latent_dim=hidden_image_dim,
             reward_processor=self.reward_processor,
             seq_len=self.seq_len,
             n_layer=encoder_block_num,
@@ -205,7 +201,7 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)
         self.prediction_head = StatePredictionHead(
-            image_processor=self.image_processor,
+            image_latent_shape=(hidden_image_dim, self.encoder.hidden_h, self.encoder.hidden_w),
             reward_processor=self.reward_processor,
             action_dim=self.action_dim,
             predictor_hidden_dim=predictor_hidden_dim,
@@ -227,6 +223,13 @@ class ActorCriticWithActionValue(NetworkInterface):
 
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
+
+    def stored_image_shape(self) -> tuple[int, ...]:
+        """The frozen encoder's output for the frame, not the frame."""
+        return tuple(self.image_processor.output_shape)
+
+    def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
+        return self.image_processor.encode(image.unsqueeze(0)).squeeze(0)
 
     def advance_cot(
         self, episode_started: bool, window: ReplayBufferData
@@ -463,10 +466,12 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
+        with torch.no_grad():
+            next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
         seq_loss, seq_info = self.prediction_head.compute_loss(
             curr_state,
             data.actions[:, -self.horizon],
-            data.observations[:, -self.horizon],
+            next_image_latent,
             data.rewards[:, -self.horizon],
             self.detach_predictor,
             self.disable_state_predictor,
@@ -509,10 +514,12 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
+        with torch.no_grad():
+            next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
         seq_loss, seq_info = self.prediction_head.compute_loss(
             prev_state,
             data.actions[:, -self.horizon],
-            data.observations[:, -self.horizon],
+            next_image_latent,
             data.rewards[:, -self.horizon],
             self.detach_predictor,
             self.disable_state_predictor,

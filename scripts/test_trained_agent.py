@@ -85,7 +85,7 @@ def load_checkpoint_weights(checkpoint_path: Path, network: torch.nn.Module) -> 
 
     # `missing` includes two harmless cases: frozen params (never saved) and
     # names that alias a shared tensor already restored under a different key
-    # (e.g. tied lm_head/embed_tokens, or image_processor reused by prediction_head).
+    # (e.g. tied lm_head/embed_tokens).
     # Resolve every trainable missing name to its tensor and flag it only if
     # that exact tensor was never touched by any key actually in the checkpoint.
     loaded_ids = set()

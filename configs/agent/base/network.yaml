@@ -20,9 +20,6 @@ image_encoder_output_dim: 16
 #                was trained (DINOv2 CLS, SigLIP MAP head, mean pooling for
 #                V-JEPA 2 / Qwen, the folded latent for the VAEs).
 image_encode_mode: grid
-# Whether the image encoder trains with the rest of the network. The pretrained
-# backbones are frozen feature extractors here.
-image_encoder_trainable: false
 predictor_hidden_dim: 512
 predictor_block_num: 2
 predictor_step_num: 1

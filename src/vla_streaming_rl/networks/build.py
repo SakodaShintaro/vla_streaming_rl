@@ -155,7 +155,6 @@ def build_network(
             image_encoder_type=args.image_encoder_type,
             image_encoder_output_dim=args.image_encoder_output_dim,
             image_encode_mode=args.image_encode_mode,
-            image_encoder_trainable=args.image_encoder_trainable,
             vlm_model_id=args.vlm_model_id,
             vlm_load_in_4bit=args.vlm_load_in_4bit,
             cot_tokens_num=args.cot_tokens_num,
@@ -235,7 +234,6 @@ def build_network(
             image_encoder_type=args.image_encoder_type,
             image_encoder_output_dim=args.image_encoder_output_dim,
             image_encode_mode=args.image_encode_mode,
-            image_encoder_trainable=args.image_encoder_trainable,
         ).to(device)
 
     else:

@@ -3,7 +3,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .image_processor import ImageProcessor
 from .reward_processor import RewardProcessor
 from .self_attention import get_fourier_embeds_from_coordinates
 from .spatial_temporal_transformer import SpatialTemporalTransformer
@@ -55,7 +54,8 @@ class SpatialTemporalEncoder(nn.Module):
 
     def __init__(
         self,
-        image_processor: ImageProcessor,
+        image_features_shape: tuple[int, int, int],
+        image_latent_dim: int,
         reward_processor: RewardProcessor,
         seq_len: int,
         n_layer: int,
@@ -79,14 +79,14 @@ class SpatialTemporalEncoder(nn.Module):
         self.pool_cot = cot_pool == "mean" and cot_tokens_num > 0
         cot_slots = 1 if self.pool_cot else cot_tokens_num
         self.n_layer = n_layer
-        self.image_processor = image_processor
         self.reward_processor = reward_processor
         self.cot_tokens_num = cot_tokens_num
 
-        # image_processor outputs [B, C, H, W] -> treat as [B, H * W, C]
-        self.hidden_image_dim = self.image_processor.output_shape[0]
-        self.hidden_h = self.image_processor.output_shape[1]
-        self.hidden_w = self.image_processor.output_shape[2]
+        # The frozen encoder's (C, H, W) grid, projected here to the token width
+        # and read as [B, H * W, C'] tokens.
+        features_dim, self.hidden_h, self.hidden_w = image_features_shape
+        self.hidden_image_dim = image_latent_dim
+        self.image_projection = nn.Conv2d(features_dim, image_latent_dim, kernel_size=1)
         self.image_tokens_num = self.hidden_h * self.hidden_w
 
         self.space_len = (
@@ -134,7 +134,7 @@ class SpatialTemporalEncoder(nn.Module):
 
     def forward(
         self,
-        images: torch.Tensor,  # (B, T, 3, H, W)
+        images: torch.Tensor,  # (B, T, *image_features_shape): the frozen encoder's output per frame
         actions: torch.Tensor,  # (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)
@@ -153,7 +153,7 @@ class SpatialTemporalEncoder(nn.Module):
         rnn_state_internal = rnn_state.reshape(1, B * self.space_len, -1, self.n_layer)
 
         all_frames = images.reshape(-1, *images.shape[2:])
-        all_latents = self.image_processor.encode(all_frames)  # [B*T, C', H', W']
+        all_latents = self.image_projection(all_frames)  # [B*T, C', H', W']
         all_latents = all_latents.reshape(B, T, *all_latents.shape[1:])
         image_embed = all_latents.flatten(3).transpose(2, 3)  # [B, T, S, C']
 

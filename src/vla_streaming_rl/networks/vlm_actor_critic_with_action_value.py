@@ -113,7 +113,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         image_encoder_type: str,
         image_encoder_output_dim: int,
         image_encode_mode: str,
-        image_encoder_trainable: bool,
     ) -> None:
         super().__init__()
         self.seq_len = seq_len
@@ -143,13 +142,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # "single_token" is for the animal backbone (see ``networks/animal_ppo.py``)
         assert image_encode_mode == "grid"
         self.image_processor = ImageProcessor(
-            observation_space_shape,
-            image_encoder_type,
-            image_encoder_output_dim,
-            image_encode_mode,
-            image_encoder_trainable,
+            observation_space_shape, image_encoder_type, image_encode_mode
         )
-        hidden_image_dim = self.image_processor.output_shape[0]
+        hidden_image_dim = image_encoder_output_dim
+        self.image_projection = nn.Conv2d(
+            self.image_processor.output_shape[0], hidden_image_dim, kernel_size=1
+        )
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
         # Load VLM
@@ -207,7 +205,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.value_head = value_head_factory(state_dim, self.action_dim)
 
         self.prediction_head = StatePredictionHead(
-            image_processor=self.image_processor,
+            image_latent_shape=(hidden_image_dim, *self.image_processor.output_shape[1:]),
             reward_processor=self.reward_processor,
             action_dim=self.action_dim,
             predictor_hidden_dim=predictor_hidden_dim,
@@ -235,6 +233,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     def init_state(self) -> torch.Tensor:
         return self._dummy_state.clone()
+
+    def stored_image_shape(self) -> tuple[int, ...]:
+        """The image itself: the VLM reads the frames in its prompt."""
+        return tuple(self.observation_space_shape)
+
+    def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
+        return image
 
     def observe_scalar_obs(
         self,
@@ -408,10 +413,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
         # Sequence (state prediction) loss
+        with torch.no_grad():
+            next_image_latent = self.image_projection(
+                self.image_processor.encode(data.observations[:, -self.horizon])
+            )
         seq_loss, seq_info = self.prediction_head.compute_loss(
             self._state_for_predictor(state),
             data.actions[:, -self.horizon],
-            data.observations[:, -self.horizon],
+            next_image_latent,
             data.rewards[:, -self.horizon],
             self.detach_predictor,
             self.disable_state_predictor,
@@ -462,10 +471,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
         # Sequence (state prediction) loss
+        with torch.no_grad():
+            next_image_latent = self.image_projection(
+                self.image_processor.encode(data.observations[:, -self.horizon])
+            )
         seq_loss, seq_info = self.prediction_head.compute_loss(
             self._state_for_predictor(state),
             data.actions[:, -self.horizon],
-            data.observations[:, -self.horizon],
+            next_image_latent,
             data.rewards[:, -self.horizon],
             self.detach_predictor,
             self.disable_state_predictor,
