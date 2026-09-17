@@ -8,7 +8,6 @@ the zero-shot baseline the trained agents are measured against, so it plugs
 into the same trainer loop and reports the same telemetry.
 """
 
-import re
 import time
 from typing import Any
 
@@ -17,13 +16,8 @@ import numpy as np
 from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import ANSWER_RE, PromptBuilder, assistant_turn
 from vla_streaming_rl.utils import render_conversation_panel
-
-# The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
-# the tag before writing the real section, and reading the first one then takes
-# the whole reasoning as the action.
-ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
 
 
 def preprocess_image(image: np.ndarray) -> Image.Image:

@@ -6,7 +6,10 @@ step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
 before the action of that tick is chosen. Below ``learning_starts`` the env is
 driven by uniform random actions, so the buffer fills with something other than
 an untrained policy's output while the network's recurrent state still follows
-the episode.
+the episode. With ``text_action`` on, the env is instead driven throughout by
+the action the chain of thought names in its ``<answer>``, read the way the
+zero-shot controller reads it and held the same way: for a random number of
+steps out of the chain's cadence, then standing still until the next chain.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
@@ -23,8 +26,9 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.prompt import ANSWER_RE, PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 
@@ -52,6 +56,9 @@ class OffPolicyAgent(Agent):
         pad_token_id: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
+        text_action: bool,
+        cot_steps_per_chain: int,
+        parse_action_text,
     ) -> None:
         super().__init__(
             horizon=horizon,
@@ -59,6 +66,19 @@ class OffPolicyAgent(Agent):
             prompt_builder=prompt_builder,
         )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.text_action = text_action
+        if text_action:
+            assert isinstance(network.cot_module, CoTBatch), (
+                "text_action reads the action off a finished chain, which only "
+                "cot_mode=batch writes; set cot_tokens_num > 0 and cot_mode=batch"
+            )
+        assert cot_steps_per_chain >= 1, cot_steps_per_chain
+        self.cot_steps_per_chain = cot_steps_per_chain
+        self.parse_action_text = parse_action_text
+        self.held_action = np.zeros(int(np.prod(action_space.shape)), dtype=np.float32)
+        self.hold_steps = 0
+        self.text_parse_failed = 0.0
 
         self.observation_space = observation_space
 
@@ -251,6 +271,11 @@ class OffPolicyAgent(Agent):
         self.rb.amend_latest(
             cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
         )
+        if self.text_action and cot_age == 0:
+            self._read_text_action()
+        if self.text_action:
+            metrics["text/parse_failed"] = self.text_parse_failed
+            metrics["text/hold_steps"] = self.hold_steps
 
         warmup = global_step < self.learning_starts
 
@@ -299,7 +324,17 @@ class OffPolicyAgent(Agent):
         self.prev_action = action
         metrics["chunk_step"] = self.chunk_step
 
-        if warmup:
+        if self.text_action:
+            action = (
+                self.held_action
+                if cot_age < self.hold_steps
+                else np.zeros(self.action_dim, dtype=np.float32)
+            )
+            self.action_chunk = None
+            self.chunk_step = 0
+            self.prev_action = action
+            metrics["chunk_step"] = self.chunk_step
+        elif warmup:
             # The network was queried anyway so its recurrent state keeps
             # following the episode; only the action it chose is dropped.
             action = self.action_space.sample()
@@ -313,6 +348,23 @@ class OffPolicyAgent(Agent):
             panels=self.network.render_panels(),
             texts={"prompt": prompt, **self.network.render_texts()},
         )
+
+    def _read_text_action(self) -> None:
+        """Read the action the chain just written names, and draw how long it
+        is held. A reply that named no runnable action stands the agent still
+        for the chain's whole cadence and is answered by the env in its own turn."""
+        answer_match = ANSWER_RE.search(self.network.thought_text())
+        answer_text = answer_match.group(1).strip() if answer_match is not None else ""
+        action_array, parse_ok = self.parse_action_text(answer_text)
+        if parse_ok:
+            self.held_action = np.clip(
+                action_array[0].astype(np.float32), self.action_low, self.action_high
+            )
+        else:
+            self.held_action = np.zeros(self.action_dim, dtype=np.float32)
+            self.prompt_builder.reject(answer_text)
+        self.hold_steps = int(np.random.randint(1, self.cot_steps_per_chain + 1))
+        self.text_parse_failed = float(not parse_ok)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

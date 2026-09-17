@@ -24,6 +24,7 @@ handed and compose no text of their own beyond how a chain is continued.
 """
 
 import csv
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,11 @@ TEXT_ACTION_PROTOCOL = (
     "Reply with <reason>one short sentence on what decides the next action</reason> "
     "then <answer>the action only</answer>."
 )
+
+# The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
+# the tag before writing the real section, and reading the first one then takes
+# the whole reasoning as the action.
+ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
 
 
 def assistant_turn(text: str) -> dict:

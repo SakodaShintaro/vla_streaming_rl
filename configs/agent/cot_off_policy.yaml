@@ -17,3 +17,4 @@ buffer_device: "cpu"
 # 0 is its ablation: same body, same heads, same loss, no chain on the space axis.
 cot_tokens_num: 4
 disable_state_predictor: 1
+text_action: true
