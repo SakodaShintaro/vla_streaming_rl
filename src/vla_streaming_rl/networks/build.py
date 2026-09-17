@@ -142,6 +142,7 @@ def build_network(
             cot_dropout=args.cot_dropout,
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
+            cot_prompt_budget=args.cot_prompt_budget,
             prompt_builder=prompt_builder,
         ).to(device)
 

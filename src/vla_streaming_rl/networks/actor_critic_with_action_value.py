@@ -36,6 +36,7 @@ def build_cot(
     temperature: float,
     steps_per_chain: int,
     use_cuda_graph: bool,
+    prompt_budget: int,
     prompt_builder,
     device: torch.device,
 ):
@@ -64,6 +65,8 @@ def build_cot(
             max_len=max_len,
             temperature=temperature,
             steps_per_chain=steps_per_chain,
+            use_cuda_graph=use_cuda_graph,
+            prompt_budget=prompt_budget,
             prompt_builder=prompt_builder,
             device=device,
         ),
@@ -113,6 +116,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_dropout: float,
         cot_pool: str,
         cot_cuda_graph: bool,
+        cot_prompt_budget: int,
         prompt_builder,
         layer_scale_init: float,
     ) -> None:
@@ -155,6 +159,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 temperature=temperature,
                 steps_per_chain=cot_steps_per_chain,
                 use_cuda_graph=cot_cuda_graph,
+                prompt_budget=cot_prompt_budget,
                 prompt_builder=prompt_builder,
                 device=torch.device("cuda"),
             )

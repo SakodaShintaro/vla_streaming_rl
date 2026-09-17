@@ -48,8 +48,7 @@ cot_tokens_num: 0
 #            partly written (cot_steps_per_chain is ignored).
 #   batch  : a whole chain written every cot_steps_per_chain steps and held
 #            in between, so what the agent reads is a finished thought about
-#            a frame up to that many ticks old. Ignores cot_cuda_graph,
-#            since there is no per-step decode to record.
+#            a frame up to that many ticks old.
 cot_mode: batch
 cot_steps_per_chain: 16
 # Share of learning batches the chain is taken away from, so the critic is
@@ -65,6 +64,7 @@ cot_pool: mean
 # running them, so replaying one call is several times faster. Off falls back to
 # issuing the step normally.
 cot_cuda_graph: true
+cot_prompt_budget: 2048
 
 use_lora: false
 vlm_model_id: Qwen/Qwen3.8-27B
