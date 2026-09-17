@@ -9,7 +9,8 @@ an untrained policy's output while the network's recurrent state still follows
 the episode. With ``text_action`` on, the action the chain of thought names in
 its ``<answer>`` is a second candidate, held for the chain's whole cadence: it
 drives the env alone below ``learning_starts``, and from then on every tick
-runs whichever of it and the head's action the critic values higher.
+runs the head's action only where the critic values it more than the VLM's
+by at least ``select_margin``, the VLM's otherwise.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
@@ -65,6 +66,7 @@ class OffPolicyAgent(Agent):
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
         text_action: bool,
+        select_margin: float,
         parse_action_text,
     ) -> None:
         super().__init__(
@@ -75,6 +77,7 @@ class OffPolicyAgent(Agent):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.text_action = text_action
+        self.select_margin = select_margin
         if text_action:
             assert isinstance(network.cot_module, CoTBatch), (
                 "text_action reads the action off a finished chain, which only "
@@ -334,7 +337,7 @@ class OffPolicyAgent(Agent):
             vlm_chunk = np.repeat(self._to_net_action(self.vlm_action)[None], self.horizon, axis=0)
             q_vlm = self.network.action_value(infer_result.features, vlm_chunk)
             q_head = self.network.action_value(infer_result.features, action_chunk)
-            vlm_chosen = warmup or q_vlm >= q_head
+            vlm_chosen = warmup or q_head - q_vlm <= self.select_margin
             metrics["select/q_vlm"] = q_vlm
             metrics["select/q_head"] = q_head
             metrics["select/vlm_chosen"] = float(vlm_chosen)

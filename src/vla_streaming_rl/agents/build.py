@@ -98,5 +98,6 @@ def build_agent(
         reset_on_episode_end=args.reset_on_episode_end,
         prompt_builder=prompt_builder,
         text_action=args.text_action,
+        select_margin=args.select_margin,
         parse_action_text=parse_action_text,
     )
