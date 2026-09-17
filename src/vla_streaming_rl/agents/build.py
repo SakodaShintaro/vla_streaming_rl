@@ -99,5 +99,6 @@ def build_agent(
         prompt_builder=prompt_builder,
         text_action=args.text_action,
         select_margin=args.select_margin,
+        cot_steps_per_chain=args.cot_steps_per_chain,
         parse_action_text=parse_action_text,
     )

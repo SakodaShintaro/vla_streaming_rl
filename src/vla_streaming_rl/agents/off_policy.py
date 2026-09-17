@@ -6,11 +6,14 @@ step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
 before the action of that tick is chosen. Below ``learning_starts`` the env is
 driven by uniform random actions, so the buffer fills with something other than
 an untrained policy's output while the network's recurrent state still follows
-the episode. With ``text_action`` on, the action the chain of thought names in
-its ``<answer>`` is a second candidate, held for the chain's whole cadence: it
-drives the env alone below ``learning_starts``, and from then on every tick
-runs the head's action only where the critic values it more than the VLM's
-by at least ``select_margin``, the VLM's otherwise.
+the episode. With ``text_action`` on, the VLM policy is a second candidate,
+behaving exactly as the zero-shot controller does: the action the chain of
+thought names in its ``<answer>``, held for a random number of steps out of the
+chain's cadence, then standing still until the next chain. It drives the env
+alone below ``learning_starts``, and from then on every tick runs the head's
+action only where the critic values it more than the VLM's by at least
+``select_margin``, the VLM's otherwise -- so a head that never earns that
+margin leaves the run performing as the zero-shot controller would.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
@@ -67,6 +70,7 @@ class OffPolicyAgent(Agent):
         prompt_builder: PromptBuilder,
         text_action: bool,
         select_margin: float,
+        cot_steps_per_chain: int,
         parse_action_text,
     ) -> None:
         super().__init__(
@@ -78,6 +82,8 @@ class OffPolicyAgent(Agent):
 
         self.text_action = text_action
         self.select_margin = select_margin
+        assert cot_steps_per_chain >= 1, cot_steps_per_chain
+        self.cot_steps_per_chain = cot_steps_per_chain
         if text_action:
             assert isinstance(network.cot_module, CoTBatch), (
                 "text_action reads the action off a finished chain, which only "
@@ -86,6 +92,7 @@ class OffPolicyAgent(Agent):
         self.parse_action_text = parse_action_text
         self.vlm_action = np.zeros(int(np.prod(action_space.shape)), dtype=np.float32)
         self.vlm_answer_text = ""
+        self.hold_steps = 0
         self.text_parse_failed = 0.0
         self.selection_status = ""
         self.selection_rows = []
@@ -334,7 +341,9 @@ class OffPolicyAgent(Agent):
         metrics.update(infer_result.value_report)
         action_chunk = infer_result.action[0].cpu().numpy()
         if self.text_action:
-            vlm_chunk = np.repeat(self._to_net_action(self.vlm_action)[None], self.horizon, axis=0)
+            holding = cot_age < self.hold_steps
+            vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
+            vlm_chunk = np.repeat(self._to_net_action(vlm_action)[None], self.horizon, axis=0)
             q_vlm = self.network.action_value(infer_result.features, vlm_chunk)
             q_head = self.network.action_value(infer_result.features, action_chunk)
             vlm_chosen = warmup or q_head - q_vlm <= self.select_margin
@@ -351,7 +360,8 @@ class OffPolicyAgent(Agent):
             self.selection_rows = [
                 (
                     "VLM",
-                    f"{self.vlm_answer_text}  {_format_action(self.vlm_action)}",
+                    f"{self.vlm_answer_text}  {_format_action(vlm_action)}  "
+                    f"({'holding' if holding else 'standing still'}, hold {self.hold_steps})",
                     q_vlm,
                     vlm_chosen,
                 ),
@@ -396,10 +406,10 @@ class OffPolicyAgent(Agent):
         return panels
 
     def _read_vlm_action(self) -> None:
-        """Read the action the chain just written names, the VLM policy's
-        candidate until the next chain. A reply that named no runnable action
-        makes the candidate standing still, and is answered by the env in its
-        own turn."""
+        """Read the action the chain just written names and draw how long the
+        VLM policy holds it, as the zero-shot controller does. A reply that
+        named no runnable action makes the candidate standing still, and is
+        answered by the env in its own turn."""
         answer_match = ANSWER_RE.search(self.network.thought_text())
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
         action_array, parse_ok = self.parse_action_text(answer_text)
@@ -411,6 +421,7 @@ class OffPolicyAgent(Agent):
         else:
             self.vlm_action = np.zeros(self.action_dim, dtype=np.float32)
             self.prompt_builder.reject(answer_text)
+        self.hold_steps = int(np.random.randint(1, self.cot_steps_per_chain + 1))
         self.text_parse_failed = float(not parse_ok)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
