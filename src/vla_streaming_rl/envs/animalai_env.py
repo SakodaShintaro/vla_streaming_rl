@@ -335,19 +335,22 @@ class ArenaSelector:
         curriculum wants a stricter bar (see `SuccessDrivenSelector`)."""
         return self._successes[arena.name] > 0
 
-    def progress_by_group(self) -> list[tuple[str, int, int, int]]:
-        """(group, cleared, failed, untried) per arena group, in group order.
+    def progress_by_group(self) -> list[tuple[str, int, int]]:
+        """(group, successes, failures) per arena group over every episode run
+        so far, in group order.
 
-        `cleared` counts arenas `is_cleared` accepts, `failed` ones attempted
-        without reaching that bar, `untried` ones never run. The group is the
-        arena label's first "-" separated token, which is the competition
-        level ("01-01-01" -> "01") and so also the curriculum stage.
+        Episodes rather than arenas, so the bar reads as the group's success
+        rate over the whole run and not as whether each arena was ever passed
+        once. The group is the arena label's first "-" separated token, which
+        is the competition level ("01-01-01" -> "01") and so also the
+        curriculum stage.
         """
         counts: dict[str, list[int]] = {}
         for arena in self.arenas:
-            group = counts.setdefault(arena.name.split("-")[0], [0, 0, 0])
-            attempts = self._attempts[arena.name]
-            group[0 if self.is_cleared(arena) else (1 if attempts else 2)] += 1
+            group = counts.setdefault(arena.name.split("-")[0], [0, 0])
+            attempts, successes = self._attempts[arena.name], self._successes[arena.name]
+            group[0] += successes
+            group[1] += attempts - successes
         return [(group, *counts[group]) for group in sorted(counts)]
 
     def info(self, global_step: int) -> dict:
@@ -697,15 +700,16 @@ def _draw_header(lines: list[str], width_px: int) -> np.ndarray:
 _PROGRESS_ROW_PX = 22
 _PROGRESS_LABEL_PX = 76
 _PROGRESS_LEGEND_PX = 22
-# cleared / attempted-but-never-passed / never attempted.
+# passed episodes / failed episodes / no episode run yet.
 _PROGRESS_COLORS = ((60, 170, 60), (205, 75, 75), (205, 205, 205))
 _PROGRESS_LEGEND = ("pass", "fail", "n/a")
 
 
-def _render_progress(groups: list[tuple[str, int, int, int]]) -> np.ndarray:
-    """One stacked horizontal bar per arena group (see
-    `ArenaSelector.progress_by_group`): what share of it the agent has ever
-    passed, tried without passing, and not yet been given."""
+def _render_progress(groups: list[tuple[str, int, int]]) -> np.ndarray:
+    """One horizontal bar per arena group (see
+    `ArenaSelector.progress_by_group`): the group's success rate over every
+    episode run so far, passed in green and failed in red, grey until the
+    group has been run at all."""
     passed = sum(group[1] for group in groups)
     total = sum(sum(group[1:]) for group in groups)
     header = _draw_header([f"passed:{passed}/{total}"], _RENDER_SIZE_PX)
@@ -716,11 +720,13 @@ def _render_progress(groups: list[tuple[str, int, int, int]]) -> np.ndarray:
 
     bar_x = _PROGRESS_LABEL_PX
     bar_width = _RENDER_SIZE_PX - bar_x - 6
-    for row, (name, *counts) in enumerate(groups):
+    for row, (name, passed, failed) in enumerate(groups):
         top = header_px + row * _PROGRESS_ROW_PX
+        attempts = passed + failed
+        label = f"{name} {passed / attempts:.0%}" if attempts else name
         cv2.putText(
             canvas,
-            name,
+            label,
             (4, top + 15),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.35,
@@ -728,7 +734,9 @@ def _render_progress(groups: list[tuple[str, int, int, int]]) -> np.ndarray:
             1,
             cv2.LINE_AA,
         )
-        # Walk cumulative counts so the segments always tile the bar exactly.
+        # A group never run is one grey bar; otherwise the passed and failed
+        # episodes tile the bar exactly.
+        counts = (passed, failed, 0) if attempts else (0, 0, 1)
         left = bar_x
         filled = 0
         for count, color in zip(counts, _PROGRESS_COLORS):
