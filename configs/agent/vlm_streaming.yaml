@@ -1,7 +1,6 @@
 # @package _global_
 defaults:
   - base/network
-  - base/streaming
   - _self_
 
 agent_type: streaming

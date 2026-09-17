@@ -1,4 +1,0 @@
-# @package _global_
-batch_size: 16
-actor_lr: 1e-5
-critic_lr: 1e-5
