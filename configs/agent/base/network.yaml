@@ -1,8 +1,10 @@
 # @package _global_
 encoder_block_num: 8
+temporal_model_type: gru
 layer_scale_init: 0.0001
 actor_hidden_dim: 512
 actor_block_num: 1
+policy_type: diffusion
 critic_hidden_dim: 1024
 critic_block_num: 1
 # Action-value critic architecture:
