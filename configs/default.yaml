@@ -43,3 +43,4 @@ image_save_interval: 100
 print_interval: 5
 max_step_count: 100
 debug: false
+text_action: false
