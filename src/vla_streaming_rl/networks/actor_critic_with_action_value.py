@@ -275,8 +275,10 @@ class ActorCriticWithActionValue(NetworkInterface):
             return ""
         return self.cot_module.text()
 
-    def _drop_cot(self, cot_activations: torch.Tensor) -> torch.Tensor:
-        """The chain taken away from a share ``cot_dropout`` of the batch.
+    def _cot_keep(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Which sequences of a batch keep their chain, the rest being the share
+        ``cot_dropout`` it is taken away from. Handed to the encoder as a mask
+        rather than applied to the activations here, which would copy them.
 
         Only on the learning path. Without it the critic has never scored a
         state whose chain is missing, so asking it what an action is worth
@@ -286,15 +288,13 @@ class ActorCriticWithActionValue(NetworkInterface):
         internally consistent.
         """
         if self.cot_dropout == 0.0:
-            return cot_activations
-        keep = (
-            torch.rand(cot_activations.shape[0], device=cot_activations.device) >= self.cot_dropout
-        )
-        return cot_activations * keep.view(-1, *([1] * (cot_activations.dim() - 1)))
+            return torch.ones(batch_size, dtype=torch.bool, device=device)
+        return torch.rand(batch_size, device=device) >= self.cot_dropout
 
     def _window(self, data: ReplayBufferData, start, stop) -> tuple:
-        """The ``(image, action, reward, rnn_state, scalar_obs, cot)`` the encoder
-        reads, sliced out of a replay batch over ``[start, stop)`` steps."""
+        """The ``(image, action, reward, rnn_state, scalar_obs, cot, cot_age,
+        cot_keep)`` the encoder reads, sliced out of a replay batch over
+        ``[start, stop)`` steps."""
         return (
             data.observations[:, start:stop],
             data.actions[:, start:stop],
@@ -311,8 +311,9 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.episode_step[:, start:stop],
                 data.health[:, start:stop],
             ),
-            self._drop_cot(data.cot_activations[:, start:stop]),
+            data.cot_activations[:, start:stop],
             data.cot_age[:, start:stop],
+            self._cot_keep(data.cot_activations.shape[0], data.cot_activations.device),
         )
 
     def tokenize(self, text: str) -> list[int]:
@@ -398,6 +399,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             scalar_obs,
             data.cot_activations_seq,
             data.cot_age_seq,
+            torch.ones(1, dtype=torch.bool, device=data.cot_activations_seq.device),
         )  # (B, state_dim)
 
         # Get action chunk from policy_head

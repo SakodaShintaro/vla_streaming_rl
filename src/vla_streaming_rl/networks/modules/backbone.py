@@ -141,6 +141,7 @@ class SpatialTemporalEncoder(nn.Module):
         scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
         cot_activations: torch.Tensor,  # (B, T, cot_tokens_num, cot_layers, cot_dim)
         cot_age: torch.Tensor,  # (B, T, 1)
+        cot_keep: torch.Tensor,  # (B,) bool: which sequences keep their chain
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -163,8 +164,9 @@ class SpatialTemporalEncoder(nn.Module):
         register_token = torch.zeros(
             (B, T, 1, self.hidden_image_dim), device=images.device, dtype=images.dtype
         )
-        weights = F.softmax(self.cot_layer_logits, dim=0)
-        cot = (cot_activations.to(image_embed.dtype) * weights.view(1, 1, 1, -1, 1)).sum(dim=3)
+        weights = F.softmax(self.cot_layer_logits, dim=0).to(cot_activations.dtype)
+        cot = torch.matmul(weights.view(1, 1, 1, 1, -1), cot_activations).squeeze(3)
+        cot = cot.to(image_embed.dtype) * cot_keep.view(-1, 1, 1, 1).to(image_embed.dtype)
         cot = cot.mean(dim=2, keepdim=True) if self.pool_cot else cot
         # [B, T, 1, C'], broadcast over the slots: every token of one step's
         # chain is that step's chain, so they share its age.
