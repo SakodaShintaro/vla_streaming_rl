@@ -5,6 +5,7 @@ layer_scale_init: 0.0001
 actor_hidden_dim: 512
 actor_block_num: 1
 policy_type: diffusion
+denoising_time: 0.9
 critic_hidden_dim: 1024
 critic_block_num: 1
 # Action-value critic architecture:

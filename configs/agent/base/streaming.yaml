@@ -3,4 +3,3 @@ batch_size: 1
 actor_lr: 1e-6
 critic_lr: 1e-5
 weight_decay: 0.1
-denoising_time: 0.7
