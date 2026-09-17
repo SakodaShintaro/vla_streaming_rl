@@ -2,6 +2,7 @@
 encoder_block_num: 8
 temporal_model_type: gru
 layer_scale_init: 0.0001
+weight_decay: 0.01
 actor_hidden_dim: 512
 actor_block_num: 1
 policy_type: diffusion
