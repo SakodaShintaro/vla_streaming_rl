@@ -1,8 +1,6 @@
 # @package _global_
 defaults:
   - base/network
-  - base/off_policy
-  - base/streaming
   - _self_
 
 agent_type: animal_ppo
@@ -32,9 +30,3 @@ seq_len: 8
 # slot, divided by the value it starts at.
 velocity_scale: [1.0, 1.0, 16.0]
 health_scale: 100.0
-
-# Read by scripts/train.py for every agent.
-# Unused here (there is no replay buffer and no warmup), but debug mode assigns
-# them, so they have to exist.
-learning_starts: 0
-buffer_size: 0
