@@ -545,6 +545,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 data_dict["round_index"] = env_info["round_index"]
                 data_dict["round_success_rate"] = env_info["round_success_rate"]
                 data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
+                for level, rate in env_info["last_round_level_success_rate"].items():
+                    data_dict[f"last_round_success_rate/{level}"] = rate
                 data_dict["advanced"] = float(env_info["advanced"])
         if len(score_list) >= eval_range:
             data_dict["recent_average_score"] = recent_average_score

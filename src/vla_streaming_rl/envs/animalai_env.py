@@ -445,7 +445,9 @@ class SuccessDrivenSelector(ArenaSelector):
         self._queue: list[str] = []
         self._round_attempts = 0
         self._round_successes = 0
+        self._round_by_level: dict[str, list[int]] = {}
         self._last_round_rate = 0.0
+        self._last_round_level_rate: dict[str, float] = {}
         self._advanced = False
 
     def _refill(self) -> None:
@@ -468,12 +470,20 @@ class SuccessDrivenSelector(ArenaSelector):
         super().on_episode_end(arena, success)
         self._round_attempts += 1
         self._round_successes += int(success)
+        level = self._round_by_level.setdefault(arena.name.split("-")[0], [0, 0])
+        level[0] += int(success)
+        level[1] += 1
         self._advanced = False
         if self._round_attempts < len(self._stages[self._stage]):
             return
         # The counters reset here but info() is read after this call, so the
         # rate the decision was made on is kept rather than reported as 0/0.
         self._last_round_rate = self._round_rate()
+        self._last_round_level_rate = {
+            level: successes / attempts
+            for level, (successes, attempts) in sorted(self._round_by_level.items())
+        }
+        self._round_by_level = {}
         if self._last_round_rate >= self.advance_success_rate and self._stage + 1 < len(
             self._stages
         ):
@@ -489,6 +499,7 @@ class SuccessDrivenSelector(ArenaSelector):
             "round_index": self._round_attempts,
             "round_success_rate": (self._round_rate() if self._round_attempts > 0 else 0.0),
             "last_round_success_rate": self._last_round_rate,
+            "last_round_level_success_rate": dict(self._last_round_level_rate),
             "advanced": self._advanced,
             "cleared_count": sum(self.is_cleared(arena) for arena in self.arenas),
         }
@@ -508,7 +519,11 @@ class SuccessDrivenSelector(ArenaSelector):
             "queue": list(self._queue),
             "round_attempts": self._round_attempts,
             "round_successes": self._round_successes,
+            "round_by_level": {
+                level: list(counts) for level, counts in self._round_by_level.items()
+            },
             "last_round_rate": self._last_round_rate,
+            "last_round_level_rate": dict(self._last_round_level_rate),
         }
 
     def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
@@ -522,6 +537,13 @@ class SuccessDrivenSelector(ArenaSelector):
         self._round_attempts = int(progress["round_attempts"])
         self._round_successes = int(progress["round_successes"])
         self._last_round_rate = float(progress["last_round_rate"])
+        self._round_by_level = {
+            level: [int(counts[0]), int(counts[1])]
+            for level, counts in progress["round_by_level"].items()
+        }
+        self._last_round_level_rate = {
+            level: float(rate) for level, rate in progress["last_round_level_rate"].items()
+        }
         known = set(self._attempts)
         self._queue = [name for name in progress["queue"] if name in known]
         if not self._queue:
