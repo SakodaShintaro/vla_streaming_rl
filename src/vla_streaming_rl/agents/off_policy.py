@@ -8,8 +8,8 @@ driven by uniform random actions, so the buffer fills with something other than
 an untrained policy's output while the network's recurrent state still follows
 the episode. With ``text_action`` on, the VLM policy is a second candidate,
 behaving exactly as the zero-shot controller does: the action the chain of
-thought names in its ``<answer>``, held for a random number of steps out of the
-chain's cadence, then standing still until the next chain. It drives the env
+thought names in its ``<answer>``, held for the number of steps it asks for within
+the chain's cadence, then standing still until the next chain. It drives the env
 alone below ``learning_starts``, and from then on every tick runs the head's
 action only where the critic values it more than the VLM's by at least
 ``select_margin``, the VLM's otherwise -- so a head that never earns that
@@ -406,8 +406,8 @@ class OffPolicyAgent(Agent):
         return panels
 
     def _read_vlm_action(self) -> None:
-        """Read the action the chain just written names and draw how long the
-        VLM policy holds it, as the zero-shot controller does. A reply that
+        """Read the action the chain just written names and how many steps it
+        asks to hold it, as the zero-shot controller does. A reply that
         named no runnable action makes the candidate standing still, and is
         answered by the env in its own turn."""
         answer_match = ANSWER_RE.search(self.network.thought_text())
@@ -421,7 +421,7 @@ class OffPolicyAgent(Agent):
         else:
             self.vlm_action = np.zeros(self.action_dim, dtype=np.float32)
             self.prompt_builder.reject(answer_text)
-        self.hold_steps = int(np.random.randint(1, self.cot_steps_per_chain + 1))
+        self.hold_steps = min(len(action_array), self.cot_steps_per_chain)
         self.text_parse_failed = float(not parse_ok)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:

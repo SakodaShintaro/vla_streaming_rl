@@ -22,40 +22,27 @@ def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
 # Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
 # named action maps onto the extreme Box value that survives that dead-zone.
-# An action is written the way it is said: `<move>, <rotation>`, so the model
-# spells out what it is doing rather than looking a letter code up in the prompt
-# every step.
-_ANIMALAI_MOVE = {"stand still": 0.0, "walk forward": 1.0, "walk backward": -1.0}
-_ANIMALAI_ROTATE = {"no turn": 0.0, "turn right": 1.0, "turn left": -1.0}
-# One phrase from each half, comma separated. Which half a phrase belongs to is
-# what it says, not where it sits, so the two orders read the same and both are
-# accepted: a model naming the half it cares about first writes "turn left,
-# stand still" as readily as "stand still, turn left", and rejecting one of them
-# would measure word order rather than the action chosen. Anything that is not
-# one phrase from each half stays a format violation, reported as such rather
-# than repaired here.
-_ANIMALAI_ACTION_RE = re.compile(
-    f"({'|'.join(_ANIMALAI_MOVE | _ANIMALAI_ROTATE)}), "
-    f"({'|'.join(_ANIMALAI_MOVE | _ANIMALAI_ROTATE)})",
-    re.IGNORECASE,
-)
+# An action is written as a call, `<name>(<n>)`: one of four names, each a move
+# or a rotation alone, and how many steps in a row it is taken.
+_ANIMALAI_ACTIONS = {
+    "move_forward": (1.0, 0.0),
+    "move_backward": (-1.0, 0.0),
+    "turn_right": (0.0, 1.0),
+    "turn_left": (0.0, -1.0),
+}
+# Anything that is not one call with a count of 1-99 stays a format violation,
+# reported as such rather than repaired here.
+_ANIMALAI_ACTION_RE = re.compile(f"({'|'.join(_ANIMALAI_ACTIONS)})\\(([1-9]\\d?)\\)", re.IGNORECASE)
 
 
 def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    """Decode the `<move>, <rotation>` phrase pair into the Box action that the
-    env discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair."""
+    """Decode the `<name>(<n>)` call into n rows of the Box action that the env
+    discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair."""
     match = _ANIMALAI_ACTION_RE.fullmatch(action_text.strip())
     if match is None:
         return np.zeros((0, 2), dtype=np.float32), False
-    first, second = (group.lower() for group in match.groups())
-    moves = [phrase for phrase in (first, second) if phrase in _ANIMALAI_MOVE]
-    rotations = [phrase for phrase in (first, second) if phrase in _ANIMALAI_ROTATE]
-    if len(moves) != 1 or len(rotations) != 1:
-        return np.zeros((0, 2), dtype=np.float32), False
-    action_array = np.array(
-        [[_ANIMALAI_MOVE[moves[0]], _ANIMALAI_ROTATE[rotations[0]]]], dtype=np.float32
-    )
-    return action_array, True
+    action = np.array(_ANIMALAI_ACTIONS[match.group(1).lower()], dtype=np.float32)
+    return np.tile(action, (int(match.group(2)), 1)), True
 
 
 def make_animalai_env(

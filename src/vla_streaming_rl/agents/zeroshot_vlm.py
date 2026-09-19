@@ -96,7 +96,6 @@ class ZeroShotVLMAgent(Agent):
 
         if self.steps_until_next == 0:
             self._write_action()
-            self.hold_steps = int(np.random.randint(1, self.steps_per_action + 1))
             self.steps_until_next = self.steps_per_action
         steps_since_write = self.steps_per_action - self.steps_until_next
         action = (
@@ -146,6 +145,8 @@ class ZeroShotVLMAgent(Agent):
             if parse_ok
             else np.zeros(self.action_dim, dtype=np.float32)
         )
+        # One row per step the reply asked for, cut at the next generation.
+        self.hold_steps = min(len(action_array), self.steps_per_action)
 
         # The reply is handed back as written, <think> section and all, so the
         # conversation is the whole record of what the model said -- what the

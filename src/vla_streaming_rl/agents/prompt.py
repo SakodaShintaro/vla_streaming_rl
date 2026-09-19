@@ -85,10 +85,12 @@ class PromptBuilder(ABC):
     dropped instead.
     """
 
-    def __init__(self, env: Env, history_turns: int) -> None:
+    def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
         del env
         assert history_turns >= 0, history_turns
+        assert steps_per_action >= 1, steps_per_action
         self.history_turns = history_turns
+        self.steps_per_action = steps_per_action
         self._turns = []
         self._current = {}
         self._task_text = ""
@@ -192,18 +194,15 @@ class CarRacingPromptBuilder(PromptBuilder):
 
 ANIMALAI_FRAMING = (
     "You control the agent in Animal-AI (first-person view). "
-    "Write the action as a move and a rotation joined by a comma, for example "
-    "`walk forward, turn left`: move is stand still, walk forward or walk "
-    "backward; rotation is no turn, turn right or turn left. "
     "Health drains every step and the episode fails when it reaches 0. "
     "Green spheres look yellow-green and touching one ends the episode; yellow "
     "spheres are bright yellow and the episode goes on after touching them; red "
     "spheres and red zones end the episode as a failure, never touch them. "
     "Walls are never the goal, whatever their color. "
-    "Walk forward whenever the target is in view, turning while walking if it is "
-    "off center; turn on the spot only when it is out of view, and walk to a new "
-    "spot if a full turn shows nothing. "
+    "Turn until the target is at the center of the view, then move forward; "
+    "move to a new spot if a full turn shows nothing. "
 )
+ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
 
 
 def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
@@ -237,21 +236,25 @@ class AnimalAIPromptBuilder(PromptBuilder):
     handed over as text by the env, so the env carries no vocabulary of its own.
     """
 
-    def __init__(self, env: Env, history_turns: int) -> None:
-        super().__init__(env, history_turns)
+    def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
+        super().__init__(env, history_turns, steps_per_action)
         self.tasks = _load_arena_tasks(env)
 
-    def _rejection_text(self, answer: str) -> str:
+    def _action_format(self) -> str:
         return (
-            f"(`{answer}` is not an action -- the agent stood still. First half: "
-            "stand still / walk forward / walk backward. Second half: no turn / "
-            "turn right / turn left.)"
+            f"Write the action as `<name>(<n>)`, for example `move_forward(4)`: "
+            f"<name> is one of {ANIMALAI_ACTION_NAMES}, and <n> is how many steps "
+            f"in a row it is taken, an integer from 1 to {self.steps_per_action}."
         )
+
+    def _rejection_text(self, answer: str) -> str:
+        return f"(`{answer}` is not an action -- the agent stood still. {self._action_format()})"
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs
         return (
             f"{ANIMALAI_FRAMING} "
+            f"{self._action_format()} "
             f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
             f"{TEXT_ACTION_PROTOCOL}"
         )
@@ -308,4 +311,4 @@ def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     # the same count the trained network reads off its replay buffer, so the
     # two see the same history for the same config.
     history_turns = (args.seq_len - 1) // args.cot_steps_per_chain
-    return PROMPT_BUILDERS[args.env_id](env, history_turns)
+    return PROMPT_BUILDERS[args.env_id](env, history_turns, args.cot_steps_per_chain)
