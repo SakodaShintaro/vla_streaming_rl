@@ -205,8 +205,13 @@ ANIMALAI_FRAMING = (
 ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
 
 
-def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
+def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: float) -> str:
     """Animal-AI's live scalars: the numbers the frame cannot show.
+
+    The forward speed is the average over the steps since the last answer
+    rather than this tick's own: an action of fewer steps than the interval has
+    run out by the time the next answer is asked for, so the speed at that
+    moment reads 0 whether the move got somewhere or not.
 
     Read off the observation the network's scalar branch is fed, cut down to
     what a reply can act on: of the three velocity components only the forward
@@ -215,9 +220,8 @@ def _animalai_turn(obs: dict[str, Any], reward: float) -> str:
     The lateral and vertical components still reach the policy through the
     scalar branch. These are what the env reports, not how the run frames it.
     """
-    forward_speed = obs["velocity"][2]
     return (
-        f"Forward speed: {forward_speed:+.2f}. "
+        f"Average forward speed since your last answer: {average_forward_speed:+.2f}. "
         f"Reward: {reward:+.3f}. "
         f"Return so far: {obs['episode_return'][0]:+.3f}. "
         f"Pass mark: {obs['pass_mark'][0]:+.3f}. "
@@ -239,6 +243,20 @@ class AnimalAIPromptBuilder(PromptBuilder):
     def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
         super().__init__(env, history_turns, steps_per_action)
         self.tasks = _load_arena_tasks(env)
+        self._forward_speed_sum = 0.0
+        self._forward_speed_steps = 0
+
+    def reset(self) -> None:
+        super().reset()
+        self._forward_speed_sum = 0.0
+        self._forward_speed_steps = 0
+
+    def add_reply(self, text: str) -> None:
+        """Settle the reply and start the forward speed's average afresh, so the
+        next turn reports what came of this answer."""
+        super().add_reply(text)
+        self._forward_speed_sum = 0.0
+        self._forward_speed_steps = 0
 
     def _action_format(self) -> str:
         return (
@@ -261,7 +279,9 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del info
-        return _animalai_turn(obs, reward)
+        self._forward_speed_sum += float(obs["velocity"][2])
+        self._forward_speed_steps += 1
+        return _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)
 
 
 # --- CARLA -------------------------------------------------------------------
