@@ -9,7 +9,7 @@ different framing, and the env carries no text of its own.
 
 There is one builder per environment, and it always writes the prompt of an
 agent about to act: what the env asks, the action vocabulary it is asked in, the
-arena's own instruction, and the two sections the answer is read out of. Whether
+arena's own instruction, and the three sections the answer is read out of. Whether
 the action then comes from the reply or from a policy head is the reader's
 business, not the prompt's -- a run that reads the language as conditioning is
 reading the same words a run that acts on it would, so the two are comparable
@@ -35,7 +35,9 @@ from omegaconf import DictConfig
 ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 
 TEXT_ACTION_PROTOCOL = (
-    "Reply with <reason>one short sentence on what decides the next action</reason> "
+    "Reply with <memory>at most two short sentences on what you have tried so far in "
+    "this episode and what came of it, rewritten from the memory of your last reply</memory> "
+    "then <reason>one short sentence on what decides the next action</reason> "
     "then <answer>the action only</answer>."
 )
 
