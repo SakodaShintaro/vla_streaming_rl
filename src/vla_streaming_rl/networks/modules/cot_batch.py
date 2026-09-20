@@ -71,6 +71,8 @@ class CoTBatch:
         # would not be the baseline's reasoning measured under RL.
         assert temperature >= 0.0, temperature
         self.temperature = temperature
+        self.top_k = self.model.generation_config.top_k
+        self.top_p = self.model.generation_config.top_p
         self.steps_per_chain = steps_per_chain
         # The conversation is the agent's; a chain reads it on the steps it
         # writes and puts what it wrote back as that turn's reply.
@@ -195,11 +197,16 @@ class CoTBatch:
 
     def _sample(self, logits: torch.Tensor) -> int:
         """The token the logits imply, decoded the way the zero-shot controller
-        decodes: greedy at temperature 0, sampled otherwise."""
+        decodes: greedy at temperature 0, otherwise sampled the way `generate`
+        samples under the model's own generation config -- the temperature, then
+        the ``top_k`` likeliest tokens, then the fewest of those that hold
+        ``top_p`` of the probability."""
         if self.temperature == 0.0:
             return int(logits.argmax().item())
-        probs = torch.softmax(logits.float() / self.temperature, dim=-1)
-        return int(torch.multinomial(probs, 1).item())
+        top = torch.topk(logits.float() / self.temperature, self.top_k)
+        probs = torch.softmax(top.values, dim=-1)
+        kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
+        return int(top.indices[torch.multinomial(kept, 1)].item())
 
     def _read_activations(self, positions: torch.Tensor) -> torch.Tensor:
         """The whole chain, every depth kept, pooled to one step's read:
