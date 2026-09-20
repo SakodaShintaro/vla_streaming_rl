@@ -13,7 +13,7 @@ learning_starts: 2000
 # The chain-carrying run of the one actor-critic. Setting cot_tokens_num back to
 # 0 is its ablation: same body, same heads, same loss, no chain on the space axis.
 cot_tokens_num: 4
-disable_state_predictor: 1
+disable_state_predictor: true
 text_action: true
 select_margin: 0.05
 seq_len: 65
