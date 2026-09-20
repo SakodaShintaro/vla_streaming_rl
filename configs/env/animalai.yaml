@@ -75,7 +75,7 @@ env_factory:
   #   that a view of a wall says which side of the arena the agent is facing.
   #   false leaves every wall the shade it has always had. Requires a binary
   #   rebuilt from animal-ai-unity; ignored by an official one.
-  colored_walls: true
+  colored_walls: false
   # - end_at_pass_mark: end the episode once a collected reward reaches the
   #   arena's pass mark. Unity never does, so in an arena with no episode-ending
   #   goal the agent bleeds 1/t per step until its health expires -- 1.0 of
