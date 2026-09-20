@@ -26,7 +26,7 @@ import time
 import torch
 from transformers import StaticCache
 
-from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn, user_turn
 
 from .vlm_backbone import load_model
 
@@ -104,13 +104,7 @@ class CoTStream:
                 self._prefill(
                     [
                         {"role": "system", "content": [{"type": "text", "text": ""}]},
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "image", "image": blank_frame},
-                                {"type": "text", "text": ""},
-                            ],
-                        },
+                        user_turn(0.0, blank_frame, ""),
                     ]
                 )
                 self._write_step_inputs(self._position)
@@ -201,14 +195,11 @@ class CoTStream:
         # than sent: a prefill has to fit ``PROMPT_BUDGET`` however long the
         # conversation has grown, and the only frame it carries is the current.
         turn = conversation[-1]
-        image = turn["content"][0]["image"]
+        image = turn["content"][1]["image"]
         replies = [reply for reply in conversation if reply["role"] == "assistant"]
         current = {
             "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": turn["content"][1]["text"]},
-            ],
+            "content": [turn["content"][0], {"type": "image"}, turn["content"][2]],
         }
         # Thinking off: with the <think> block left open the model spends the
         # chain reasoning about the request rather than about the scene.

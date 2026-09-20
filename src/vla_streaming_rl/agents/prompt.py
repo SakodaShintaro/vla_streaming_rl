@@ -52,6 +52,20 @@ def assistant_turn(text: str) -> dict:
     return {"role": "assistant", "content": [{"type": "text", "text": text}]}
 
 
+def user_turn(seconds: float, image, text: str) -> dict:
+    """A turn the env puts to the agent: the frame under its timestamp, then the
+    turn's text. The timestamp comes first and is written the way the model's
+    video frames carry theirs, which is the order it learned them in."""
+    return {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": f"<{seconds:.1f} seconds>"},
+            {"type": "image", "image": image},
+            {"type": "text", "text": text},
+        ],
+    }
+
+
 def _load_arena_tasks(env: Env) -> dict[str, str]:
     """The per-task instruction, keyed by the "XX-YY" prefix of an arena label.
 
@@ -88,31 +102,31 @@ class PromptBuilder(ABC):
     """
 
     def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
-        del env
         assert history_turns >= 0, history_turns
         assert steps_per_action >= 1, steps_per_action
         self.history_turns = history_turns
         self.steps_per_action = steps_per_action
+        self.decision_fps = env.metadata["decision_fps"]
         self._turns = []
         self._current = {}
         self._task_text = ""
+        self._tick = 0
 
     def reset(self) -> None:
         """A finished episode ends the conversation; the next one opens its own."""
         self._turns = []
         self._current = {}
+        self._tick = 0
 
     def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
         """What the agent is looking at this tick: the turn a chain would read if
-        it wrote one now. Overwritten every step until one does."""
+        it wrote one now. Overwritten every step until one does. Its timestamp
+        is the episode's clock at the rate the env takes decisions."""
         self._task_text = self._task(obs, info)
-        self._current = {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": self._turn(obs, reward, info)},
-            ],
-        }
+        self._current = user_turn(
+            self._tick / self.decision_fps, image, self._turn(obs, reward, info)
+        )
+        self._tick += 1
 
     def conversation(self) -> list[dict]:
         """What a chain about to write reads: the standing task, the turns it has
@@ -123,7 +137,7 @@ class PromptBuilder(ABC):
     def turn_text(self) -> str:
         """This tick's own text, the live numbers under the frame. What a learner
         stores beside the frame, so the turn can be rebuilt from its row later."""
-        return self._current["content"][1]["text"]
+        return self._current["content"][2]["text"]
 
     def add_reply(self, text: str) -> None:
         """What the chain wrote about that turn, which settles the pair into the
