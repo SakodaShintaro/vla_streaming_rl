@@ -43,7 +43,7 @@ env_factory:
   #   ["01", "02"]. For looking at some levels on their own without waiting for a
   #   curriculum to reach them, so only "sequential" and "random" take anything
   #   short of every level: the other modes' stages are the levels.
-  train_levels: ["01", "02"]
+  train_levels: ["01", "02", "03"]
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 20_000
   # - advance_success_rate ("success"): the share of a round that has to be
