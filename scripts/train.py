@@ -662,7 +662,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             agent,
             eval_env,
             seed,
-            bool(args.render),
+            args.render,
             args.env_id,
             global_step,
             result_dir / "eval" / "final",
@@ -700,7 +700,7 @@ def hydra_main(cfg: DictConfig) -> None:
     if cfg.debug:
         cfg.off_wandb = True
         cfg.learning_starts = max(10, cfg.seq_len + cfg.horizon + 5)
-        cfg.render = 0
+        cfg.render = False
         cfg.step_limit = 100
         cfg.buffer_size = int(2e4)
 
@@ -709,7 +709,7 @@ def hydra_main(cfg: DictConfig) -> None:
 
     if not os.environ.get("DISPLAY"):
         print("Because a headless environment is detected, rendering is automatically disabled.")
-        cfg.render = 0
+        cfg.render = False
 
     exp_name = f"{cfg.agent_type.upper()}_{cfg.exp_name}"
     seed = cfg.seed if cfg.seed != -1 else np.random.randint(0, 10000)

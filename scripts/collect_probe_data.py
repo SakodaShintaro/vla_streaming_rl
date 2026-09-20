@@ -175,7 +175,7 @@ def hydra_main(cfg: DictConfig) -> None:
 
     if not os.environ.get("DISPLAY"):
         print("Because a headless environment is detected, rendering is automatically disabled.")
-        cfg.render = 0
+        cfg.render = False
 
     if cfg.resume_dir is None:
         raise ValueError(

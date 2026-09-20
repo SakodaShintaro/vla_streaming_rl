@@ -18,7 +18,7 @@ resume_dir: null
 env_factory: null
 trial_num: 1
 seed: -1
-render: 1
+render: true
 render_scale: 1.0
 off_wandb: false
 wandb_group: default_group
@@ -36,14 +36,14 @@ buffer_device: cpu
 buffer_size: 20000
 learning_starts: 2000
 critic_loss_weight: 1.0
-use_done: 1
+use_done: true
 reset_on_episode_end: true
-normalizing_by_return: 0
+normalizing_by_return: false
 image_save_interval: 100
 print_interval: 5
 max_step_count: 100
 debug: false
 text_action: false
 select_margin: 0.0
-use_eligibility_trace: 1
+use_eligibility_trace: true
 et_lambda: 0.5
