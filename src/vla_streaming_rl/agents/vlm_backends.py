@@ -24,11 +24,6 @@ from vla_streaming_rl.networks.modules.vlm_backbone import load_model, sampling_
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# The close of the protocol's answer section, which is where a local generation
-# is stopped: the action is the last thing the protocol asks for, so nothing
-# past it is worth the latency.
-ANSWER_CLOSE = "</answer>"
-
 
 @dataclass(frozen=True)
 class VLMResponse:
@@ -163,6 +158,7 @@ class LocalVLMBackend:
             model_id, use_lora=False, load_in_4bit=load_in_4bit, device=self.device
         )
         self.model.eval()
+        self.eos_token_id = self.processor.tokenizer.eos_token_id
         self.max_new_tokens = max_new_tokens
         # As on the hosted backend, 0 means the model does no thinking of its
         # own; here that is the chat template's block, which it then renders
@@ -185,16 +181,15 @@ class LocalVLMBackend:
             **inputs,
             max_new_tokens=self.max_new_tokens,
             **sampling_kwargs(self.temperature),
-            stop_strings=[ANSWER_CLOSE],
-            tokenizer=self.processor.tokenizer,
+            eos_token_id=self.eos_token_id,
         )
         ids = generated[0, prompt_tokens:]
         text = self.processor.decode(ids, skip_special_tokens=True)
         return VLMResponse(
             text=text,
-            # What the hosted backend reports: the answer closed the reply, or
+            # What the hosted backend reports: the model ended the reply, or
             # the budget ran out before it did.
-            finish_reason="stop" if ANSWER_CLOSE in text else "length",
+            finish_reason="stop" if int(ids[-1]) == self.eos_token_id else "length",
             prompt_tokens=prompt_tokens,
             completion_tokens=int(ids.shape[0]),
         )
