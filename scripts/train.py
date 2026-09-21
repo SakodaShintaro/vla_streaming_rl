@@ -340,7 +340,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     # Every agent composes its own language input; the env only publishes state.
     # The chain of thought writes into the same conversation, so the builder is
     # made before the network that carries the chain.
-    prompt_builder = build_prompt_builder(env, args)
+    prompt_builder = build_prompt_builder(env, args, "planner")
 
     trains_a_network = args.agent_type != "zeroshot_vlm"
     network = (

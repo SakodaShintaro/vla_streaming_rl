@@ -14,7 +14,7 @@ learning_starts: 2000
 # 0 is its ablation: same body, same heads, same loss, no chain on the space axis.
 cot_tokens_num: 4
 disable_state_predictor: true
-text_action: true
+text_action: false
 select_margin: 0.05
 bc_loss_weight: 0.0
 seq_len: 65

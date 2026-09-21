@@ -3,7 +3,7 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.prompt import PromptBuilder, build_prompt_builder
 
 
 def build_agent(
@@ -19,6 +19,7 @@ def build_agent(
             backend=build_vlm_backend(args),
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
+            actor_builder=build_prompt_builder(env, args, "actor"),
             steps_per_action=args.cot_steps_per_chain,
         )
 

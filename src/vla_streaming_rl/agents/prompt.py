@@ -7,13 +7,12 @@ observation the env already publishes, so the prompt belongs to the run's agent
 config rather than to the simulator: two agents can drive the same env with
 different framing, and the env carries no text of its own.
 
-There is one builder per environment, and it always writes the prompt of an
-agent about to act: what the env asks, the action vocabulary it is asked in, the
-arena's own instruction, and the three sections the answer is read out of. Whether
-the action then comes from the reply or from a policy head is the reader's
-business, not the prompt's -- a run that reads the language as conditioning is
-reading the same words a run that acts on it would, so the two are comparable
-without a second wording to keep in step.
+There is one builder per environment, and it writes for one of two readers. The
+planner reads what the env asks -- the framing and the episode's own instruction
+-- and replies with a subtask, never an action. The actor reads the framing, the
+action vocabulary and, in every turn, the subtask the planner last wrote, and
+replies with an action; the episode's instruction reaches it only as far as a
+subtask carries it. Which of the two a builder writes for is its ``role``.
 
 A builder is called once per environment step with the observation, the reward
 and the info the agent itself received, and returns the conversation as it then
@@ -34,17 +33,18 @@ from omegaconf import DictConfig
 
 ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 
-TEXT_ACTION_PROTOCOL = (
-    "Reply with <memory>at most two short sentences on what you have tried so far in "
-    "this episode and what came of it, rewritten from the memory of your last reply</memory> "
-    "then <reason>one short sentence on what decides the next action</reason> "
-    "then <answer>the action only</answer>."
+ROLES = ("planner", "actor")
+
+ACTION_PROTOCOL = (
+    "Every turn names the subtask to carry out, and the action is chosen for that "
+    "subtask alone. Reply with <answer>the action only</answer>."
 )
 
-# The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
-# the tag before writing the real section, and reading the first one then takes
-# the whole reasoning as the action.
+# The LAST section is the one that counts: a model sometimes quotes the tag
+# before writing the real section, and reading the first one then takes the
+# whole reply as the section.
 ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
+SUBTASK_RE = re.compile(r"<subtask>(?!.*<subtask>)(.*?)</subtask>", re.DOTALL)
 
 
 def assistant_turn(text: str) -> dict:
@@ -101,11 +101,14 @@ class PromptBuilder(ABC):
     dropped instead.
     """
 
-    def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
+    def __init__(self, env: Env, history_turns: int, steps_per_action: int, role: str) -> None:
         assert history_turns >= 0, history_turns
         assert steps_per_action >= 1, steps_per_action
+        assert role in ROLES, role
         self.history_turns = history_turns
         self.steps_per_action = steps_per_action
+        self.role = role
+        self._subtask = ""
         self.decision_fps = env.metadata["decision_fps"]
         self._turns = []
         self._current = {}
@@ -117,15 +120,16 @@ class PromptBuilder(ABC):
         self._turns = []
         self._current = {}
         self._tick = 0
+        self._subtask = ""
 
     def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
         """What the agent is looking at this tick: the turn a chain would read if
         it wrote one now. Overwritten every step until one does. Its timestamp
         is the episode's clock at the rate the env takes decisions."""
         self._task_text = self._task(obs, info)
-        self._current = user_turn(
-            self._tick / self.decision_fps, image, self._turn(obs, reward, info)
-        )
+        turn = self._turn(obs, reward, info)
+        text = {"planner": turn, "actor": f"{turn} Subtask: {self._subtask}".strip()}[self.role]
+        self._current = user_turn(self._tick / self.decision_fps, image, text)
         self._tick += 1
 
     def conversation(self) -> list[dict]:
@@ -172,8 +176,22 @@ class PromptBuilder(ABC):
             {"role": "user", "content": [{"type": "text", "text": self._rejection_text(answer)}]}
         ]
 
+    def set_subtask(self, subtask: str) -> None:
+        """What the planner last wrote, which the actor's turns name from here
+        on."""
+        self._subtask = subtask
+
     def _rejection_text(self, answer: str) -> str:
         return f"({answer!r} is not an action -- nothing ran.)"
+
+    def _subtask_protocol(self) -> str:
+        seconds = self.steps_per_action / self.decision_fps
+        return (
+            f"You do not choose the agent's actions yourself: a low-level controller does, "
+            f"reading the subtask you write, until your next reply {seconds:.1f} seconds "
+            f"from now. Reply with <subtask>one short sentence on what the agent should "
+            f"get done by then</subtask>."
+        )
 
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -186,11 +204,12 @@ class PromptBuilder(ABC):
 
 # --- CarRacing ---------------------------------------------------------------
 
-CAR_RACING_TEXT_ACTION_PROMPT = (
+CAR_RACING_FRAMING = (
     "You control the red car in CarRacing-v3 (top-down). Stay on the gray road "
-    "and avoid going onto the green grass; hug the road center when possible. "
-    "Write the action as `steer=<value>, accel=<value>`, where each <value> is a "
-    "float in [-1, 1]."
+    "and avoid going onto the green grass; hug the road center when possible."
+)
+CAR_RACING_ACTION_FORMAT = (
+    "Write the action as `steer=<value>, accel=<value>`, where each <value> is a float in [-1, 1]."
 )
 
 
@@ -199,7 +218,10 @@ class CarRacingPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CAR_RACING_TEXT_ACTION_PROMPT}"
+        return {
+            "planner": f"{CAR_RACING_FRAMING} {self._subtask_protocol()}",
+            "actor": f"{CAR_RACING_FRAMING} {CAR_RACING_ACTION_FORMAT} {ACTION_PROTOCOL}",
+        }[self.role]
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward, info
@@ -256,8 +278,8 @@ class AnimalAIPromptBuilder(PromptBuilder):
     handed over as text by the env, so the env carries no vocabulary of its own.
     """
 
-    def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
-        super().__init__(env, history_turns, steps_per_action)
+    def __init__(self, env: Env, history_turns: int, steps_per_action: int, role: str) -> None:
+        super().__init__(env, history_turns, steps_per_action, role)
         self.tasks = _load_arena_tasks(env)
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
@@ -286,12 +308,11 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs
-        return (
-            f"{ANIMALAI_FRAMING} "
-            f"{self._action_format()} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
-            f"{TEXT_ACTION_PROTOCOL}"
-        )
+        instruction = self.tasks[info["arena_name"].rsplit("-", 1)[0]]
+        return {
+            "planner": f"{ANIMALAI_FRAMING} Task: {instruction}. {self._subtask_protocol()}",
+            "actor": f"{ANIMALAI_FRAMING} {self._action_format()} {ACTION_PROTOCOL}",
+        }[self.role]
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del info
@@ -326,7 +347,10 @@ class CarlaPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CARLA_TEXT_ACTION_FRAMING} {TEXT_ACTION_PROTOCOL}"
+        return {
+            "planner": f"{CARLA_TEXT_ACTION_FRAMING} {self._subtask_protocol()}",
+            "actor": f"{CARLA_TEXT_ACTION_FRAMING} {ACTION_PROTOCOL}",
+        }[self.role]
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward
@@ -341,10 +365,10 @@ PROMPT_BUILDERS = {
 }
 
 
-def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
+def build_prompt_builder(env: Env, args: DictConfig, role: str) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
     # The exchanges a window of ``seq_len`` ticks holds at the chain's cadence:
     # the same count the trained network reads off its replay buffer, so the
     # two see the same history for the same config.
     history_turns = (args.seq_len - 1) // args.cot_steps_per_chain
-    return PROMPT_BUILDERS[args.env_id](env, history_turns, args.cot_steps_per_chain)
+    return PROMPT_BUILDERS[args.env_id](env, history_turns, args.cot_steps_per_chain, role)
