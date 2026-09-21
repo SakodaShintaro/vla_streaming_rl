@@ -45,6 +45,7 @@ ACTION_PROTOCOL = (
 # whole reply as the section.
 ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
 SUBTASK_RE = re.compile(r"<subtask>(?!.*<subtask>)(.*?)</subtask>", re.DOTALL)
+ACHIEVED_RE = re.compile(r"<achieved>(?!.*<achieved>)\s*(\d+(?:\.\d+)?)\s*</achieved>", re.DOTALL)
 
 
 def assistant_turn(text: str) -> dict:
@@ -109,6 +110,7 @@ class PromptBuilder(ABC):
         self.steps_per_action = steps_per_action
         self.role = role
         self._subtask = ""
+        self._frames = []
         self.decision_fps = env.metadata["decision_fps"]
         self._turns = []
         self._current = {}
@@ -121,6 +123,7 @@ class PromptBuilder(ABC):
         self._current = {}
         self._tick = 0
         self._subtask = ""
+        self._frames = []
 
     def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
         """What the agent is looking at this tick: the turn a chain would read if
@@ -130,6 +133,7 @@ class PromptBuilder(ABC):
         turn = self._turn(obs, reward, info)
         text = {"planner": turn, "actor": f"{turn} Subtask: {self._subtask}".strip()}[self.role]
         self._current = user_turn(self._tick / self.decision_fps, image, text)
+        self._frames = (self._frames + [(self._tick, image)])[-self.steps_per_action :]
         self._tick += 1
 
     def conversation(self) -> list[dict]:
@@ -174,6 +178,35 @@ class PromptBuilder(ABC):
         told."""
         self._turns = self._turns + [
             {"role": "user", "content": [{"type": "text", "text": self._rejection_text(answer)}]}
+        ]
+
+    def judge_conversation(self, subtask: str, steps: int) -> list[dict]:
+        """What is asked about a subtask once it has run for ``steps`` steps --
+        all it stood for, or as many as the episode left it: every frame of
+        those steps as one video, not the one frame in ``steps_per_action`` the
+        turns hold, since how far a subtask got shows in the motion between
+        them. A video holds an even number of frames, so an odd run of steps
+        opens on the frame the subtask was written on. It stands alone: no turn
+        before it is read and its reply is kept nowhere."""
+        assert 1 <= steps <= self.steps_per_action, steps
+        frames = self._frames[-(steps + steps % 2) :]
+        assert len(frames) == steps + steps % 2, f"{len(frames)} frames held for {steps} steps"
+        seconds = steps / self.decision_fps
+        system = (
+            f"The video is what the agent saw over the last {seconds:.1f} seconds while "
+            f"carrying out a subtask; its last frame is the current view. Judge from the "
+            f"video alone how far the subtask has been achieved. "
+            f"Reply with <achieved>a number from 0 to 1</achieved>."
+        )
+        video = {
+            "type": "video",
+            "video": [frame for _, frame in frames],
+            "fps": self.decision_fps,
+            "frames_indices": [tick for tick, _ in frames],
+        }
+        return [
+            {"role": "system", "content": [{"type": "text", "text": system}]},
+            {"role": "user", "content": [video, {"type": "text", "text": f"Subtask: {subtask}"}]},
         ]
 
     def set_subtask(self, subtask: str) -> None:

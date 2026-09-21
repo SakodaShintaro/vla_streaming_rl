@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: MIT
 """Zero-shot VLM controller.
 
-The same model is asked twice every ``steps_per_action`` steps, in two
-conversations of its own. As the planner it reads what the env asks and names a
-subtask; as the actor it reads that subtask, never the env's own instruction,
-and names the action that is then held. Both go through a `VLMBackend`, so the
+The same model is asked three times every ``steps_per_action`` steps, each in a
+conversation of its own. As the judge it reads every frame of the steps the last
+subtask stood for and says how far that subtask got, which is only logged here
+and is what a trained low-level policy would be paid. As the planner it reads
+what the env asks and names a subtask; as the actor it reads that subtask, never
+the env's own instruction, and names the action that is then held. All go
+through a `VLMBackend`, so the
 same protocol runs against a model hosted on OpenRouter or a Qwen3.5 checkpoint
 generating locally (see `vlm_backends`). It learns nothing: it is the zero-shot
 baseline the trained agents are measured against, so it plugs into the same
@@ -19,7 +22,13 @@ import numpy as np
 from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import ANSWER_RE, SUBTASK_RE, PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import (
+    ACHIEVED_RE,
+    ANSWER_RE,
+    SUBTASK_RE,
+    PromptBuilder,
+    assistant_turn,
+)
 from vla_streaming_rl.utils import render_conversation_panel
 
 
@@ -80,8 +89,10 @@ class ZeroShotVLMAgent(Agent):
         self.planner_exchange = []
         self.planner_status = ""
         self.planner_metrics = {}
+        self.judge_metrics = {"subtask/achieved": 0.0, "subtask/judge_failed": 0.0}
         self.subtask = ""
         self.answer = ""
+        self.achieved = ""
         self.steps_until_next = 0
         self.step_in_episode = 0
 
@@ -98,16 +109,23 @@ class ZeroShotVLMAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step, terminated, truncated
+        del global_step
 
         image = preprocess_image(obs["image"])
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
-        if self.steps_until_next == 0:
+        episode_done = terminated or truncated
+        steps_since_subtask = self.steps_per_action - self.steps_until_next
+        subtask_over = self.steps_until_next == 0 or episode_done
+        judged = subtask_over and self.step_in_episode > 0
+        if judged:
+            self._judge_subtask(steps_since_subtask)
+        next_due = self.steps_until_next == 0 and not episode_done
+        if next_due:
             self._write_subtask()
         self.actor_builder.observe(obs, reward, info, image)
 
-        if self.steps_until_next == 0:
+        if next_due:
             self._write_action()
             self.steps_until_next = self.steps_per_action
         steps_since_write = self.steps_per_action - self.steps_until_next
@@ -116,8 +134,17 @@ class ZeroShotVLMAgent(Agent):
             if steps_since_write < self.hold_steps
             else np.zeros(self.action_dim, dtype=np.float32)
         )
-        self.steps_until_next -= 1
-        self.step_in_episode += 1
+        self.steps_until_next = 0 if episode_done else self.steps_until_next - 1
+        self.step_in_episode = 0 if episode_done else self.step_in_episode + 1
+
+        texts = {}
+        if judged or next_due:
+            texts = {
+                "prompt": prompt,
+                "achieved": self.achieved if judged else "",
+                "subtask": self.subtask if next_due else "",
+                "answer": self.answer if next_due else "",
+            }
 
         panels = {
             "planner": render_conversation_panel(
@@ -137,8 +164,29 @@ class ZeroShotVLMAgent(Agent):
             action=action,
             metrics=self.held_metrics,
             panels=panels,
-            texts={"prompt": prompt, "subtask": self.subtask, "answer": self.answer},
+            texts=texts,
         )
+
+    def _judge_subtask(self, steps: int) -> None:
+        """Ask how far the subtask that just ran for ``steps`` steps got, off
+        every frame of those steps: all it stood for, or what the episode's end
+        left it. A reply without a number counts as nothing achieved."""
+        request_start = time.time()
+        response = self.backend.generate(
+            self.prompt_builder.judge_conversation(self.subtask, steps)
+        )
+        achieved_match = ACHIEVED_RE.search(response.text)
+        self.achieved = response.text
+        self.judge_metrics = {
+            "subtask/achieved": (
+                float(np.clip(float(achieved_match.group(1)), 0.0, 1.0))
+                if achieved_match is not None
+                else 0.0
+            ),
+            "subtask/judge_failed": float(achieved_match is None),
+            "vlm/judge_msec": (time.time() - request_start) * 1000,
+            "vlm/judge_prompt_tokens": float(response.prompt_tokens),
+        }
 
     def _write_subtask(self) -> None:
         """Generate on the planner's conversation and hand what it named to the
@@ -203,6 +251,7 @@ class ZeroShotVLMAgent(Agent):
             self.actor_builder.reject(answer_text)
 
         self.held_metrics = {
+            **self.judge_metrics,
             **self.planner_metrics,
             "vlm/parse_failed": float(not parse_ok),
             "vlm/api_msec": api_msec,
@@ -240,6 +289,7 @@ class ZeroShotVLMAgent(Agent):
             self.planner_status = ""
             self.subtask = ""
             self.answer = ""
+            self.achieved = ""
             # Zero means "generate now", so the first step of an episode decides
             # on that episode's own first frame.
             self.steps_until_next = 0

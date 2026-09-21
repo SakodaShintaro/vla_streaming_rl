@@ -42,17 +42,21 @@ def _png_data_url(image: Image.Image) -> str:
     return f"data:image/png;base64,{payload}"
 
 
+def _to_openai_parts(part: dict) -> list[dict]:
+    """A part as the OpenAI wire format carries it. That format has no video
+    part, so a video goes as one picture per frame."""
+    if part["type"] == "text":
+        return [part]
+    frames = [part["image"]] if part["type"] == "image" else part["video"]
+    return [{"type": "image_url", "image_url": {"url": _png_data_url(frame)}} for frame in frames]
+
+
 def _to_openai_content(content: list[dict]):
     # A text-only turn goes over the wire as a plain string: some models reject
     # a parts list on the system and assistant roles.
     if all(part["type"] == "text" for part in content):
         return "\n".join(part["text"] for part in content)
-    return [
-        part
-        if part["type"] == "text"
-        else {"type": "image_url", "image_url": {"url": _png_data_url(part["image"])}}
-        for part in content
-    ]
+    return [wire_part for part in content for wire_part in _to_openai_parts(part)]
 
 
 def _to_openai_messages(messages: list[dict]) -> list[dict]:
