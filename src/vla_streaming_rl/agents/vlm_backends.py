@@ -20,7 +20,7 @@ from omegaconf import DictConfig
 from openai import BadRequestError, OpenAI
 from PIL import Image
 
-from vla_streaming_rl.networks.modules.vlm_backbone import load_model, sampling_kwargs
+from vla_streaming_rl.networks.modules.chain_generator import ChainGenerator
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -151,47 +151,32 @@ class LocalVLMBackend:
         max_new_tokens: int,
         reasoning_max_tokens: int,
         temperature: float,
+        use_cuda_graph: bool,
+        prompt_budget: int,
     ) -> None:
-        assert temperature >= 0.0, temperature
-        self.device = torch.device("cuda")
-        self.model, self.processor = load_model(
-            model_id, use_lora=False, load_in_4bit=load_in_4bit, device=self.device
-        )
-        self.model.eval()
-        self.eos_token_id = self.processor.tokenizer.eos_token_id
-        self.max_new_tokens = max_new_tokens
         # As on the hosted backend, 0 means the model does no thinking of its
         # own; here that is the chat template's block, which it then renders
         # already closed.
-        self.enable_thinking = reasoning_max_tokens != 0
-        self.temperature = temperature
-
-    @torch.inference_mode()
-    def generate(self, messages: list[dict]) -> VLMResponse:
-        inputs = self.processor.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            enable_thinking=self.enable_thinking,
-        ).to(self.device)
-        prompt_tokens = int(inputs["input_ids"].shape[1])
-        generated = self.model.generate(
-            **inputs,
-            max_new_tokens=self.max_new_tokens,
-            **sampling_kwargs(self.temperature),
-            eos_token_id=self.eos_token_id,
+        self.generator = ChainGenerator(
+            model_id=model_id,
+            load_in_4bit=load_in_4bit,
+            max_len=max_new_tokens,
+            temperature=temperature,
+            enable_thinking=reasoning_max_tokens != 0,
+            use_cuda_graph=use_cuda_graph,
+            prompt_budget=prompt_budget,
+            device=torch.device("cuda"),
         )
-        ids = generated[0, prompt_tokens:]
-        text = self.processor.decode(ids, skip_special_tokens=True)
+
+    def generate(self, messages: list[dict]) -> VLMResponse:
+        chain = self.generator.generate(messages)
         return VLMResponse(
-            text=text,
+            text=chain.text,
             # What the hosted backend reports: the model ended the reply, or
             # the budget ran out before it did.
-            finish_reason="stop" if int(ids[-1]) == self.eos_token_id else "length",
-            prompt_tokens=prompt_tokens,
-            completion_tokens=int(ids.shape[0]),
+            finish_reason="stop" if chain.finished else "length",
+            prompt_tokens=chain.prompt_tokens,
+            completion_tokens=len(chain.tokens),
         )
 
 
@@ -212,4 +197,6 @@ def build_vlm_backend(args: DictConfig):
         max_new_tokens=args.max_new_tokens,
         reasoning_max_tokens=args.reasoning_max_tokens,
         temperature=args.temperature,
+        use_cuda_graph=args.cot_cuda_graph,
+        prompt_budget=args.cot_prompt_budget,
     )
