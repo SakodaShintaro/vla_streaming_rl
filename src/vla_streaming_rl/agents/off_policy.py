@@ -149,6 +149,7 @@ class OffPolicyAgent(Agent):
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
+        self.prev_vlm_action = np.zeros(self.action_dim, dtype=np.float32)
         self._episode_reset = False
         # the first observation of a run starts an episode
         self._previous_done = True
@@ -274,6 +275,7 @@ class OffPolicyAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
+            torch.from_numpy(self._to_net_action(self.prev_vlm_action)).to(self.device),
             self.network.tokenize(prompt),
             self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
@@ -296,6 +298,9 @@ class OffPolicyAgent(Agent):
         )
         if self.text_action and cot_age == 0:
             self._read_vlm_action()
+        holding = cot_age < self.hold_steps
+        vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
+        self.prev_vlm_action = vlm_action
         if self.text_action:
             metrics["text/parse_failed"] = self.text_parse_failed
 
@@ -341,8 +346,6 @@ class OffPolicyAgent(Agent):
         metrics.update(infer_result.value_report)
         action_chunk = infer_result.action[0].cpu().numpy()
         if self.text_action:
-            holding = cot_age < self.hold_steps
-            vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
             vlm_chunk = np.repeat(self._to_net_action(vlm_action)[None], self.horizon, axis=0)
             q_vlm = self.network.action_value(infer_result.features, vlm_chunk)
             q_head = self.network.action_value(infer_result.features, action_chunk)

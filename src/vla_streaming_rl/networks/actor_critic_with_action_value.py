@@ -3,6 +3,7 @@ from collections.abc import Callable
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
@@ -114,6 +115,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_mode: str,
         cot_steps_per_chain: int,
         cot_dropout: float,
+        token_dropout: float,
+        bc_loss_weight: float,
         cot_pool: str,
         cot_cuda_graph: bool,
         cot_prompt_budget: int,
@@ -135,6 +138,9 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         assert 0.0 <= cot_dropout < 1.0, cot_dropout
         self.cot_dropout = cot_dropout
+        assert 0.0 <= token_dropout < 1.0, token_dropout
+        self.token_dropout = token_dropout
+        self.bc_loss_weight = bc_loss_weight
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
         # ``cot_tokens_num = 0`` is the ablation: the same body, the same heads
@@ -305,12 +311,21 @@ class ActorCriticWithActionValue(NetworkInterface):
             return torch.ones(batch_size, dtype=torch.bool, device=device)
         return torch.rand(batch_size, device=device) >= self.cot_dropout
 
+    def _token_keep(self, batch_size: int, steps: int, device: torch.device) -> torch.Tensor:
+        """Which tokens of a batch's windows the encoder gets to read, the rest
+        being the share ``token_dropout`` takes away: every token alike, whatever
+        it carries, so no one kind of input can be leaned on alone. Only on the
+        learning path, as the chain's own dropout is."""
+        shape = (batch_size, steps, self.encoder.space_len)
+        return torch.rand(shape, device=device) >= self.token_dropout
+
     def _window(self, data: ReplayBufferData, start, stop) -> tuple:
         """The ``(image, action, reward, rnn_state, scalar_obs, cot, cot_age,
-        cot_keep)`` the encoder reads, sliced out of a replay batch over
-        ``[start, stop)`` steps."""
+        cot_keep, token_keep)`` the encoder reads, sliced out of a replay batch
+        over ``[start, stop)`` steps."""
+        observations = data.observations[:, start:stop]
         return (
-            data.observations[:, start:stop],
+            observations,
             data.actions[:, start:stop],
             data.rewards[:, start:stop],
             data.rnn_state[:, start],
@@ -328,6 +343,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.cot_activations[:, start:stop],
             data.cot_age[:, start:stop],
             self._cot_keep(data.cot_activations.shape[0], data.cot_activations.device),
+            self._token_keep(observations.shape[0], observations.shape[1], observations.device),
         )
 
     def tokenize(self, text: str) -> list[int]:
@@ -414,6 +430,11 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.cot_activations_seq,
             data.cot_age_seq,
             torch.ones(1, dtype=torch.bool, device=data.cot_activations_seq.device),
+            torch.ones(
+                (1, data.s_seq.shape[1], self.encoder.space_len),
+                dtype=torch.bool,
+                device=data.s_seq.device,
+            ),
         )  # (B, state_dim)
 
         # Get action chunk from policy_head
@@ -475,6 +496,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
+        head_action, _ = self.policy_head.get_action(curr_state)
+        bc_loss = F.mse_loss(head_action, data.vlm_actions[:, -self.horizon :])
         with torch.no_grad():
             next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
         seq_loss, seq_info = self.prediction_head.compute_loss(
@@ -486,11 +509,21 @@ class ActorCriticWithActionValue(NetworkInterface):
             self.disable_state_predictor,
         )
 
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
+        total_loss = (
+            self.critic_loss_weight * critic_loss
+            + actor_loss
+            + seq_loss
+            + self.bc_loss_weight * bc_loss
+        )
 
         info_dict = {
             f"losses/{key}": value
-            for key, value in {**critic_info, **actor_info, **seq_info}.items()
+            for key, value in {
+                **critic_info,
+                **actor_info,
+                **seq_info,
+                "bc_loss": bc_loss.item(),
+            }.items()
         }
 
         return LossResult(loss=total_loss, info=info_dict)

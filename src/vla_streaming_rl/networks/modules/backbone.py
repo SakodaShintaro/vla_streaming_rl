@@ -142,6 +142,7 @@ class SpatialTemporalEncoder(nn.Module):
         cot_activations: torch.Tensor,  # (B, T, cot_tokens_num, cot_layers, cot_dim)
         cot_age: torch.Tensor,  # (B, T, 1)
         cot_keep: torch.Tensor,  # (B,) bool: which sequences keep their chain
+        token_keep: torch.Tensor,  # (B, T, space_len) bool: which tokens are kept
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -177,6 +178,7 @@ class SpatialTemporalEncoder(nn.Module):
             [image_embed, action_embed, reward_embed, scalar_obs_embed, register_token, cot_embed],
             dim=2,
         )
+        all_embed = all_embed * token_keep.unsqueeze(-1).to(all_embed.dtype)
 
         spatial_temporal_output, rnn_state_internal = self.spatial_temporal(
             all_embed, rnn_state_internal
