@@ -2,20 +2,22 @@
 import torch
 import torch.nn.functional as F
 
-from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.subtask_cycle import SubtaskCycle
 
 from .chain_generator import ChainGenerator
 
 
 class CoTBatch:
-    """A whole chain of thought written every ``steps_per_chain`` environment
-    steps and held in between.
+    """The planner's reply as the policy reads it: the activations behind the
+    subtask written every ``steps_per_chain`` environment steps, held in between.
 
-    The chain is written by :class:`ChainGenerator`, the generator the zero-shot
-    controller's local backend writes its replies with, so a chain is the
-    baseline's reasoning measured under RL by construction. What is added here
-    is the cadence, the pooling of the chain's activations to one step's read,
-    and the reply going back into the builder's conversation.
+    When a subtask is judged and when the next is planned is
+    :class:`SubtaskCycle`'s, the loop the zero-shot controller runs too, over
+    :class:`ChainGenerator`, the generator that controller's local backend
+    writes with -- so what differs between the two agents is who acts on the
+    subtask and nothing else. What is added here is the pooling of the planner's
+    activations to one step's read.
     """
 
     def __init__(
@@ -49,32 +51,20 @@ class CoTBatch:
             prompt_budget=prompt_budget,
             device=device,
         )
+        self.cycle = SubtaskCycle(self.generator.generate, prompt_builder, steps_per_chain)
         self.tokens_per_step = tokens_per_step
-        self.steps_per_chain = steps_per_chain
-        # The conversation is the agent's; a chain reads it on the steps it
-        # writes and puts what it wrote back as that turn's reply.
-        self.prompt_builder = prompt_builder
         self.device = device
         self.reset()
 
     def reset(self) -> None:
-        """Drop the chain. The next advance writes a new one on the frame it is
-        given; the conversation it is written into is the builder's to reset."""
-        self._text = ""
-        self._output_tokens = 0
-        self._last_conversation = []
-        # What the last chain cost. Kept between writes, since the steps that
-        # hold one are not the steps that paid for it.
-        self._input_tokens = 0
-        self._msec = 0.0
+        """Drop the chain. The next advance plans a new subtask on the frame it
+        is given; the conversation it is written into is the builder's to reset."""
+        self.cycle.reset()
         self._activations = torch.zeros(
             (self.tokens_per_step, self.generator.layers_num, self.generator.hidden_size),
             dtype=torch.bfloat16,
             device=self.device,
         )
-        # Zero means "write one now", so the first advance of an episode always
-        # reasons about that episode's own first frame.
-        self._until_next = 0
 
     def age(self) -> int:
         """How many environment steps ago the chain now being read was written.
@@ -86,34 +76,21 @@ class CoTBatch:
         observation says which of the two this is -- `episode_step` carries it
         only modulo a period the encoder cannot take.
         """
-        return self.steps_per_chain - 1 - self._until_next
+        return self.cycle.age()
 
     @torch.inference_mode()
-    def advance(self) -> torch.Tensor:
-        """This environment step's activations, writing a fresh chain when due.
-
-        The builder's conversation is read on the steps that write a chain and
-        not at all in between, which is what makes the chain the slow loop.
+    def advance(self, episode_done: bool) -> torch.Tensor:
+        """This environment step's activations, the cycle judging and planning
+        when due.
 
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16. The same tensor
-            on every step until the next chain is written.
+            on every step until the next subtask is planned.
         """
-        if self._until_next == 0:
-            self._write_chain()
-            self._until_next = self.steps_per_chain
-        self._until_next -= 1
+        self.cycle.advance(episode_done)
+        if self.cycle.planned:
+            self._activations = self._read_activations(self.cycle.plan.positions)
         return self._activations
-
-    def _write_chain(self) -> None:
-        self._last_conversation = self.prompt_builder.conversation()
-        chain = self.generator.generate(self._last_conversation)
-        self._activations = self._read_activations(chain.positions)
-        self._text = chain.text
-        self._output_tokens = len(chain.tokens)
-        self._input_tokens = chain.prompt_tokens
-        self._msec = chain.msec
-        self.prompt_builder.add_reply(chain.text)
 
     def _read_activations(self, positions: torch.Tensor) -> torch.Tensor:
         """The whole chain, every depth kept, pooled to one step's read:
@@ -131,19 +108,19 @@ class CoTBatch:
         return pooled.permute(2, 0, 1).to(torch.bfloat16)
 
     def stats(self) -> dict:
-        """What the last chain cost: the tokens it was given, the tokens it
-        wrote, and the wall time the write took."""
+        """What the last plan cost: the tokens it was given, the tokens it wrote,
+        and the wall time the write took."""
         return {
-            "input_tokens": self._input_tokens,
-            "output_tokens": self._output_tokens,
-            "msec": self._msec,
+            "input_tokens": self.cycle.plan.prompt_tokens,
+            "output_tokens": len(self.cycle.plan.tokens),
+            "msec": self.cycle.plan_msec,
         }
 
     def text(self) -> str:
-        """The chain as written, for logging."""
-        return self._text
+        """The planner's reply as written, for logging."""
+        return self.cycle.plan.text
 
     def exchange(self) -> list[dict]:
-        """The last write as it happened: the conversation the model was given
-        and the chain it wrote back, for the render panel."""
-        return self._last_conversation + [assistant_turn(self.text())]
+        """The last plan as it happened: the conversation the model was given
+        and the reply it wrote back, for the render panel."""
+        return self.cycle.exchange

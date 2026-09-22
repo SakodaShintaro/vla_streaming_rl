@@ -3,7 +3,6 @@ from collections.abc import Callable
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
@@ -116,7 +115,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_steps_per_chain: int,
         cot_dropout: float,
         token_dropout: float,
-        bc_loss_weight: float,
         cot_pool: str,
         cot_cuda_graph: bool,
         cot_prompt_budget: int,
@@ -140,7 +138,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.cot_dropout = cot_dropout
         assert 0.0 <= token_dropout < 1.0, token_dropout
         self.token_dropout = token_dropout
-        self.bc_loss_weight = bc_loss_weight
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
         # ``cot_tokens_num = 0`` is the ablation: the same body, the same heads
@@ -229,12 +226,6 @@ class ActorCriticWithActionValue(NetworkInterface):
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
-    def action_value(self, features: torch.Tensor, action_chunk: np.ndarray) -> float:
-        """Q(s, a) the critic gives one ``(horizon, action_dim)`` chunk at the
-        state ``infer`` handed back as ``features``."""
-        chunk = torch.from_numpy(action_chunk).to(features.device, features.dtype).unsqueeze(0)
-        return self.value_head.scalar_value(features, chunk).item()
-
     def stored_image_shape(self) -> tuple[int, ...]:
         """The frozen encoder's output for the frame, not the frame."""
         return tuple(self.image_processor.output_shape)
@@ -243,14 +234,15 @@ class ActorCriticWithActionValue(NetworkInterface):
         return self.image_processor.encode(image.unsqueeze(0)).squeeze(0)
 
     def advance_cot(
-        self, episode_started: bool, window: ReplayBufferData
+        self, episode_started: bool, episode_done: bool, window: ReplayBufferData
     ) -> tuple[torch.Tensor, int]:
         """This step's chain-of-thought activations and how many steps ago they
         were generated, or nothing when the chain is off. The first tick of an
         episode ends whatever chain was running, so an episode's commentary
         starts on its own first frame rather than carrying the one written about
-        the frame the last episode ended on. The chain reads the conversation
-        the builder holds, not ``window``."""
+        the frame the last episode ended on, and its last tick is what the chain
+        judges the subtask it cut short on. The chain reads the conversation the
+        builder holds, not ``window``."""
         del window
         if self.cot_module is None:
             return torch.zeros(self.cot_shape), 0
@@ -258,7 +250,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             self.cot_module.reset()
         # Advanced first: `age` is about the chain the call hands back, which is
         # a fresh one on the steps that write.
-        activations = self.cot_module.advance()
+        activations = self.cot_module.advance(episode_done)
         if self.pool_cot:
             activations = activations.float().mean(dim=0, keepdim=True).to(activations.dtype)
         return activations, self.cot_module.age()
@@ -496,8 +488,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_head=self.value_head,
             detach_actor=self.detach_actor,
         )
-        head_action, _ = self.policy_head.get_action(curr_state)
-        bc_loss = F.mse_loss(head_action, data.vlm_actions[:, -self.horizon :])
         with torch.no_grad():
             next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
         seq_loss, seq_info = self.prediction_head.compute_loss(
@@ -509,21 +499,11 @@ class ActorCriticWithActionValue(NetworkInterface):
             self.disable_state_predictor,
         )
 
-        total_loss = (
-            self.critic_loss_weight * critic_loss
-            + actor_loss
-            + seq_loss
-            + self.bc_loss_weight * bc_loss
-        )
+        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
         info_dict = {
             f"losses/{key}": value
-            for key, value in {
-                **critic_info,
-                **actor_info,
-                **seq_info,
-                "bc_loss": bc_loss.item(),
-            }.items()
+            for key, value in {**critic_info, **actor_info, **seq_info}.items()
         }
 
         return LossResult(loss=total_loss, info=info_dict)

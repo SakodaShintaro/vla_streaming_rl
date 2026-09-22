@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: MIT
 """Zero-shot VLM controller.
 
-The same model is asked three times every ``steps_per_action`` steps, each in a
-conversation of its own. As the judge it reads every frame of the steps the last
-subtask stood for and says how far that subtask got, which is only logged here
-and is what a trained low-level policy would be paid. As the planner it reads
-what the env asks and names a subtask; as the actor it reads that subtask, never
-the env's own instruction, and names the action that is then held. All go
-through a `VLMBackend`, so the
-same protocol runs against a model hosted on OpenRouter or a Qwen3.5 checkpoint
-generating locally (see `vlm_backends`). It learns nothing: it is the zero-shot
+The judge and the planner are :class:`SubtaskCycle`'s, the slow loop every agent
+that reads a VLM shares. What is this agent's own is the actor: the same model
+asked a third time, reading the subtask the planner wrote, never the env's own
+instruction, and naming the action that is then held. All go through a
+`VLMBackend`, so the same protocol runs against a model hosted on OpenRouter or
+a Qwen3.5 checkpoint generating locally (see `vlm_backends`). It learns nothing: it is the zero-shot
 baseline the trained agents are measured against, so it plugs into the same
 trainer loop and reports the same telemetry.
 """
@@ -22,13 +19,8 @@ import numpy as np
 from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import (
-    ACHIEVED_RE,
-    ANSWER_RE,
-    SUBTASK_RE,
-    PromptBuilder,
-    assistant_turn,
-)
+from vla_streaming_rl.agents.prompt import ANSWER_RE, PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.subtask_cycle import SubtaskCycle
 from vla_streaming_rl.utils import render_conversation_panel
 
 
@@ -70,11 +62,7 @@ class ZeroShotVLMAgent(Agent):
         )
         self.backend = backend
         self.actor_builder = actor_builder
-        # One generation every `steps_per_action` steps, the action held in
-        # between, which is the cadence `CoTBatch` writes a chain at. The
-        # conversation then advances once per that many steps at both ends, so a
-        # turn covers the same stretch of an episode either way and the two are
-        # comparable without the baseline paying for a generation per tick.
+        self.cycle = SubtaskCycle(backend.generate, prompt_builder, steps_per_action)
         self.steps_per_action = steps_per_action
 
         self.action_space = action_space
@@ -86,15 +74,7 @@ class ZeroShotVLMAgent(Agent):
         self.held_exchange = []
         self.held_status = ""
         self.held_metrics = {}
-        self.planner_exchange = []
-        self.planner_status = ""
-        self.planner_metrics = {}
-        self.judge_metrics = {"subtask/achieved": 0.0, "subtask/judge_failed": 0.0}
-        self.subtask = ""
         self.answer = ""
-        self.achieved = ""
-        self.steps_until_next = 0
-        self.step_in_episode = 0
 
     # ------------------------------------------------------------------
     # Agent interface
@@ -114,42 +94,32 @@ class ZeroShotVLMAgent(Agent):
         image = preprocess_image(obs["image"])
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
-        episode_done = terminated or truncated
-        steps_since_subtask = self.steps_per_action - self.steps_until_next
-        subtask_over = self.steps_until_next == 0 or episode_done
-        judged = subtask_over and self.step_in_episode > 0
-        if judged:
-            self._judge_subtask(steps_since_subtask)
-        next_due = self.steps_until_next == 0 and not episode_done
-        if next_due:
-            self._write_subtask()
+        self.cycle.advance(terminated or truncated)
+        self.actor_builder.set_subtask(self.cycle.subtask)
         self.actor_builder.observe(obs, reward, info, image)
-
-        if next_due:
+        if self.cycle.planned:
             self._write_action()
-            self.steps_until_next = self.steps_per_action
-        steps_since_write = self.steps_per_action - self.steps_until_next
         action = (
             self.held_action
-            if steps_since_write < self.hold_steps
+            if self.cycle.age() < self.hold_steps
             else np.zeros(self.action_dim, dtype=np.float32)
         )
-        self.steps_until_next = 0 if episode_done else self.steps_until_next - 1
-        self.step_in_episode = 0 if episode_done else self.step_in_episode + 1
+        self.prompt_builder.record_action(action)
 
         texts = {}
-        if judged or next_due:
+        if self.cycle.judged or self.cycle.planned:
             texts = {
                 "prompt": prompt,
-                "achieved": self.achieved if judged else "",
-                "subtask": self.subtask if next_due else "",
-                "answer": self.answer if next_due else "",
+                "achieved": self.cycle.judge_text if self.cycle.judged else "",
+                "subtask": self.cycle.subtask if self.cycle.planned else "",
+                "answer": self.answer if self.cycle.planned else "",
             }
 
         panels = {
             "planner": render_conversation_panel(
-                self.planner_exchange,
-                self.planner_status,
+                self.cycle.exchange,
+                f"plan {self.cycle.plan_msec:.0f} ms   judge {self.cycle.judge_msec:.0f} ms   "
+                f"achieved {self.cycle.achieved:.2f}",
                 self.PANEL_WIDTH,
                 self.PANEL_HEIGHT,
             ),
@@ -162,57 +132,16 @@ class ZeroShotVLMAgent(Agent):
         }
         return StepResult(
             action=action,
-            metrics=self.held_metrics,
+            metrics={
+                **self.held_metrics,
+                "subtask/achieved": self.cycle.achieved,
+                "subtask/judge_failed": float(self.cycle.judge_failed),
+                "vlm/judge_msec": self.cycle.judge_msec,
+                "vlm/planner_msec": self.cycle.plan_msec,
+            },
             panels=panels,
             texts=texts,
         )
-
-    def _judge_subtask(self, steps: int) -> None:
-        """Ask how far the subtask that just ran for ``steps`` steps got, off
-        every frame of those steps: all it stood for, or what the episode's end
-        left it. A reply without a number counts as nothing achieved."""
-        request_start = time.time()
-        response = self.backend.generate(
-            self.prompt_builder.judge_conversation(self.subtask, steps)
-        )
-        achieved_match = ACHIEVED_RE.search(response.text)
-        self.achieved = response.text
-        self.judge_metrics = {
-            "subtask/achieved": (
-                float(np.clip(float(achieved_match.group(1)), 0.0, 1.0))
-                if achieved_match is not None
-                else 0.0
-            ),
-            "subtask/judge_failed": float(achieved_match is None),
-            "vlm/judge_msec": (time.time() - request_start) * 1000,
-            "vlm/judge_prompt_tokens": float(response.prompt_tokens),
-        }
-
-    def _write_subtask(self) -> None:
-        """Generate on the planner's conversation and hand what it named to the
-        actor, whose turn this step then carries it. A reply without the section
-        is the subtask as it stands."""
-        request_start = time.time()
-        conversation = self.prompt_builder.conversation()
-        response = self.backend.generate(conversation)
-        planner_msec = (time.time() - request_start) * 1000
-
-        self.planner_exchange = conversation + [assistant_turn(response.text)]
-        subtask_match = SUBTASK_RE.search(response.text)
-        self.subtask = (
-            subtask_match.group(1).strip() if subtask_match is not None else response.text
-        )
-        self.prompt_builder.add_reply(response.text)
-        self.actor_builder.set_subtask(self.subtask)
-        self.planner_status = (
-            f"in {response.prompt_tokens} tok   out {response.completion_tokens} tok   "
-            f"{planner_msec:.0f} ms   {response.finish_reason}"
-        )
-        self.planner_metrics = {
-            "vlm/planner_msec": planner_msec,
-            "vlm/planner_prompt_tokens": float(response.prompt_tokens),
-            "vlm/planner_completion_tokens": float(response.completion_tokens),
-        }
 
     def _write_action(self) -> None:
         """Generate on this step's conversation and hold what it decided.
@@ -251,8 +180,6 @@ class ZeroShotVLMAgent(Agent):
             self.actor_builder.reject(answer_text)
 
         self.held_metrics = {
-            **self.judge_metrics,
-            **self.planner_metrics,
             "vlm/parse_failed": float(not parse_ok),
             "vlm/api_msec": api_msec,
             "vlm/prompt_tokens": float(response.prompt_tokens),
@@ -285,15 +212,8 @@ class ZeroShotVLMAgent(Agent):
             self.held_exchange = []
             self.held_status = ""
             self.held_metrics = {}
-            self.planner_exchange = []
-            self.planner_status = ""
-            self.subtask = ""
             self.answer = ""
-            self.achieved = ""
-            # Zero means "generate now", so the first step of an episode decides
-            # on that episode's own first frame.
-            self.steps_until_next = 0
-            self.step_in_episode = 0
+            self.cycle.reset()
         return {}
 
     def optimizer_state_dict(self) -> dict:

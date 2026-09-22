@@ -141,7 +141,6 @@ def build_network(
             cot_steps_per_chain=args.cot_steps_per_chain,
             cot_dropout=args.cot_dropout,
             token_dropout=args.token_dropout,
-            bc_loss_weight=args.bc_loss_weight,
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
             cot_prompt_budget=args.cot_prompt_budget,

@@ -187,7 +187,6 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            torch.zeros(self.action_dim, device=self.device),
             self.network.tokenize(prompt),
             self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
@@ -203,7 +202,7 @@ class StreamingAgent(Agent):
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
         cot_activation, cot_age = self.network.advance_cot(
-            episode_started, self.rb.get_latest(self.seq_len)
+            episode_started, episode_done, self.rb.get_latest(self.seq_len)
         )
         self.rb.amend_latest(
             cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
@@ -394,7 +393,6 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            torch.zeros(self.action_dim, device=self.device),
             self.network.tokenize(prompt),
             self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
@@ -410,7 +408,7 @@ class StreamingAgent(Agent):
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
         cot_activation, cot_age = self.network.advance_cot(
-            episode_started, self.rb.get_latest(self.seq_len)
+            episode_started, episode_done, self.rb.get_latest(self.seq_len)
         )
         self.rb.amend_latest(
             cot_activation, cot_age, self.network.tokenize(self.network.thought_text())

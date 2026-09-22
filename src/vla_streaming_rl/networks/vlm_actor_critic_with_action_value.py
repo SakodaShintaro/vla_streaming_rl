@@ -261,7 +261,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return self._last_reasoning_text
 
     def advance_cot(
-        self, episode_started: bool, window: ReplayBufferData
+        self, episode_started: bool, episode_done: bool, window: ReplayBufferData
     ) -> tuple[torch.Tensor, int]:
         """Every ``cot_steps_per_chain`` ticks, write a chain on this tick's
         prompt, read off ``window`` (the buffer's newest rows, this tick last).
@@ -269,6 +269,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         Returns no activations -- the chain reaches the policy as text, as the
         reply of this tick's turn in the prompts that follow -- and 0.
         """
+        del episode_done
         if episode_started:
             self._since_write = self.cot_steps_per_chain
         else:

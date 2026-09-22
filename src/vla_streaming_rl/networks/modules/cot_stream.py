@@ -158,7 +158,7 @@ class CoTStream:
         """
         return 0
 
-    def advance(self) -> torch.Tensor:
+    def advance(self, episode_done: bool) -> torch.Tensor:
         """The ``tokens_per_step`` activations this environment step issues.
 
         The builder's conversation is read only where a chain restarts, and only
@@ -170,6 +170,7 @@ class CoTStream:
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16.
         """
+        del episode_done
         start = time.perf_counter()
         activations = []
         while len(activations) < self.tokens_per_step:

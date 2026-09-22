@@ -23,11 +23,13 @@ handed and compose no text of their own beyond how a chain is continued.
 """
 
 import csv
+import itertools
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
@@ -111,6 +113,7 @@ class PromptBuilder(ABC):
         self.role = role
         self._subtask = ""
         self._frames = []
+        self._actions = []
         self.decision_fps = env.metadata["decision_fps"]
         self._turns = []
         self._current = {}
@@ -124,6 +127,7 @@ class PromptBuilder(ABC):
         self._tick = 0
         self._subtask = ""
         self._frames = []
+        self._actions = []
 
     def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
         """What the agent is looking at this tick: the turn a chain would read if
@@ -180,23 +184,46 @@ class PromptBuilder(ABC):
             {"role": "user", "content": [{"type": "text", "text": self._rejection_text(answer)}]}
         ]
 
+    def record_action(self, action: np.ndarray) -> None:
+        """The action the agent took on the tick it last observed, by the name
+        the env's action vocabulary gives it. What the judge is told beside the
+        video: a first-person view turning left shows the scene sliding right,
+        and the model reads the scene's motion as the agent's own."""
+        self._actions = (self._actions + [self._action_name(action)])[-self.steps_per_action :]
+
+    def _action_name(self, action: np.ndarray) -> str:
+        return ", ".join(f"{value:+.1f}" for value in action)
+
     def judge_conversation(self, subtask: str, steps: int) -> list[dict]:
         """What is asked about a subtask once it has run for ``steps`` steps --
         all it stood for, or as many as the episode left it: every frame of
         those steps as one video, not the one frame in ``steps_per_action`` the
         turns hold, since how far a subtask got shows in the motion between
         them. A video holds an even number of frames, so an odd run of steps
-        opens on the frame the subtask was written on. It stands alone: no turn
-        before it is read and its reply is kept nowhere."""
+        opens on the frame the subtask was written on. Under it go the actions
+        taken on those steps, runs of the same one folded. It stands alone: no
+        turn before it is read and its reply is kept nowhere."""
         assert 1 <= steps <= self.steps_per_action, steps
         frames = self._frames[-(steps + steps % 2) :]
         assert len(frames) == steps + steps % 2, f"{len(frames)} frames held for {steps} steps"
+        actions = self._actions[-steps:]
+        assert len(actions) == steps, f"{len(actions)} actions held for {steps} steps"
         seconds = steps / self.decision_fps
         system = (
             f"The video is what the agent saw over the last {seconds:.1f} seconds while "
             f"carrying out a subtask; its last frame is the current view. Judge from the "
-            f"video alone how far the subtask has been achieved. "
-            f"Reply with <achieved>a number from 0 to 1</achieved>."
+            f"video and the actions the agent took how far the agent did what the subtask "
+            f"asked of it: the movement the subtask names, not where the agent happens to "
+            f"end up. Movement the subtask did not ask for counts against it. "
+            f"Reply with <did>the movement the actions show, in a few words</did> then "
+            f"<achieved>a number from 0 to 1</achieved>."
+        )
+        runs = ", ".join(
+            f"{name} x{len(list(group))}" for name, group in itertools.groupby(actions)
+        )
+        text = (
+            f"Subtask: {subtask} "
+            f"Actions taken, one per {1 / self.decision_fps:.1f} seconds: {runs}."
         )
         video = {
             "type": "video",
@@ -206,7 +233,7 @@ class PromptBuilder(ABC):
         }
         return [
             {"role": "system", "content": [{"type": "text", "text": system}]},
-            {"role": "user", "content": [video, {"type": "text", "text": f"Subtask: {subtask}"}]},
+            {"role": "user", "content": [video, {"type": "text", "text": text}]},
         ]
 
     def set_subtask(self, subtask: str) -> None:
@@ -328,6 +355,17 @@ class AnimalAIPromptBuilder(PromptBuilder):
         super().add_reply(text)
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
+
+    def _action_name(self, action: np.ndarray) -> str:
+        """The name the action goes by once the env has put it through its
+        dead zone of a third either side of zero."""
+        move = {1: "move_forward", -1: "move_backward", 0: ""}[
+            int(np.sign(action[0]) * (abs(action[0]) > 1 / 3))
+        ]
+        turn = {1: "turn_right", -1: "turn_left", 0: ""}[
+            int(np.sign(action[1]) * (abs(action[1]) > 1 / 3))
+        ]
+        return "+".join(name for name in (move, turn) if name) or "stand_still"
 
     def _action_format(self) -> str:
         return (
