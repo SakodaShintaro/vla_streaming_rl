@@ -50,16 +50,19 @@ def _viz_resize(image: np.ndarray, scale: float) -> np.ndarray:
 
 
 def save_episode_texts(episode_log_dir: Path, text_list: list[dict[str, str]]) -> None:
-    """The free-form text agents emitted, one row per rendered frame.
+    """The free-form text agents emitted, one row per step an agent emitted any
+    on: a step it hands back no text for writes no row, so an agent that
+    generates once in many steps is logged once per generation.
 
     Text a network draws into a panel is legible in the video but not
     searchable; this is the same content as characters, so a run's chain of
     thought can be read back and grepped. Tabs and newlines are escaped to keep
     one step on one line.
     """
-    keys = list(text_list[0].keys())
-    if not keys:
+    rows = [(step, texts) for step, texts in enumerate(text_list) if texts]
+    if not rows:
         return
+    keys = list(rows[0][1].keys())
 
     def escape(text: str) -> str:
         return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
@@ -67,7 +70,7 @@ def save_episode_texts(episode_log_dir: Path, text_list: list[dict[str, str]]) -
     tsv_path = episode_log_dir / "texts.tsv"
     with open(tsv_path, "w", encoding="utf-8") as f:
         f.write("step\t" + "\t".join(keys) + "\n")
-        for step, texts in enumerate(text_list):
+        for step, texts in rows:
             f.write(f"{step}\t" + "\t".join(escape(texts[key]) for key in keys) + "\n")
 
 
@@ -340,7 +343,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     # Every agent composes its own language input; the env only publishes state.
     # The chain of thought writes into the same conversation, so the builder is
     # made before the network that carries the chain.
-    prompt_builder = build_prompt_builder(env, args)
+    prompt_builder = build_prompt_builder(env, args, "planner")
 
     trains_a_network = args.agent_type != "zeroshot_vlm"
     network = (
@@ -403,7 +406,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         obs_for_render = obs["image"].copy().transpose(1, 2, 0)
         obs_viz = _viz_resize(obs_for_render, args.render_scale)
         panels = {
-            "environment": overlay_caption(env.render(), result.texts["prompt"]),
+            "environment": overlay_caption(env.render(), agent.prompt_builder.task_text()),
             "observation": obs_viz,
             **result.panels,
         }
@@ -460,7 +463,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
             obs_viz = _viz_resize(obs_for_render, args.render_scale)
             panels = {
-                "environment": overlay_caption(env.render(), result.texts["prompt"]),
+                "environment": overlay_caption(env.render(), agent.prompt_builder.task_text()),
                 "observation": obs_viz,
                 **result.panels,
             }

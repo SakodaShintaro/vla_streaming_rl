@@ -6,14 +6,14 @@ step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
 before the action of that tick is chosen. Below ``learning_starts`` the env is
 driven by uniform random actions, so the buffer fills with something other than
 an untrained policy's output while the network's recurrent state still follows
-the episode. With ``text_action`` on, the VLM policy is a second candidate,
-behaving exactly as the zero-shot controller does: the action the chain of
-thought names in its ``<answer>``, held for the number of steps it asks for within
-the chain's cadence, then standing still until the next chain. It drives the env
-alone below ``learning_starts``, and from then on every tick runs the head's
-action only where the critic values it more than the VLM's by at least
-``select_margin``, the VLM's otherwise -- so a head that never earns that
-margin leaves the run performing as the zero-shot controller would.
+the episode.
+
+With a chain carried, this is the zero-shot controller with its actor swapped
+for the policy head and nothing else: the same :class:`SubtaskCycle` judges the
+subtask that just ran and plans the next, the planner's activations are what the
+head reads of it, and the judge's verdict is the head's only reward -- what the
+env pays is logged and never trained on. Without a chain there is no subtask to
+judge, and the env's reward is what is trained on.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
@@ -30,22 +30,14 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import ANSWER_RE, PromptBuilder
+from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
-from vla_streaming_rl.utils import render_selection_panel
-
-
-def _format_action(action: np.ndarray) -> str:
-    return "[" + ", ".join(f"{value:+.2f}" for value in action) + "]"
 
 
 class OffPolicyAgent(Agent):
-    SELECTION_PANEL_WIDTH = 320
-    SELECTION_PANEL_HEIGHT = 560
-
     def __init__(
         self,
         *,
@@ -68,10 +60,6 @@ class OffPolicyAgent(Agent):
         pad_token_id: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
-        text_action: bool,
-        select_margin: float,
-        cot_steps_per_chain: int,
-        parse_action_text,
     ) -> None:
         super().__init__(
             horizon=horizon,
@@ -80,24 +68,9 @@ class OffPolicyAgent(Agent):
         )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.text_action = text_action
-        self.select_margin = select_margin
-        assert cot_steps_per_chain >= 1, cot_steps_per_chain
-        self.cot_steps_per_chain = cot_steps_per_chain
-        if text_action:
-            assert isinstance(network.cot_module, CoTBatch), (
-                "text_action reads the action off a finished chain, which only "
-                "cot_mode=batch writes; set cot_tokens_num > 0 and cot_mode=batch"
-            )
-        self.parse_action_text = parse_action_text
-        self.vlm_action = np.zeros(int(np.prod(action_space.shape)), dtype=np.float32)
-        self.vlm_answer_text = ""
-        self.hold_steps = 0
-        self.text_parse_failed = 0.0
-        self.selection_status = ""
-        self.selection_rows = []
-        self.decisions_num = 0
-        self.vlm_chosen_num = 0
+        assert network.cot_module is None or isinstance(network.cot_module, CoTBatch), (
+            "the reward is the judge's verdict on a subtask, which only cot_mode=batch writes"
+        )
 
         self.observation_space = observation_space
 
@@ -149,7 +122,6 @@ class OffPolicyAgent(Agent):
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
-        self.prev_vlm_action = np.zeros(self.action_dim, dtype=np.float32)
         self._episode_reset = False
         # the first observation of a run starts an episode
         self._previous_done = True
@@ -231,7 +203,7 @@ class OffPolicyAgent(Agent):
         # terminal tick instead, the turn that tick then writes would be the one
         # the next episode opens on.
         episode_started = self._previous_done
-        # What the agent trains on, against what the env reported as its score.
+        # What the env pays, against what it reported as its score.
         shaped_reward = info["shaped_reward"]
         metrics["shaped_reward"] = shaped_reward
         self._reset_rnn_state_if_fresh(episode_done)
@@ -241,16 +213,9 @@ class OffPolicyAgent(Agent):
             # new episode; the first action of an episode comes from its own frame.
             self.action_chunk = None
             self.chunk_step = 0
-            self.decisions_num = 0
-            self.vlm_chosen_num = 0
         if episode_done:
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
-        if not self.normalizing_by_return:
-            self.reward_processor.update(shaped_reward)
-        metrics["processed_reward"] = self.reward_processor.normalize(
-            torch.tensor(shaped_reward)
-        ).item()
         (
             image,
             velocity_x,
@@ -275,7 +240,6 @@ class OffPolicyAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            torch.from_numpy(self._to_net_action(self.prev_vlm_action)).to(self.device),
             self.network.tokenize(prompt),
             self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
@@ -291,31 +255,44 @@ class OffPolicyAgent(Agent):
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
         cot_activation, cot_age = self.network.advance_cot(
-            episode_started, self.rb.get_latest(self.seq_len)
+            episode_started, episode_done, self.rb.get_latest(self.seq_len)
         )
         self.rb.amend_latest(
             cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
         )
-        if self.text_action and cot_age == 0:
-            self._read_vlm_action()
-        holding = cot_age < self.hold_steps
-        vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
-        self.prev_vlm_action = vlm_action
-        if self.text_action:
-            metrics["text/parse_failed"] = self.text_parse_failed
+        trained_reward = shaped_reward
+        texts = {}
+        if self.network.cot_module is not None:
+            cycle = self.network.cot_module.cycle
+            trained_reward = cycle.achieved if cycle.judged else 0.0
+            self.rb.set_latest_reward(trained_reward)
+            metrics["subtask/achieved"] = cycle.achieved
+            metrics["subtask/judge_failed"] = float(cycle.judge_failed)
+            if cycle.judged or cycle.planned:
+                texts = {
+                    "prompt": prompt,
+                    "achieved": cycle.judge_text if cycle.judged else "",
+                    "subtask": cycle.subtask if cycle.planned else "",
+                }
+        if not self.normalizing_by_return:
+            self.reward_processor.update(trained_reward)
+        metrics["processed_reward"] = self.reward_processor.normalize(
+            torch.tensor(trained_reward)
+        ).item()
 
         warmup = global_step < self.learning_starts
 
         if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
             self.prev_action = action
+            self.prompt_builder.record_action(action)
             self.chunk_step += 1
             metrics["chunk_step"] = self.chunk_step
             return StepResult(
                 action=action,
                 metrics=metrics,
-                panels=self._panels(),
-                texts={"prompt": prompt, **self.network.render_texts()},
+                panels=self.network.render_panels(),
+                texts=texts,
             )
 
         latest_data = self.rb.get_latest(self.seq_len)
@@ -345,39 +322,7 @@ class OffPolicyAgent(Agent):
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
         action_chunk = infer_result.action[0].cpu().numpy()
-        if self.text_action:
-            vlm_chunk = np.repeat(self._to_net_action(vlm_action)[None], self.horizon, axis=0)
-            q_vlm = self.network.action_value(infer_result.features, vlm_chunk)
-            q_head = self.network.action_value(infer_result.features, action_chunk)
-            vlm_chosen = warmup or q_head - q_vlm <= self.select_margin
-            metrics["select/q_vlm"] = q_vlm
-            metrics["select/q_head"] = q_head
-            metrics["select/vlm_chosen"] = float(vlm_chosen)
-            self.decisions_num += 1
-            self.vlm_chosen_num += int(vlm_chosen)
-            self.selection_status = (
-                f"step {global_step}, chain age {cot_age}, "
-                f"{'warmup: VLM only' if warmup else 'chosen by Q'}. "
-                f"VLM chosen {self.vlm_chosen_num}/{self.decisions_num} this episode."
-            )
-            self.selection_rows = [
-                (
-                    "VLM",
-                    f"{self.vlm_answer_text}  {_format_action(vlm_action)}  "
-                    f"({'holding' if holding else 'standing still'}, hold {self.hold_steps})",
-                    q_vlm,
-                    vlm_chosen,
-                ),
-                (
-                    "head",
-                    _format_action(self._to_env_action(action_chunk[0])),
-                    q_head,
-                    not vlm_chosen,
-                ),
-            ]
-            if vlm_chosen:
-                action_chunk = vlm_chunk
-        elif warmup:
+        if warmup:
             # The network was queried anyway so its recurrent state keeps
             # following the episode; only the action it chose is dropped.
             action_chunk = np.repeat(
@@ -387,45 +332,14 @@ class OffPolicyAgent(Agent):
         self.chunk_step = 1
         action = self._to_env_action(action_chunk[0])
         self.prev_action = action
+        self.prompt_builder.record_action(action)
         metrics["chunk_step"] = self.chunk_step
         return StepResult(
             action=action,
             metrics=metrics,
-            panels=self._panels(),
-            texts={"prompt": prompt, **self.network.render_texts()},
+            panels=self.network.render_panels(),
+            texts=texts,
         )
-
-    def _panels(self) -> dict[str, np.ndarray]:
-        """The network's panels, plus the two candidates and their action values
-        when the chain's answer is one: the same keys on every step of a run."""
-        panels = self.network.render_panels()
-        if self.text_action:
-            panels["selection"] = render_selection_panel(
-                self.selection_status,
-                self.selection_rows,
-                self.SELECTION_PANEL_WIDTH,
-                self.SELECTION_PANEL_HEIGHT,
-            )
-        return panels
-
-    def _read_vlm_action(self) -> None:
-        """Read the action the chain just written names and how many steps it
-        asks to hold it, as the zero-shot controller does. A reply that
-        named no runnable action makes the candidate standing still, and is
-        answered by the env in its own turn."""
-        answer_match = ANSWER_RE.search(self.network.thought_text())
-        answer_text = answer_match.group(1).strip() if answer_match is not None else ""
-        action_array, parse_ok = self.parse_action_text(answer_text)
-        self.vlm_answer_text = answer_text if parse_ok else f"(unparsed: {answer_text})"
-        if parse_ok:
-            self.vlm_action = np.clip(
-                action_array[0].astype(np.float32), self.action_low, self.action_high
-            )
-        else:
-            self.vlm_action = np.zeros(self.action_dim, dtype=np.float32)
-            self.prompt_builder.reject(answer_text)
-        self.hold_steps = min(len(action_array), self.cot_steps_per_chain)
-        self.text_parse_failed = float(not parse_ok)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

@@ -3,7 +3,7 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.prompt import PromptBuilder, build_prompt_builder
 
 
 def build_agent(
@@ -19,6 +19,7 @@ def build_agent(
             backend=build_vlm_backend(args),
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
+            actor_builder=build_prompt_builder(env, args, "actor"),
             steps_per_action=args.cot_steps_per_chain,
         )
 
@@ -76,7 +77,6 @@ def build_agent(
     assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
     from vla_streaming_rl.agents.off_policy import OffPolicyAgent
 
-    parse_action_text = env.unwrapped.parse_action_text if args.text_action else None
     return OffPolicyAgent(
         observation_space=env.observation_space,
         action_space=env.action_space,
@@ -97,8 +97,4 @@ def build_agent(
         pad_token_id=args.pad_token_id,
         reset_on_episode_end=args.reset_on_episode_end,
         prompt_builder=prompt_builder,
-        text_action=args.text_action,
-        select_margin=args.select_margin,
-        cot_steps_per_chain=args.cot_steps_per_chain,
-        parse_action_text=parse_action_text,
     )

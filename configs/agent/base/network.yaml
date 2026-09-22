@@ -56,7 +56,6 @@ cot_steps_per_chain: 16
 # something. 0 leaves the chain in every batch, which is the ablation.
 cot_dropout: 0.5
 token_dropout: 0.2
-bc_loss_weight: 0.0
 # How a step's chain tokens reach the space axis.
 #   mean : one slot per step, whose temporal recurrence follows the chain
 #   none : one slot per token, each recurring on a stride-L phase of the chain

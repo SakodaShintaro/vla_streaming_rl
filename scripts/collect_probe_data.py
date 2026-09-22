@@ -122,7 +122,7 @@ def main(args: DictConfig, result_dir: Path) -> None:
     env = make_env(args.env_id, args.env_factory, result_dir=None)
     env.action_space.seed(seed)
 
-    prompt_builder = build_prompt_builder(env, args)
+    prompt_builder = build_prompt_builder(env, args, "planner")
     network = build_network(
         args,
         observation_space_shape=env.observation_space["image"].shape,

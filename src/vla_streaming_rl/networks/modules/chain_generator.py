@@ -3,11 +3,10 @@ import time
 from dataclasses import dataclass
 
 import torch
-from torchvision.transforms.v2 import functional as TF
 from transformers import StaticCache
 
 from .vlm_backbone import load_model
-from .vlm_inputs import render_conversation
+from .vlm_inputs import encode_conversation
 
 
 @dataclass(frozen=True)
@@ -85,17 +84,11 @@ class ChainGenerator:
 
     @torch.inference_mode()
     def generate(self, conversation: list[dict]) -> Chain:
-        """Write a reply to ``conversation``. A frame in it is whatever the
-        agent hands its builder -- an 8-bit picture or a (C, H, W) float tensor
-        in [0, 1] -- and reaches the processor as the latter."""
+        """Write a reply to ``conversation``."""
         start = time.perf_counter()
-        text, images = render_conversation(self.processor, conversation, self.enable_thinking)
-        inputs = self.processor(
-            text=[text],
-            images=[TF.to_dtype(TF.to_image(image), torch.float32, scale=True) for image in images],
-            return_tensors="pt",
-            do_rescale=False,
-        ).to(self.device)
+        inputs = encode_conversation(
+            self.processor, conversation, self.enable_thinking, self.device
+        )
         prompt_len = int(inputs["input_ids"].shape[1])
         assert prompt_len <= self.prompt_budget, (
             f"prompt of {prompt_len} tokens exceeds cot_prompt_budget={self.prompt_budget}; raise it"

@@ -133,13 +133,13 @@ class NetworkInterface(nn.Module, abc.ABC):
     cot_shape: tuple[int, int] = (0, 0)
 
     def advance_cot(
-        self, episode_started: bool, window: ReplayBufferData
+        self, episode_started: bool, episode_done: bool, window: ReplayBufferData
     ) -> tuple[torch.Tensor, int]:
         """This step's chain-of-thought activations and how many steps ago they
         were generated, empty and 0 unless the network carries a chain (see
         ``networks/cot_actor_critic.py``). ``window`` is the buffer's newest
         rows, this step's last, for a chain that reads its prompt off them."""
-        del episode_started, window
+        del episode_started, episode_done, window
         return torch.zeros(self.cot_shape), 0
 
     def thought_text(self) -> str:

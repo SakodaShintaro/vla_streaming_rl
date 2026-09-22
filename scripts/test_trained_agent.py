@@ -248,7 +248,7 @@ def main(
     # would be far outside anything the checkpoint was trained at.
     env.unwrapped.set_global_step(global_step)
 
-    prompt_builder = build_prompt_builder(env, args)
+    prompt_builder = build_prompt_builder(env, args, "planner")
     network = build_network(
         args,
         observation_space_shape=env.observation_space["image"].shape,

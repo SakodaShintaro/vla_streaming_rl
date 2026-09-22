@@ -43,7 +43,5 @@ image_save_interval: 100
 print_interval: 5
 max_step_count: 100
 debug: false
-text_action: false
-select_margin: 0.0
 use_eligibility_trace: true
 et_lambda: 0.5
