@@ -98,6 +98,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         denoising_steps: int,
         som_alpha: float,
         som_w: float,
+        target_entropy_scale: float,
+        init_temperature: float,
         predictor_hidden_dim: int,
         predictor_block_num: int,
         detach_actor: bool,
@@ -202,6 +204,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             dacer_loss_weight=dacer_loss_weight,
             som_alpha=som_alpha,
             som_w=som_w,
+            target_entropy_scale=target_entropy_scale,
+            init_temperature=init_temperature,
         )
 
         self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)

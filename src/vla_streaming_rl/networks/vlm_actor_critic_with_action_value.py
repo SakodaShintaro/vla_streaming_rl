@@ -87,6 +87,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         dacer_loss_weight: float,
         som_alpha: float,
         som_w: float,
+        target_entropy_scale: float,
+        init_temperature: float,
         reasoning_loss_weight: float,
         reasoning_max_tokens: int,
         reasoning_temperature: float,
@@ -192,6 +194,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             dacer_loss_weight=dacer_loss_weight,
             som_alpha=som_alpha,
             som_w=som_w,
+            target_entropy_scale=target_entropy_scale,
+            init_temperature=init_temperature,
         )
 
         # Critic: Q(state, action)

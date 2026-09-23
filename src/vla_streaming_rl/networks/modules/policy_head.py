@@ -628,6 +628,123 @@ class IMLEPolicy(nn.Module):
         return actor_loss, info_dict
 
 
+class TanhPolicy(nn.Module):
+    """A squashed Gaussian over the action chunk: a = tanh(u), u ~ N(mu(s), sigma(s)).
+
+    The head every residual policy is built on (EXPO, arXiv:2506.16560): one
+    distribution the entropy of which is a number the loss can hold to a target,
+    rather than a sampler whose spread is whatever the denoiser happens to have.
+    The temperature that balances that entropy against the critic is learned
+    here, as its own parameter, so a run tunes it without a second optimizer.
+    """
+
+    LOG_STD_MIN = -20.0
+    LOG_STD_MAX = 2.0
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        block_num: int,
+        horizon: int,
+        sparsity: float,
+        target_entropy_scale: float,
+        init_temperature: float,
+    ) -> None:
+        super().__init__()
+        assert init_temperature > 0.0, init_temperature
+        self.horizon = horizon
+        self.action_dim = action_dim
+        total_action_dim = action_dim * horizon
+        self.fc_in = nn.Linear(state_dim, hidden_dim)
+        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.fc_mean = nn.Linear(hidden_dim, total_action_dim)
+        self.fc_log_std = nn.Linear(hidden_dim, total_action_dim)
+        # The mean starts at the middle of the action range, as the other heads'
+        # output layers do; the spread starts at one, which tanh makes close to
+        # uniform over the range.
+        nn.init.zeros_(self.fc_mean.weight)
+        nn.init.zeros_(self.fc_mean.bias)
+        nn.init.zeros_(self.fc_log_std.bias)
+        # Entropy of a chunk this wide that the temperature holds the policy to.
+        self.target_entropy = -target_entropy_scale * total_action_dim
+        self.log_temperature = nn.Parameter(torch.tensor(math.log(init_temperature)))
+        self.sparse_mask = (
+            None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
+        )
+
+    def forward(self, state: torch.Tensor) -> HeadOutput:
+        """The distribution's parameters for ``state``, ``output`` being the
+        mean and the log standard deviation on one axis."""
+        x = self.norm(self.fc_mid(self.fc_in(state)))
+        log_std = self.fc_log_std(x).clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
+        return HeadOutput(output=torch.cat([self.fc_mean(x), log_std], dim=-1), activation=x)
+
+    def _sample(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """One reparameterized draw: the action chunk, its log density under the
+        squashed Gaussian, and the penultimate feature.
+
+        The correction for the squash is written as ``2 * (log 2 - u -
+        softplus(-2u))`` rather than ``log(1 - tanh(u)^2)``, which underflows
+        where the sample saturates.
+        """
+        head_out = self.forward(state)
+        mean, log_std = head_out.output.chunk(2, dim=-1)
+        noise = torch.randn_like(mean)
+        pre_tanh = mean + noise * log_std.exp()
+        log_prob = (
+            -0.5 * noise.pow(2)
+            - log_std
+            - 0.5 * math.log(2 * math.pi)
+            - 2.0 * (math.log(2.0) - pre_tanh - F.softplus(-2.0 * pre_tanh))
+        ).sum(dim=-1)
+        action = torch.tanh(pre_tanh).view(-1, self.horizon, self.action_dim)
+        return action, log_prob, head_out.activation
+
+    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        action, _, activation = self._sample(x)
+        return action, activation
+
+    def compute_actor_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        *,
+        value_head,
+        detach_actor: bool,
+    ) -> tuple[torch.Tensor, dict]:
+        """Soft actor-critic's actor and temperature losses in one number.
+
+        The temperature enters each with the other side detached, so the two
+        terms share a backward without either chasing the other.
+        """
+        del action_chunk
+        if detach_actor:
+            state = state.detach()
+        action, log_prob, _ = self._sample(state)
+
+        for param in value_head.parameters():
+            param.requires_grad_(False)
+        advantage = value_head.scalar_advantage(state, action)
+        for param in value_head.parameters():
+            param.requires_grad_(True)
+
+        temperature = self.log_temperature.exp()
+        actor_loss = (temperature.detach() * log_prob - advantage).mean()
+        temperature_loss = -(temperature * (log_prob.detach() + self.target_entropy)).mean()
+
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "dacer_loss": 0.0,
+            "advantage": advantage.mean().item(),
+            "entropy": -log_prob.mean().item(),
+            "temperature": temperature.item(),
+        }
+        return actor_loss + temperature_loss, info_dict
+
+
 def build_policy_head(
     *,
     policy_type: str,
@@ -642,6 +759,8 @@ def build_policy_head(
     dacer_loss_weight: float,
     som_alpha: float,
     som_w: float,
+    target_entropy_scale: float,
+    init_temperature: float,
 ) -> nn.Module:
     """The policy head named by ``policy_type``, for a state of width ``state_dim``.
 
@@ -683,6 +802,17 @@ def build_policy_head(
             sparsity=sparsity,
             som_alpha=som_alpha,
             som_w=som_w,
+        )
+    if policy_type == "tanh":
+        return TanhPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dim=hidden_dim,
+            block_num=block_num,
+            horizon=horizon,
+            sparsity=sparsity,
+            target_entropy_scale=target_entropy_scale,
+            init_temperature=init_temperature,
         )
     if policy_type == "imle":
         return IMLEPolicy(

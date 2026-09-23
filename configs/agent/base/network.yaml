@@ -32,6 +32,10 @@ dacer_loss_weight: 0.05
 denoising_steps: 1
 som_alpha: 1.0
 som_w: 25.0
+# policy_type=tanh: the entropy per action dimension the learned temperature
+# holds the squashed Gaussian to, and where that temperature starts.
+target_entropy_scale: 0.5
+init_temperature: 1.0
 
 # Chain-of-thought stream. A frozen VLM keeps
 # one chain of thought running across environment steps: cot_tokens_num tokens
