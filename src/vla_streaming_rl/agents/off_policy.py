@@ -8,7 +8,7 @@ driven by uniform random actions, so the buffer fills with something other than
 an untrained policy's output while the network's recurrent state still follows
 the episode. With ``text_action`` on, the VLM policy is a second candidate,
 behaving exactly as the zero-shot controller does: the action the chain of
-thought names in its ``<answer>``, held for the number of steps it asks for within
+thought names in its ``<action>``, held for the number of steps it asks for within
 the chain's cadence, then standing still until the next chain. It drives the env
 alone below ``learning_starts``, and from then on every tick runs the head's
 action only where the critic values it more than the VLM's by at least
@@ -30,7 +30,7 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import ANSWER_RE, PromptBuilder
+from vla_streaming_rl.agents.prompt import ACTION_RE, PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
 from vla_streaming_rl.replay_buffer import ReplayBuffer
@@ -413,7 +413,7 @@ class OffPolicyAgent(Agent):
         asks to hold it, as the zero-shot controller does. A reply that
         named no runnable action makes the candidate standing still, and is
         answered by the env in its own turn."""
-        answer_match = ANSWER_RE.search(self.network.thought_text())
+        answer_match = ACTION_RE.search(self.network.thought_text())
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
         action_array, parse_ok = self.parse_action_text(answer_text)
         self.vlm_answer_text = answer_text if parse_ok else f"(unparsed: {answer_text})"

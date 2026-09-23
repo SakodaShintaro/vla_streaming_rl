@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import ANSWER_RE, PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import ACTION_RE, PromptBuilder, assistant_turn
 from vla_streaming_rl.utils import render_conversation_panel
 
 
@@ -134,7 +134,7 @@ class ZeroShotVLMAgent(Agent):
 
         response_text = response.text
         self.held_exchange = conversation + [assistant_turn(response_text)]
-        answer_match = ANSWER_RE.search(response_text)
+        answer_match = ACTION_RE.search(response_text)
         answer_text = answer_match.group(1).strip() if answer_match is not None else ""
         action_array, parse_ok = self.parse_action_text(answer_text)
         # A response that did not follow the format stands the agent still for

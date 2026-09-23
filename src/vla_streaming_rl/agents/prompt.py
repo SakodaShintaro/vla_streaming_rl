@@ -35,16 +35,15 @@ from omegaconf import DictConfig
 ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 
 TEXT_ACTION_PROTOCOL = (
-    "Reply with <memory>at most two short sentences on what you have tried so far in "
-    "this episode and what came of it, rewritten from the memory of your last reply</memory> "
-    "then <reason>one short sentence on what decides the next action</reason> "
-    "then <answer>the action only</answer>."
+    "Reply with <reason>one short sentence on what you see</reason> "
+    "then <subtask>one short sentence on what the agent should get done by your next "
+    "reply</subtask> then <action>the action only</action>."
 )
 
-# The LAST <answer> is the one that counts: a model's reasoning sometimes quotes
+# The LAST <action> is the one that counts: a model's reasoning sometimes quotes
 # the tag before writing the real section, and reading the first one then takes
 # the whole reasoning as the action.
-ANSWER_RE = re.compile(r"<answer>(?!.*<answer>)(.*?)</answer>", re.DOTALL)
+ACTION_RE = re.compile(r"<action>(?!.*<action>)(.*?)</action>", re.DOTALL)
 
 
 def assistant_turn(text: str) -> dict:
@@ -278,7 +277,11 @@ class AnimalAIPromptBuilder(PromptBuilder):
         return (
             f"Write the action as `<name>(<n>)`, for example `move_forward(4)`: "
             f"<name> is one of {ANIMALAI_ACTION_NAMES}, and <n> is how many steps "
-            f"in a row it is taken, an integer from 1 to {self.steps_per_action}."
+            f"in a row it is taken, an integer from 1 to {self.steps_per_action}. One turn "
+            f"step rotates 10 degrees; one forward step moves about 1.5 units, the arena "
+            f"being 40 units across. You are asked for a new action only every "
+            f"{self.steps_per_action} steps, and the steps left over after <n> are spent "
+            f"standing still."
         )
 
     def _rejection_text(self, answer: str) -> str:
