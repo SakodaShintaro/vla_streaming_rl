@@ -38,7 +38,7 @@ som_w: 25.0
 # leaves the actor maximizing entropy alone, and the temperature rises by
 # itself once the policy is more certain than the target asks.
 target_entropy_scale: 0.5
-init_temperature: 0.1
+init_temperature: 0.01
 temperature_lr: 3e-3
 
 # Chain-of-thought stream. A frozen VLM keeps
