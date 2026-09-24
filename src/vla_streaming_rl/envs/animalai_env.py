@@ -421,7 +421,7 @@ class StagedSelector(ArenaSelector):
         return {"stage": self._stage_index(global_step) + 1}
 
     def status(self, global_step: int) -> str:
-        return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}  step:{global_step}"
+        return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}"
 
 
 class SuccessDrivenSelector(ArenaSelector):
@@ -508,12 +508,12 @@ class SuccessDrivenSelector(ArenaSelector):
         }
 
     def status(self, global_step: int) -> str:
+        del global_step
         size = len(self._stages[self._stage])
         rate = self._round_rate() if self._round_attempts > 0 else 0.0
         return (
             f"stage:{self._stage + 1}/{len(self._stages)}"
             f"  round:{self._round_attempts}/{size} rate:{rate:.2f}"
-            f"  step:{global_step}"
         )
 
     def progress_state(self) -> dict:
@@ -588,11 +588,12 @@ class SequentialSelector(ArenaSelector):
         }
 
     def status(self, global_step: int) -> str:
+        del global_step
         cleared = sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
         return (
             f"{(self._next_index - 1) % len(self.arenas) + 1}/{len(self.arenas)}"
             f"  lap:{(self._next_index - 1) // len(self.arenas) + 1}"
-            f"  cleared:{cleared}/{len(self._arena_by_name)}  step:{global_step}"
+            f"  cleared:{cleared}/{len(self._arena_by_name)}"
         )
 
     def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
@@ -624,9 +625,10 @@ class RandomSelector(ArenaSelector):
         return {"arena_total": len(self._arena_by_name), "cleared_count": cleared}
 
     def status(self, global_step: int) -> str:
+        del global_step
         cleared = sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
         untried = sum(attempts == 0 for attempts in self._attempts.values())
-        return f"random  cleared:{cleared}/{len(self._arena_by_name)}  untried:{untried}  step:{global_step}"
+        return f"random  cleared:{cleared}/{len(self._arena_by_name)}  untried:{untried}"
 
 
 def build_selector(
@@ -1151,6 +1153,7 @@ class AnimalAIEnv(gym.Env):
         header_lines = [
             f"{self.arena_name}  {successes}/{attempts}",
             self.selector.status(self.global_step),
+            f"step:{self.global_step}  health:{self._agent_health:.2f}",
         ]
         arena = (
             _fit_square(self._latest_topdown_image, _RENDER_SIZE_PX)
