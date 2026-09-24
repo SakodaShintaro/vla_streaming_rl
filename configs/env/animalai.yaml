@@ -59,7 +59,7 @@ env_factory:
   #             binary rebuilt from animal-ai-unity with the hybrid action spec
   #             (branch "feat/continuous_actions"); +/-1 there matches the discrete
   #             branches exactly, so it is a strict superset of false.
-  continuous_action: false
+  continuous_action: true
   # - topdown_camera: have the binary render a second camera looking straight
   #   down at the whole arena. It never reaches the policy (it is not part of
   #   observation_space); `render` draws it in the pane the schematic would have
