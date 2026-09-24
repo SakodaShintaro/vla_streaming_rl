@@ -16,5 +16,5 @@ cot_tokens_num: 4
 disable_state_predictor: true
 text_action: true
 select_margin: 0.05
-bc_loss_weight: 0.0
+bc_loss_weight: 1.0
 seq_len: 65

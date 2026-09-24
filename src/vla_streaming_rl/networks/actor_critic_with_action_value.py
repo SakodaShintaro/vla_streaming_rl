@@ -3,7 +3,6 @@ from collections.abc import Callable
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
@@ -499,7 +498,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             detach_actor=self.detach_actor,
         )
         head_action, _ = self.policy_head.get_action(curr_state)
-        bc_loss = F.mse_loss(head_action, data.vlm_actions[:, -self.horizon :])
+        bc_gap = (head_action - data.vlm_actions[:, -self.horizon :]).pow(2).mean(dim=-1)
+        bc_holds = data.vlm_holds[:, -self.horizon :, 0]
+        bc_loss = (bc_gap * bc_holds).sum() / bc_holds.sum().clamp(min=1.0)
         with torch.no_grad():
             next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
         seq_loss, seq_info = self.prediction_head.compute_loss(

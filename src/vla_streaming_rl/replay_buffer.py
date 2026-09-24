@@ -23,6 +23,7 @@ class ReplayBufferData:
     rnn_state: torch.Tensor  # (B, T, space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
     vlm_actions: torch.Tensor  # (B, T, action_shape)
+    vlm_holds: torch.Tensor  # (B, T, 1)
     system_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     turn_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     reply_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
@@ -79,6 +80,7 @@ class ReplayBuffer:
         self.rnn_states = init_tensor((size, *rnn_state_shape))
         self.actions = init_tensor((size, *action_shape))
         self.vlm_actions = init_tensor((size, *action_shape))
+        self.vlm_holds = init_tensor((size, 1))
         self.velocity_x = init_tensor((size, 1))
         self.velocity_y = init_tensor((size, 1))
         self.velocity_z = init_tensor((size, 1))
@@ -140,6 +142,7 @@ class ReplayBuffer:
             self.rnn_states[:curr_size].to(self.output_device, non_blocking=True),
             self.actions[:curr_size].to(self.output_device, non_blocking=True),
             self.vlm_actions[:curr_size].to(self.output_device, non_blocking=True),
+            self.vlm_holds[:curr_size].to(self.output_device, non_blocking=True),
             self.system_token_ids[:curr_size].to(self.output_device, non_blocking=True),
             self.turn_token_ids[:curr_size].to(self.output_device, non_blocking=True),
             self.reply_token_ids[:curr_size].to(self.output_device, non_blocking=True),
@@ -164,6 +167,7 @@ class ReplayBuffer:
         rnn_state: torch.Tensor,
         action: torch.Tensor,
         vlm_action: torch.Tensor,
+        vlm_hold: float,
         system_token_ids: list[int],
         turn_token_ids: list[int],
         velocity_x: float,
@@ -185,6 +189,7 @@ class ReplayBuffer:
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
         self.vlm_actions[self.idx].copy_(vlm_action.reshape(self.vlm_actions[self.idx].shape))
+        self.vlm_holds[self.idx].fill_(vlm_hold)
         self.velocity_x[self.idx].fill_(velocity_x)
         self.velocity_y[self.idx].fill_(velocity_y)
         self.velocity_z[self.idx].fill_(velocity_z)
@@ -251,6 +256,7 @@ class ReplayBuffer:
             self._gather("rnn_states", self.rnn_states, indices),
             self._gather("actions", self.actions, indices),
             self._gather("vlm_actions", self.vlm_actions, indices),
+            self._gather("vlm_holds", self.vlm_holds, indices),
             self._gather("system_token_ids", self.system_token_ids, indices),
             self._gather("turn_token_ids", self.turn_token_ids, indices),
             self._gather("reply_token_ids", self.reply_token_ids, indices),

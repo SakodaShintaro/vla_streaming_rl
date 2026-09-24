@@ -150,6 +150,7 @@ class OffPolicyAgent(Agent):
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = np.zeros(self.action_dim, dtype=np.float32)
+        self.prev_vlm_holding = False
         self._episode_reset = False
         # the first observation of a run starts an episode
         self._previous_done = True
@@ -246,6 +247,9 @@ class OffPolicyAgent(Agent):
         if episode_done:
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
+        if self.text_action and self.prev_vlm_holding:
+            gap = self._to_net_action(self.prev_action) - self._to_net_action(self.prev_vlm_action)
+            metrics["text/similarity"] = 1.0 - float(np.mean(gap**2)) / 4.0
         if not self.normalizing_by_return:
             self.reward_processor.update(shaped_reward)
         metrics["processed_reward"] = self.reward_processor.normalize(
@@ -276,6 +280,7 @@ class OffPolicyAgent(Agent):
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
             torch.from_numpy(self._to_net_action(self.prev_vlm_action)).to(self.device),
+            1.0 if self.prev_vlm_holding else 0.0,
             self.network.tokenize(prompt),
             self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
@@ -301,6 +306,7 @@ class OffPolicyAgent(Agent):
         holding = cot_age < self.hold_steps
         vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = vlm_action
+        self.prev_vlm_holding = holding
         if self.text_action:
             metrics["text/parse_failed"] = self.text_parse_failed
 
