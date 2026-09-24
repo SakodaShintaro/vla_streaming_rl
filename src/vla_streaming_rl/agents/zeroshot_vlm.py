@@ -73,7 +73,6 @@ class ZeroShotVLMAgent(Agent):
         self.held_status = ""
         self.held_metrics = {}
         self.steps_until_next = 0
-        self.step_in_episode = 0
 
     # ------------------------------------------------------------------
     # Agent interface
@@ -104,7 +103,6 @@ class ZeroShotVLMAgent(Agent):
             else np.zeros(self.action_dim, dtype=np.float32)
         )
         self.steps_until_next -= 1
-        self.step_in_episode += 1
 
         panels = {
             "conversation": render_conversation_panel(
@@ -193,7 +191,6 @@ class ZeroShotVLMAgent(Agent):
             # Zero means "generate now", so the first step of an episode decides
             # on that episode's own first frame.
             self.steps_until_next = 0
-            self.step_in_episode = 0
         return {"reflection/rewritten": float(rewritten)}
 
     def optimizer_state_dict(self) -> dict:

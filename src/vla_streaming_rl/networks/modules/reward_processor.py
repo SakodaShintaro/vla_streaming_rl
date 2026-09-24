@@ -13,9 +13,3 @@ class RewardProcessor(nn.Module):
         # x: (B, T, 1) -> embedded: (B, T, 1, embed_dim)
         embedded = x.unsqueeze(-1).expand(*x.shape, self.embed_dim)
         return embedded
-
-    def decode(self, embedded: torch.Tensor) -> torch.Tensor:
-        # Simply take the average
-        # embedded: (B, embed_dim) -> decoded: (B,)
-        decoded = embedded.mean(dim=-1)
-        return decoded

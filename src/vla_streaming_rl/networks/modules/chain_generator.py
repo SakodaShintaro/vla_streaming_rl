@@ -74,11 +74,16 @@ class ChainGenerator:
         self.eos_token_id = self.processor.tokenizer.eos_token_id
         self.max_len = max_len
         self.temperature = temperature
-        self.top_k = self.model.generation_config.top_k
-        self.top_p = self.model.generation_config.top_p
+        text_config = self.model.config.text_config
+        generation_config = self.model.generation_config
+        self.top_k = (
+            generation_config.top_k
+            if generation_config.top_k is not None
+            else text_config.vocab_size
+        )
+        self.top_p = generation_config.top_p if generation_config.top_p is not None else 1.0
         self.enable_thinking = enable_thinking
         self.device = device
-        text_config = self.model.config.text_config
         self.hidden_size = text_config.hidden_size
         # The embedding plus every layer's output, matching `CoTStream`.
         self.layers_num = text_config.num_hidden_layers + 1

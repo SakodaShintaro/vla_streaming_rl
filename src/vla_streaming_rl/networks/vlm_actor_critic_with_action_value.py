@@ -99,7 +99,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         use_lora: bool,
         vlm_model_id: str,
         vlm_load_in_4bit: bool,
-        max_prompt_tokens: int,
         pad_token_id: int,
         num_state_queries: int,
         state_out_dim: int,
@@ -163,13 +162,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         vlm_cfg = self.vlm_model.config.text_config
         vlm_hidden_size = vlm_cfg.hidden_size
         num_layers = vlm_cfg.num_hidden_layers
-        self.num_layers = num_layers
-        self.vlm_num_kv_heads = vlm_cfg.num_key_value_heads
-        self.vlm_head_dim = vlm_cfg.head_dim
         # Input-independent learnable logits over all (embedding + per-layer) hidden
         # states; softmax-weighted sum forms the representation used downstream.
         self.layer_logits = nn.Parameter(torch.zeros(num_layers + 1, device=device))
-        self.max_prompt_tokens = max_prompt_tokens
         self.pad_token_id = pad_token_id
 
         self.num_state_queries = num_state_queries
@@ -179,7 +174,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # state_dim is determined purely by config.
         state_dim = num_state_queries * state_out_dim
 
-        self.policy_type = policy_type
         self.policy_head = build_policy_head(
             policy_type=policy_type,
             state_dim=state_dim,

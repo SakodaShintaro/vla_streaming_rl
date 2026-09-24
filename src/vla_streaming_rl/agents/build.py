@@ -52,7 +52,6 @@ def build_agent(
         from vla_streaming_rl.agents.streaming import StreamingAgent
 
         return StreamingAgent(
-            observation_space=env.observation_space,
             action_space=env.action_space,
             network=network,
             normalizing_by_return=args.normalizing_by_return,
@@ -78,7 +77,6 @@ def build_agent(
 
     parse_action_text = env.unwrapped.parse_action_text if args.text_action else None
     return OffPolicyAgent(
-        observation_space=env.observation_space,
         action_space=env.action_space,
         network=network,
         normalizing_by_return=args.normalizing_by_return,

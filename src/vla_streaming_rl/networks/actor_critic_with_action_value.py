@@ -124,13 +124,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         layer_scale_init: float,
     ) -> None:
         super().__init__()
-        self.sparsity = sparsity
         self.seq_len = seq_len
         self.critic_loss_weight = critic_loss_weight
 
         self.action_dim = action_space_shape[0]
         self.predictor_step_num = predictor_step_num
-        self.observation_space_shape = observation_space_shape
 
         self.image_processor = ImageProcessor(observation_space_shape, image_encoder_type)
         hidden_image_dim = image_encoder_output_dim
@@ -188,7 +186,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
 
         self.horizon = horizon
-        self.policy_type = policy_type
         self.policy_head = build_policy_head(
             policy_type=policy_type,
             state_dim=self.encoder.output_dim,

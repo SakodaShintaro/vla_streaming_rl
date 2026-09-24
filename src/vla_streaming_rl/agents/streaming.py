@@ -33,7 +33,6 @@ class StreamingAgent(Agent):
     def __init__(
         self,
         *,
-        observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: nn.Module,
         normalizing_by_return: bool,
@@ -59,8 +58,6 @@ class StreamingAgent(Agent):
             prompt_builder=prompt_builder,
         )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        self.observation_space = observation_space
 
         # action properties
         self.action_space = action_space

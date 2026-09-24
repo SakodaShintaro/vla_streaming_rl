@@ -178,7 +178,6 @@ def build_network(
             use_lora=args.use_lora,
             vlm_model_id=args.vlm_model_id,
             vlm_load_in_4bit=args.vlm_load_in_4bit,
-            max_prompt_tokens=args.max_prompt_tokens,
             pad_token_id=args.pad_token_id,
             num_state_queries=args.num_state_queries,
             state_out_dim=args.state_out_dim,

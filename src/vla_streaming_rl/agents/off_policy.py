@@ -49,7 +49,6 @@ class OffPolicyAgent(Agent):
     def __init__(
         self,
         *,
-        observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Box,
         network: nn.Module,
         normalizing_by_return: bool,
@@ -98,8 +97,6 @@ class OffPolicyAgent(Agent):
         self.selection_rows = []
         self.decisions_num = 0
         self.vlm_chosen_num = 0
-
-        self.observation_space = observation_space
 
         # action properties
         self.action_space = action_space
@@ -151,7 +148,6 @@ class OffPolicyAgent(Agent):
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_holding = False
-        self._episode_reset = False
         # the first observation of a run starts an episode
         self._previous_done = True
         # Shared representation fed to policy/value/prediction heads on the
@@ -249,8 +245,6 @@ class OffPolicyAgent(Agent):
             self.chunk_step = 0
             self.decisions_num = 0
             self.vlm_chosen_num = 0
-        if episode_done:
-            self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if self.text_action and self.prev_vlm_holding:
             gap = self._to_net_action(self.prev_action) - self._to_net_action(self.prev_vlm_action)

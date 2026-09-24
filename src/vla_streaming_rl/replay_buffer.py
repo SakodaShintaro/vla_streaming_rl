@@ -122,42 +122,8 @@ class ReplayBuffer:
             device=self.storage_device,
         )
 
-    def is_full(self) -> bool:
-        return self.full
-
     def num_stored(self) -> int:
         return self.size if self.full else self.idx
-
-    def reset(self) -> None:
-        self.idx = 0
-        self.full = False
-
-    def get_all_data(self) -> ReplayBufferData:
-        """Get all data in the buffer (for on-policy training)"""
-        curr_size = self.size if self.full else self.idx
-        return ReplayBufferData(
-            self.observations[:curr_size].to(self.output_device, non_blocking=True),
-            self.rewards[:curr_size].to(self.output_device, non_blocking=True),
-            self.dones[:curr_size].to(self.output_device, non_blocking=True),
-            self.rnn_states[:curr_size].to(self.output_device, non_blocking=True),
-            self.actions[:curr_size].to(self.output_device, non_blocking=True),
-            self.vlm_actions[:curr_size].to(self.output_device, non_blocking=True),
-            self.vlm_holds[:curr_size].to(self.output_device, non_blocking=True),
-            self.system_token_ids[:curr_size].to(self.output_device, non_blocking=True),
-            self.turn_token_ids[:curr_size].to(self.output_device, non_blocking=True),
-            self.reply_token_ids[:curr_size].to(self.output_device, non_blocking=True),
-            self.velocity_x[:curr_size].to(self.output_device, non_blocking=True),
-            self.velocity_y[:curr_size].to(self.output_device, non_blocking=True),
-            self.velocity_z[:curr_size].to(self.output_device, non_blocking=True),
-            self.episode_return[:curr_size].to(self.output_device, non_blocking=True),
-            self.pass_mark[:curr_size].to(self.output_device, non_blocking=True),
-            self.remaining_return[:curr_size].to(self.output_device, non_blocking=True),
-            self.global_step[:curr_size].to(self.output_device, non_blocking=True),
-            self.episode_step[:curr_size].to(self.output_device, non_blocking=True),
-            self.health[:curr_size].to(self.output_device, non_blocking=True),
-            self.cot_activations[:curr_size].to(self.output_device, non_blocking=True),
-            self.cot_age[:curr_size].to(self.output_device, non_blocking=True),
-        )
 
     def add(
         self,

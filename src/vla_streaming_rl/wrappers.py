@@ -2,7 +2,6 @@
 import re
 from pathlib import Path
 
-import cv2
 import gymnasium as gym
 import hydra
 import numpy as np
@@ -517,21 +516,6 @@ class CarRacingActionWrapper(gym.ActionWrapper):
         gas = np.maximum(gas_or_brake, 0.0)
         brake = np.maximum(-gas_or_brake, 0.0)
         return np.array([steer, gas, brake], dtype=np.float32)
-
-
-class ResizeObs(gym.ObservationWrapper):
-    def __init__(self, env: gym.Env, shape: tuple[int, ...]) -> None:
-        super().__init__(env)
-        self.shape = shape
-        h, w = shape[1:]  # shape is (C, H, W), so extract H, W
-        self.observation_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(h, w, 3), dtype=np.float32
-        )
-
-    def observation(self, obs: np.ndarray) -> np.ndarray:
-        # obs is (H, W, C), resize and return (H, W, C)
-        h, w = self.shape[1:]  # target height and width
-        return cv2.resize(obs, (w, h), interpolation=cv2.INTER_AREA)
 
 
 class ZeroObsOnDoneWrapper(gym.ObservationWrapper):
