@@ -213,22 +213,25 @@ def training_levels(mode: str, variant: str, train_levels: list[str]) -> list[st
 
 
 def _training_arenas(variant: str, levels: list[str]) -> list[Arena]:
-    """The training set: the `variant` copy of every task at one of `levels`.
+    """The training set: the `variant` copy of every task of each of `levels`,
+    one block of arenas per entry, in the order the entries are given.
 
     `levels` narrowed below every level is for looking at some levels on their
     own -- what a run scores on levels 01 and 02 without waiting for a
-    curriculum to reach them. The curriculum modes ignore it: their stages are
-    the levels, and hiding levels from them would leave the stage numbers
-    meaning something else.
+    curriculum to reach them. A repeated entry repeats its block, so
+    `["01", "01"]` sweeps level 01 twice in the sequential mode and doubles
+    its draw weight in the random mode. The curriculum modes ignore it: their
+    stages are the levels, and hiding levels from them would leave the stage
+    numbers meaning something else.
     """
     assert len(levels) > 0, "levels must name at least one level"
-    assert len(set(levels)) == len(levels), f"levels repeats a level: {list(levels)}"
     available = _all_levels(variant)
     assert all(level in available for level in levels), (
         f"levels {list(levels)} names a level with no arena at variant {variant!r}; "
         f"available: {available}"
     )
-    return [arena for arena in _variant_arenas(variant) if arena.name.split("-")[0] in levels]
+    arenas = _variant_arenas(variant)
+    return [arena for level in levels for arena in arenas if arena.name.split("-")[0] == level]
 
 
 def _training_stages(variant: str) -> list[list[Arena]]:
@@ -346,7 +349,7 @@ class ArenaSelector:
         curriculum stage.
         """
         counts: dict[str, list[int]] = {}
-        for arena in self.arenas:
+        for arena in self._arena_by_name.values():
             group = counts.setdefault(arena.name.split("-")[0], [0, 0])
             attempts, successes = self._attempts[arena.name], self._successes[arena.name]
             group[0] += successes
@@ -585,11 +588,11 @@ class SequentialSelector(ArenaSelector):
         }
 
     def status(self, global_step: int) -> str:
-        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
+        cleared = sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
         return (
             f"{(self._next_index - 1) % len(self.arenas) + 1}/{len(self.arenas)}"
             f"  lap:{(self._next_index - 1) // len(self.arenas) + 1}"
-            f"  cleared:{cleared}/{len(self.arenas)}  step:{global_step}"
+            f"  cleared:{cleared}/{len(self._arena_by_name)}  step:{global_step}"
         )
 
     def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
@@ -617,15 +620,13 @@ class RandomSelector(ArenaSelector):
         return self.arenas[int(self._rng.integers(len(self.arenas)))]
 
     def info(self, global_step: int) -> dict:
-        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
-        return {"arena_total": len(self.arenas), "cleared_count": cleared}
+        cleared = sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
+        return {"arena_total": len(self._arena_by_name), "cleared_count": cleared}
 
     def status(self, global_step: int) -> str:
-        cleared = sum(self.is_cleared(arena) for arena in self.arenas)
+        cleared = sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
         untried = sum(attempts == 0 for attempts in self._attempts.values())
-        return (
-            f"random  cleared:{cleared}/{len(self.arenas)}  untried:{untried}  step:{global_step}"
-        )
+        return f"random  cleared:{cleared}/{len(self._arena_by_name)}  untried:{untried}  step:{global_step}"
 
 
 def build_selector(
