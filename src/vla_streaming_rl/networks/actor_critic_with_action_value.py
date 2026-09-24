@@ -100,6 +100,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         som_w: float,
         target_entropy_scale: float,
         init_temperature: float,
+        temperature_lr: float,
         predictor_hidden_dim: int,
         predictor_block_num: int,
         detach_actor: bool,
@@ -206,6 +207,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             som_w=som_w,
             target_entropy_scale=target_entropy_scale,
             init_temperature=init_temperature,
+            temperature_lr=temperature_lr,
         )
 
         self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)

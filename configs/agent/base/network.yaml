@@ -32,10 +32,14 @@ dacer_loss_weight: 0.05
 denoising_steps: 1
 som_alpha: 1.0
 som_w: 25.0
-# policy_type=tanh: the entropy per action dimension the learned temperature
-# holds the squashed Gaussian to, and where that temperature starts.
+# policy_type=tanh: the entropy per action dimension the temperature holds the
+# squashed Gaussian to, where that temperature starts, and how fast it moves.
+# It starts low because the critic starts at zero: a temperature of 1 there
+# leaves the actor maximizing entropy alone, and the temperature rises by
+# itself once the policy is more certain than the target asks.
 target_entropy_scale: 0.5
-init_temperature: 1.0
+init_temperature: 0.1
+temperature_lr: 3e-3
 
 # Chain-of-thought stream. A frozen VLM keeps
 # one chain of thought running across environment steps: cot_tokens_num tokens

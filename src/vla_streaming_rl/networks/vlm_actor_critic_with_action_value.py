@@ -89,6 +89,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         som_w: float,
         target_entropy_scale: float,
         init_temperature: float,
+        temperature_lr: float,
         reasoning_loss_weight: float,
         reasoning_max_tokens: int,
         reasoning_temperature: float,
@@ -196,6 +197,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             som_w=som_w,
             target_entropy_scale=target_entropy_scale,
             init_temperature=init_temperature,
+            temperature_lr=temperature_lr,
         )
 
         # Critic: Q(state, action)

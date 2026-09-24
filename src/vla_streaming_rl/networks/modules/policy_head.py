@@ -634,12 +634,21 @@ class TanhPolicy(nn.Module):
     The head every residual policy is built on (EXPO, arXiv:2506.16560): one
     distribution the entropy of which is a number the loss can hold to a target,
     rather than a sampler whose spread is whatever the denoiser happens to have.
-    The temperature that balances that entropy against the critic is learned
-    here, as its own parameter, so a run tunes it without a second optimizer.
+
+    The temperature that balances that entropy against the critic is a dual
+    variable, stepped here rather than left to the actor's optimizer: it is one
+    scalar whose gradient is known in closed form, and at the actor's own
+    learning rate it would take hundreds of thousands of steps to cross the
+    range it has to cross, which leaves the loss maximizing entropy for as long
+    as the critic is still near zero.
     """
 
     LOG_STD_MIN = -20.0
     LOG_STD_MAX = 2.0
+    # Wide enough for any critic scale a run reaches, tight enough that a
+    # transient cannot send the entropy term out of reach of the advantage.
+    LOG_TEMPERATURE_MIN = -10.0
+    LOG_TEMPERATURE_MAX = 2.0
 
     def __init__(
         self,
@@ -651,9 +660,11 @@ class TanhPolicy(nn.Module):
         sparsity: float,
         target_entropy_scale: float,
         init_temperature: float,
+        temperature_lr: float,
     ) -> None:
         super().__init__()
         assert init_temperature > 0.0, init_temperature
+        assert temperature_lr > 0.0, temperature_lr
         self.horizon = horizon
         self.action_dim = action_dim
         total_action_dim = action_dim * horizon
@@ -670,7 +681,10 @@ class TanhPolicy(nn.Module):
         nn.init.zeros_(self.fc_log_std.bias)
         # Entropy of a chunk this wide that the temperature holds the policy to.
         self.target_entropy = -target_entropy_scale * total_action_dim
-        self.log_temperature = nn.Parameter(torch.tensor(math.log(init_temperature)))
+        self.temperature_lr = temperature_lr
+        # A buffer, not a parameter: it is stepped by :meth:`compute_actor_loss`
+        # and must stay out of the actor's optimizer, while still being saved.
+        self.register_buffer("log_temperature", torch.tensor(math.log(init_temperature)))
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
@@ -715,15 +729,23 @@ class TanhPolicy(nn.Module):
         value_head,
         detach_actor: bool,
     ) -> tuple[torch.Tensor, dict]:
-        """Soft actor-critic's actor and temperature losses in one number.
+        """Soft actor-critic's actor loss, and the temperature's own step.
 
-        The temperature enters each with the other side detached, so the two
-        terms share a backward without either chasing the other.
+        The temperature is stepped first, in place: its loss has no parameters
+        in common with the actor's, so nothing is lost by taking it outside the
+        backward, and the step is gradient descent on ``-log_temperature *
+        (log_prob + target_entropy)`` -- down while the policy is more random
+        than the target asks, up while it is less.
         """
         del action_chunk
         if detach_actor:
             state = state.detach()
         action, log_prob, _ = self._sample(state)
+
+        with torch.no_grad():
+            self.log_temperature += self.temperature_lr * (log_prob.mean() + self.target_entropy)
+            self.log_temperature.clamp_(self.LOG_TEMPERATURE_MIN, self.LOG_TEMPERATURE_MAX)
+        temperature = self.log_temperature.exp()
 
         for param in value_head.parameters():
             param.requires_grad_(False)
@@ -731,10 +753,7 @@ class TanhPolicy(nn.Module):
         for param in value_head.parameters():
             param.requires_grad_(True)
 
-        temperature = self.log_temperature.exp()
-        actor_loss = (temperature.detach() * log_prob - advantage).mean()
-        temperature_loss = -(temperature * (log_prob.detach() + self.target_entropy)).mean()
-
+        actor_loss = (temperature * log_prob - advantage).mean()
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": 0.0,
@@ -742,7 +761,7 @@ class TanhPolicy(nn.Module):
             "entropy": -log_prob.mean().item(),
             "temperature": temperature.item(),
         }
-        return actor_loss + temperature_loss, info_dict
+        return actor_loss, info_dict
 
 
 def build_policy_head(
@@ -761,6 +780,7 @@ def build_policy_head(
     som_w: float,
     target_entropy_scale: float,
     init_temperature: float,
+    temperature_lr: float,
 ) -> nn.Module:
     """The policy head named by ``policy_type``, for a state of width ``state_dim``.
 
@@ -813,6 +833,7 @@ def build_policy_head(
             sparsity=sparsity,
             target_entropy_scale=target_entropy_scale,
             init_temperature=init_temperature,
+            temperature_lr=temperature_lr,
         )
     if policy_type == "imle":
         return IMLEPolicy(
