@@ -45,6 +45,8 @@ TEXT_ACTION_PROTOCOL = (
 # the whole reasoning as the action.
 ACTION_RE = re.compile(r"<action>(?!.*<action>)(.*?)</action>", re.DOTALL)
 
+SUBTASK_RE = re.compile(r"<subtask>(?!.*<subtask>)(.*?)</subtask>", re.DOTALL)
+
 
 def assistant_turn(text: str) -> dict:
     """A reply as the message the conversation holds it as."""

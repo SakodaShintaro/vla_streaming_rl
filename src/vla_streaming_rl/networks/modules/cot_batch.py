@@ -2,9 +2,9 @@
 import torch
 import torch.nn.functional as F
 
-from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import SUBTASK_RE, PromptBuilder, assistant_turn
 
-from .chain_generator import ChainGenerator
+from .chain_generator import Chain, ChainGenerator
 
 
 class CoTBatch:
@@ -14,8 +14,8 @@ class CoTBatch:
     The chain is written by :class:`ChainGenerator`, the generator the zero-shot
     controller's local backend writes its replies with, so a chain is the
     baseline's reasoning measured under RL by construction. What is added here
-    is the cadence, the pooling of the chain's activations to one step's read,
-    and the reply going back into the builder's conversation.
+    is the cadence, the pooling of the chain's ``<subtask>`` activations to one
+    step's read, and the reply going back into the builder's conversation.
     """
 
     def __init__(
@@ -108,22 +108,45 @@ class CoTBatch:
     def _write_chain(self) -> None:
         self._last_conversation = self.prompt_builder.conversation()
         chain = self.generator.generate(self._last_conversation)
-        self._activations = self._read_activations(chain.positions)
+        subtask_positions = self._subtask_positions(chain)
+        if subtask_positions.shape[0] == 0:
+            self._activations = torch.zeros_like(self._activations)
+        else:
+            self._activations = self._read_activations(subtask_positions)
         self._text = chain.text
         self._output_tokens = len(chain.tokens)
         self._input_tokens = chain.prompt_tokens
         self._msec = chain.msec
         self.prompt_builder.add_reply(chain.text)
 
-    def _read_activations(self, positions: torch.Tensor) -> torch.Tensor:
-        """The whole chain, every depth kept, pooled to one step's read:
-        (tokens_per_step, layers_num, hidden_size).
+    def _subtask_positions(self, chain: Chain) -> torch.Tensor:
+        """The rows of ``chain.positions`` whose tokens fall inside the reply's
+        ``<subtask>`` section, empty when the reply wrote none: the subtask is
+        the one part of a reply addressed to the policy below, so it is all the
+        policy reads."""
+        tokenizer = self.generator.processor.tokenizer
+        text = tokenizer.decode(chain.tokens, skip_special_tokens=True)
+        match = SUBTASK_RE.search(text)
+        if match is None:
+            return chain.positions[:0]
+        rows = []
+        start = 0
+        for i in range(len(chain.tokens)):
+            end = len(tokenizer.decode(chain.tokens[: i + 1], skip_special_tokens=True))
+            if start < match.end(1) and end > match.start(1):
+                rows.append(i)
+            start = end
+        if len(rows) == 0:
+            return chain.positions[:0]
+        return chain.positions[rows]
 
-        ``positions`` is (chain_len, layers_num, hidden_size): each position's
-        activation is the state that chose its token. A chain stops where the
-        model stops it, so the positions are pooled along the chain rather than
-        sliced to its tail: the whole chain reaches the policy, and a chain that
-        ended early needs no padding to reach the fixed read.
+    def _read_activations(self, positions: torch.Tensor) -> torch.Tensor:
+        """``positions`` (a span of the chain, (span_len, layers_num,
+        hidden_size), each position's activation the state that chose its
+        token), every depth kept, pooled to one step's read:
+        (tokens_per_step, layers_num, hidden_size). Pooled along the span
+        rather than sliced to a fixed length, so a span of any length reaches
+        the fixed read without padding.
         """
         pooled = F.adaptive_avg_pool1d(
             positions.to(torch.float32).permute(1, 2, 0), self.tokens_per_step
