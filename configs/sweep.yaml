@@ -4,10 +4,8 @@ metric:
   name: total_average_score
   goal: maximize
 parameters:
-  som_alpha:
-    values: [0.5, 1.0, 2.0]
-  som_w:
-    values: [10.0, 25.0, 50.0]
+  target_entropy_scale:
+    values: [0.25, 0.5, 1.0]
 command:
   - ${env}
   - uv
@@ -21,6 +19,6 @@ command:
   - actor_lr=1e-5
   - critic_lr=1e-5
   - env=car_racing
-  - policy_type=som
+  - policy_type=tanh
   - step_limit=50_000
   - ${args_no_hyphens}

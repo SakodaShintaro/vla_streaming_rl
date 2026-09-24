@@ -360,173 +360,6 @@ class CFGDiffusionPolicy(nn.Module):
         return actor_loss, info_dict
 
 
-class MeanFlowPolicy(nn.Module):
-    """One-step policy network u_θ(a_t, r, t, s) trained with the SOM objective.
-
-    Inference uses a single network evaluation:
-        a = ε - u_θ(ε, r=0, t=1, s),  ε ~ N(0, I)
-    matching the SOM/MeanFlow convention (t=1 noise, t=0 action).
-    """
-
-    def __init__(
-        self,
-        state_dim: int,
-        action_dim: int,
-        hidden_dim: int,
-        block_num: int,
-        horizon: int,
-        sparsity: float,
-        som_alpha: float,
-        som_w: float,
-    ) -> None:
-        super().__init__()
-        time_embedding_size = 256
-        self.horizon = horizon
-        self.action_dim = action_dim
-        self.som_alpha = som_alpha
-        self.som_w = som_w
-        total_action_dim = action_dim * horizon
-        self.fc_in = nn.Linear(state_dim + total_action_dim + 2 * time_embedding_size, hidden_dim)
-        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
-        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.fc_out = nn.Linear(hidden_dim, total_action_dim)
-        nn.init.zeros_(self.fc_out.weight)
-        nn.init.zeros_(self.fc_out.bias)
-        self.t_embedder = TimestepEmbedder(time_embedding_size)
-        # Gap (t - r) embedding; at r=t it is r_embedder(0), recovering FM.
-        self.r_embedder = TimestepEmbedder(time_embedding_size)
-        self.sparse_mask = (
-            None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
-        )
-
-    def forward(
-        self,
-        a: torch.Tensor,
-        t: torch.Tensor,
-        r: torch.Tensor,
-        state: torch.Tensor,
-    ) -> HeadOutput:
-        """Args:
-        a: noisy action (B, horizon*action_dim).
-        t: upper time (B,) — closer to noise in SOM convention (r ≤ t).
-        r: lower time (B,).
-        state: (B, state_dim).
-        """
-        t_emb = self.t_embedder(t)
-        r_emb = self.r_embedder(t - r)
-        x = torch.cat([a, t_emb, r_emb, state], 1)
-        x = self.fc_in(x)
-        x = self.fc_mid(x)
-        x = self.norm(x)
-        activation = x
-        x = self.fc_out(x)
-        return HeadOutput(output=x, activation=activation)
-
-    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        bs = x.size(0)
-        device = x.device
-        eps = torch.randn(bs, self.horizon, self.action_dim, device=device)
-        eps_flat = eps.view(bs, -1)
-        t = torch.ones(bs, device=device)
-        r = torch.zeros(bs, device=device)
-        head_out = self.forward(eps_flat, t, r, x)
-        u = head_out.output
-        action_flat = eps_flat - u
-        action = torch.tanh(action_flat).view(bs, self.horizon, self.action_dim)
-        return action, head_out.activation
-
-    def compute_actor_loss(
-        self,
-        state: torch.Tensor,
-        action_chunk: torch.Tensor,
-        *,
-        value_head: nn.Module,
-        detach_actor: bool,
-    ) -> tuple[torch.Tensor, dict]:
-        """Score-based One-step MeanFlow Policy Optimization (SOM, arXiv:2605.23365).
-
-        The target velocity for MeanFlow is derived from the Q-function via an
-        iDEM-style Monte Carlo score estimator over a Boltzmann policy
-        p0(a|s) ∝ exp(α Q(s,a)) under the VP-SDE forward kernel
-        a_t = μ_t a_0 + σ_t ε. The MeanFlow identity is then enforced via a JVP.
-        Convention here matches the SOM paper: t=1 is noise, t=0 is action, r ≤ t.
-        """
-        # som_alpha (Boltzmann inverse-temperature) and som_w (PF-ODE score
-        # scale) are the two "greediness" knobs, exposed via config for sweeps.
-        # Remaining defaults follow the SOM paper (Appendix C / Table 3).
-        som_alpha = self.som_alpha
-        som_w = self.som_w
-        som_mc_K = 100
-        som_beta_min = 0.1
-        som_beta_max = 20.0
-
-        if detach_actor:
-            state = state.detach()
-        B, horizon, action_dim = action_chunk.shape
-        D = horizon * action_dim
-        device = state.device
-        a0 = action_chunk.view(B, D)
-
-        # Sample time pair: clamp away from boundaries for VP-SDE numerical safety.
-        t_eps = 1e-3
-        t = torch.rand(B, device=device) * (1 - 2 * t_eps) + t_eps
-        r = torch.rand(B, device=device) * t
-        # 25% FM mode (r = t) so the network also learns the boundary case.
-        fm_mask = torch.rand(B, device=device) < 0.25
-        r = torch.where(fm_mask, t, r)
-
-        # VP-SDE coefficients with linear β schedule β(t) = β_min + t(β_max - β_min).
-        int_beta = som_beta_min * t + 0.5 * (som_beta_max - som_beta_min) * t * t
-        mu_t = torch.exp(-0.5 * int_beta)
-        sigma_t = torch.sqrt(1.0 - mu_t * mu_t + 1e-8)
-        beta_t = som_beta_min + t * (som_beta_max - som_beta_min)
-
-        # Forward noising kernel sample.
-        noise = torch.randn(B, D, device=device)
-        at = mu_t.unsqueeze(1) * a0 + sigma_t.unsqueeze(1) * noise
-
-        # === Q-derived score estimator (iDEM, Eq. 5) ===
-        at_grad = at.detach().clone().requires_grad_(True)
-        proposal_std = (sigma_t / mu_t).unsqueeze(0).unsqueeze(2)  # (1, B, 1)
-        delta = torch.randn(som_mc_K, B, D, device=device) * proposal_std
-        a0_proposal = at_grad.unsqueeze(0) / mu_t.unsqueeze(0).unsqueeze(2) + delta
-        state_exp = state.detach().unsqueeze(0).expand(som_mc_K, B, -1).reshape(-1, state.shape[1])
-        a0_chunk_mc = a0_proposal.reshape(som_mc_K * B, horizon, action_dim)
-        q_vals = value_head.scalar_value(state_exp, a0_chunk_mc).view(som_mc_K, B)
-        # GRPO-style batch-wise normalization for scale-invariant training.
-        q_norm = (q_vals - q_vals.mean()) / (q_vals.std() + 1e-6)
-        log_sum_exp = torch.logsumexp(som_alpha * q_norm, dim=0)
-        score = torch.autograd.grad(log_sum_exp.sum(), at_grad, create_graph=False)[0]
-
-        # === PF-ODE target velocity (Eq. 8): unit-normalized score scaled by w ===
-        score_norm = score / (score.norm(dim=1, keepdim=True) + 1e-6)
-        v_t = -0.5 * beta_t.unsqueeze(1) * (at + som_w * score_norm)
-        v_t = v_t.detach()
-
-        # === MeanFlow identity via JVP: du/dt along (at, t) with tangents (v_t, 1) ===
-        def f(at_in: torch.Tensor, t_in: torch.Tensor) -> torch.Tensor:
-            return self.forward(at_in, t_in, r, state).output
-
-        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-            u, du_dt = torch.func.jvp(f, (at.detach(), t), (v_t, torch.ones_like(t)))
-
-        gap = (t - r).unsqueeze(1)
-        u_target = v_t - gap * du_dt
-        # Adaptive per-sample weighting (MeanFlow paper) to stabilize (t-r)·du/dt.
-        delta_sq = (u - u_target.detach()).pow(2)
-        w_loss = 1.0 / (delta_sq.detach().mean(dim=1, keepdim=True) + 1e-3)
-        actor_loss = (w_loss * delta_sq).mean()
-
-        info_dict = {
-            "actor_loss": actor_loss.item(),
-            "dacer_loss": 0.0,
-            "advantage": q_vals.mean().item(),
-            "som_score_norm": score.norm(dim=1).mean().item(),
-            "som_du_dt": du_dt.detach().abs().mean().item(),
-        }
-        return actor_loss, info_dict
-
-
 class IMLEPolicy(nn.Module):
     """Single-step generator a = G(s, z), z ~ N(0, I), after cIMLE (IMLE-VLA).
 
@@ -776,8 +609,6 @@ def build_policy_head(
     denoising_time: float,
     denoising_steps: int,
     dacer_loss_weight: float,
-    som_alpha: float,
-    som_w: float,
     target_entropy_scale: float,
     init_temperature: float,
     temperature_lr: float,
@@ -811,17 +642,6 @@ def build_policy_head(
             horizon=horizon,
             denoising_steps=denoising_steps,
             condition_drop_prob=0.1,
-        )
-    if policy_type == "som":
-        return MeanFlowPolicy(
-            state_dim=state_dim,
-            action_dim=action_dim,
-            hidden_dim=hidden_dim,
-            block_num=block_num,
-            horizon=horizon,
-            sparsity=sparsity,
-            som_alpha=som_alpha,
-            som_w=som_w,
         )
     if policy_type == "tanh":
         return TanhPolicy(

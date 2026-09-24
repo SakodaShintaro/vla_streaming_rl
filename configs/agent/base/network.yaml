@@ -30,8 +30,6 @@ detach_predictor: false
 disable_state_predictor: false
 dacer_loss_weight: 0.05
 denoising_steps: 1
-som_alpha: 1.0
-som_w: 25.0
 # policy_type=tanh: the entropy per action dimension the temperature holds the
 # squashed Gaussian to, where that temperature starts, and how fast it moves.
 # It starts low because the critic starts at zero: a temperature of 1 there
