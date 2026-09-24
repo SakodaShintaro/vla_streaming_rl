@@ -216,8 +216,11 @@ ANIMALAI_FRAMING = (
     "spheres are bright yellow and the episode goes on after touching them; red "
     "spheres and red zones end the episode as a failure, never touch them. "
     "Walls are never the goal, whatever their color. "
-    "Turn until the target is at the center of the view, then move forward; "
-    "move to a new spot if a full turn shows nothing. "
+    "Turn until the target is at the center of the view, then move forward in "
+    "bursts short enough to keep it centered, turning to re-center it whenever "
+    "it drifts. A target that slips out of view is usually right beside or "
+    "behind you: turn back to that same target rather than switching to "
+    "another. Move to a new spot only if a full turn shows nothing. "
 )
 ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
 
