@@ -176,6 +176,14 @@ class PromptBuilder(ABC):
     def _rejection_text(self, answer: str) -> str:
         return f"({answer!r} is not an action -- nothing ran.)"
 
+    def reflect_on_failure(self, score: float, generate) -> bool:
+        """Rewrite the ended episode's task instruction off a reflection the
+        model writes, when the episode failed and the builder holds a per-task
+        instruction to rewrite. ``generate`` maps a conversation to the model's
+        reply text. The base builder holds none, so this is a no-op."""
+        del score, generate
+        return False
+
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         """The standing task: what the env asks, unchanged through an episode."""
@@ -224,6 +232,14 @@ ANIMALAI_FRAMING = (
 )
 ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
 
+ANIMALAI_REFLECTION_REQUEST = (
+    "The episode just ended in failure: return {score:+.3f} against pass mark "
+    '{pass_mark:+.3f}. You were following this task instruction: "{task}" '
+    "Rewrite that instruction for the next attempt at this task, keeping what "
+    "worked and changing what led to this failure. Reply with the new "
+    "instruction only, at most three sentences."
+)
+
 
 def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: float) -> str:
     """Animal-AI's live scalars: the numbers the frame cannot show.
@@ -263,6 +279,8 @@ class AnimalAIPromptBuilder(PromptBuilder):
     def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
         super().__init__(env, history_turns, steps_per_action)
         self.tasks = _load_arena_tasks(env)
+        self._task_key = ""
+        self._pass_mark = 0.0
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
@@ -294,18 +312,40 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs
+        self._task_key = info["arena_name"].rsplit("-", 1)[0]
         return (
             f"{ANIMALAI_FRAMING} "
             f"{self._action_format()} "
-            f"Task: {self.tasks[info['arena_name'].rsplit('-', 1)[0]]}. "
+            f"Task: {self.tasks[self._task_key]}. "
             f"{TEXT_ACTION_PROTOCOL}"
         )
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del info
+        self._pass_mark = float(obs["pass_mark"][0])
         self._forward_speed_sum += float(obs["velocity"][2])
         self._forward_speed_steps += 1
         return _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)
+
+    def reflect_on_failure(self, score: float, generate) -> bool:
+        """The Animal-AI rewrite: on a failed episode, ask the model, over the
+        episode's own conversation, to rewrite this task's instruction, and
+        keep the rewrite for every later episode of the task. A reply that is
+        empty or would bloat the standing prompt leaves the instruction as it
+        was."""
+        if self._task_key == "" or score >= self._pass_mark:
+            return False
+        request = ANIMALAI_REFLECTION_REQUEST.format(
+            score=score, pass_mark=self._pass_mark, task=self.tasks[self._task_key]
+        )
+        conversation = self.conversation() + [
+            {"role": "user", "content": [{"type": "text", "text": request}]}
+        ]
+        reply = re.sub(r"<think>.*?</think>", "", generate(conversation), flags=re.DOTALL).strip()
+        if reply == "" or len(reply) > 500:
+            return False
+        self.tasks[self._task_key] = reply
+        return True
 
 
 # --- CARLA -------------------------------------------------------------------
