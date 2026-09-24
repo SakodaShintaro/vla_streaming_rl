@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import ACTION_RE, PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn, read_action_reply
 from vla_streaming_rl.utils import render_conversation_panel
 
 
@@ -132,19 +132,13 @@ class ZeroShotVLMAgent(Agent):
 
         response_text = response.text
         self.held_exchange = conversation + [assistant_turn(response_text)]
-        answer_match = ACTION_RE.search(response_text)
-        answer_text = answer_match.group(1).strip() if answer_match is not None else ""
-        action_array, parse_ok = self.parse_action_text(answer_text)
-        # A response that did not follow the format stands the agent still for
-        # the steps it would have driven; nothing is recovered from the rest of
-        # the text.
-        self.held_action = (
-            self._to_env_action(action_array[0].astype(np.float32))
-            if parse_ok
-            else np.zeros(self.action_dim, dtype=np.float32)
+        answer_text, self.held_action, self.hold_steps, parse_ok = read_action_reply(
+            response_text,
+            self.parse_action_text,
+            self.action_space.low,
+            self.action_space.high,
+            self.steps_per_action,
         )
-        # One row per step the reply asked for, cut at the next generation.
-        self.hold_steps = min(len(action_array), self.steps_per_action)
 
         # The reply is handed back as written, <think> section and all, so the
         # conversation is the whole record of what the model said -- what the
@@ -199,10 +193,3 @@ class ZeroShotVLMAgent(Agent):
 
     def load_optimizer_state_dict(self, state: dict) -> None:
         del state
-
-    def _preprocess(self, obs: dict[str, Any], info: dict) -> Image.Image:
-        del info
-        return preprocess_image(obs["image"])
-
-    def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
-        return np.clip(net_action, self.action_space.low, self.action_space.high)

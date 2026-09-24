@@ -151,7 +151,8 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = ZeroObsOnDoneWrapper(env)
         env = ZeroScalarObsWrapper(env)
         env = StepCountInfoWrapper(env)
-        env = StepCountObsWrapper(env)
+        env = InfoToObsWrapper(env, key="global_step", shape=(1,), pop=False)
+        env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
@@ -165,7 +166,8 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = hydra.utils.instantiate(env_factory, eval_output_dir=eval_output_dir)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = ZeroScalarObsWrapper(env)
-        env = StepCountObsWrapper(env)
+        env = InfoToObsWrapper(env, key="global_step", shape=(1,), pop=False)
+        env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 220
         return env
@@ -175,10 +177,11 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)
-        env = VelocityObsWrapper(env)
-        env = PassMarkObsWrapper(env)
-        env = HealthObsWrapper(env)
-        env = StepCountObsWrapper(env)
+        env = InfoToObsWrapper(env, key="velocity", shape=(3,), pop=True)
+        env = InfoToObsWrapper(env, key="pass_mark", shape=(1,), pop=False)
+        env = InfoToObsWrapper(env, key="health", shape=(1,), pop=False)
+        env = InfoToObsWrapper(env, key="global_step", shape=(1,), pop=False)
+        env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
         env = EpisodeReturnObsWrapper(env)
         env = RemainingReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
@@ -281,75 +284,45 @@ class DictObsWrapper(gym.ObservationWrapper):
         return {"image": obs}
 
 
-class VelocityObsWrapper(gym.Wrapper):
-    def __init__(self, env: gym.Env) -> None:
+def _with_box_obs(env: gym.Env, boxes: dict[str, tuple[int, ...]]) -> gym.spaces.Dict:
+    """The env's Dict observation space with one unbounded float32 Box per
+    entry of ``boxes`` added."""
+    spaces = dict(env.observation_space.spaces)
+    for key, shape in boxes.items():
+        spaces[key] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=shape, dtype=np.float32)
+    return gym.spaces.Dict(spaces)
+
+
+class InfoToObsWrapper(gym.Wrapper):
+    """Publish one ``info`` entry as a float32 observation of the given shape,
+    on reset and on every step. ``pop`` moves the entry out of ``info``
+    instead of copying it."""
+
+    def __init__(self, env: gym.Env, key: str, shape: tuple[int, ...], pop: bool) -> None:
         super().__init__(env)
-        spaces = dict(env.observation_space.spaces)
-        spaces["velocity"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
-        self.observation_space = gym.spaces.Dict(spaces)
+        self.key = key
+        self.shape = shape
+        self.pop = pop
+        self.observation_space = _with_box_obs(env, {key: shape})
+
+    def _attach(self, obs: dict, info: dict) -> dict:
+        value = info.pop(self.key) if self.pop else info[self.key]
+        obs[self.key] = np.asarray(value, dtype=np.float32).reshape(self.shape)
+        return obs
 
     def reset(self, **kwargs) -> tuple:
         obs, info = self.env.reset(**kwargs)
-        obs["velocity"] = info.pop("velocity")
-        return obs, info
+        return self._attach(obs, info), info
 
     def step(self, action: np.ndarray) -> tuple:
         obs, reward, terminated, truncated, info = self.env.step(action)
-        obs["velocity"] = info.pop("velocity")
-        return obs, reward, terminated, truncated, info
-
-
-class HealthObsWrapper(gym.Wrapper):
-    """Expose Animal-AI's agent health as a scalar observation.
-
-    Health is what actually bounds an AAI episode: it decays at a rate set by
-    the arena's `t`, refills whenever a reward is collected, and the episode
-    ends when it reaches 0. It is passed through raw, as the env reports it.
-    """
-
-    def __init__(self, env: gym.Env) -> None:
-        super().__init__(env)
-        spaces = dict(env.observation_space.spaces)
-        spaces["health"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
-        self.observation_space = gym.spaces.Dict(spaces)
-
-    def reset(self, **kwargs) -> tuple:
-        obs, info = self.env.reset(**kwargs)
-        obs["health"] = np.array([info["health"]], dtype=np.float32)
-        return obs, info
-
-    def step(self, action: np.ndarray) -> tuple:
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        obs["health"] = np.array([info["health"]], dtype=np.float32)
-        return obs, reward, terminated, truncated, info
-
-
-class PassMarkObsWrapper(gym.Wrapper):
-    def __init__(self, env: gym.Env) -> None:
-        super().__init__(env)
-        spaces = dict(env.observation_space.spaces)
-        spaces["pass_mark"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
-        self.observation_space = gym.spaces.Dict(spaces)
-
-    def reset(self, **kwargs) -> tuple:
-        obs, info = self.env.reset(**kwargs)
-        obs["pass_mark"] = np.array([info["pass_mark"]], dtype=np.float32)
-        return obs, info
-
-    def step(self, action: np.ndarray) -> tuple:
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        obs["pass_mark"] = np.array([info["pass_mark"]], dtype=np.float32)
-        return obs, reward, terminated, truncated, info
+        return self._attach(obs, info), reward, terminated, truncated, info
 
 
 class EpisodeReturnObsWrapper(gym.Wrapper):
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
-        spaces = dict(env.observation_space.spaces)
-        spaces["episode_return"] = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-        )
-        self.observation_space = gym.spaces.Dict(spaces)
+        self.observation_space = _with_box_obs(env, {"episode_return": (1,)})
         self._episode_return = 0.0
 
     def reset(self, **kwargs) -> tuple:
@@ -376,11 +349,7 @@ class RemainingReturnObsWrapper(gym.ObservationWrapper):
 
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
-        spaces = dict(env.observation_space.spaces)
-        spaces["remaining_return"] = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-        )
-        self.observation_space = gym.spaces.Dict(spaces)
+        self.observation_space = _with_box_obs(env, {"remaining_return": (1,)})
 
     def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         remaining = obs["pass_mark"] - obs["episode_return"]
@@ -390,8 +359,8 @@ class RemainingReturnObsWrapper(gym.ObservationWrapper):
 class StepCountInfoWrapper(gym.Wrapper):
     """Count the step numbers an env does not report itself.
 
-    AnimalAI and CARLA publish their own counters, so they need only
-    ``StepCountObsWrapper``; CarRacing does not, so it is counted here instead.
+    AnimalAI and CARLA publish their own counters, so their ``info`` already
+    carries them; CarRacing does not, so it is counted here instead.
     """
 
     def __init__(self, env: gym.Env) -> None:
@@ -416,63 +385,21 @@ class StepCountInfoWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, self._add_info(info)
 
 
-class StepCountObsWrapper(gym.Wrapper):
-    """Expose the env's step counters as scalar observations.
-
-    ``global_step`` tells the model *when* an experience happened, so the
-    sequence it reads carries an order across the whole run; ``episode_step``
-    tells it how far into the current episode it is.
-    """
-
-    def __init__(self, env: gym.Env) -> None:
-        super().__init__(env)
-        spaces = dict(env.observation_space.spaces)
-        spaces["global_step"] = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-        )
-        spaces["episode_step"] = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-        )
-        self.observation_space = gym.spaces.Dict(spaces)
-
-    def _add_step_obs(self, obs: dict, info: dict) -> dict:
-        obs["global_step"] = np.array([info["global_step"]], dtype=np.float32)
-        obs["episode_step"] = np.array([info["episode_step"]], dtype=np.float32)
-        return obs
-
-    def reset(self, **kwargs) -> tuple:
-        obs, info = self.env.reset(**kwargs)
-        return self._add_step_obs(obs, info), info
-
-    def step(self, action: np.ndarray) -> tuple:
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        return self._add_step_obs(obs, info), reward, terminated, truncated, info
-
-
 class ZeroScalarObsWrapper(gym.ObservationWrapper):
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
-        spaces = dict(env.observation_space.spaces)
-        spaces["velocity"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
-        spaces["pass_mark"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
-        spaces["health"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
-        spaces["remaining_return"] = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
+        self._zeros = {
+            "velocity": np.zeros(3, dtype=np.float32),
+            "pass_mark": np.zeros(1, dtype=np.float32),
+            "health": np.zeros(1, dtype=np.float32),
+            "remaining_return": np.zeros(1, dtype=np.float32),
+        }
+        self.observation_space = _with_box_obs(
+            env, {key: value.shape for key, value in self._zeros.items()}
         )
-        self.observation_space = gym.spaces.Dict(spaces)
-        self._zero_velocity = np.zeros(3, dtype=np.float32)
-        self._zero_pass_mark = np.zeros(1, dtype=np.float32)
-        self._zero_health = np.zeros(1, dtype=np.float32)
-        self._zero_remaining_return = np.zeros(1, dtype=np.float32)
 
     def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        return {
-            **obs,
-            "velocity": self._zero_velocity,
-            "pass_mark": self._zero_pass_mark,
-            "health": self._zero_health,
-            "remaining_return": self._zero_remaining_return,
-        }
+        return {**obs, **self._zeros}
 
 
 class CarRacingRewardFixWrapper(gym.Wrapper):

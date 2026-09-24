@@ -90,9 +90,3 @@ class Agent(ABC):
 
     @abstractmethod
     def load_optimizer_state_dict(self, state: dict) -> None: ...
-
-    @abstractmethod
-    def _preprocess(self, obs: dict[str, Any], info: dict): ...
-
-    @abstractmethod
-    def _to_env_action(self, net_action): ...

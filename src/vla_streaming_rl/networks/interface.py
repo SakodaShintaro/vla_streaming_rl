@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: MIT
 """Shared network interface: structured result types and the abstract base class.
 
-Every policy/value network exposes exactly three public methods —
-``infer``, ``compute_loss`` and ``infer_and_compute_loss`` — returning the
-structured types defined here. ``NetworkInterface`` makes that contract explicit:
-a subclass that does not implement all three cannot be instantiated. Anything
-else on a concrete network is an implementation detail (``_``-prefixed by
-convention) and is not part of the public surface.
+Every policy/value network exposes the forward passes — ``infer``,
+``compute_loss`` and ``infer_and_compute_loss`` — returning the structured
+types defined here, plus the observation-side hooks the agents drive
+(``stored_image_shape`` / ``to_stored_image`` / ``observe_scalar_obs``).
+``NetworkInterface`` makes that contract explicit: a subclass that does not
+implement all of them cannot be instantiated. Anything else on a concrete
+network is an implementation detail (``_``-prefixed by convention) and is not
+part of the public surface.
 """
 
 import abc
@@ -119,7 +121,7 @@ class InferLossResult:
 class NetworkInterface(nn.Module, abc.ABC):
     """Abstract base for all policy/value networks.
 
-    The contract is the five abstract methods below. A subclass missing any of
+    The contract is the abstract methods below. A subclass missing any of
     them raises ``TypeError`` on instantiation. ``nn.Module`` is mixed in so
     concrete networks keep full PyTorch behaviour (``parameters()``, ``.to()``,
     ``state_dict()`` …); ``ABCMeta`` derives from ``type`` so there is no
@@ -162,6 +164,33 @@ class NetworkInterface(nn.Module, abc.ABC):
     @abc.abstractmethod
     def init_state(self) -> torch.Tensor:
         """Initial recurrent state the agent carries between steps."""
+
+    @abc.abstractmethod
+    def stored_image_shape(self) -> tuple[int, ...]:
+        """Shape of the per-step image tensor the replay buffer stores, which
+        is the raw observation's or that of a representation the network
+        pre-encodes it into (see ``to_stored_image``)."""
+
+    @abc.abstractmethod
+    def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
+        """The stored form of one raw observation image, matching
+        ``stored_image_shape``."""
+
+    @abc.abstractmethod
+    def observe_scalar_obs(
+        self,
+        velocity_x: float,
+        velocity_y: float,
+        velocity_z: float,
+        episode_return: float,
+        pass_mark: float,
+        remaining_return: float,
+        global_step: float,
+        episode_step: float,
+        health: float,
+    ) -> None:
+        """This tick's raw scalar observations, handed over before ``infer``
+        so a network can track their running statistics."""
 
     @abc.abstractmethod
     def tokenize(self, text: str) -> list[int]:

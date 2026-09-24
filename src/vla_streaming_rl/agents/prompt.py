@@ -29,6 +29,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
@@ -46,6 +47,26 @@ TEXT_ACTION_PROTOCOL = (
 ACTION_RE = re.compile(r"<action>(?!.*<action>)(.*?)</action>", re.DOTALL)
 
 SUBTASK_RE = re.compile(r"<subtask>(?!.*<subtask>)(.*?)</subtask>", re.DOTALL)
+
+
+def read_action_reply(
+    reply_text: str,
+    parse_action_text,
+    action_low: np.ndarray,
+    action_high: np.ndarray,
+    hold_cap: int,
+) -> tuple[str, np.ndarray, int, bool]:
+    """The action a reply's ``<action>`` block names, clipped to the action
+    bounds, with how many steps it asks to hold it, capped at ``hold_cap``.
+    A reply that named no runnable action yields standing still, one row."""
+    answer_match = ACTION_RE.search(reply_text)
+    answer_text = answer_match.group(1).strip() if answer_match is not None else ""
+    action_array, parse_ok = parse_action_text(answer_text)
+    if parse_ok:
+        action = np.clip(action_array[0].astype(np.float32), action_low, action_high)
+    else:
+        action = np.zeros(action_low.shape, dtype=np.float32)
+    return answer_text, action, min(len(action_array), hold_cap), parse_ok
 
 
 def assistant_turn(text: str) -> dict:
