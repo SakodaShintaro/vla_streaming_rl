@@ -16,48 +16,20 @@ How Unity consumes it depends on `continuous_action`:
            the discrete branches exactly, so it is a strict superset.
 
 Everything about talking to Unity lives in `AnimalAIEnv`. The only thing that
-differs between the three ways we run Animal-AI is *which arena each episode
-loads*, so that is factored out into an `ArenaSelector`, picked by the
-`mode` config field (see `build_selector`):
-
-  - "staged"  training with the paper's cumulative 11-stage curriculum, one
-              stage per competition level, sampled uniformly within the stage
-              (`StagedSelector`).
-  - "success" one stage per level, advanced by clearing a round of it: the
-              stage's whole pool (30 arenas at stage 1, 60 at stage 2, up to
-              300) drawn without replacement, then the next stage if the
-              round's success rate reached `advance_success_rate`
-              (`SuccessDrivenSelector`).
-  - "sequential" no curriculum: every training arena once, in label order,
-              then the run ends (`SequentialSelector`, not cycling).
-  - "random"  no curriculum: every episode draws uniformly at random from the
-              whole training set (`RandomSelector`).
-  - "eval"    every configs/competition/ arena once, in order -- the
-              900-arena Testbed sweep (the same `SequentialSelector`, not
-              cycling, so it ends).
-
-Every arena comes from configs/competition/, whose files are named
-XX-YY-ZZ.yaml for level, task and variant. Each of the 300 tasks ships three
-variants; the training modes serve one variant of each (`train_variant`: 300
-arenas, 30 per level) while eval sweeps all 900. Training and eval therefore
-overlap by construction -- the trained variant is scored again, and within a
-task the variants are often identical files -- so `seen_in_training` is what
-separates the held-out part of a Testbed score from the rest.
+differs between the ways we run Animal-AI is *which arena each episode loads*,
+so that lives in an `ArenaSelector` (see `animalai_curriculum.py`, whose
+docstring describes the modes); the render-panel drawing lives in
+`animalai_render.py`.
 
 `end_at_pass_mark` ends an episode as soon as a collected reward carries the
 return to the arena's pass mark, which Unity itself never does (see `step`).
 """
 
-import hashlib
-import json
 import random
-from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
 import gymnasium as gym
 import numpy as np
-import yaml
 from animalai import AnimalAIEnvironment
 from gymnasium import spaces
 from mlagents_envs.base_env import ActionTuple
@@ -65,8 +37,14 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
     EnvironmentParametersChannel,
 )
 
-COMPETITION_DIR = Path("./external/animal-ai/configs/competition")
-
+from vla_streaming_rl.envs.animalai_curriculum import Arena, ArenaSelector, parse_arena
+from vla_streaming_rl.envs.animalai_render import (
+    RENDER_SIZE_PX,
+    draw_header,
+    fit_square,
+    render_progress,
+    render_topdown,
+)
 
 # Environment parameter the rebuilt binary reads to pick continuous over
 # discrete actions (see TrainingAgent.ReadAction in animal-ai-unity).
@@ -108,744 +86,11 @@ def _to_discrete(value: float) -> int:
     return 0
 
 
-# Animal-AI yaml uses custom !ArenaConfig/!Item/!Vector3/!RGB tags. We register
-# them as plain mappings so yaml.load can parse the full structure.
-class _AAILoader(yaml.SafeLoader):
-    pass
-
-
-def _aai_tag_constructor(loader, node):
-    if isinstance(node, yaml.MappingNode):
-        return loader.construct_mapping(node, deep=True)
-    if isinstance(node, yaml.SequenceNode):
-        return loader.construct_sequence(node, deep=True)
-    return loader.construct_scalar(node)
-
-
-for _tag in ("!ArenaConfig", "!Arena", "!Item", "!Vector3", "!RGB"):
-    _AAILoader.add_constructor(_tag, _aai_tag_constructor)
-
-
-def _parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
-    """Return (pass_mark, items) from an Animal-AI arena yaml.
-
-    The arena's ``t`` is deliberately not read: it is not a step cap but the
-    decay rate of the agent's health, and collecting a reward refills that
-    health, so an episode routinely runs well past ``t`` steps. What is left of
-    the episode is the health value in the AAI vector observation, not a step
-    count, so that is what the agent is given (see `_read_observation`).
-
-    Each item dict carries one (position, size, rotation) triple in arena
-    coordinates: {name, x, z, size_x, size_z, rotation}. yaml entries with
-    multiple positions are expanded into multiple item dicts; if `sizes` is
-    shorter than `positions` the last given size is reused (AAI's convention).
-    """
-    cfg = yaml.load(yaml_path.read_text(), Loader=_AAILoader)
-    arena = cfg["arenas"][0]
-    pass_mark = float(arena.get("pass_mark", 0))
-    items_out: list[dict] = []
-    for item in arena.get("items", []) or []:
-        name = item["name"]
-        positions = item.get("positions") or []
-        sizes = item.get("sizes") or []
-        rotations = item.get("rotations") or []
-        for i, pos in enumerate(positions):
-            size = sizes[i] if i < len(sizes) else (sizes[-1] if sizes else None)
-            rot = rotations[i] if i < len(rotations) else (rotations[-1] if rotations else 0)
-            items_out.append(
-                {
-                    "name": name,
-                    "x": float(pos["x"]),
-                    "z": float(pos["z"]),
-                    "size_x": float(size["x"]) if size else 1.0,
-                    "size_z": float(size["z"]) if size else 1.0,
-                    "rotation": float(rot),
-                }
-            )
-    return pass_mark, items_out
-
-
-@dataclass(frozen=True)
-class Arena:
-    """One arena yaml plus the label it is reported under (info, logs, render)."""
-
-    path: Path
-    name: str
-
-
-def _competition_arenas() -> list[Arena]:
-    """Every arena of the Olympics set, labeled by its "XX-YY-ZZ" stem.
-
-    The three fields are level, task and variant, so the label carries the
-    curriculum stage ("01") and the task family ("01-24") an arena belongs to.
-    It is also what names per-arena files (train.py writes a video per arena)
-    and wandb metrics, so training and eval report the same arena under the
-    same name.
-    """
-    paths = sorted(COMPETITION_DIR.glob("*.yaml"))
-    assert paths, f"no arena yamls under {COMPETITION_DIR}"
-    return [Arena(path, path.stem) for path in paths]
-
-
-def _variant_arenas(variant: str) -> list[Arena]:
-    """The `variant` numbered copy of every Olympics task, at every level.
-
-    Each task family XX-YY ships three variants, so one variant is one arena
-    per family -- 300 of the 900, which is the arena set the paper's
-    curriculum trains on. The other variants are what eval scores.
-    """
-    arenas = [arena for arena in _competition_arenas() if arena.name.rsplit("-", 1)[1] == variant]
-    assert arenas, f"no competition arena has variant {variant!r}"
-    return arenas
-
-
-def _all_levels(variant: str) -> list[str]:
-    """Every Olympics level the `variant` copy has an arena at, in order."""
-    return sorted({arena.name.split("-")[0] for arena in _variant_arenas(variant)})
-
-
-def training_levels(mode: str, variant: str, train_levels: list[str]) -> list[str]:
-    """The levels a run in `mode` trains on: `train_levels` for the sweep modes,
-    every level for the curriculum modes, whose stages are the levels."""
-    if mode in ("sequential", "random"):
-        return list(train_levels)
-    return _all_levels(variant)
-
-
-def _training_arenas(variant: str, levels: list[str]) -> list[Arena]:
-    """The training set: the `variant` copy of every task of each of `levels`,
-    one block of arenas per entry, in the order the entries are given.
-
-    `levels` narrowed below every level is for looking at some levels on their
-    own -- what a run scores on levels 01 and 02 without waiting for a
-    curriculum to reach them. A repeated entry repeats its block, so
-    `["01", "01"]` sweeps level 01 twice in the sequential mode and doubles
-    its draw weight in the random mode. The curriculum modes ignore it: their
-    stages are the levels, and hiding levels from them would leave the stage
-    numbers meaning something else.
-    """
-    assert len(levels) > 0, "levels must name at least one level"
-    available = _all_levels(variant)
-    assert all(level in available for level in levels), (
-        f"levels {list(levels)} names a level with no arena at variant {variant!r}; "
-        f"available: {available}"
-    )
-    arenas = _variant_arenas(variant)
-    return [arena for level in levels for arena in arenas if arena.name.split("-")[0] == level]
-
-
-def _training_stages(variant: str) -> list[list[Arena]]:
-    """The training arenas grouped into one stage per curriculum level.
-
-    The Olympics levels are the paper's curriculum stages in order (01 food
-    retrieval ... 10 causal reasoning), and every level holds 30 tasks, so
-    each stage is 30 arenas. `StagedSelector` accumulates them; the rounds of
-    `SuccessDrivenSelector` are one stage each.
-    """
-    arenas = _variant_arenas(variant)
-    return [
-        [arena for arena in arenas if arena.name.split("-")[0] == level]
-        for level in sorted({arena.name.split("-")[0] for arena in arenas})
-    ]
-
-
-def _cumulative_stages(variant: str) -> list[list[Arena]]:
-    """Each stage's arena pool: its own level plus every level before it.
-
-    30 arenas at stage 1, 60 at stage 2, up to all 300 at stage 10, so a stage
-    keeps drawing on everything the curriculum has unlocked so far.
-    """
-    pools: list[list[Arena]] = []
-    for level_arenas in _training_stages(variant):
-        pools.append((pools[-1] if pools else []) + level_arenas)
-    return pools
-
-
-def _arena_signature(path: Path) -> str:
-    """Digest of what makes two arena yamls the same episode.
-
-    Item order and mapping key order are how a file happens to be written,
-    not what it runs, so both are canonicalized away; `pass_mark` and `t`
-    decide the episode alongside the items, so both are in. Used to find the
-    eval arenas that are repeats of a training arena -- within a task family
-    the variants are often the same arena written out three times, and a score
-    over those is not a held-out score.
-    """
-    arena = yaml.load(path.read_text(), Loader=_AAILoader)["arenas"][0]
-    pass_mark = float(arena["pass_mark"]) if "pass_mark" in arena else 0.0
-    items = arena["items"] if "items" in arena else []
-    payload = json.dumps(
-        {
-            "pass_mark": pass_mark,
-            "t": arena["t"],
-            "items": sorted(json.dumps(item, sort_keys=True) for item in items),
-        },
-        sort_keys=True,
-    )
-    return hashlib.md5(payload.encode()).hexdigest()
-
-
-def seen_in_training(variant: str, levels: list[str]) -> set[str]:
-    """Labels of the eval arenas a run trained on `variant` has already seen.
-
-    The training variant itself, plus every other variant whose arena is
-    identical to the one its family contributed to training. `levels` is the
-    run's `train_levels`, so a run held to some levels is not credited with the
-    rest.
-    """
-    trained = {_arena_signature(arena.path) for arena in _training_arenas(variant, levels)}
-    return {
-        arena.name for arena in _competition_arenas() if _arena_signature(arena.path) in trained
-    }
-
-
-class ArenaSelector:
-    """Picks the arena each episode runs, and counts how each one has gone.
-
-    `arenas` is every arena this selector can serve: `AnimalAIEnv` boots Unity
-    on the first of them and resolves `options={"arena_stem": ...}` against
-    their names. Per-arena attempt/success counts are kept for every mode, so
-    the curriculum-progress panel and the resume snapshot do not depend on
-    which selector is running.
-    """
-
-    def __init__(self, arenas: list[Arena]):
-        self.arenas = arenas
-        self._arena_by_name = {arena.name: arena for arena in arenas}
-        names = [arena.name for arena in arenas]
-        self._attempts = dict.fromkeys(names, 0)
-        self._successes = dict.fromkeys(names, 0)
-
-    @property
-    def is_exhausted(self) -> bool:
-        """True once there is nothing left to run (finite sweeps only)."""
-        return False
-
-    def next_arena(self, global_step: int) -> Arena:
-        raise NotImplementedError
-
-    def on_episode_end(self, arena: Arena, success: bool) -> None:
-        """Record the attempt. Curricula extend this to advance themselves."""
-        self._attempts[arena.name] += 1
-        self._successes[arena.name] += int(success)
-
-    def arena_record(self, arena: Arena) -> tuple[int, int]:
-        """(attempts, successes) so far for one arena."""
-        return self._attempts[arena.name], self._successes[arena.name]
-
-    def is_cleared(self, arena: Arena) -> bool:
-        """Whether one arena counts as solved: passed at least once, unless a
-        curriculum wants a stricter bar (see `SuccessDrivenSelector`)."""
-        return self._successes[arena.name] > 0
-
-    def progress_by_group(self) -> list[tuple[str, int, int]]:
-        """(group, successes, failures) per arena group over every episode run
-        so far, in group order.
-
-        Episodes rather than arenas, so the bar reads as the group's success
-        rate over the whole run and not as whether each arena was ever passed
-        once. The group is the arena label's first "-" separated token, which
-        is the competition level ("01-01-01" -> "01") and so also the
-        curriculum stage.
-        """
-        counts: dict[str, list[int]] = {}
-        for arena in self._arena_by_name.values():
-            group = counts.setdefault(arena.name.split("-")[0], [0, 0])
-            attempts, successes = self._attempts[arena.name], self._successes[arena.name]
-            group[0] += successes
-            group[1] += attempts - successes
-        return [(group, *counts[group]) for group in sorted(counts)]
-
-    def info(self, global_step: int) -> dict:
-        """Selector-specific fields merged into each reset/step info dict."""
-        return {}
-
-    def status(self, global_step: int) -> str:
-        """One-line progress summary drawn on the top-down render."""
-        raise NotImplementedError
-
-    def state(self) -> dict:
-        """Resume snapshot: attempted arenas only, so the file stays small.
-
-        `arena_cleared` is this selector's own `is_cleared` verdict, so what
-        train.py reports as cleared is what the running curriculum acts on."""
-        attempts = {name: n for name, n in self._attempts.items() if n > 0}
-        arena_by_name = {arena.name: arena for arena in self.arenas}
-        return {
-            "arena_attempts": attempts,
-            "arena_successes": {name: self._successes[name] for name in attempts},
-            "arena_cleared": {name: self.is_cleared(arena_by_name[name]) for name in attempts},
-            "progress": self.progress_state(),
-        }
-
-    def progress_state(self) -> dict:
-        """Whatever else this selector needs to resume, beyond the per-arena
-        counts. Empty for the selectors whose position follows from those."""
-        return {}
-
-    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
-        """Restore a `state()` snapshot, dropping arenas this set does not have."""
-        known = set(self._attempts)
-        self._attempts.update({k: int(v) for k, v in arena_attempts.items() if k in known})
-        self._successes.update({k: int(v) for k, v in arena_successes.items() if k in known})
-
-
-class StagedSelector(ArenaSelector):
-    """The paper's cumulative curriculum (Animal-AI paper, Section 4.1.3).
-
-    One stage per Olympics level, plus a final stage repeating the last one,
-    so the 10 levels give 11. Stage i samples uniformly from every arena of
-    stages 1..i, and runs for `steps_per_stage` steps; stage 11 runs until
-    train.py's step_limit ends the run -- the paper's "further five million
-    steps on the last stage".
-    """
-
-    def __init__(self, variant: str, steps_per_stage: int, seed: int):
-        stages = _cumulative_stages(variant)
-        super().__init__(stages[-1])
-        self._stages = stages + [stages[-1]]
-        self.steps_per_stage = steps_per_stage
-        self._rng = np.random.default_rng(seed)
-
-    def _stage_index(self, global_step: int) -> int:
-        return min(global_step // self.steps_per_stage, len(self._stages) - 1)
-
-    def _stage_arenas(self, global_step: int) -> list[Arena]:
-        return self._stages[self._stage_index(global_step)]
-
-    def next_arena(self, global_step: int) -> Arena:
-        stage_arenas = self._stage_arenas(global_step)
-        return stage_arenas[int(self._rng.integers(len(stage_arenas)))]
-
-    def info(self, global_step: int) -> dict:
-        return {"stage": self._stage_index(global_step) + 1}
-
-    def status(self, global_step: int) -> str:
-        return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}"
-
-
-class SuccessDrivenSelector(ArenaSelector):
-    """One stage per Olympics level, advanced by clearing a round of it.
-
-    A round is the stage's whole pool drawn without replacement, so every arena
-    it has unlocked is played exactly once before any is played again. When the
-    round ends its success rate is compared with `advance_success_rate`: at or
-    above it the next stage opens, below it the same stage runs another round
-    with a fresh draw order.
-
-    The pools are cumulative, so a round is 30 arenas at stage 1, 60 at stage
-    2 and so on up to 300, and nothing already learned is dropped. At the
-    default rate of 1.0 stage 2 therefore asks for 60 straight passes.
-    """
-
-    def __init__(self, variant: str, advance_success_rate: float, seed: int):
-        stages = _cumulative_stages(variant)
-        super().__init__(stages[-1])
-        self._stages = stages
-        self.advance_success_rate = advance_success_rate
-        self._rng = np.random.default_rng(seed)
-        self._stage = 0
-        self._queue: list[str] = []
-        self._round_attempts = 0
-        self._round_successes = 0
-        self._round_by_level: dict[str, list[int]] = {}
-        self._last_round_rate = 0.0
-        self._last_round_level_rate: dict[str, float] = {}
-        self._advanced = False
-
-    def _refill(self) -> None:
-        names = [arena.name for arena in self._stages[self._stage]]
-        order = self._rng.permutation(len(names))
-        self._queue = [names[int(i)] for i in order]
-
-    def _round_rate(self) -> float:
-        assert self._round_attempts > 0
-        return self._round_successes / self._round_attempts
-
-    def next_arena(self, global_step: int) -> Arena:
-        """Take the next draw of the round. Drawing is what consumes it, so an
-        episode the caller abandons still moves the round along."""
-        if not self._queue:
-            self._refill()
-        return self._arena_by_name[self._queue.pop(0)]
-
-    def on_episode_end(self, arena: Arena, success: bool) -> None:
-        super().on_episode_end(arena, success)
-        self._round_attempts += 1
-        self._round_successes += int(success)
-        level = self._round_by_level.setdefault(arena.name.split("-")[0], [0, 0])
-        level[0] += int(success)
-        level[1] += 1
-        self._advanced = False
-        if self._round_attempts < len(self._stages[self._stage]):
-            return
-        # The counters reset here but info() is read after this call, so the
-        # rate the decision was made on is kept rather than reported as 0/0.
-        self._last_round_rate = self._round_rate()
-        self._last_round_level_rate = {
-            level: successes / attempts
-            for level, (successes, attempts) in sorted(self._round_by_level.items())
-        }
-        self._round_by_level = {}
-        if self._last_round_rate >= self.advance_success_rate and self._stage + 1 < len(
-            self._stages
-        ):
-            self._stage += 1
-            self._advanced = True
-        self._round_attempts = 0
-        self._round_successes = 0
-        self._queue = []
-
-    def info(self, global_step: int) -> dict:
-        return {
-            "stage": self._stage + 1,
-            "round_index": self._round_attempts,
-            "round_success_rate": (self._round_rate() if self._round_attempts > 0 else 0.0),
-            "last_round_success_rate": self._last_round_rate,
-            "last_round_level_success_rate": dict(self._last_round_level_rate),
-            "advanced": self._advanced,
-            "cleared_count": sum(self.is_cleared(arena) for arena in self.arenas),
-        }
-
-    def status(self, global_step: int) -> str:
-        del global_step
-        size = len(self._stages[self._stage])
-        rate = self._round_rate() if self._round_attempts > 0 else 0.0
-        return (
-            f"stage:{self._stage + 1}/{len(self._stages)}"
-            f"  round:{self._round_attempts}/{size} rate:{rate:.2f}"
-        )
-
-    def progress_state(self) -> dict:
-        return {
-            "stage": self._stage,
-            "queue": list(self._queue),
-            "round_attempts": self._round_attempts,
-            "round_successes": self._round_successes,
-            "round_by_level": {
-                level: list(counts) for level, counts in self._round_by_level.items()
-            },
-            "last_round_rate": self._last_round_rate,
-            "last_round_level_rate": dict(self._last_round_level_rate),
-        }
-
-    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
-        """Resume mid-round: the stage, what is left of its draw order and the
-        round's tally so far all have to come back, since none of them can be
-        recovered from the per-arena totals."""
-        super().load_state(arena_attempts, arena_successes, progress)
-        if not progress:
-            return
-        self._stage = int(progress["stage"])
-        self._round_attempts = int(progress["round_attempts"])
-        self._round_successes = int(progress["round_successes"])
-        self._last_round_rate = float(progress["last_round_rate"])
-        self._round_by_level = {
-            level: [int(counts[0]), int(counts[1])]
-            for level, counts in progress["round_by_level"].items()
-        }
-        self._last_round_level_rate = {
-            level: float(rate) for level, rate in progress["last_round_level_rate"].items()
-        }
-        known = set(self._attempts)
-        self._queue = [name for name in progress["queue"] if name in known]
-        if not self._queue:
-            self._refill()
-
-
-class SequentialSelector(ArenaSelector):
-    """Every arena of `arenas` in label order.
-
-    `cycle` is what separates the two ways this is used:
-
-      - False: one pass, then `is_exhausted`. Over the whole competition set
-        this is the paper's Testbed protocol -- one episode per arena, pass/fail
-        by that arena's pass mark (scripts/test_trained_agent.py loops until
-        exhausted).
-      - True: wrap back to the first arena instead of ending, so the set is
-        replayed until train.py's step_limit stops the run.
-    """
-
-    def __init__(self, arenas: list[Arena], cycle: bool):
-        super().__init__(arenas)
-        self.cycle = cycle
-        self._next_index = 0
-
-    @property
-    def is_exhausted(self) -> bool:
-        return not self.cycle and self._next_index >= len(self.arenas)
-
-    def next_arena(self, global_step: int) -> Arena:
-        arena = self.arenas[self._next_index % len(self.arenas)]
-        self._next_index += 1
-        return arena
-
-    def info(self, global_step: int) -> dict:
-        return {
-            "arena_index": (self._next_index - 1) % len(self.arenas),
-            "arena_total": len(self.arenas),
-            "lap": (self._next_index - 1) // len(self.arenas),
-        }
-
-    def status(self, global_step: int) -> str:
-        del global_step
-        cleared = sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
-        return (
-            f"{(self._next_index - 1) % len(self.arenas) + 1}/{len(self.arenas)}"
-            f"  lap:{(self._next_index - 1) // len(self.arenas) + 1}"
-            f"  cleared:{cleared}/{len(self._arena_by_name)}"
-        )
-
-    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
-        """Resume where the run left off: one episode per arena visit, so the
-        total attempt count is exactly how far into the order we are."""
-        super().load_state(arena_attempts, arena_successes, progress)
-        self._next_index = sum(self._attempts.values())
-
-
-class RandomSelector(ArenaSelector):
-    """Every episode drawn uniformly at random from `arenas`.
-
-    No curriculum and no ordering: unlike `SequentialSelector(cycle=True)` an
-    arena can repeat before the whole set has been seen, and unlike
-    `StagedSelector` nothing is withheld -- the full set is available from the
-    first episode. The curriculum-free baseline the staged modes are compared
-    against. Runs forever, so train.py's step_limit ends the run.
-    """
-
-    def __init__(self, arenas: list[Arena], seed: int):
-        super().__init__(arenas)
-        self._rng = np.random.default_rng(seed)
-
-    def next_arena(self, global_step: int) -> Arena:
-        return self.arenas[int(self._rng.integers(len(self.arenas)))]
-
-    def info(self, global_step: int) -> dict:
-        cleared = sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
-        return {"arena_total": len(self._arena_by_name), "cleared_count": cleared}
-
-    def status(self, global_step: int) -> str:
-        del global_step
-        cleared = sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
-        untried = sum(attempts == 0 for attempts in self._attempts.values())
-        return f"random  cleared:{cleared}/{len(self._arena_by_name)}  untried:{untried}"
-
-
-def build_selector(
-    mode: str,
-    train_variant: str,
-    train_levels: list[str],
-    steps_per_stage: int,
-    advance_success_rate: float,
-    seed: int,
-) -> ArenaSelector:
-    """Build the arena selector named by `mode` (see the module docstring).
-
-    The training modes serve the `train_variant` copy of every task; "eval"
-    serves the whole competition set, the paper's fixed 900-arena Testbed.
-    Which of those the run has already trained on follows from
-    `train_variant` -- `seen_in_training` is what reports it.
-
-    Every mode's parameters are always supplied; a mode ignores the ones that
-    do not apply to it.
-    """
-    builders = {
-        "staged": lambda: StagedSelector(
-            variant=train_variant, steps_per_stage=steps_per_stage, seed=seed
-        ),
-        "success": lambda: SuccessDrivenSelector(
-            variant=train_variant, advance_success_rate=advance_success_rate, seed=seed
-        ),
-        # One pass and done: the curriculum-free sweep is a measurement of the
-        # training set, so a second lap over the same arenas would only mix
-        # repeats into the score.
-        "sequential": lambda: SequentialSelector(
-            arenas=_training_arenas(train_variant, train_levels), cycle=False
-        ),
-        "random": lambda: RandomSelector(
-            arenas=_training_arenas(train_variant, train_levels), seed=seed
-        ),
-        "eval": lambda: SequentialSelector(arenas=_competition_arenas(), cycle=False),
-    }
-    assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"
-    return builders[mode]()
-
-
-# RGB colors (matplotlib-style) for each AAI item type when drawn top-down.
-_ITEM_COLORS: dict[str, tuple[int, int, int]] = {
-    "GoodGoal": (40, 200, 40),
-    "GoodGoalMulti": (40, 230, 80),
-    "GoodGoalBounce": (40, 200, 120),
-    "GoodGoalMultiBounce": (40, 230, 160),
-    "BadGoal": (220, 40, 40),
-    "BadGoalBounce": (220, 100, 40),
-    "DeathZone": (140, 20, 20),
-    "HotZone": (220, 120, 40),
-    "Wall": (110, 110, 110),
-    "WallTransparent": (200, 200, 220),
-    "Ramp": (140, 100, 60),
-    "Cardbox1": (210, 160, 80),
-    "Cardbox2": (180, 130, 70),
-    "LObject": (220, 200, 50),
-    "LObject2": (200, 180, 50),
-    "UObject": (220, 220, 50),
-    "CylinderTunnel": (160, 190, 210),
-    "CylinderTunnelTransparent": (200, 220, 230),
-}
-_DEFAULT_ITEM_COLOR: tuple[int, int, int] = (180, 180, 180)
-_AGENT_COLOR: tuple[int, int, int] = (40, 80, 220)
-_ARENA_SIZE_M = 40.0  # standard Animal-AI arena is 40 m square
-_RENDER_SIZE_PX = 256
-_HEADER_LINE_PX = 20
-
-
-def _draw_header(lines: list[str], width_px: int) -> np.ndarray:
-    """Caption strip, one row per line. Splitting a long status over two lines
-    keeps the type readable where fitting it on one would shrink it away."""
-    header = np.full((_HEADER_LINE_PX * len(lines), width_px, 3), 215, dtype=np.uint8)
-    max_width = width_px - 8
-    for row, text in enumerate(lines):
-        font_scale = 0.45
-        (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
-        # Shrink rather than let a long line run off the right edge.
-        font_scale *= min(1.0, max_width / width)
-        cv2.putText(
-            header,
-            text,
-            (4, _HEADER_LINE_PX * row + 14),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            font_scale,
-            (20, 20, 20),
-            1,
-            cv2.LINE_AA,
-        )
-    return header
-
-
-_PROGRESS_ROW_PX = 22
-_PROGRESS_LABEL_PX = 76
-_PROGRESS_LEGEND_PX = 22
-# passed episodes / failed episodes / no episode run yet.
-_PROGRESS_COLORS = ((60, 170, 60), (205, 75, 75), (205, 205, 205))
-_PROGRESS_LEGEND = ("pass", "fail", "n/a")
-
-
-def _render_progress(groups: list[tuple[str, int, int]]) -> np.ndarray:
-    """One horizontal bar per arena group (see
-    `ArenaSelector.progress_by_group`): the group's success rate over every
-    episode run so far, passed in green and failed in red, grey until the
-    group has been run at all."""
-    passed = sum(group[1] for group in groups)
-    total = sum(sum(group[1:]) for group in groups)
-    header = _draw_header([f"passed:{passed}/{total}"], _RENDER_SIZE_PX)
-    header_px = header.shape[0]
-    height = header_px + _PROGRESS_ROW_PX * len(groups) + _PROGRESS_LEGEND_PX
-    canvas = np.full((height, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
-    canvas[:header_px] = header
-
-    bar_x = _PROGRESS_LABEL_PX
-    bar_width = _RENDER_SIZE_PX - bar_x - 6
-    for row, (name, passed, failed) in enumerate(groups):
-        top = header_px + row * _PROGRESS_ROW_PX
-        attempts = passed + failed
-        label = f"{name} {passed / attempts:.0%}" if attempts else name
-        cv2.putText(
-            canvas,
-            label,
-            (4, top + 15),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.35,
-            (20, 20, 20),
-            1,
-            cv2.LINE_AA,
-        )
-        # A group never run is one grey bar; otherwise the passed and failed
-        # episodes tile the bar exactly.
-        counts = (passed, failed, 0) if attempts else (0, 0, 1)
-        left = bar_x
-        filled = 0
-        for count, color in zip(counts, _PROGRESS_COLORS):
-            filled += count
-            right = bar_x + round(bar_width * filled / sum(counts))
-            if right > left:
-                cv2.rectangle(canvas, (left, top + 3), (right, top + 18), color, cv2.FILLED)
-            left = right
-
-    legend_top = height - _PROGRESS_LEGEND_PX
-    for i, (label, color) in enumerate(zip(_PROGRESS_LEGEND, _PROGRESS_COLORS)):
-        swatch_x = 6 + i * 84
-        cv2.rectangle(
-            canvas, (swatch_x, legend_top + 6), (swatch_x + 14, legend_top + 16), color, cv2.FILLED
-        )
-        cv2.putText(
-            canvas,
-            label,
-            (swatch_x + 18, legend_top + 15),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.35,
-            (20, 20, 20),
-            1,
-            cv2.LINE_AA,
-        )
-    return canvas
-
-
-def _fit_square(image: np.ndarray, size_px: int) -> np.ndarray:
-    """Scale a camera frame to the pane the schematic would have filled."""
-    return cv2.resize(image, (size_px, size_px), interpolation=cv2.INTER_NEAREST)
-
-
-def _render_topdown(items: list[dict], agent_xyz: tuple[float, float, float] | None) -> np.ndarray:
-    scale = _RENDER_SIZE_PX / _ARENA_SIZE_M
-    canvas = np.full((_RENDER_SIZE_PX, _RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
-
-    # Flip z so the +z arena axis points up in the image (Unity-editor-like).
-    def to_px(x: float, z: float) -> tuple[int, int]:
-        return int(round(x * scale)), int(round((_ARENA_SIZE_M - z) * scale))
-
-    cv2.rectangle(canvas, (0, 0), (_RENDER_SIZE_PX - 1, _RENDER_SIZE_PX - 1), (60, 60, 60), 2)
-
-    for item in items:
-        if item["name"] == "Agent":
-            continue
-        # x or z = -1 in the yaml means Unity randomizes the position at
-        # reset; we don't know the actual location, so skip drawing.
-        if item["x"] < 0 or item["z"] < 0:
-            continue
-        cx, cy = to_px(item["x"], item["z"])
-        color = _ITEM_COLORS.get(item["name"], _DEFAULT_ITEM_COLOR)
-        # Goals are spherical in the Unity scene; draw as circles so they
-        # are visually distinct from rectangular zones/walls/boxes.
-        if "Goal" in item["name"]:
-            radius = max(int(0.5 * item["size_x"] * scale), 3)
-            cv2.circle(canvas, (cx, cy), radius, color, cv2.FILLED)
-            cv2.circle(canvas, (cx, cy), radius, (20, 20, 20), 1)
-            continue
-        sx_px = max(item["size_x"] * scale, 3.0)
-        sz_px = max(item["size_z"] * scale, 3.0)
-        # Unity Y-axis rotation is CW from above (in left-handed world);
-        # our z-flipped image preserves "north up" so we pass the raw angle
-        # to cv2 (positive cv2 angle is CW in image after the z flip).
-        rect = ((float(cx), float(cy)), (sx_px, sz_px), item["rotation"])
-        box = np.intp(cv2.boxPoints(rect))
-        transparent = "Transparent" in item["name"]
-        cv2.drawContours(canvas, [box], 0, color, 1 if transparent else cv2.FILLED)
-
-    if agent_xyz is not None:
-        ax, _ay, az = agent_xyz
-        apx, apy = to_px(ax, az)
-        radius = max(int(0.6 * scale), 4)
-        cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
-        cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
-
-    return canvas
-
-
 class AnimalAIEnv(gym.Env):
     """Animal-AI environment with continuous Box action space.
 
-    `selector` decides which arena each episode loads; see the module
-    docstring for the three of them.
+    `selector` decides which arena each episode loads; see
+    `animalai_curriculum.py`.
     """
 
     _PHYSICS_STEP_SEC = 0.02
@@ -877,7 +122,6 @@ class AnimalAIEnv(gym.Env):
         self.colored_walls = colored_walls
         self.end_at_pass_mark = end_at_pass_mark
         self.selector = selector
-        self._arena_by_name = {arena.name: arena for arena in selector.arenas}
 
         self.binary_path = str(Path(binary_path).expanduser())
         self.resolution = resolution
@@ -1072,13 +316,13 @@ class AnimalAIEnv(gym.Env):
         # selector (scripts/collect_probe_data.py repeats a single arena).
         forced_name = options["arena_stem"] if options is not None else None
         self._arena = (
-            self._arena_by_name[forced_name]
+            self.selector.arena_by_name(forced_name)
             if forced_name is not None
             else self.selector.next_arena(self.global_step)
         )
 
         self.arena_name = self._arena.name
-        self.pass_mark, self._arena_items = _parse_arena(self._arena.path)
+        self.pass_mark, self._arena_items = parse_arena(self._arena.path)
         self._aai.reset(arenas_configurations=str(self._arena.path))
         self.episode_step = 0
         self._episode_return = 0.0
@@ -1122,22 +366,16 @@ class AnimalAIEnv(gym.Env):
         if self.end_at_pass_mark and not episode_over and reward > 0.0:
             terminated = terminated or self._episode_return >= self.pass_mark
 
-        shaped_reward = self._shape_reward(reward, terminated or truncated)
-
-        if not (episode_over or terminated):
-            return (
-                self._latest_image,
-                reward,
-                terminated,
-                truncated,
-                self._build_info(shaped_reward),
-            )
+        done = terminated or truncated
+        shaped_reward = self._shape_reward(reward, done)
 
         success = self._episode_return >= self.pass_mark
-        # Before _build_info, so the selector reports post-episode progress.
-        self.selector.on_episode_end(self._arena, success)
+        if done:
+            # Before _build_info, so the selector reports post-episode progress.
+            self.selector.on_episode_end(self._arena, success)
         info = self._build_info(shaped_reward)
-        info["success"] = bool(success)
+        if done:
+            info["success"] = bool(success)
         return self._latest_image, reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
@@ -1156,12 +394,12 @@ class AnimalAIEnv(gym.Env):
             f"step:{self.global_step}  health:{self._agent_health:.2f}",
         ]
         arena = (
-            _fit_square(self._latest_topdown_image, _RENDER_SIZE_PX)
+            fit_square(self._latest_topdown_image, RENDER_SIZE_PX)
             if self._latest_topdown_image is not None
-            else _render_topdown(self._arena_items, self._agent_xyz)
+            else render_topdown(self._arena_items, self._agent_xyz)
         )
-        topdown = np.vstack([_draw_header(header_lines, _RENDER_SIZE_PX), arena])
-        progress = _render_progress(self.selector.progress_by_group())
+        topdown = np.vstack([draw_header(header_lines, RENDER_SIZE_PX), arena])
+        progress = render_progress(self.selector.progress_by_group())
         padding = np.full(
             (topdown.shape[0] - progress.shape[0], progress.shape[1], 3), 240, dtype=np.uint8
         )
@@ -1174,6 +412,8 @@ class AnimalAIEnv(gym.Env):
 
 
 if __name__ == "__main__":
+    from vla_streaming_rl.envs.animalai_curriculum import StagedSelector
+
     env = AnimalAIEnv(
         resolution=96,
         seed=0,

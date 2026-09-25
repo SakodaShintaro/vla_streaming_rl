@@ -58,7 +58,8 @@ def make_animalai_env(
     colored_walls: bool,
     end_at_pass_mark: bool,
 ) -> gym.Env:
-    from vla_streaming_rl.envs.animalai_env import AnimalAIEnv, build_selector
+    from vla_streaming_rl.envs.animalai_curriculum import build_selector
+    from vla_streaming_rl.envs.animalai_env import AnimalAIEnv
 
     selector = build_selector(
         mode=mode,

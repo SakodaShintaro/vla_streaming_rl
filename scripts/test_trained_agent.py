@@ -28,7 +28,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_all
 from vla_streaming_rl.checkpoint import load_checkpoint_weights
-from vla_streaming_rl.envs.animalai_env import seen_in_training, training_levels
+from vla_streaming_rl.envs.animalai_curriculum import seen_in_training, training_levels
 from vla_streaming_rl.script_setup import disable_render_if_headless, resolve_seed, seed_everything
 from vla_streaming_rl.utils import render_frame
 from vla_streaming_rl.wrappers import make_env
@@ -234,7 +234,7 @@ if __name__ == "__main__":
     run_dir = checkpoint_path.parent
     cfg = load_wandb_config(run_dir)
     # Always evaluate on the paper's Testbed sweep, regardless of which mode
-    # trained this checkpoint (see SequentialSelector in animalai_env.py).
+    # trained this checkpoint (see SequentialSelector in animalai_curriculum.py).
     cfg.env_factory.mode = "eval"
 
     seed = resolve_seed(cli_args.seed)
