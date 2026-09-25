@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Screenshot every Animal-AI arena from the player's overhead camera.
+"""Screenshot every Animal-AI arena from the player's camera.
 
 Opens the arenas in Unity's play mode the same way scripts/play_animalai.py
 does, switches the camera with C, then walks the whole set: let the arena
@@ -16,7 +16,8 @@ directory holding a subset to sweep only those:
 
 C cycles first person -> third person -> overhead, and the player starts on
 the first of those, so --camera-presses says how many times to press it before
-the sweep starts (2 by default). The first PNG shows which camera you got.
+the sweep starts (0 by default, keeping the first-person camera; 2 selects
+the overhead one). The first PNG shows which camera you got.
 
 Keys reach the player through the X11 XTEST extension, so this needs an X
 session and python-xlib:
@@ -67,7 +68,8 @@ def parse_args() -> argparse.Namespace:
         "--camera-presses",
         type=int,
         default=0,
-        help="how many times to press C before capturing (default: 2, the overhead camera)",
+        help="how many times to press C before capturing (default: 0, the "
+        "first-person camera; 2 selects the overhead one)",
     )
     parser.add_argument("--settle", type=float, default=0.5)
     parser.add_argument(

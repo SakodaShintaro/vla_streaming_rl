@@ -327,6 +327,24 @@ def overlay_caption(image: np.ndarray, text: str) -> np.ndarray:
     return np.vstack((image, band))
 
 
+def render_frame(env, obs, result, scale: float) -> np.ndarray:
+    """One RGB frame of the render strip: the env panel captioned with the
+    prompt, the observation panel (rescaled by ``scale`` for display only),
+    then whatever panels the agent contributed."""
+    obs_viz = obs["image"].copy().transpose(1, 2, 0)
+    if scale != 1.0:
+        h, w = obs_viz.shape[:2]
+        obs_viz = cv2.resize(
+            obs_viz, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+        )
+    panels = {
+        "environment": overlay_caption(env.render(), result.texts["prompt"]),
+        "observation": obs_viz,
+        **result.panels,
+    }
+    return concat_labeled_images(panels)
+
+
 def concat_labeled_images(panels: dict[str, np.ndarray]) -> np.ndarray:
     """Lay out named image panels side by side as a single RGB strip.
 

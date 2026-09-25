@@ -23,8 +23,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import wandb.proto.wandb_internal_pb2 as pb
-from wandb.sdk.internal import datastore
+
+from vla_streaming_rl.wandb_reader import load_history, scan_records
 
 _TAB10 = plt.cm.tab10.colors
 
@@ -74,27 +74,22 @@ def find_method_dir(data_dir: Path, suffix: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def _scan_wandb(method_dir: Path):
-    """Yield decoded records from the method's local wandb run file."""
+def _wandb_file(method_dir: Path) -> Path | None:
+    """The method's local wandb run file, or None (with a note) when absent."""
     wandb_files = list(method_dir.rglob("*.wandb"))
     if not wandb_files:
         print(f"No .wandb file under {method_dir}")
-        return
-    ds = datastore.DataStore()
-    ds.open_for_scan(str(wandb_files[0]))
-    while True:
-        data = ds.scan_data()
-        if data is None:
-            break
-        rec = pb.Record()
-        rec.ParseFromString(data)
-        yield rec
+        return None
+    return wandb_files[0]
 
 
 def peak_gpu_memory_gb(method_dir: Path) -> float | None:
     """Peak ``gpu.0.memoryAllocatedBytes`` (GB) from the local wandb run."""
+    wandb_file = _wandb_file(method_dir)
+    if wandb_file is None:
+        return None
     peak = 0.0
-    for rec in _scan_wandb(method_dir):
+    for rec in scan_records(wandb_file):
         if rec.WhichOneof("record_type") != "stats":
             continue
         for it in rec.stats.item:
@@ -116,20 +111,17 @@ def agent_step_msec(method_dir: Path) -> float | None:
     acting forward instead of running a separate one for learning. Read from the
     per-step ``agent_step_msec`` in the wandb history.
     """
-    vals = []
-    for rec in _scan_wandb(method_dir):
-        if rec.WhichOneof("record_type") != "history":
-            continue
-        for it in rec.history.item:
-            key = "/".join(it.nested_key) if list(it.nested_key) else it.key
-            if key == "agent_step_msec":
-                try:
-                    vals.append(float(json.loads(it.value_json)))
-                except (ValueError, json.JSONDecodeError):
-                    pass
-    if not vals:
+    wandb_file = _wandb_file(method_dir)
+    if wandb_file is None:
         return None
-    return float(np.mean(np.asarray(vals)[len(vals) // 2 :]))
+    history = load_history(wandb_file)
+    if "agent_step_msec" not in history:
+        return None
+    vals = history["agent_step_msec"]
+    vals = vals[~np.isnan(vals)]
+    if len(vals) == 0:
+        return None
+    return float(np.mean(vals[len(vals) // 2 :]))
 
 
 def find_method_dirs(data_dirs, suffix: str) -> list[Path]:

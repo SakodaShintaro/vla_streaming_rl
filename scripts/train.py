@@ -1,20 +1,15 @@
 # SPDX-License-Identifier: MIT
 # This script was initially inspired by CleanRL https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/sac_continuous_action.py
-import logging
-import os
-import subprocess
-import warnings
+from vla_streaming_rl.script_setup import setup_runtime
 
-os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts=false"
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
-warnings.filterwarnings("ignore", message=".*local_dir_use_symlinks.*")
-warnings.filterwarnings("ignore", message=".*Attempting to run cuBLAS.*")
-logging.getLogger("httpx").setLevel(logging.WARNING)
+setup_runtime()
 
 import csv
 import json
-import random
+import os
+import subprocess
 import time
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 import cv2
@@ -26,27 +21,58 @@ import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from vla_streaming_rl.agents.build import build_agent
-from vla_streaming_rl.agents.prompt import build_prompt_builder
+from vla_streaming_rl.agents.build import build_all
+from vla_streaming_rl.checkpoint import load_checkpoint_weights, save_checkpoint
 from vla_streaming_rl.envs.animalai_env import training_levels
-from vla_streaming_rl.networks.build import build_network
-from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
+from vla_streaming_rl.script_setup import disable_render_if_headless, resolve_seed, seed_everything
+from vla_streaming_rl.utils import render_frame
 from vla_streaming_rl.wrappers import make_env
 
-torch.set_float32_matmul_precision("high")
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+@dataclass
+class TrainState:
+    """The trainer's running counters: initialized fresh, persisted to
+    train_state.json every episode, and restored by ``load_resume_state``."""
+
+    global_step: int
+    episode_id: int
+    episode_count: int
+    score_sum_all: float
+    success_sum_all: float
+    success_episode_count: int
+    best_score: float
+    score_list: list[float]
+    success_list: list[float]
+
+    @classmethod
+    def fresh(cls) -> "TrainState":
+        return cls(
+            global_step=0,
+            episode_id=0,
+            episode_count=0,
+            score_sum_all=0.0,
+            success_sum_all=0.0,
+            success_episode_count=0,
+            best_score=-float("inf"),
+            score_list=[],
+            success_list=[],
+        )
 
 
-def _viz_resize(image: np.ndarray, scale: float) -> np.ndarray:
-    """Downscale (or upscale) the observation render panel.
+@dataclass
+class EpisodeRecord:
+    """Everything one episode leaves behind for ``save_episode_data``."""
 
-    This is applied only to the copy that goes into ``concat_labeled_images``
-    / ``cv2.imshow``, never to data used for any computation.
-    """
-    if scale == 1.0:
-        return image
-    h, w = image.shape[:2]
-    return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    bgr_images: list[np.ndarray]
+    actions: list[np.ndarray]
+    rewards: list[float]
+    observations: list[np.ndarray]
+    texts: list[dict[str, str]]
+    xyzs: list[tuple[float, float, float]]
+
+    @classmethod
+    def fresh(cls) -> "EpisodeRecord":
+        return cls(bgr_images=[], actions=[], rewards=[], observations=[], texts=[], xyzs=[])
 
 
 def save_episode_texts(episode_log_dir: Path, text_list: list[dict[str, str]]) -> None:
@@ -71,24 +97,15 @@ def save_episode_texts(episode_log_dir: Path, text_list: list[dict[str, str]]) -
             f.write(f"{step}\t" + "\t".join(escape(texts[key]) for key in keys) + "\n")
 
 
-def save_episode_data(
-    episode_dir: Path,
-    name: str,
-    bgr_image_list: list[np.ndarray],
-    action_list: list[np.ndarray],
-    reward_list: list[float],
-    obs_list: list[np.ndarray],
-    text_list: list[dict[str, str]],
-    xyz_list: list[tuple[float, float, float]],
-) -> None:
+def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> None:
     """Save episode videos, actions, rewards and positions"""
-    if not bgr_image_list:
+    if not record.bgr_images:
         return
 
     # Stable-panel contract: an agent emits the same set of equally-shaped
     # panels every step, so every render frame has the same size. Fail loudly
     # if that is violated rather than letting the video encoder error out.
-    frame_sizes = {img.shape for img in bgr_image_list}
+    frame_sizes = {img.shape for img in record.bgr_images}
     assert len(frame_sizes) == 1, (
         f"Episode '{name}' produced frames of differing sizes {frame_sizes}; "
         "an agent's panel set / shapes must stay constant across the run."
@@ -96,6 +113,7 @@ def save_episode_data(
 
     # libx264 (yuv420p) requires even width/height; the concatenated panel strip
     # can be an odd size. Pad one black row/column when needed.
+    bgr_image_list = record.bgr_images
     h, w = bgr_image_list[0].shape[:2]
     if h % 2 or w % 2:
         bgr_image_list = [
@@ -109,7 +127,9 @@ def save_episode_data(
     rgb_images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in bgr_image_list]
     imageio.mimsave(str(video_path), rgb_images, fps=10, macro_block_size=1)
 
-    obs_rgb_images = [(obs.transpose(1, 2, 0) * 255).astype(np.uint8) for obs in obs_list]
+    obs_rgb_images = [
+        (obs.transpose(1, 2, 0) * 255).astype(np.uint8) for obs in record.observations
+    ]
     obs_sizes = {img.shape for img in obs_rgb_images}
     assert len(obs_sizes) == 1, (
         f"Episode '{name}' produced observations of differing sizes {obs_sizes}"
@@ -123,21 +143,21 @@ def save_episode_data(
     obs_video_path = episode_log_dir / "obs.mp4"
     imageio.mimsave(str(obs_video_path), obs_rgb_images, fps=10, macro_block_size=1)
 
-    save_episode_texts(episode_log_dir, text_list)
+    save_episode_texts(episode_log_dir, record.texts)
 
     # One row per step: the action taken, the reward it drew, and where the
     # agent stood after it, so an episode's trajectory can be drawn from the
-    # run rather than re-simulated. ``xyz_list`` is empty for an env that
-    # reports no position, and the x/y/z columns are then left out rather than
-    # filled with a stand-in.
-    columns = [f"action{i}" for i in range(len(action_list[0]))] + ["reward"]
+    # run rather than re-simulated. ``xyzs`` is empty for an env that reports
+    # no position, and the x/y/z columns are then left out rather than filled
+    # with a stand-in.
+    columns = [f"action{i}" for i in range(len(record.actions[0]))] + ["reward"]
     rows = [
         [f"{float(a):.6f}" for a in action] + [f"{float(reward):.6f}"]
-        for action, reward in zip(action_list, reward_list)
+        for action, reward in zip(record.actions, record.rewards)
     ]
-    if xyz_list:
+    if record.xyzs:
         columns = columns + ["x", "y", "z"]
-        rows = [row + [f"{float(v):.4f}" for v in xyz] for row, xyz in zip(rows, xyz_list)]
+        rows = [row + [f"{float(v):.4f}" for v in xyz] for row, xyz in zip(rows, record.xyzs)]
 
     with open(episode_log_dir / "log.tsv", "w", encoding="utf-8") as f:
         f.write("step\t" + "\t".join(columns) + "\n")
@@ -145,22 +165,17 @@ def save_episode_data(
             f.write(f"{step}\t" + "\t".join(row) + "\n")
 
 
-def save_checkpoint(result_dir: Path, network, agent) -> None:
-    """Save trainable weights (checkpoint.pt) and optimizer states (optimizer.pt).
-
-    A no-op for the zero-shot VLM baseline, which carries no network and so has
-    nothing to checkpoint."""
-    if network is None:
-        return
-
-    module = network._orig_mod if hasattr(network, "_orig_mod") else network
-    trainable_state = {
-        name: param.detach().cpu()
-        for name, param in module.named_parameters()
-        if param.requires_grad
-    }
-    torch.save(trainable_state, result_dir / "checkpoint.pt")
-    torch.save(agent.optimizer_state_dict(), result_dir / "optimizer.pt")
+def write_git_info(result_dir: Path) -> None:
+    """Save branch name, git show -s and git diff results"""
+    branch_name = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True
+    ).stdout
+    git_show = subprocess.run(["git", "show", "-s"], capture_output=True, text=True).stdout
+    git_diff = subprocess.run(["git", "diff", "HEAD"], capture_output=True, text=True).stdout
+    with open(result_dir / "git_info.txt", "w") as f:
+        f.write(f"branch:\n{branch_name}\n")
+        f.write(f"git show -s:\n{git_show}\n")
+        f.write(f"git diff:\n{git_diff}\n")
 
 
 def write_arena_stats(path: Path, curriculum: dict, best_score_per_arena: dict) -> None:
@@ -201,33 +216,13 @@ def write_success_rate(path: Path, curriculum: dict) -> None:
         f.write(f"all,{len(cleared)},{successes},{successes / len(cleared):.4f}\n")
 
 
-def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
+def load_resume_state(resume_dir: Path, network, agent, env) -> tuple[TrainState, dict[str, float]]:
     """Restore weights / optimizer / counters / curriculum from a previous run dir.
 
     checkpoint.pt is required; the other files are optional so directories
     written before this resume mechanism existed still load (their missing
-    parts fall back to the defaults below)."""
-    state = {
-        "global_step": 0,
-        "episode_id": 0,
-        "episode_count": 0,
-        "score_sum_all": 0.0,
-        "success_sum_all": 0.0,
-        "success_episode_count": 0,
-        "best_score": -float("inf"),
-        "score_list": [],
-        "success_list": [],
-        "curriculum_progress": {},
-        "best_score_per_arena": {},
-    }
-
-    checkpoint_path = resume_dir / "checkpoint.pt"
-    trainable_state = torch.load(checkpoint_path, map_location="cuda")
-    module = network._orig_mod if hasattr(network, "_orig_mod") else network
-    missing, unexpected = module.load_state_dict(trainable_state, strict=False)
-    if unexpected:
-        raise ValueError(f"checkpoint parameters not found in the network: {unexpected[:5]}")
-    print(f"Resume: loaded {len(trainable_state)} weight tensors from {checkpoint_path}")
+    parts keep the fresh defaults)."""
+    load_checkpoint_weights(resume_dir / "checkpoint.pt", network)
 
     optimizer_path = resume_dir / "optimizer.pt"
     if optimizer_path.exists():
@@ -236,417 +231,127 @@ def load_resume_state(resume_dir: Path, network, agent, env) -> dict:
     else:
         print(f"Resume: {optimizer_path} not found, optimizers start fresh")
 
+    state = TrainState.fresh()
+    curriculum_progress: dict = {}
     train_state_path = resume_dir / "train_state.json"
     if train_state_path.exists():
-        state.update(json.loads(train_state_path.read_text()))
+        data = json.loads(train_state_path.read_text())
+        if "curriculum_progress" in data:
+            curriculum_progress = data["curriculum_progress"]
+        for state_field in fields(TrainState):
+            if state_field.name in data:
+                setattr(state, state_field.name, data[state_field.name])
         print(f"Resume: loaded counters from {train_state_path}")
     else:
         print(f"Resume: {train_state_path} not found, counters start from zero")
 
+    best_score_per_arena: dict[str, float] = {}
     arena_stats_path = resume_dir / "arena_stats.tsv"
     set_curriculum = getattr(env.unwrapped, "set_curriculum_state", None)
     if arena_stats_path.exists() and set_curriculum is not None:
         attempts = {}
         successes = {}
-        best_scores = {}
         cleared_count = 0
         for row in arena_stats_path.read_text().splitlines()[1:]:
             arena, n_attempt, n_success, _rate, best, cleared = row.split("\t")
             attempts[arena] = int(n_attempt)
             successes[arena] = int(n_success)
-            best_scores[arena] = float(best)
+            best_score_per_arena[arena] = float(best)
             cleared_count += int(cleared)
-        set_curriculum(attempts, successes, state["curriculum_progress"])
-        state["best_score_per_arena"] = best_scores
+        set_curriculum(attempts, successes, curriculum_progress)
         print(
             f"Resume: loaded {len(attempts)} arena records from {arena_stats_path} "
             f"(cleared={cleared_count})"
         )
-    return state
+    return state, best_score_per_arena
 
 
-def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
-    result_dir.mkdir(parents=True, exist_ok=True)
+def save_train_state(
+    result_dir: Path, state: TrainState, env, best_score_per_arena: dict[str, float]
+) -> None:
+    """Persist the light resume state (the heavy weights / optimizer files
+    follow the checkpoint_interval cadence instead)."""
+    train_state = asdict(state)
+    train_state["score_list"] = [float(s) for s in state.score_list]
+    train_state["success_list"] = [float(s) for s in state.success_list]
+    train_state["score_sum_all"] = float(state.score_sum_all)
+    train_state["success_sum_all"] = float(state.success_sum_all)
+    train_state["best_score"] = float(state.best_score)
+    get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
+    if get_curriculum is not None:
+        curriculum = get_curriculum()
+        train_state["curriculum_progress"] = curriculum["progress"]
+        write_arena_stats(result_dir / "arena_stats.tsv", curriculum, best_score_per_arena)
+        write_success_rate(result_dir / "success_rate.csv", curriculum)
+    (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
 
-    wandb.init(
-        project=f"vla_streaming_rl_{args.env_id}",
-        config=OmegaConf.to_container(args, resolve=True),
-        name=exp_name,
-        group=args.wandb_group,
-        save_code=True,
-        settings=wandb.Settings(quiet=True),
-        dir=str(result_dir),
-    )
 
-    # seeding
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.cuda.set_device(0)
+def build_episode_log(
+    state: TrainState, env_info: dict, eval_range: int, elapsed_time_sec: float
+) -> dict:
+    """The per-episode wandb row, updating the running counters in ``state``."""
+    score = env_info["episode"]["r"]
+    state.score_list.append(score)
+    state.score_list = state.score_list[-eval_range:]
+    state.score_sum_all += float(score)
+    state.episode_count += 1
 
-    # save seed to file
-    with open(result_dir / "seed.txt", "w") as f:
-        f.write(str(seed))
-
-    # Save branch name, git show -s and git diff results
-    branch_name = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True
-    ).stdout
-    git_show = subprocess.run(["git", "show", "-s"], capture_output=True, text=True).stdout
-    git_diff = subprocess.run(["git", "diff", "HEAD"], capture_output=True, text=True).stdout
-    with open(result_dir / "git_info.txt", "w") as f:
-        f.write(f"branch:\n{branch_name}\n")
-        f.write(f"git show -s:\n{git_show}\n")
-        f.write(f"git diff:\n{git_diff}\n")
-
-    episode_log_dir = result_dir / "episode_log"
-    episode_log_dir.mkdir(parents=True, exist_ok=True)
-
-    log_episode_path = result_dir / "log_episode.tsv"
-    log_episode_file = None
-    log_episode_writer = None
-
-    # env setup
-    env = make_env(args.env_id, args.env_factory, result_dir=result_dir)
-    env.unwrapped.max_step_count = args.max_step_count
-    env.action_space.seed(seed)
-
-    eval_range = env.unwrapped.eval_range
-
-    start_time = time.time()
-
-    # start the game
-    global_step = 0
-    score_list = []
-    score_sum_all = 0.0
-    episode_count = 0
-    success_list = []
-    success_sum_all = 0.0
-    success_episode_count = 0
-    best_score = -float("inf")
-    best_score_per_arena: dict[str, float] = {}
-    # Don't reset the env here — the first iteration of the episode loop
-    # does that with seed=seed (was: double-reset wasted route 0 in the
-    # bench2drive sequential cursor and confused the eval writer).
-    step_limit = args.step_limit
-    episode_limit = args.episode_limit
-    time_limit_sec = args.time_limit_hour * 3600
-    checkpoint_interval = max(1, step_limit // 10)
-
-    # The zero-shot VLM baseline is not trained, so it has no network to build
-    # and nothing to optimize.
-    # Every agent composes its own language input; the env only publishes state.
-    # The chain of thought writes into the same conversation, so the builder is
-    # made before the network that carries the chain.
-    prompt_builder = build_prompt_builder(env, args)
-
-    trains_a_network = args.agent_type != "zeroshot_vlm"
-    network = (
-        build_network(
-            args,
-            observation_space_shape=env.observation_space["image"].shape,
-            action_space_shape=env.action_space.shape,
-            prompt_builder=prompt_builder,
-            device=torch.device("cuda"),
-        )
-        if trains_a_network
-        else None
-    )
-
-    agent = build_agent(env, network, prompt_builder, args)
-
-    parameter_count = sum(p.numel() for p in agent.network.parameters()) if trains_a_network else 0
-    print(f"Parameter count: {parameter_count:,}")
-
-    episode_id = 0
-    if args.resume_dir is not None:
-        resume_state = load_resume_state(Path(args.resume_dir), network, agent, env)
-        global_step = resume_state["global_step"]
-        episode_id = resume_state["episode_id"]
-        episode_count = resume_state["episode_count"]
-        score_sum_all = resume_state["score_sum_all"]
-        success_sum_all = resume_state["success_sum_all"]
-        success_episode_count = resume_state["success_episode_count"]
-        best_score = resume_state["best_score"]
-        score_list = list(resume_state["score_list"])
-        success_list = list(resume_state["success_list"])
-        best_score_per_arena = dict(resume_state["best_score_per_arena"])
-        print(f"Resumed from {args.resume_dir}: global_step={global_step} episode_id={episode_id}")
-        set_global_step = getattr(env.unwrapped, "set_global_step", None)
-        if set_global_step is not None:
-            set_global_step(global_step)
-
-    while True:
-        # Stop when the env has dispensed every scenario in a fixed playlist:
-        # Animal-AI's "sequential" and "eval" arena orders, Bench2Drive220's
-        # sequential runtime. An env with no finite playlist does not publish
-        # the flag and is left to episode_limit / step_limit.
-        if getattr(env.unwrapped, "is_exhausted", False):
-            break
-
-        # Stop once we've run the configured number of episodes.
-        if episode_id >= episode_limit:
-            break
-
-        # initialize episode (seed only the first call so the gym RNG is
-        # set once; subsequent resets keep advancing it).
-        obs, reset_info = env.reset(seed=seed) if episode_id == 0 else env.reset()
-
-        # initial action
-        result = agent.select_action(global_step, obs, 0.0, False, False, reset_info)
-        action = result.action
-
-        # initial render. The trainer only owns the environment / observation
-        # panels; goal, bev, ... arrive via result.panels.
-        obs_for_render = obs["image"].copy().transpose(1, 2, 0)
-        obs_viz = _viz_resize(obs_for_render, args.render_scale)
-        panels = {
-            "environment": overlay_caption(env.render(), result.texts["prompt"]),
-            "observation": obs_viz,
-            **result.panels,
-        }
-        initial_rgb_image = concat_labeled_images(panels)
-        bgr_image_list = [cv2.cvtColor(initial_rgb_image, cv2.COLOR_RGB2BGR)]
-
-        # action and reward history for this episode
-        action_list = []
-        reward_list = []
-        obs_list = [obs["image"].copy()]
-        # one entry per rendered frame, so the initial render leads
-        text_list = [result.texts]
-        # Animal-AI reports the agent's arena position every step; an env with no
-        # arena reports none and this stays empty.
-        log_position = "agent_xyz" in reset_info
-        xyz_list = []
-
-        while True:
-            global_step += 1
-
-            # step
-            env_step_start = time.time()
-            obs, reward, terminated, truncated, env_info = env.step(action)
-            env_step_time_msec = (time.time() - env_step_start) * 1000
-
-            # save action, reward, and observation
-            action_list.append(action.copy())
-            reward_list.append(reward)
-            obs_list.append(obs["image"].copy())
-            if log_position:
-                xyz_list.append(env_info["agent_xyz"])
-
-            agent_step_start = time.time()
-            result = agent.step(global_step, obs, reward, terminated, truncated, env_info)
-            action = result.action
-            agent_step_time_msec = (time.time() - agent_step_start) * 1000
-
-            # render
-            obs_for_render = obs["image"].copy().transpose(1, 2, 0)
-
-            # log: metrics are already scalar telemetry (images live in panels)
-            elapsed_time_sec = time.time() - start_time
-            elapsed_time_min = elapsed_time_sec / 60
-            data_dict = {
-                "global_step": global_step,
-                "elapsed_time_min": elapsed_time_min,
-                "SPS": global_step / elapsed_time_sec,
-                "reward": reward,
-                "env_step_msec": env_step_time_msec,
-                "agent_step_msec": agent_step_time_msec,
-                **result.metrics,
-            }
-            wandb.log(data_dict)
-
-            obs_viz = _viz_resize(obs_for_render, args.render_scale)
-            panels = {
-                "environment": overlay_caption(env.render(), result.texts["prompt"]),
-                "observation": obs_viz,
-                **result.panels,
-            }
-            rgb_image = concat_labeled_images(panels)
-            bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
-            bgr_image_list.append(bgr_image)
-            text_list.append(result.texts)
-            if args.render:
-                cv2.imshow(args.env_id, bgr_image)
-                cv2.waitKey(1)
-
-            if global_step % checkpoint_interval == 0:
-                save_checkpoint(result_dir, network, agent)
-
-            if terminated or truncated:
-                break
-
-            if global_step >= step_limit:
-                break
-
-            if time.time() - start_time >= time_limit_sec:
-                break
-
-        if global_step >= step_limit:
-            break
-
-        if time.time() - start_time >= time_limit_sec:
-            break
-
-        score = env_info["episode"]["r"]
-        score_list.append(score)
-        score_list = score_list[-eval_range:]
-        recent_average_score = np.mean(score_list)
-        score_sum_all += float(score)
-        episode_count += 1
-        total_average_score = score_sum_all / episode_count
-
-        if args.normalizing_by_return:
-            agent.reward_processor.update(score)
-
-        elapsed_time_sec = time.time() - start_time
-        elapsed_time_hour = elapsed_time_sec / 3600
-        data_dict = {
-            "global_step": global_step,
-            "episode_id": episode_id,
-            "episodic_return": env_info["episode"]["r"],
-            "episodic_length": env_info["episode"]["l"],
-            "SPS": global_step / elapsed_time_sec,
-            "elapsed_time_hour": elapsed_time_hour,
-            "total_average_score": total_average_score,
-        }
-        # Bench2Drive sequential-mode bookkeeping: surface which scenario
-        # just finished so a wandb sweep across the 220 routes is plottable.
-        if "scenario_index" in env_info:
-            data_dict["scenario_index"] = env_info["scenario_index"]
-            data_dict["scenarios_done"] = int(env_info["scenario_index"]) + 1
-            data_dict["scenarios_total"] = env_info["scenarios_total"]
-        # The env auto-flushes its Bench2Drive eval artifacts on the
-        # terminating step and exposes the summary scores here.
-        for k, v in env_info.get("eval_summary", {}).items():
+    data_dict = {
+        "global_step": state.global_step,
+        "episode_id": state.episode_id,
+        "episodic_return": env_info["episode"]["r"],
+        "episodic_length": env_info["episode"]["l"],
+        "SPS": state.global_step / elapsed_time_sec,
+        "elapsed_time_hour": elapsed_time_sec / 3600,
+        "total_average_score": state.score_sum_all / state.episode_count,
+    }
+    # Bench2Drive sequential-mode bookkeeping: surface which scenario
+    # just finished so a wandb sweep across the 220 routes is plottable.
+    if "scenario_index" in env_info:
+        data_dict["scenario_index"] = env_info["scenario_index"]
+        data_dict["scenarios_done"] = int(env_info["scenario_index"]) + 1
+        data_dict["scenarios_total"] = env_info["scenarios_total"]
+    # The env auto-flushes its Bench2Drive eval artifacts on the
+    # terminating step and exposes the summary scores here.
+    if "eval_summary" in env_info:
+        for k, v in env_info["eval_summary"].items():
             if isinstance(v, (int, float)):
                 data_dict[f"eval/{k}"] = v
-        # for animalai_env
-        if "pass_mark" in env_info:
-            success = float(score >= env_info["pass_mark"])
-            data_dict["success"] = success
-            success_sum_all += success
-            success_episode_count += 1
-            success_list.append(success)
-            success_list = success_list[-eval_range:]
-            data_dict["success_episode_count"] = success_episode_count
-            data_dict["total_success_rate"] = success_sum_all / success_episode_count
-            if len(success_list) >= eval_range:
-                data_dict["recent_success_rate"] = float(np.mean(success_list))
-            arena_name = env_info.get("arena_name", "")
-            if arena_name:
-                data_dict[f"success/{arena_name}"] = success
-                data_dict[f"episodic_return/{arena_name}"] = score
-            if "cleared_count" in env_info:
-                data_dict["cleared_count"] = env_info["cleared_count"]
-                data_dict["stage"] = env_info["stage"]
-                data_dict["round_index"] = env_info["round_index"]
-                data_dict["round_success_rate"] = env_info["round_success_rate"]
-                data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
-                for level, rate in env_info["last_round_level_success_rate"].items():
-                    data_dict[f"last_round_success_rate/{level}"] = rate
-                data_dict["advanced"] = float(env_info["advanced"])
-        if len(score_list) >= eval_range:
-            data_dict["recent_average_score"] = recent_average_score
-        wandb.log(data_dict)
-
-        if log_episode_writer is None:
-            log_episode_file = open(log_episode_path, "w", newline="")
-            fieldnames = list(data_dict.keys()) + [
-                "recent_average_score",
-                "recent_success_rate",
-            ]
-            log_episode_writer = csv.DictWriter(
-                log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
-            )
-            log_episode_writer.writeheader()
-        log_episode_writer.writerow(data_dict)
-        log_episode_file.flush()
-
-        if episode_id % args.print_interval == 0:
-            print(
-                f"Ep: {episode_id}\tStep: {global_step}\tLast score: {score:.2f}\tAverage score: {recent_average_score:.2f}\tLength: {env_info['episode']['l']:.2f}\tElapsed time: {elapsed_time_hour:.2f}h"
-            )
-
-        episode_end_info = agent.on_episode_end(score)
-        wandb.log(episode_end_info)
-
+    # for animalai_env
+    if "pass_mark" in env_info:
+        success = float(score >= env_info["pass_mark"])
+        data_dict["success"] = success
+        state.success_sum_all += success
+        state.success_episode_count += 1
+        state.success_list.append(success)
+        state.success_list = state.success_list[-eval_range:]
+        data_dict["success_episode_count"] = state.success_episode_count
+        data_dict["total_success_rate"] = state.success_sum_all / state.success_episode_count
+        if len(state.success_list) >= eval_range:
+            data_dict["recent_success_rate"] = float(np.mean(state.success_list))
         arena_name = env_info["arena_name"] if "arena_name" in env_info else ""
-
         if arena_name:
-            arena_is_best = (
-                arena_name not in best_score_per_arena or score > best_score_per_arena[arena_name]
-            )
-            if arena_is_best:
-                best_score_per_arena[arena_name] = score
-                save_episode_data(
-                    episode_log_dir,
-                    f"best_{arena_name}",
-                    bgr_image_list,
-                    action_list,
-                    reward_list,
-                    obs_list,
-                    text_list,
-                    xyz_list,
-                )
-        else:
-            is_best = score > best_score
-            if is_best:
-                with open(result_dir / "best_score.txt", "w") as f:
-                    f.write(f"{episode_id + 1}\t{score:.2f}")
-                best_score = score
-                save_episode_data(
-                    episode_log_dir,
-                    "best_episode",
-                    bgr_image_list,
-                    action_list,
-                    reward_list,
-                    obs_list,
-                    text_list,
-                    xyz_list,
-                )
+            data_dict[f"success/{arena_name}"] = success
+            data_dict[f"episodic_return/{arena_name}"] = score
+        if "cleared_count" in env_info:
+            data_dict["cleared_count"] = env_info["cleared_count"]
+            data_dict["stage"] = env_info["stage"]
+            data_dict["round_index"] = env_info["round_index"]
+            data_dict["round_success_rate"] = env_info["round_success_rate"]
+            data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
+            for level, rate in env_info["last_round_level_success_rate"].items():
+                data_dict[f"last_round_success_rate/{level}"] = rate
+            data_dict["advanced"] = float(env_info["advanced"])
+    if len(state.score_list) >= eval_range:
+        data_dict["recent_average_score"] = float(np.mean(state.score_list))
+    return data_dict
 
-        if episode_id == 0 or (episode_id + 1) % args.image_save_interval == 0:
-            save_episode_data(
-                episode_log_dir,
-                f"ep_{episode_id + 1:08d}",
-                bgr_image_list,
-                action_list,
-                reward_list,
-                obs_list,
-                text_list,
-                xyz_list,
-            )
 
-        # Persist the light resume state every episode (the heavy weights /
-        # optimizer files follow the checkpoint_interval cadence above).
-        train_state = {
-            "global_step": global_step,
-            "episode_id": episode_id + 1,
-            "episode_count": episode_count,
-            "score_sum_all": float(score_sum_all),
-            "success_sum_all": float(success_sum_all),
-            "success_episode_count": success_episode_count,
-            "best_score": float(best_score),
-            "score_list": [float(s) for s in score_list],
-            "success_list": [float(s) for s in success_list],
-        }
-        get_curriculum = getattr(env.unwrapped, "get_curriculum_state", None)
-        if get_curriculum is not None:
-            curriculum = get_curriculum()
-            train_state["curriculum_progress"] = curriculum["progress"]
-            write_arena_stats(result_dir / "arena_stats.tsv", curriculum, best_score_per_arena)
-            write_success_rate(result_dir / "success_rate.csv", curriculum)
-        (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
-
-        episode_id += 1
-
-    save_checkpoint(result_dir, network, agent)
-
-    env.close()
-
+def final_evaluation(
+    args: DictConfig, agent, network, env, seed: int, global_step: int, result_dir: Path
+) -> None:
+    """Post-training evaluation: the Animal-AI Testbed sweep for AnimalAI runs,
+    and the Bench2Drive final summary the closed env stashed on itself."""
     if args.env_id == "AnimalAI-v0" and not args.debug:
         from test_trained_agent import run_testbed
 
@@ -685,6 +390,214 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         for k, v in final_eval_summary.items():
             print(f"  {k}: {v}")
 
+
+def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    wandb.init(
+        project=f"vla_streaming_rl_{args.env_id}",
+        config=OmegaConf.to_container(args, resolve=True),
+        name=exp_name,
+        group=args.wandb_group,
+        save_code=True,
+        settings=wandb.Settings(quiet=True),
+        dir=str(result_dir),
+    )
+
+    seed_everything(seed)
+    with open(result_dir / "seed.txt", "w") as f:
+        f.write(str(seed))
+    write_git_info(result_dir)
+
+    episode_log_dir = result_dir / "episode_log"
+    episode_log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_episode_path = result_dir / "log_episode.tsv"
+    log_episode_file = None
+    log_episode_writer = None
+
+    # env setup
+    env = make_env(args.env_id, args.env_factory, result_dir=result_dir)
+    env.unwrapped.max_step_count = args.max_step_count
+    env.action_space.seed(seed)
+
+    eval_range = env.unwrapped.eval_range
+
+    start_time = time.time()
+
+    state = TrainState.fresh()
+    best_score_per_arena: dict[str, float] = {}
+    step_limit = args.step_limit
+    episode_limit = args.episode_limit
+    time_limit_sec = args.time_limit_hour * 3600
+    checkpoint_interval = max(1, step_limit // 10)
+
+    def out_of_budget() -> bool:
+        return state.global_step >= step_limit or time.time() - start_time >= time_limit_sec
+
+    # Every agent composes its own language input; the env only publishes state.
+    # The chain of thought writes into the same conversation, so the builder is
+    # made before the network that carries the chain.
+    network, agent = build_all(env, args)
+
+    parameter_count = (
+        sum(p.numel() for p in agent.network.parameters()) if network is not None else 0
+    )
+    print(f"Parameter count: {parameter_count:,}")
+
+    if args.resume_dir is not None:
+        state, best_score_per_arena = load_resume_state(Path(args.resume_dir), network, agent, env)
+        print(
+            f"Resumed from {args.resume_dir}: "
+            f"global_step={state.global_step} episode_id={state.episode_id}"
+        )
+        set_global_step = getattr(env.unwrapped, "set_global_step", None)
+        if set_global_step is not None:
+            set_global_step(state.global_step)
+
+    while True:
+        # Stop when the env has dispensed every scenario in a fixed playlist:
+        # Animal-AI's "sequential" and "eval" arena orders, Bench2Drive220's
+        # sequential runtime. An env with no finite playlist does not publish
+        # the flag and is left to episode_limit / step_limit.
+        if getattr(env.unwrapped, "is_exhausted", False):
+            break
+
+        # Stop once we've run the configured number of episodes.
+        if state.episode_id >= episode_limit:
+            break
+
+        # initialize episode (seed only the first call so the gym RNG is
+        # set once; subsequent resets keep advancing it).
+        obs, reset_info = env.reset(seed=seed) if state.episode_id == 0 else env.reset()
+
+        # initial action
+        result = agent.select_action(state.global_step, obs, 0.0, False, False, reset_info)
+        action = result.action
+
+        # The trainer only owns the environment / observation panels; goal,
+        # bev, ... arrive via result.panels. The initial render leads.
+        record = EpisodeRecord.fresh()
+        rgb_image = render_frame(env, obs, result, args.render_scale)
+        record.bgr_images.append(cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
+        record.observations.append(obs["image"].copy())
+        record.texts.append(result.texts)
+        # Animal-AI reports the agent's arena position every step; an env with no
+        # arena reports none and record.xyzs stays empty.
+        log_position = "agent_xyz" in reset_info
+
+        while True:
+            state.global_step += 1
+
+            # step
+            env_step_start = time.time()
+            obs, reward, terminated, truncated, env_info = env.step(action)
+            env_step_time_msec = (time.time() - env_step_start) * 1000
+
+            record.actions.append(action.copy())
+            record.rewards.append(reward)
+            record.observations.append(obs["image"].copy())
+            if log_position:
+                record.xyzs.append(env_info["agent_xyz"])
+
+            agent_step_start = time.time()
+            result = agent.step(state.global_step, obs, reward, terminated, truncated, env_info)
+            action = result.action
+            agent_step_time_msec = (time.time() - agent_step_start) * 1000
+
+            # log: metrics are already scalar telemetry (images live in panels)
+            elapsed_time_sec = time.time() - start_time
+            wandb.log(
+                {
+                    "global_step": state.global_step,
+                    "elapsed_time_min": elapsed_time_sec / 60,
+                    "SPS": state.global_step / elapsed_time_sec,
+                    "reward": reward,
+                    "env_step_msec": env_step_time_msec,
+                    "agent_step_msec": agent_step_time_msec,
+                    **result.metrics,
+                }
+            )
+
+            rgb_image = render_frame(env, obs, result, args.render_scale)
+            bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+            record.bgr_images.append(bgr_image)
+            record.texts.append(result.texts)
+            if args.render:
+                cv2.imshow(args.env_id, bgr_image)
+                cv2.waitKey(1)
+
+            if state.global_step % checkpoint_interval == 0:
+                save_checkpoint(result_dir, network, agent)
+
+            if terminated or truncated:
+                break
+
+            if out_of_budget():
+                break
+
+        if out_of_budget():
+            break
+
+        score = env_info["episode"]["r"]
+        if args.normalizing_by_return:
+            agent.reward_processor.update(score)
+
+        elapsed_time_sec = time.time() - start_time
+        data_dict = build_episode_log(state, env_info, eval_range, elapsed_time_sec)
+        wandb.log(data_dict)
+
+        if log_episode_writer is None:
+            log_episode_file = open(log_episode_path, "w", newline="")
+            fieldnames = list(data_dict.keys()) + [
+                "recent_average_score",
+                "recent_success_rate",
+            ]
+            log_episode_writer = csv.DictWriter(
+                log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
+            )
+            log_episode_writer.writeheader()
+        log_episode_writer.writerow(data_dict)
+        log_episode_file.flush()
+
+        if state.episode_id % args.print_interval == 0:
+            recent_average_score = float(np.mean(state.score_list))
+            print(
+                f"Ep: {state.episode_id}\tStep: {state.global_step}\tLast score: {score:.2f}\tAverage score: {recent_average_score:.2f}\tLength: {env_info['episode']['l']:.2f}\tElapsed time: {elapsed_time_sec / 3600:.2f}h"
+            )
+
+        episode_end_info = agent.on_episode_end(score)
+        wandb.log(episode_end_info)
+
+        arena_name = env_info["arena_name"] if "arena_name" in env_info else ""
+
+        if arena_name:
+            arena_is_best = (
+                arena_name not in best_score_per_arena or score > best_score_per_arena[arena_name]
+            )
+            if arena_is_best:
+                best_score_per_arena[arena_name] = score
+                save_episode_data(episode_log_dir, f"best_{arena_name}", record)
+        else:
+            is_best = score > state.best_score
+            if is_best:
+                with open(result_dir / "best_score.txt", "w") as f:
+                    f.write(f"{state.episode_id + 1}\t{score:.2f}")
+                state.best_score = score
+                save_episode_data(episode_log_dir, "best_episode", record)
+
+        if state.episode_id == 0 or (state.episode_id + 1) % args.image_save_interval == 0:
+            save_episode_data(episode_log_dir, f"ep_{state.episode_id + 1:08d}", record)
+
+        state.episode_id += 1
+        save_train_state(result_dir, state, env, best_score_per_arena)
+
+    save_checkpoint(result_dir, network, agent)
+
+    env.close()
+
+    final_evaluation(args, agent, network, env, seed, state.global_step, result_dir)
+
     if log_episode_file is not None:
         log_episode_file.close()
     wandb.finish()
@@ -707,12 +620,10 @@ def hydra_main(cfg: DictConfig) -> None:
     if cfg.off_wandb:
         os.environ["WANDB_MODE"] = "offline"
 
-    if not os.environ.get("DISPLAY"):
-        print("Because a headless environment is detected, rendering is automatically disabled.")
-        cfg.render = False
+    cfg.render = disable_render_if_headless(cfg.render)
 
     exp_name = f"{cfg.agent_type.upper()}_{cfg.exp_name}"
-    seed = cfg.seed if cfg.seed != -1 else np.random.randint(0, 10000)
+    seed = resolve_seed(cfg.seed)
 
     for i in range(cfg.trial_num):
         suffix = f"_{i:02d}" if cfg.trial_num > 1 else ""

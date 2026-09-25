@@ -2,8 +2,8 @@
 """Animate the linear probe's predicted vs. true agent position over time.
 
 Reads a ``probe_data.npz`` produced by scripts/collect_probe_data.py
-(features, xyz, arena, episode arrays), fits the same closed-form ridge
-linear probe as scripts/compute_linear_probe.py (split by episode: 9 train /
+(features, xyz, arena, episode arrays), fits a closed-form ridge
+linear probe (split by episode: 9 train /
 1 valid out of the default 10 collected episodes), and renders a single
 video (one train episode, then one valid episode) with the actual gameplay
 footage (from collect_probe_data.py's saved per-episode video) on the left

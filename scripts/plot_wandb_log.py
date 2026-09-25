@@ -21,61 +21,13 @@ Examples:
 """
 
 import argparse
-import json
 import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import wandb.proto.wandb_internal_pb2 as pb
-from wandb.sdk.internal import datastore
 
-
-def find_wandb_file(run_dir: Path) -> Path:
-    candidates = list(run_dir.rglob("*.wandb"))
-    if not candidates:
-        raise FileNotFoundError(f"No .wandb file found under {run_dir}")
-    if len(candidates) > 1:
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
-
-
-def load_history(wandb_file: Path) -> dict[str, np.ndarray]:
-    """Return {key: 1-D array} for every scalar logged via wandb.log."""
-    ds = datastore.DataStore()
-    ds.open_for_scan(str(wandb_file))
-
-    columns: dict[str, list] = {}
-    row_idx = 0
-
-    while True:
-        data = ds.scan_data()
-        if data is None:
-            break
-        rec = pb.Record()
-        rec.ParseFromString(data)
-        if rec.WhichOneof("record_type") != "history":
-            continue
-
-        for it in rec.history.item:
-            key = "/".join(it.nested_key) if list(it.nested_key) else it.key
-            try:
-                value = json.loads(it.value_json)
-            except (ValueError, json.JSONDecodeError):
-                continue
-            if not isinstance(value, (int, float)):
-                continue
-            col = columns.setdefault(key, [])
-            col.extend([np.nan] * (row_idx - len(col)))
-            col.append(float(value))
-
-        row_idx += 1
-
-    for key, col in columns.items():
-        col.extend([np.nan] * (row_idx - len(col)))
-        columns[key] = np.asarray(col, dtype=np.float64)
-
-    return columns
+from vla_streaming_rl.wandb_reader import find_wandb_file, load_history
 
 
 def episode_boundaries(history: dict[str, np.ndarray], x_key: str, marker_key: str) -> np.ndarray:
@@ -114,16 +66,16 @@ def split_by_episode(gs: np.ndarray, y: np.ndarray, boundaries: np.ndarray) -> l
 
 
 def smooth(y: np.ndarray, window: int) -> np.ndarray:
-    if window <= 1:
-        return y
     mask = ~np.isnan(y)
-    out = np.full_like(y, np.nan)
     valid_y = y[mask]
-    if len(valid_y) == 0:
-        return out
+    # A series shorter than the window is returned as is: np.convolve with
+    # mode="same" would return `window` values for it, which no longer line up
+    # with the mask.
+    if window <= 1 or len(valid_y) < window:
+        return y
+    out = np.full_like(y, np.nan)
     kernel = np.ones(window) / window
-    smoothed = np.convolve(valid_y, kernel, mode="same")
-    out[mask] = smoothed
+    out[mask] = np.convolve(valid_y, kernel, mode="same")
     return out
 
 
@@ -244,14 +196,11 @@ def _resolve_gamma(run_dir: Path, cli_gamma: float | None) -> float:
         return cli_gamma
     cfg = run_dir / ".hydra" / "config.yaml"
     if cfg.exists():
-        try:
-            from omegaconf import OmegaConf
+        from omegaconf import OmegaConf
 
-            data = OmegaConf.load(cfg)
-            if data.get("gamma") is not None:
-                return float(data["gamma"])
-        except Exception:
-            pass
+        data = OmegaConf.load(cfg)
+        if "gamma" in data and data["gamma"] is not None:
+            return float(data["gamma"])
     return 0.99
 
 
@@ -271,7 +220,7 @@ def plot_q_calibration(
     """Scatter Q vs realized discounted return-to-go (colored by episode id),
     plus the per-episode mean gap (Q - return). A growing positive gap for late
     episodes is the classic critic-overestimation collapse."""
-    q_key = args.keys[0] if args.keys else "value"
+    q_key = args.keys[0]
     if q_key not in history:
         raise SystemExit(f"Q key '{q_key}' not found in run")
     gamma = _resolve_gamma(args.run_dir, args.gamma)
@@ -394,8 +343,8 @@ def _render_calibration(
 
     # actual score (episodic return) on a twin axis, smoothed
     handles = [gap_line]
-    marker = history.get(args.episode_key)
-    if marker is not None:
+    if args.episode_key in history:
+        marker = history[args.episode_key]
         scores = marker[~np.isnan(marker)]
         if len(scores):
             ax2b = ax2.twinx()
@@ -567,22 +516,25 @@ def main() -> None:
         raise SystemExit(f"x-axis key '{args.x_key}' not found and no '_step' fallback")
     x = history[x_key]
 
-    if args.per_gamma:
-        plot_per_gamma(args, history, x, x_key)
-        return
+    # One plotting mode per flag; the first enabled one wins, the key-vs-step
+    # plot is the fallback.
+    modes = [
+        (args.per_gamma, plot_per_gamma),
+        (args.calibration_per_gamma, plot_calibration_per_gamma),
+        (args.calibration, plot_q_calibration),
+        (args.per_episode, plot_per_episode),
+    ]
+    for enabled, plot in modes:
+        if enabled:
+            plot(args, history, x, x_key)
+            return
+    plot_keys(args, history, x, x_key)
 
-    if args.calibration_per_gamma:
-        plot_calibration_per_gamma(args, history, x, x_key)
-        return
 
-    if args.calibration:
-        plot_q_calibration(args, history, x, x_key)
-        return
-
-    if args.per_episode:
-        plot_per_episode(args, history, x, x_key)
-        return
-
+def plot_keys(
+    args: argparse.Namespace, history: dict[str, np.ndarray], x: np.ndarray, x_key: str
+) -> None:
+    """The default mode: each requested key against the x-axis."""
     fig, ax = plt.subplots(figsize=(10, 6))
     for key in args.keys:
         y = history[key]

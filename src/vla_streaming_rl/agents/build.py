@@ -3,7 +3,26 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.prompt import PromptBuilder, build_prompt_builder
+
+
+def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module | None, object]:
+    """The prompt builder, network and agent a config describes, wired
+    together the way every entry script needs them; the zero-shot VLM baseline
+    carries no network."""
+    prompt_builder = build_prompt_builder(env, args)
+    network = None
+    if args.agent_type != "zeroshot_vlm":
+        from vla_streaming_rl.networks.build import build_network
+
+        network = build_network(
+            args,
+            observation_space_shape=env.observation_space["image"].shape,
+            action_space_shape=env.action_space.shape,
+            prompt_builder=prompt_builder,
+            device=torch.device("cuda"),
+        )
+    return network, build_agent(env, network, prompt_builder, args)
 
 
 def build_agent(

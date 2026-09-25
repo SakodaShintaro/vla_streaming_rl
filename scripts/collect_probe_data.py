@@ -6,55 +6,36 @@ Runs a frozen, trained policy through the same Animal-AI arena (``ARENA_STEM``)
 hands to its policy/value/prediction heads (``last_features``)
 together with the agent's true arena position (``info["agent_xyz"]``). Also
 renders the same panel video train.py writes, for visual sanity-checking.
-Saves everything to ``probe_data.npz``; run scripts/compute_linear_probe.py
-on that file to fit and evaluate the probe.
+Saves everything to ``probe_data.npz``; run scripts/visualize_linear_probe.py
+on that file to fit the probe and render it.
 
 ``ARENA_STEM`` names a competition arena, so run this with
 ``env=animalai env_factory.mode=eval`` (the env resolves a pinned arena
 against the arenas its selector serves).
 """
 
-import logging
-import os
-import random
-import warnings
-from pathlib import Path
+from vla_streaming_rl.script_setup import setup_runtime
 
-os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts=false"
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
-warnings.filterwarnings("ignore", message=".*local_dir_use_symlinks.*")
-warnings.filterwarnings("ignore", message=".*Attempting to run cuBLAS.*")
-logging.getLogger("httpx").setLevel(logging.WARNING)
+setup_runtime()
+
+import os
+from pathlib import Path
 
 import hydra
 import imageio
 import numpy as np
-import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from vla_streaming_rl.agents.build import build_agent
-from vla_streaming_rl.agents.prompt import build_prompt_builder
-from vla_streaming_rl.networks.build import build_network
-from vla_streaming_rl.utils import concat_labeled_images, overlay_caption
+from vla_streaming_rl.agents.build import build_all
+from vla_streaming_rl.checkpoint import load_checkpoint_weights
+from vla_streaming_rl.script_setup import resolve_seed, seed_everything
+from vla_streaming_rl.utils import render_frame
 from vla_streaming_rl.wrappers import make_env
-
-torch.set_float32_matmul_precision("high")
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # TODO: swap for a hand-authored arena yaml once one exists.
 ARENA_STEM = "01-30-03"
 NUM_REPEATS = 10
-
-
-def load_checkpoint_weights(checkpoint_dir: Path, network: torch.nn.Module) -> None:
-    checkpoint_path = checkpoint_dir / "checkpoint.pt"
-    trainable_state = torch.load(checkpoint_path, map_location="cuda")
-    module = network._orig_mod if hasattr(network, "_orig_mod") else network
-    missing, unexpected = module.load_state_dict(trainable_state, strict=False)
-    if unexpected:
-        raise ValueError(f"checkpoint parameters not found in the network: {unexpected[:5]}")
-    print(f"Loaded {len(trainable_state)} weight tensors from {checkpoint_path}")
 
 
 def collect_arena(
@@ -77,12 +58,7 @@ def collect_arena(
     episode_list.append(episode_id)
     action = result.action
 
-    obs_viz = (obs["image"].copy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
-    panels = {
-        "environment": overlay_caption(env.render(), result.texts["prompt"]),
-        "observation": obs_viz,
-    }
-    frame_list = [concat_labeled_images(panels)]
+    frame_list = [render_frame(env, obs, result, 1.0)]
 
     while True:
         obs, reward, terminated, truncated, env_info = env.step(action)
@@ -93,12 +69,7 @@ def collect_arena(
         episode_list.append(episode_id)
         action = result.action
 
-        obs_viz = (obs["image"].copy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
-        panels = {
-            "environment": overlay_caption(env.render(), result.texts["prompt"]),
-            "observation": obs_viz,
-        }
-        frame_list.append(concat_labeled_images(panels))
+        frame_list.append(render_frame(env, obs, result, 1.0))
 
         if terminated or truncated:
             break
@@ -111,27 +82,14 @@ def main(args: DictConfig, result_dir: Path) -> None:
     video_dir = result_dir / "video"
     video_dir.mkdir(parents=True, exist_ok=True)
 
-    seed = args.seed if args.seed != -1 else np.random.randint(0, 10000)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.cuda.set_device(0)
+    seed = resolve_seed(args.seed)
+    seed_everything(seed)
 
     env = make_env(args.env_id, args.env_factory, result_dir=None)
     env.action_space.seed(seed)
 
-    prompt_builder = build_prompt_builder(env, args)
-    network = build_network(
-        args,
-        observation_space_shape=env.observation_space["image"].shape,
-        action_space_shape=env.action_space.shape,
-        prompt_builder=prompt_builder,
-        device=torch.device("cuda"),
-    )
-    agent = build_agent(env, network, prompt_builder, args)
-    load_checkpoint_weights(Path(args.resume_dir), network)
+    network, agent = build_all(env, args)
+    load_checkpoint_weights(Path(args.resume_dir) / "checkpoint.pt", network)
     network.eval()
 
     print(f"Collecting representations over {NUM_REPEATS} repeats of arena {ARENA_STEM}.")
@@ -173,14 +131,9 @@ def hydra_main(cfg: DictConfig) -> None:
     hydra_output_dir = Path(HydraConfig.get().runtime.output_dir)
     os.chdir(hydra.utils.get_original_cwd())
 
-    if not os.environ.get("DISPLAY"):
-        print("Because a headless environment is detected, rendering is automatically disabled.")
-        cfg.render = False
-
-    if cfg.resume_dir is None:
-        raise ValueError(
-            "collect_probe_data.py requires resume_dir to point at a trained checkpoint directory."
-        )
+    assert cfg.resume_dir is not None, (
+        "collect_probe_data.py requires resume_dir to point at a trained checkpoint directory."
+    )
 
     print(OmegaConf.to_yaml(cfg))
     main(cfg, hydra_output_dir)
