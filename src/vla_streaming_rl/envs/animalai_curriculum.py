@@ -286,7 +286,7 @@ class ArenaSelector:
         return self._successes[arena.name] > 0
 
     def cleared_count(self) -> int:
-        return sum(self.is_cleared(arena) for arena in self.arenas)
+        return sum(self.is_cleared(arena) for arena in self._arena_by_name.values())
 
     def progress_by_group(self) -> list[tuple[str, int, int]]:
         """(group, successes, failures) per arena group over every episode run
@@ -299,7 +299,7 @@ class ArenaSelector:
         curriculum stage.
         """
         counts: dict[str, list[int]] = {}
-        for arena in self.arenas:
+        for arena in self._arena_by_name.values():
             group = counts.setdefault(arena.name.split("-")[0], [0, 0])
             attempts, successes = self._attempts[arena.name], self._successes[arena.name]
             group[0] += successes
@@ -543,7 +543,7 @@ class SequentialSelector(ArenaSelector):
         return (
             f"{(self._next_index - 1) % len(self.arenas) + 1}/{len(self.arenas)}"
             f"  lap:{(self._next_index - 1) // len(self.arenas) + 1}"
-            f"  cleared:{self.cleared_count()}/{len(self.arenas)}"
+            f"  cleared:{self.cleared_count()}/{len(self._arena_by_name)}"
         )
 
     def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
@@ -571,12 +571,14 @@ class RandomSelector(ArenaSelector):
         return self.arenas[int(self._rng.integers(len(self.arenas)))]
 
     def info(self, global_step: int) -> dict:
-        return {"arena_total": len(self.arenas), "cleared_count": self.cleared_count()}
+        return {"arena_total": len(self._arena_by_name), "cleared_count": self.cleared_count()}
 
     def status(self, global_step: int) -> str:
         del global_step
         untried = sum(attempts == 0 for attempts in self._attempts.values())
-        return f"random  cleared:{self.cleared_count()}/{len(self.arenas)}  untried:{untried}"
+        return (
+            f"random  cleared:{self.cleared_count()}/{len(self._arena_by_name)}  untried:{untried}"
+        )
 
 
 def build_selector(

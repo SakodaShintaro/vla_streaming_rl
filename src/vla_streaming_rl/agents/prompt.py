@@ -23,17 +23,13 @@ free of any environment's vocabulary -- they run a model over what they are
 handed and compose no text of their own beyond how a chain is continued.
 """
 
-import csv
 import re
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
-
-ARENA_TASK_CSV = Path("./external/animal-ai/configs/AnimalAI_prompt.csv")
 
 TEXT_ACTION_PROTOCOL = (
     "Reply with <reason>one short sentence on what you see</reason> "
@@ -86,25 +82,6 @@ def user_turn(seconds: float, image, text: str) -> dict:
             {"type": "text", "text": text},
         ],
     }
-
-
-def _load_arena_tasks(env: Env) -> dict[str, str]:
-    """The per-task instruction, keyed by the "XX-YY" prefix of an arena label.
-
-    One row per Olympics task, its columns being category (= level), scenario
-    (= task within that level), a description, and the instruction in Japanese
-    then English. Every arena the selector can serve has to have a row, which is
-    checked here so a missing instruction fails at startup rather than at the
-    episode that draws that arena.
-    """
-    with ARENA_TASK_CSV.open(encoding="utf-8") as csv_file:
-        rows = list(csv.reader(csv_file))[1:]
-    tasks = {f"{int(row[0]):02d}-{int(row[1]):02d}": row[4] for row in rows}
-    assert len(tasks) == len(rows), f"{ARENA_TASK_CSV} repeats a category/scenario pair"
-    assert all(arena.name.rsplit("-", 1)[0] in tasks for arena in env.unwrapped.selector.arenas), (
-        f"{ARENA_TASK_CSV} is missing a row for an arena of the selector"
-    )
-    return tasks
 
 
 class PromptBuilder(ABC):
@@ -255,9 +232,9 @@ ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
 
 ANIMALAI_REFLECTION_REQUEST = (
     "The episode just ended in failure: return {score:+.3f} against pass mark "
-    '{pass_mark:+.3f}. You were following this task instruction: "{task}" '
-    "Rewrite that instruction for the next attempt at this task, keeping what "
-    "worked and changing what led to this failure. Reply with the new "
+    '{pass_mark:+.3f}. Your standing instruction for this task so far: "{task}" '
+    "Write the instruction to follow on the next attempt at this task, keeping "
+    "what worked and fixing what led to this failure. Reply with the "
     "instruction only, at most three sentences."
 )
 
@@ -293,13 +270,15 @@ class AnimalAIPromptBuilder(PromptBuilder):
     """Animal-AI: the framing, this arena's own instruction, and the live
     scalars.
 
-    The instruction is looked up from the episode's arena name rather than
-    handed over as text by the env, so the env carries no vocabulary of its own.
+    Every task's instruction starts empty and is written by
+    :meth:`reflect_on_failure`, so what the prompt says about a task is only
+    what the run's own failures taught it, keyed by the "XX-YY" prefix of the
+    episode's arena name.
     """
 
     def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
         super().__init__(env, history_turns, steps_per_action)
-        self.tasks = _load_arena_tasks(env)
+        self.tasks = {arena.name.rsplit("-", 1)[0]: "" for arena in env.unwrapped.selector.arenas}
         self._task_key = ""
         self._pass_mark = 0.0
         self._forward_speed_sum = 0.0
@@ -334,12 +313,9 @@ class AnimalAIPromptBuilder(PromptBuilder):
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs
         self._task_key = info["arena_name"].rsplit("-", 1)[0]
-        return (
-            f"{ANIMALAI_FRAMING} "
-            f"{self._action_format()} "
-            f"Task: {self.tasks[self._task_key]}. "
-            f"{TEXT_ACTION_PROTOCOL}"
-        )
+        task = self.tasks[self._task_key]
+        task_sentence = f"Task: {task} " if task != "" else ""
+        return f"{ANIMALAI_FRAMING} {self._action_format()} {task_sentence}{TEXT_ACTION_PROTOCOL}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del info
