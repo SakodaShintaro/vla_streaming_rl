@@ -418,7 +418,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
     # env setup
     env = make_env(args.env_id, args.env_factory, result_dir=result_dir)
-    env.unwrapped.max_step_count = args.max_step_count
     env.action_space.seed(seed)
 
     eval_range = env.unwrapped.eval_range

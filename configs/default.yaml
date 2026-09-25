@@ -41,7 +41,6 @@ reset_on_episode_end: true
 normalizing_by_return: false
 image_save_interval: 100
 print_interval: 5
-max_step_count: 100
 debug: false
 text_action: false
 select_margin: 0.0
