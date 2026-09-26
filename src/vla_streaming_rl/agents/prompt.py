@@ -174,11 +174,11 @@ class PromptBuilder(ABC):
     def _rejection_text(self, answer: str) -> str:
         return f"({answer!r} is not an action -- nothing ran.)"
 
-    def reflect_on_failure(self, score: float, generate) -> bool:
+    def reflect(self, score: float, generate) -> bool:
         """Rewrite the ended episode's task instruction off a reflection the
-        model writes, when the episode failed and the builder holds a per-task
-        instruction to rewrite. ``generate`` maps a conversation to the model's
-        reply text. The base builder holds none, so this is a no-op."""
+        model writes, when the builder holds a per-task instruction to rewrite.
+        ``generate`` maps a conversation to the model's reply text. The base
+        builder holds none, so this is a no-op."""
         del score, generate
         return False
 
@@ -231,10 +231,10 @@ ANIMALAI_FRAMING = (
 ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
 
 ANIMALAI_REFLECTION_REQUEST = (
-    "The episode just ended in failure: return {score:+.3f} against pass mark "
+    "The episode just ended in {outcome}: return {score:+.3f} against pass mark "
     '{pass_mark:+.3f}. Your standing instruction for this task so far: "{task}" '
     "Write the instruction to follow on the next attempt at this task, keeping "
-    "what worked and fixing what led to this failure. Reply with the "
+    "what worked and fixing what did not. Reply with the "
     "instruction only, at most three sentences."
 )
 
@@ -271,9 +271,9 @@ class AnimalAIPromptBuilder(PromptBuilder):
     scalars.
 
     Every task's instruction starts empty and is written by
-    :meth:`reflect_on_failure`, so what the prompt says about a task is only
-    what the run's own failures taught it, keyed by the "XX-YY" prefix of the
-    episode's arena name.
+    :meth:`reflect`, so what the prompt says about a task is only what the
+    run's own episodes taught it, keyed by the "XX-YY" prefix of the episode's
+    arena name.
     """
 
     def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
@@ -324,16 +324,20 @@ class AnimalAIPromptBuilder(PromptBuilder):
         self._forward_speed_steps += 1
         return _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)
 
-    def reflect_on_failure(self, score: float, generate) -> bool:
-        """The Animal-AI rewrite: on a failed episode, ask the model, over the
-        episode's own conversation, to rewrite this task's instruction, and
-        keep the rewrite for every later episode of the task. A reply that is
+    def reflect(self, score: float, generate) -> bool:
+        """The Animal-AI rewrite: on every ended episode, ask the model, over
+        the episode's own conversation, to rewrite this task's instruction, and
+        keep the rewrite for every later episode of the task. A failure
+        distills what to change, a success what to hold on to. A reply that is
         empty or would bloat the standing prompt leaves the instruction as it
         was."""
-        if self._task_key == "" or score >= self._pass_mark:
+        if self._task_key == "":
             return False
         request = ANIMALAI_REFLECTION_REQUEST.format(
-            score=score, pass_mark=self._pass_mark, task=self.tasks[self._task_key]
+            outcome="success" if score >= self._pass_mark else "failure",
+            score=score,
+            pass_mark=self._pass_mark,
+            task=self.tasks[self._task_key],
         )
         conversation = self.conversation() + [
             {"role": "user", "content": [{"type": "text", "text": request}]}

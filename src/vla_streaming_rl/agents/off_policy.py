@@ -192,7 +192,7 @@ class OffPolicyAgent(Agent):
     def on_episode_end(self, score: float) -> dict:
         if not self.text_action:
             return {}
-        rewritten = self.prompt_builder.reflect_on_failure(
+        rewritten = self.prompt_builder.reflect(
             score,
             lambda conversation: self.network.cot_module.generator.generate(conversation).text,
         )

@@ -172,7 +172,7 @@ class ZeroShotVLMAgent(Agent):
         return self.select_action(global_step, obs, reward, terminated, truncated, info)
 
     def on_episode_end(self, score: float) -> dict:
-        rewritten = self.prompt_builder.reflect_on_failure(
+        rewritten = self.prompt_builder.reflect(
             score, lambda conversation: self.backend.generate(conversation).text
         )
         if self.reset_on_episode_end:

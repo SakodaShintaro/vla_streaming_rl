@@ -165,6 +165,29 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
             f.write(f"{step}\t" + "\t".join(row) + "\n")
 
 
+def append_task_instruction(
+    path: Path,
+    state: "TrainState",
+    arena_name: str,
+    outcome: str,
+    score: float,
+    instruction: str,
+) -> None:
+    """One row per rewrite of a task instruction, appended as it happens: which
+    episode wrote it, how that episode went, and the instruction the following
+    episodes of the task will read. What lets a lap-over-lap regression be
+    audited against the exact words the arena was attempted under."""
+    is_new = not path.exists()
+    escaped = instruction.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+    with open(path, "a", encoding="utf-8") as f:
+        if is_new:
+            f.write("episode_id\tglobal_step\tarena\toutcome\tscore\tinstruction\n")
+        f.write(
+            f"{state.episode_id}\t{state.global_step}\t{arena_name}\t{outcome}\t"
+            f"{score:.3f}\t{escaped}\n"
+        )
+
+
 def write_git_info(result_dir: Path) -> None:
     """Save branch name, git show -s and git diff results"""
     branch_name = subprocess.run(
@@ -569,6 +592,21 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         wandb.log(episode_end_info)
 
         arena_name = env_info["arena_name"] if "arena_name" in env_info else ""
+
+        rewritten = (
+            "reflection/rewritten" in episode_end_info
+            and episode_end_info["reflection/rewritten"] > 0
+        )
+        if rewritten:
+            task_key = arena_name.rsplit("-", 1)[0]
+            append_task_instruction(
+                result_dir / "task_instructions.tsv",
+                state,
+                arena_name,
+                "success" if score >= env_info["pass_mark"] else "failure",
+                score,
+                agent.prompt_builder.tasks[task_key],
+            )
 
         if arena_name:
             arena_is_best = (
