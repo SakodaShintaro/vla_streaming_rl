@@ -172,9 +172,7 @@ class ZeroShotVLMAgent(Agent):
         return self.select_action(global_step, obs, reward, terminated, truncated, info)
 
     def on_episode_end(self, score: float) -> dict:
-        rewritten = self.prompt_builder.reflect(
-            score, lambda conversation: self.backend.generate(conversation).text
-        )
+        del score
         if self.reset_on_episode_end:
             self.prompt_builder.reset()
             self.held_action = np.zeros(self.action_dim, dtype=np.float32)
@@ -185,7 +183,7 @@ class ZeroShotVLMAgent(Agent):
             # Zero means "generate now", so the first step of an episode decides
             # on that episode's own first frame.
             self.steps_until_next = 0
-        return {"reflection/rewritten": float(rewritten)}
+        return {}
 
     def optimizer_state_dict(self) -> dict:
         # the baseline queries a hosted model; there is nothing to optimize

@@ -190,13 +190,8 @@ class OffPolicyAgent(Agent):
         return step_result
 
     def on_episode_end(self, score: float) -> dict:
-        if not self.text_action:
-            return {}
-        rewritten = self.prompt_builder.reflect(
-            score,
-            lambda conversation: self.network.cot_module.generator.generate(conversation).text,
-        )
-        return {"reflection/rewritten": float(rewritten)}
+        del score
+        return {}
 
     def optimizer_state_dict(self) -> dict:
         return {
