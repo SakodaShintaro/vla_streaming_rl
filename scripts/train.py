@@ -287,7 +287,7 @@ def save_train_state(
 
 
 def build_episode_log(
-    state: TrainState, env_info: dict, eval_range: int, elapsed_time_sec: float
+    state: TrainState, env_info: dict, mode: str, eval_range: int, elapsed_time_sec: float
 ) -> dict:
     """The per-episode wandb row, updating the running counters in ``state``."""
     score = env_info["episode"]["r"]
@@ -333,8 +333,9 @@ def build_episode_log(
         if arena_name:
             data_dict[f"success/{arena_name}"] = success
             data_dict[f"episodic_return/{arena_name}"] = score
-        if "cleared_count" in env_info:
+        if mode in ("success", "random"):
             data_dict["cleared_count"] = env_info["cleared_count"]
+        if mode == "success":
             data_dict["stage"] = env_info["stage"]
             data_dict["round_index"] = env_info["round_index"]
             data_dict["round_success_rate"] = env_info["round_success_rate"]
@@ -421,6 +422,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     env.action_space.seed(seed)
 
     eval_range = env.unwrapped.eval_range
+    # The curriculum mode only exists for AnimalAI; other envs have no mode-specific logs.
+    mode = args.env_factory.mode if args.env_id == "AnimalAI-v0" else ""
 
     start_time = time.time()
 
@@ -543,7 +546,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             agent.reward_processor.update(score)
 
         elapsed_time_sec = time.time() - start_time
-        data_dict = build_episode_log(state, env_info, eval_range, elapsed_time_sec)
+        data_dict = build_episode_log(state, env_info, mode, eval_range, elapsed_time_sec)
         wandb.log(data_dict)
 
         if log_episode_writer is None:
