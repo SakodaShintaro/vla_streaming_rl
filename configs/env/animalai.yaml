@@ -25,8 +25,8 @@ env_factory:
   #               and the run ends there -- a sweep of the training set, so a
   #               second lap would only mix repeats into the score
   #               (steps_per_stage is ignored).
-  #     random  : no curriculum. Every episode draws uniformly at random from
-  #               the whole training set, with no ordering and nothing
+  #     random  : no curriculum. The whole training set in laps, each lap a
+  #               fresh shuffle drawn without replacement, with nothing
   #               withheld (steps_per_stage is ignored).
   #     eval    : run each of the 900 external/animal-ai/configs/competition/
   #               arenas once, in order (the paper's Testbed protocol).

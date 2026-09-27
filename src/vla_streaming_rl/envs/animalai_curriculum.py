@@ -16,8 +16,8 @@ field (see `build_selector`):
               (`SuccessDrivenSelector`).
   - "sequential" no curriculum: every training arena once, in label order,
               then the run ends (`SequentialSelector`, not cycling).
-  - "random"  no curriculum: every episode draws uniformly at random from the
-              whole training set (`RandomSelector`).
+  - "random"  no curriculum: the whole training set in laps, each lap a fresh
+              shuffle drawn without replacement (`RandomSelector`).
   - "eval"    every configs/competition/ arena once, in order -- the
               900-arena Testbed sweep (the same `SequentialSelector`, not
               cycling, so it ends).
@@ -554,21 +554,34 @@ class SequentialSelector(ArenaSelector):
 
 
 class RandomSelector(ArenaSelector):
-    """Every episode drawn uniformly at random from `arenas`.
+    """`arenas` in laps, each lap a fresh shuffle drawn without replacement.
 
-    No curriculum and no ordering: unlike `SequentialSelector(cycle=True)` an
-    arena can repeat before the whole set has been seen, and unlike
-    `StagedSelector` nothing is withheld -- the full set is available from the
-    first episode. The curriculum-free baseline the staged modes are compared
-    against. Runs forever, so train.py's step_limit ends the run.
+    No curriculum: every arena is played exactly once per lap, in an order that
+    changes from lap to lap, and unlike `StagedSelector` nothing is withheld --
+    the full set is available from the first episode. The curriculum-free
+    baseline the staged modes are compared against. Runs forever, so train.py's
+    step_limit ends the run.
     """
 
     def __init__(self, arenas: list[Arena], seed: int):
         super().__init__(arenas)
         self._rng = np.random.default_rng(seed)
+        self._queue: list[str] = []
 
     def next_arena(self, global_step: int) -> Arena:
-        return self.arenas[int(self._rng.integers(len(self.arenas)))]
+        if not self._queue:
+            order = self._rng.permutation(len(self.arenas))
+            self._queue = [self.arenas[int(i)].name for i in order]
+        return self._arena_by_name[self._queue.pop(0)]
+
+    def progress_state(self) -> dict:
+        return {"queue": list(self._queue)}
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
+        """Resume mid-lap: what is left of the lap's draw order."""
+        super().load_state(arena_attempts, arena_successes, progress)
+        known = set(self._attempts)
+        self._queue = [name for name in progress["queue"] if name in known]
 
     def info(self, global_step: int) -> dict:
         return {"arena_total": len(self._arena_by_name), "cleared_count": self.cleared_count()}
