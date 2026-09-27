@@ -72,10 +72,15 @@ cot_pool: mean
 # running them, so replaying one call is several times faster. Off falls back to
 # issuing the step normally.
 cot_cuda_graph: true
-# 全注意層の KV に残す直近トークン数。キャッシュは「システムプロンプト
-# (sink) + この窓」まで StreamingLLM 式に間引かれ、これがモデル文脈と
-# メモリの実質上限になる。線形注意層の要約は全履歴分が残る。
-cot_window_tokens: 8192
+
+chain_generator:
+  _target_: vla_streaming_rl.networks.modules.chain_generator.ChainGenerator
+  _partial_: true
+  model_id: ${vlm_model_id}
+  load_in_4bit: ${vlm_load_in_4bit}
+  max_len: ${max_new_tokens}
+  temperature: ${temperature}
+  window_tokens: 8192
 
 use_lora: false
 vlm_model_id: Qwen/Qwen3.8-27B

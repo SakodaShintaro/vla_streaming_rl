@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 import functools
 
+import hydra
 import torch
 from omegaconf import DictConfig
 from torch import nn
@@ -145,7 +146,7 @@ def build_network(
             bc_loss_weight=args.bc_loss_weight,
             cot_pool=args.cot_pool,
             cot_cuda_graph=args.cot_cuda_graph,
-            cot_window_tokens=args.cot_window_tokens,
+            chain_generator_factory=hydra.utils.instantiate(args.chain_generator),
             prompt_builder=prompt_builder,
         ).to(device)
 

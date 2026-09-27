@@ -20,32 +20,22 @@ class CoTBatch:
 
     def __init__(
         self,
-        model_id: str,
-        load_in_4bit: bool,
+        chain_generator_factory,
         tokens_per_step: int,
-        max_len: int,
-        temperature: float,
         steps_per_chain: int,
-        window_tokens: int,
         prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
         assert steps_per_chain >= 1, f"steps_per_chain must be positive; got {steps_per_chain}"
-        assert max_len >= tokens_per_step, (
-            f"max_len {max_len} below {tokens_per_step}: the pool would stretch a chain "
-            "shorter than one step's read"
-        )
         # Thinking off: with the <think> block left open the model spends the
         # chain reasoning about the request rather than about the scene.
-        self.generator = ChainGenerator(
-            model_id=model_id,
-            load_in_4bit=load_in_4bit,
-            max_len=max_len,
-            temperature=temperature,
-            enable_thinking=False,
-            window_tokens=window_tokens,
-            device=device,
+        self.generator: ChainGenerator = chain_generator_factory(
+            enable_thinking=False, device=device
+        )
+        assert self.generator.max_len >= tokens_per_step, (
+            f"max_len {self.generator.max_len} below {tokens_per_step}: the pool would "
+            "stretch a chain shorter than one step's read"
         )
         self.tokens_per_step = tokens_per_step
         self.steps_per_chain = steps_per_chain
