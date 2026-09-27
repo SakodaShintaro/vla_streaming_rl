@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: MIT
-import functools
 
 import hydra
 import torch
@@ -28,7 +27,7 @@ def _build_value_head(
 ) -> DistributionalValueHead:
     """Build the action-value head for a state of width ``in_channels``.
 
-    Networks receive this (via ``functools.partial`` fixing every config knob but
+    Networks receive this (via the config's ``value_head`` node fixing every knob but
     ``in_channels`` and ``action_dim``) and call it with their own state width and
     action dim — the two shape values only the network knows. All value-related
     construction — critic architecture, discount, bins, hidden sizes — lives here,
@@ -84,20 +83,10 @@ def build_network(
             temporal_model_type=args.temporal_model_type,
         ).to(device)
 
-    # One factory for every network: all critic config comes from ``args`` and is
-    # bound here, leaving ``in_channels`` and ``action_dim`` for the network to
-    # supply at call time (see ``_build_value_head``).
-    value_head_factory = functools.partial(
-        _build_value_head,
-        critic_arch=args.critic_arch,
-        horizon=args.horizon,
-        gamma=args.gamma,
-        multi_gammas=list(args.multi_gammas),
-        hidden_dim=args.critic_hidden_dim,
-        block_num=args.critic_block_num,
-        num_bins=args.num_bins,
-        sparsity=args.sparsity,
-    )
+    # 全ネットワーク共通のヘッド工場。critic の設定は config の value_head
+    # ノードが単一ソースで束ね、ネットワークは自分しか知らない in_channels と
+    # action_dim を呼び出し時に渡す。
+    value_head_factory = hydra.utils.instantiate(args.value_head)
 
     policy_head_factory = hydra.utils.instantiate(args.policy_head)
 

@@ -3,14 +3,6 @@ encoder_block_num: 8
 temporal_model_type: gru
 layer_scale_init: 0.0001
 weight_decay: 0.01
-critic_hidden_dim: 1024
-critic_block_num: 1
-# Action-value critic architecture:
-#   simbav2 : SimbaV2 hyperspherical critic (arXiv:2502.15280); weights and
-#             features stay on the unit hypersphere so the TD loss cannot blow
-#             up the critic norm.
-#   dueling : original LayerNorm dueling V/A critic.
-critic_arch: dueling
 # Image encoder: taesd, dinov2, siglip2, vjepa2, qwen (see IMAGE_ENCODERS in image_processor.py).
 image_encoder_type: qwen
 # Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
@@ -19,7 +11,6 @@ predictor_hidden_dim: 512
 predictor_block_num: 2
 predictor_step_num: 1
 predictor_type: flow_matching
-num_bins: 1
 detach_actor: true
 detach_critic: false
 detach_predictor: false
@@ -59,12 +50,18 @@ cot_pool: mean
 # issuing the step normally.
 cot_cuda_graph: true
 
-# 方策ヘッドの組み立て。実行時引数は state_dim と action_dim だけで、残りは
-# ここが単一ソース。horizon と sparsity だけは他所と共有なので補間で参照する。
-# target_entropy_scale 以下3つは policy_type=tanh 用: 温度が方策を保つ
-# 1行動次元あたりのエントロピー、温度の初期値、その動く速さ。critic が
-# ゼロから始まるので温度は低く始める。1 で始めるとアクターがエントロピー
-# 最大化だけをやり、方策が目標より確信的になれば温度は自分で上がる。
+value_head:
+  _target_: vla_streaming_rl.networks.build._build_value_head
+  _partial_: true
+  critic_arch: dueling  # [dueling, simbav2]
+  horizon: ${horizon}
+  gamma: ${gamma}
+  multi_gammas: ${multi_gammas}
+  hidden_dim: 1024
+  block_num: 1
+  num_bins: 1
+  sparsity: ${sparsity}
+
 policy_head:
   _target_: vla_streaming_rl.networks.modules.policy_head.build_policy_head
   _partial_: true
