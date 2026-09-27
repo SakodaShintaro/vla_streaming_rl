@@ -91,8 +91,10 @@ class DiffusionPolicy(nn.Module):
         horizon: int,
         denoising_steps: int,
         dacer_loss_weight: float,
+        detach_state: bool,
     ) -> None:
         super().__init__()
+        self.detach_state = detach_state
         time_embedding_size = 256
         self.horizon = horizon
         total_action_dim = action_dim * horizon
@@ -155,13 +157,12 @@ class DiffusionPolicy(nn.Module):
         action_chunk: torch.Tensor,
         *,
         value_head,
-        detach_actor: bool,
     ) -> tuple[torch.Tensor, dict]:
         """Advantage-maximizing actor loss + DACER2 score matching
         (https://arxiv.org/abs/2505.23426).
         """
         del action_chunk
-        if detach_actor:
+        if self.detach_state:
             state = state.detach()
         action, _ = self.get_action(state)
         B, horizon, action_dim = action.shape
@@ -228,8 +229,10 @@ class CFGDiffusionPolicy(nn.Module):
         horizon: int,
         denoising_steps: int,
         condition_drop_prob: float,
+        detach_state: bool,
     ) -> None:
         super().__init__()
+        self.detach_state = detach_state
         self.cfgrl_beta = cfgrl_beta
         self.condition_drop_prob = condition_drop_prob
         self.horizon = horizon
@@ -321,10 +324,9 @@ class CFGDiffusionPolicy(nn.Module):
         action_chunk: torch.Tensor,
         *,
         value_head: nn.Module,
-        detach_actor: bool,
     ) -> tuple[torch.Tensor, dict]:
         """CFGRL/pistar06: condition on advantage sign, drop with condition_drop_prob."""
-        if detach_actor:
+        if self.detach_state:
             state = state.detach()
         batch_size = state.shape[0]
         device = state.device
@@ -378,8 +380,10 @@ class IMLEPolicy(nn.Module):
         horizon: int,
         sparsity: float,
         sample_num: int,
+        detach_state: bool,
     ) -> None:
         super().__init__()
+        self.detach_state = detach_state
         self.horizon = horizon
         self.action_dim = action_dim
         self.sample_num = sample_num
@@ -420,11 +424,10 @@ class IMLEPolicy(nn.Module):
         action_chunk: torch.Tensor,
         *,
         value_head: nn.Module,
-        detach_actor: bool,
     ) -> tuple[torch.Tensor, dict]:
         """Maximize Q of the best of ``sample_num`` candidates per state."""
         del action_chunk
-        if detach_actor:
+        if self.detach_state:
             state = state.detach()
         B = state.shape[0]
         m = self.sample_num
@@ -494,8 +497,10 @@ class TanhPolicy(nn.Module):
         target_entropy_scale: float,
         init_temperature: float,
         temperature_lr: float,
+        detach_state: bool,
     ) -> None:
         super().__init__()
+        self.detach_state = detach_state
         assert init_temperature > 0.0, init_temperature
         assert temperature_lr > 0.0, temperature_lr
         self.horizon = horizon
@@ -560,7 +565,6 @@ class TanhPolicy(nn.Module):
         action_chunk: torch.Tensor,
         *,
         value_head,
-        detach_actor: bool,
     ) -> tuple[torch.Tensor, dict]:
         """Soft actor-critic's actor loss, and the temperature's own step.
 
@@ -571,7 +575,7 @@ class TanhPolicy(nn.Module):
         than the target asks, up while it is less.
         """
         del action_chunk
-        if detach_actor:
+        if self.detach_state:
             state = state.detach()
         action, log_prob, _ = self._sample(state)
 
@@ -612,6 +616,7 @@ def build_policy_head(
     target_entropy_scale: float,
     init_temperature: float,
     temperature_lr: float,
+    detach_state: bool,
 ) -> nn.Module:
     """The policy head named by ``policy_type``, for a state of width ``state_dim``.
 
@@ -626,6 +631,7 @@ def build_policy_head(
             block_num=block_num,
             denoising_time=denoising_time,
             sparsity=sparsity,
+            detach_state=detach_state,
             horizon=horizon,
             denoising_steps=denoising_steps,
             dacer_loss_weight=dacer_loss_weight,
@@ -638,6 +644,7 @@ def build_policy_head(
             block_num=block_num,
             denoising_time=denoising_time,
             sparsity=sparsity,
+            detach_state=detach_state,
             cfgrl_beta=1.5,
             horizon=horizon,
             denoising_steps=denoising_steps,
@@ -651,6 +658,7 @@ def build_policy_head(
             block_num=block_num,
             horizon=horizon,
             sparsity=sparsity,
+            detach_state=detach_state,
             target_entropy_scale=target_entropy_scale,
             init_temperature=init_temperature,
             temperature_lr=temperature_lr,
@@ -663,6 +671,7 @@ def build_policy_head(
             block_num=block_num,
             horizon=horizon,
             sparsity=sparsity,
+            detach_state=detach_state,
             sample_num=2,
         )
     raise ValueError(f"Unknown policy_type: {policy_type}")

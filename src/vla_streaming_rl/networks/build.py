@@ -24,6 +24,7 @@ def _build_value_head(
     block_num: int,
     num_bins: int,
     sparsity: float,
+    detach_state: bool,
 ) -> DistributionalValueHead:
     """Build the action-value head for a state of width ``in_channels``.
 
@@ -49,6 +50,7 @@ def _build_value_head(
             hidden_dim=hidden_dim,
             block_num=block_num,
             num_bins=num_bins,
+            detach_state=detach_state,
         )
     if critic_arch == "dueling":
         return ActionValueHead(
@@ -60,6 +62,7 @@ def _build_value_head(
             block_num=block_num,
             num_bins=num_bins,
             sparsity=sparsity,
+            detach_state=detach_state,
         )
     raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
 
@@ -105,8 +108,6 @@ def build_network(
             actor_critic_config=args.actor_critic,
             horizon=args.horizon,
             policy_head_factory=policy_head_factory,
-            detach_actor=args.detach_actor,
-            detach_critic=args.detach_critic,
             high_level_config=args.high_level,
             prompt_builder=prompt_builder,
         ).to(device)
@@ -125,8 +126,6 @@ def build_network(
             critic_loss_weight=args.critic_loss_weight,
             policy_head_factory=policy_head_factory,
             vla_config=args.vla,
-            detach_actor=args.detach_actor,
-            detach_critic=args.detach_critic,
             pad_token_id=args.replay_buffer.pad_token_id,
             cot_steps_per_chain=args.high_level.cot_steps_per_chain,
         ).to(device)

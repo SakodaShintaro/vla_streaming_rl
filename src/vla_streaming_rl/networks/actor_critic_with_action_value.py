@@ -51,8 +51,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         actor_critic_config: DictConfig,
         horizon: int,
         policy_head_factory,
-        detach_actor: bool,
-        detach_critic: bool,
         high_level_config: DictConfig,
         prompt_builder,
     ) -> None:
@@ -120,8 +118,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             action_dim=self.action_dim,
         )
 
-        self.detach_actor = detach_actor
-        self.detach_critic = detach_critic
         self.detach_predictor = actor_critic_config.detach_predictor
         self.disable_state_predictor = actor_critic_config.disable_state_predictor
 
@@ -374,13 +370,12 @@ class ActorCriticWithActionValue(NetworkInterface):
         action_chunk = data.actions[:, -self.horizon :]
 
         critic_loss, critic_info = self.value_head.compute_critic_loss(
-            curr_state, action_chunk, target_value, self.detach_critic
+            curr_state, action_chunk, target_value
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             curr_state,
             action_chunk,
             value_head=self.value_head,
-            detach_actor=self.detach_actor,
         )
         head_action, _ = self.policy_head.get_action(curr_state)
         bc_gap = (head_action - data.vlm_actions[:, -self.horizon :]).pow(2).mean(dim=-1)
@@ -434,13 +429,12 @@ class ActorCriticWithActionValue(NetworkInterface):
         action_chunk = data.actions[:, -self.horizon :]
 
         critic_loss, critic_info = self.value_head.compute_critic_loss(
-            prev_state, action_chunk, target_value, self.detach_critic
+            prev_state, action_chunk, target_value
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             prev_state,
             action_chunk,
             value_head=self.value_head,
-            detach_actor=self.detach_actor,
         )
         with torch.no_grad():
             next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])

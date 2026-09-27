@@ -193,7 +193,6 @@ class DistributionalValueHead(nn.Module):
         state: torch.Tensor,
         action_chunk: torch.Tensor,
         target_value: torch.Tensor,
-        detach_critic: bool,
     ) -> tuple[torch.Tensor, dict]:
         """Distributional TD loss for Q(state, action_chunk) vs ``target_value``.
 
@@ -201,9 +200,9 @@ class DistributionalValueHead(nn.Module):
         chunk and the per-gamma TD target ``(B, num_gammas)`` (built by
         :meth:`compute_target_value`), the value head owns its loss (forward →
         :meth:`update_value_range` → :meth:`value_loss`) and the scalar logging
-        info. ``detach_critic`` stops the gradient into the encoder.
+        info. ``detach_state`` stops the gradient into the encoder.
         """
-        if detach_critic:
+        if self.detach_state:
             state = state.detach()
 
         logits = self(state, action_chunk).output
@@ -246,8 +245,10 @@ class ActionValueHead(DistributionalValueHead):
         num_bins: int,
         gammas: list[float],
         sparsity: float,
+        detach_state: bool,
     ) -> None:
         super().__init__()
+        self.detach_state = detach_state
         self.horizon = horizon
         self.action_dim = action_dim
         total_action_dim = action_dim * horizon
@@ -360,8 +361,10 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         block_num: int,
         num_bins: int,
         gammas: list[float],
+        detach_state: bool,
     ) -> None:
         super().__init__()
+        self.detach_state = detach_state
         self.horizon = horizon
         self.action_dim = action_dim
         in_dim = in_channels + action_dim * horizon

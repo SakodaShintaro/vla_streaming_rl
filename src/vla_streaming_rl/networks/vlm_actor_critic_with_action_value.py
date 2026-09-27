@@ -80,8 +80,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         critic_loss_weight: float,
         policy_head_factory,
         vla_config: DictConfig,
-        detach_actor: bool,
-        detach_critic: bool,
         pad_token_id: int,
         cot_steps_per_chain: int,
     ) -> None:
@@ -101,9 +99,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.reasoning_loss_weight = vla_config.reasoning_loss_weight
         self.reasoning_max_tokens = vla_config.reasoning_max_tokens
         self.reasoning_temperature = vla_config.reasoning_temperature
-
-        self.detach_actor = detach_actor
-        self.detach_critic = detach_critic
 
         # Load VLM
         device = "cuda"
@@ -309,14 +304,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
         # Critic loss
         critic_loss, critic_info = self.value_head.compute_critic_loss(
-            state, action_chunk, target_value, self.detach_critic
+            state, action_chunk, target_value
         )
 
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state,
             action_chunk,
             value_head=self.value_head,
-            detach_actor=self.detach_actor,
         )
 
         reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(prompt)
@@ -351,14 +345,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
         # Critic loss
         critic_loss, critic_info = self.value_head.compute_critic_loss(
-            state, action_chunk, target_value, self.detach_critic
+            state, action_chunk, target_value
         )
 
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state,
             action_chunk,
             value_head=self.value_head,
-            detach_actor=self.detach_actor,
         )
 
         reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(prompt)
