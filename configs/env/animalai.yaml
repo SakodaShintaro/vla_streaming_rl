@@ -8,6 +8,7 @@ env_id: AnimalAI-v0
 # steps_per_stage; the values below keep that ratio at 1/1000 scale.
 step_limit: 200_000
 image_save_interval: 40
+final_evaluation: false
 
 env_factory:
   _target_: vla_streaming_rl.wrappers.make_animalai_env

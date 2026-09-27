@@ -353,7 +353,7 @@ def final_evaluation(
 ) -> None:
     """Post-training evaluation: the Animal-AI Testbed sweep for AnimalAI runs,
     and the Bench2Drive final summary the closed env stashed on itself."""
-    if args.env_id == "AnimalAI-v0" and not args.debug:
+    if args.env_id == "AnimalAI-v0" and args.final_evaluation and not args.debug:
         from test_trained_agent import run_testbed
 
         eval_factory = OmegaConf.merge(args.env_factory, {"mode": "eval"})
