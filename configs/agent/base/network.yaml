@@ -46,7 +46,6 @@ cot_module:
   max_len: ${max_new_tokens}
   temperature: ${temperature}
   steps_per_chain: ${cot_steps_per_chain}
-  use_cuda_graph: true
   chain_generator_factory: ${chain_generator}
 
 value_head:
