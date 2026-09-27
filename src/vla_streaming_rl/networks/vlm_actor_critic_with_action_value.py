@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from omegaconf import DictConfig
 from torch import nn
 from torch.nn import functional as F
 
@@ -81,21 +82,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         horizon: int,
         critic_loss_weight: float,
         policy_head_factory,
-        reasoning_loss_weight: float,
-        reasoning_max_tokens: int,
-        reasoning_temperature: float,
+        vla_config: DictConfig,
         predictor_step_num: int,
         prediction_head_factory,
         disable_state_predictor: bool,
         detach_actor: bool,
         detach_critic: bool,
         detach_predictor: bool,
-        use_lora: bool,
-        vlm_model_id: str,
-        vlm_load_in_4bit: bool,
         pad_token_id: int,
-        num_state_queries: int,
-        state_out_dim: int,
         cot_steps_per_chain: int,
         image_encoder_type: str,
         image_encoder_output_dim: int,
@@ -113,9 +107,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         assert cot_steps_per_chain >= 1, cot_steps_per_chain
         self.cot_steps_per_chain = cot_steps_per_chain
         self._since_write = cot_steps_per_chain
-        self.reasoning_loss_weight = reasoning_loss_weight
-        self.reasoning_max_tokens = reasoning_max_tokens
-        self.reasoning_temperature = reasoning_temperature
+        self.reasoning_loss_weight = vla_config.reasoning_loss_weight
+        self.reasoning_max_tokens = vla_config.reasoning_max_tokens
+        self.reasoning_temperature = vla_config.reasoning_temperature
 
         self.predictor_step_num = predictor_step_num
         self.disable_state_predictor = disable_state_predictor
@@ -132,15 +126,15 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
         # Load VLM
         device = "cuda"
-        self.use_lora = bool(use_lora)
+        self.use_lora = bool(vla_config.use_lora)
         assert not (self.reasoning_max_tokens > 0 and not self.use_lora), (
             "a reasoning chain trains the VLM through its own tokens, so a nonzero "
             "reasoning_max_tokens needs use_lora on"
         )
         self.vlm_model, self.processor = load_model(
-            vlm_model_id,
+            vla_config.model_id,
             use_lora=self.use_lora,
-            load_in_4bit=vlm_load_in_4bit,
+            load_in_4bit=vla_config.load_in_4bit,
             device=device,
         )
         self.device = device
@@ -154,12 +148,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.layer_logits = nn.Parameter(torch.zeros(num_layers + 1, device=device))
         self.pad_token_id = pad_token_id
 
-        self.num_state_queries = num_state_queries
+        self.num_state_queries = vla_config.num_state_queries
 
-        self.state_out_proj = nn.Linear(vlm_hidden_size, state_out_dim).to(device)
+        self.state_out_proj = nn.Linear(vlm_hidden_size, vla_config.state_out_dim).to(device)
         # AdaptiveAvgPool1d fixes the token count to num_state_queries, so
         # state_dim is determined purely by config.
-        state_dim = num_state_queries * state_out_dim
+        state_dim = vla_config.num_state_queries * vla_config.state_out_dim
 
         self.policy_head = policy_head_factory(state_dim=state_dim, action_dim=self.action_dim)
 
@@ -172,7 +166,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             action_dim=self.action_dim,
         )
         # Project state output to match FluxDiT context_in_dim
-        self.state_to_predictor_proj = nn.Linear(state_out_dim, hidden_image_dim)
+        self.state_to_predictor_proj = nn.Linear(vla_config.state_out_dim, hidden_image_dim)
 
         self._dummy_state = torch.zeros(1, 1, 1)
         self._last_reasoning_text = ""

@@ -181,13 +181,13 @@ def build_vlm_backend(args: DictConfig):
     if args.vlm_backend == "openrouter":
         return OpenRouterBackend(
             model_id=args.openrouter_model_id,
-            max_new_tokens=args.max_new_tokens,
-            reasoning_max_tokens=args.reasoning_max_tokens,
-            temperature=args.temperature,
+            max_new_tokens=args.high_level.max_new_tokens,
+            reasoning_max_tokens=args.high_level.reasoning_max_tokens,
+            temperature=args.high_level.temperature,
             api_max_retries=args.api_max_retries,
             body_max_retries=args.body_max_retries,
         )
     return LocalVLMBackend(
         chain_generator_factory=hydra.utils.instantiate(args.chain_generator),
-        reasoning_max_tokens=args.reasoning_max_tokens,
+        reasoning_max_tokens=args.high_level.reasoning_max_tokens,
     )

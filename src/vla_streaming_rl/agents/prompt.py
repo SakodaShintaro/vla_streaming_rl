@@ -344,5 +344,5 @@ def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     # The exchanges a window of ``seq_len`` ticks holds at the chain's cadence:
     # the same count the trained network reads off its replay buffer, so the
     # two see the same history for the same config.
-    history_turns = (args.seq_len - 1) // args.cot_steps_per_chain
-    return PROMPT_BUILDERS[args.env_id](env, history_turns, args.cot_steps_per_chain)
+    history_turns = (args.seq_len - 1) // args.high_level.cot_steps_per_chain
+    return PROMPT_BUILDERS[args.env_id](env, history_turns, args.high_level.cot_steps_per_chain)

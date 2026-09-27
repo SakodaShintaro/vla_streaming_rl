@@ -10,7 +10,6 @@ seq_len: 8193
 # Where generation runs:
 #   openrouter : a hosted model, one API call per env step (`openrouter_model_id`).
 #   local      : a Qwen3.5 checkpoint generating in this process on the GPU
-#                (`vlm_model_id`, from base/network), so no API key and no server.
 vlm_backend: local
 # OpenRouter model
 # model                                               context   $in/Mtok  $out/Mtok
@@ -36,7 +35,6 @@ openrouter_model_id: qwen/qwen3.7-flash
 # of thought inside <think>, so the hidden copy only competes for max_new_tokens:
 # with no cap the budget runs out before <action> and the response comes back
 # empty. 0 disables thinking entirely.
-reasoning_max_tokens: 0
 # Retries the OpenAI SDK makes per request (exponential backoff). A run is one
 # API call per env step, so an upstream 429 / 5xx must not abort it.
 api_max_retries: 16

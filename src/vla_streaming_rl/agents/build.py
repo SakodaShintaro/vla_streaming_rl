@@ -38,7 +38,7 @@ def build_agent(
             backend=build_vlm_backend(args),
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
-            steps_per_action=args.cot_steps_per_chain,
+            steps_per_action=args.high_level.cot_steps_per_chain,
         )
 
     if args.agent_type == "animal_ppo":
@@ -116,6 +116,6 @@ def build_agent(
         prompt_builder=prompt_builder,
         text_action=args.text_action,
         select_margin=args.select_margin,
-        cot_steps_per_chain=args.cot_steps_per_chain,
+        cot_steps_per_chain=args.high_level.cot_steps_per_chain,
         parse_action_text=parse_action_text,
     )
