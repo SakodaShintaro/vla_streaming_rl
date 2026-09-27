@@ -18,7 +18,6 @@ from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
 from vla_streaming_rl.networks.modules.cot_stream import CoTStream
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
-from vla_streaming_rl.networks.modules.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
@@ -77,17 +76,15 @@ class ActorCriticWithActionValue(NetworkInterface):
         seq_len: int,
         critic_loss_weight: float,
         predictor_step_num: int,
+        prediction_head_factory,
         encoder_block_num: int,
         temporal_model_type: str,
         horizon: int,
         policy_head_factory,
-        predictor_hidden_dim: int,
-        predictor_block_num: int,
         detach_actor: bool,
         detach_critic: bool,
         detach_predictor: bool,
         disable_state_predictor: bool,
-        predictor_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
         vlm_model_id: str,
@@ -159,13 +156,10 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
 
         self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)
-        self.prediction_head = StatePredictionHead(
+        self.prediction_head = prediction_head_factory(
             image_latent_shape=(hidden_image_dim, self.encoder.hidden_h, self.encoder.hidden_w),
             reward_processor=self.reward_processor,
             action_dim=self.action_dim,
-            predictor_hidden_dim=predictor_hidden_dim,
-            predictor_block_num=predictor_block_num,
-            predictor_type=predictor_type,
         )
 
         self.detach_actor = detach_actor

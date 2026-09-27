@@ -20,7 +20,6 @@ from .interface import (
 )
 from .modules.head_output import HeadOutput
 from .modules.image_processor import ImageProcessor
-from .modules.prediction_head import StatePredictionHead
 from .modules.reward_processor import RewardProcessor
 from .modules.value_head import DistributionalValueHead
 from .modules.vlm_backbone import load_model
@@ -86,6 +85,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         reasoning_max_tokens: int,
         reasoning_temperature: float,
         predictor_step_num: int,
+        prediction_head_factory,
         disable_state_predictor: bool,
         detach_actor: bool,
         detach_critic: bool,
@@ -96,10 +96,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         pad_token_id: int,
         num_state_queries: int,
         state_out_dim: int,
-        predictor_hidden_dim: int,
-        predictor_block_num: int,
         cot_steps_per_chain: int,
-        predictor_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
     ) -> None:
@@ -169,13 +166,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # Critic: Q(state, action)
         self.value_head = value_head_factory(state_dim, self.action_dim)
 
-        self.prediction_head = StatePredictionHead(
+        self.prediction_head = prediction_head_factory(
             image_latent_shape=(hidden_image_dim, *self.image_processor.output_shape[1:]),
             reward_processor=self.reward_processor,
             action_dim=self.action_dim,
-            predictor_hidden_dim=predictor_hidden_dim,
-            predictor_block_num=predictor_block_num,
-            predictor_type=predictor_type,
         )
         # Project state output to match FluxDiT context_in_dim
         self.state_to_predictor_proj = nn.Linear(state_out_dim, hidden_image_dim)

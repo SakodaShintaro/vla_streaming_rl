@@ -7,10 +7,7 @@ weight_decay: 0.01
 image_encoder_type: qwen
 # Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
 image_encoder_output_dim: 16
-predictor_hidden_dim: 512
-predictor_block_num: 2
 predictor_step_num: 1
-predictor_type: flow_matching
 detach_actor: true
 detach_critic: false
 detach_predictor: false
@@ -35,6 +32,13 @@ bc_loss_weight: 0.0
 #   mean : one slot per step, whose temporal recurrence follows the chain
 #   none : one slot per token, each recurring on a stride-L phase of the chain
 cot_pool: mean
+
+prediction_head:
+  _target_: vla_streaming_rl.networks.modules.prediction_head.StatePredictionHead
+  _partial_: true
+  predictor_hidden_dim: 512
+  predictor_block_num: 2
+  predictor_type: flow_matching  # [flow_matching, mean_flow]
 
 cot_module:
   _target_: vla_streaming_rl.networks.actor_critic_with_action_value.build_cot
