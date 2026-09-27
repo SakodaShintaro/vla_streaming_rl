@@ -1,7 +1,4 @@
 # @package _global_
-encoder_block_num: 8
-temporal_model_type: gru
-layer_scale_init: 0.0001
 weight_decay: 0.01
 # Image encoder: taesd, dinov2, siglip2, vjepa2, qwen (see IMAGE_ENCODERS in image_processor.py).
 image_encoder_type: qwen
@@ -12,17 +9,6 @@ detach_actor: true
 detach_critic: false
 detach_predictor: false
 disable_state_predictor: false
-
-# Share of learning batches the chain is taken away from, so the critic is
-# calibrated on states with and without one and the gap between them means
-# something. 0 leaves the chain in every batch, which is the ablation.
-cot_dropout: 0.5
-token_dropout: 0.2
-bc_loss_weight: 0.0
-# How a step's chain tokens reach the space axis.
-#   mean : one slot per step, whose temporal recurrence follows the chain
-#   none : one slot per token, each recurring on a stride-L phase of the chain
-cot_pool: mean
 
 prediction_head:
   _target_: vla_streaming_rl.networks.modules.prediction_head.StatePredictionHead
@@ -100,3 +86,12 @@ vla:
   reasoning_loss_weight: 1.0
   reasoning_max_tokens: 0
   reasoning_temperature: 1.0
+
+actor_critic:
+  encoder_block_num: 8
+  temporal_model_type: gru
+  layer_scale_init: 0.0001
+  cot_dropout: 0.5
+  token_dropout: 0.2
+  bc_loss_weight: 0.0
+  cot_pool: mean  # [mean, none]

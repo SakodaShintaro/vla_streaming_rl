@@ -3,6 +3,7 @@ from collections.abc import Callable
 
 import numpy as np
 import torch
+from omegaconf import DictConfig
 from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
@@ -77,8 +78,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         critic_loss_weight: float,
         predictor_step_num: int,
         prediction_head_factory,
-        encoder_block_num: int,
-        temporal_model_type: str,
+        actor_critic_config: DictConfig,
         horizon: int,
         policy_head_factory,
         detach_actor: bool,
@@ -90,13 +90,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         vlm_model_id: str,
         cot_tokens_num: int,
         cot_steps_per_chain: int,
-        cot_dropout: float,
-        token_dropout: float,
-        bc_loss_weight: float,
-        cot_pool: str,
         cot_module_factory,
         prompt_builder,
-        layer_scale_init: float,
     ) -> None:
         super().__init__()
         self.seq_len = seq_len
@@ -109,11 +104,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         hidden_image_dim = image_encoder_output_dim
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
-        assert 0.0 <= cot_dropout < 1.0, cot_dropout
-        self.cot_dropout = cot_dropout
-        assert 0.0 <= token_dropout < 1.0, token_dropout
-        self.token_dropout = token_dropout
-        self.bc_loss_weight = bc_loss_weight
+        assert 0.0 <= actor_critic_config.cot_dropout < 1.0, actor_critic_config.cot_dropout
+        self.cot_dropout = actor_critic_config.cot_dropout
+        assert 0.0 <= actor_critic_config.token_dropout < 1.0, actor_critic_config.token_dropout
+        self.token_dropout = actor_critic_config.token_dropout
+        self.bc_loss_weight = actor_critic_config.bc_loss_weight
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
         # ``cot_tokens_num = 0`` is the ablation: the same body, the same heads
@@ -124,7 +119,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         cot_dim = text_config.hidden_size
         # The embedding plus every layer's output.
         cot_layers = text_config.num_hidden_layers + 1
-        self.pool_cot = cot_pool == "mean" and cot_tokens_num > 0
+        self.pool_cot = actor_critic_config.cot_pool == "mean" and cot_tokens_num > 0
         self.cot_shape = (1 if self.pool_cot else cot_tokens_num, cot_layers, cot_dim)
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
         self.cot_module = None
@@ -138,16 +133,16 @@ class ActorCriticWithActionValue(NetworkInterface):
             image_latent_dim=hidden_image_dim,
             reward_processor=self.reward_processor,
             seq_len=self.seq_len,
-            n_layer=encoder_block_num,
+            n_layer=actor_critic_config.encoder_block_num,
             action_dim=self.action_dim,
             scalar_obs_dim=self.scalar_obs_dim,
-            temporal_model_type=temporal_model_type,
+            temporal_model_type=actor_critic_config.temporal_model_type,
             cot_tokens_num=cot_tokens_num,
             cot_layers=cot_layers,
             cot_dim=cot_dim,
-            cot_pool=cot_pool,
+            cot_pool=actor_critic_config.cot_pool,
             cot_steps_per_chain=cot_steps_per_chain,
-            layer_scale_init=layer_scale_init,
+            layer_scale_init=actor_critic_config.layer_scale_init,
         )
 
         self.horizon = horizon

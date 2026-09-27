@@ -8,7 +8,8 @@ agent_type: animal_ppo
 network_class: animal_ppo
 
 # [lstm, gru]
-temporal_model_type: gru
+actor_critic:
+  temporal_model_type: gru
 
 steps_num: 1536
 minibatch_size: 384

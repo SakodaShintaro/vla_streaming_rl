@@ -80,7 +80,7 @@ def build_network(
         return AnimalPPONetwork(
             observation_space_shape=observation_space_shape,
             vels_size=4,
-            temporal_model_type=args.temporal_model_type,
+            temporal_model_type=args.actor_critic.temporal_model_type,
         ).to(device)
 
     # 全ネットワーク共通のヘッド工場。critic の設定は config の value_head
@@ -103,9 +103,7 @@ def build_network(
             critic_loss_weight=args.critic_loss_weight,
             predictor_step_num=args.predictor_step_num,
             prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
-            encoder_block_num=args.encoder_block_num,
-            layer_scale_init=args.layer_scale_init,
-            temporal_model_type=args.temporal_model_type,
+            actor_critic_config=args.actor_critic,
             horizon=args.horizon,
             policy_head_factory=policy_head_factory,
             detach_actor=args.detach_actor,
@@ -117,10 +115,6 @@ def build_network(
             vlm_model_id=args.high_level.model_id,
             cot_tokens_num=args.high_level.cot_tokens_num,
             cot_steps_per_chain=args.high_level.cot_steps_per_chain,
-            cot_dropout=args.cot_dropout,
-            token_dropout=args.token_dropout,
-            bc_loss_weight=args.bc_loss_weight,
-            cot_pool=args.cot_pool,
             cot_module_factory=hydra.utils.instantiate(args.cot_module),
             prompt_builder=prompt_builder,
         ).to(device)
