@@ -24,6 +24,7 @@ into the network's ``parameters()`` and its ``state_dict()``.
 import time
 
 import torch
+from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
 
@@ -33,26 +34,27 @@ from .vlm_backbone import load_model
 class CoTStream:
     def __init__(
         self,
-        model_id: str,
-        load_in_4bit: bool,
-        tokens_per_step: int,
-        max_len: int,
-        temperature: float,
+        high_level_config: DictConfig,
         prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
+        tokens_per_step = high_level_config.cot_tokens_num
+        max_len = high_level_config.max_new_tokens
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
         assert max_len >= tokens_per_step, (
             f"max_len {max_len} below the per-step budget {tokens_per_step}: "
             "every step would restart the chain"
         )
         self.model, self.processor = load_model(
-            model_id, use_lora=False, load_in_4bit=load_in_4bit, device=device
+            model_id=high_level_config.model_id,
+            use_lora=False,
+            load_in_4bit=high_level_config.load_in_4bit,
+            device=device,
         )
         self.model.eval().requires_grad_(False)
         self.tokens_per_step = tokens_per_step
         self.max_len = max_len
-        self.temperature = temperature
+        self.temperature = high_level_config.temperature
         # The conversation is the agent's; a chain reads it on the steps it
         # restarts and writes its own turn back when it ends.
         self.prompt_builder = prompt_builder

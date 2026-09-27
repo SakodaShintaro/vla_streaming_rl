@@ -15,7 +15,6 @@ import os
 import time
 from dataclasses import dataclass
 
-import hydra
 import torch
 from omegaconf import DictConfig
 from openai import BadRequestError, OpenAI
@@ -147,17 +146,14 @@ class OpenRouterBackend:
 
 
 class LocalVLMBackend:
-    def __init__(
-        self,
-        *,
-        chain_generator_factory,
-        reasoning_max_tokens: int,
-    ) -> None:
+    def __init__(self, high_level_config: DictConfig) -> None:
         # As on the hosted backend, 0 means the model does no thinking of its
         # own; here that is the chat template's block, which it then renders
         # already closed.
-        self.generator: ChainGenerator = chain_generator_factory(
-            enable_thinking=reasoning_max_tokens != 0, device=torch.device("cuda")
+        self.generator = ChainGenerator(
+            high_level_config,
+            enable_thinking=high_level_config.reasoning_max_tokens != 0,
+            device=torch.device("cuda"),
         )
 
     def generate(self, messages: list[dict]) -> VLMResponse:
@@ -187,7 +183,4 @@ def build_vlm_backend(args: DictConfig):
             api_max_retries=args.api_max_retries,
             body_max_retries=args.body_max_retries,
         )
-    return LocalVLMBackend(
-        chain_generator_factory=hydra.utils.instantiate(args.chain_generator),
-        reasoning_max_tokens=args.high_level.reasoning_max_tokens,
-    )
+    return LocalVLMBackend(args.high_level)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 import torch
 import torch.nn.functional as F
+from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.prompt import SUBTASK_RE, PromptBuilder, assistant_turn
 
@@ -20,19 +21,17 @@ class CoTBatch:
 
     def __init__(
         self,
-        chain_generator_factory,
-        tokens_per_step: int,
-        steps_per_chain: int,
+        high_level_config: DictConfig,
         prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
+        tokens_per_step = high_level_config.cot_tokens_num
+        steps_per_chain = high_level_config.cot_steps_per_chain
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
         assert steps_per_chain >= 1, f"steps_per_chain must be positive; got {steps_per_chain}"
         # Thinking off: with the <think> block left open the model spends the
         # chain reasoning about the request rather than about the scene.
-        self.generator: ChainGenerator = chain_generator_factory(
-            enable_thinking=False, device=device
-        )
+        self.generator = ChainGenerator(high_level_config, enable_thinking=False, device=device)
         assert self.generator.max_len >= tokens_per_step, (
             f"max_len {self.generator.max_len} below {tokens_per_step}: the pool would "
             "stretch a chain shorter than one step's read"

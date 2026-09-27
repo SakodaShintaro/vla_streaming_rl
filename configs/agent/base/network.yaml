@@ -10,18 +10,6 @@ prediction_head:
   predictor_block_num: 2
   predictor_type: flow_matching  # [flow_matching, mean_flow]
 
-cot_module:
-  _target_: vla_streaming_rl.networks.actor_critic_with_action_value.build_cot
-  _partial_: true
-  mode: batch  # [batch, stream]
-  model_id: ${high_level.model_id}
-  load_in_4bit: ${high_level.load_in_4bit}
-  tokens_per_step: ${high_level.cot_tokens_num}
-  max_len: ${high_level.max_new_tokens}
-  temperature: ${high_level.temperature}
-  steps_per_chain: ${high_level.cot_steps_per_chain}
-  chain_generator_factory: ${chain_generator}
-
 value_head:
   _target_: vla_streaming_rl.networks.build._build_value_head
   _partial_: true
@@ -49,21 +37,15 @@ policy_head:
   init_temperature: 0.01
   temperature_lr: 3e-3
 
-chain_generator:
-  _target_: vla_streaming_rl.networks.modules.chain_generator.ChainGenerator
-  _partial_: true
-  model_id: ${high_level.model_id}
-  load_in_4bit: ${high_level.load_in_4bit}
-  max_len: ${high_level.max_new_tokens}
-  temperature: ${high_level.temperature}
-  window_tokens: 8192
-
 high_level:
   model_id: Qwen/Qwen3.8-27B
   load_in_4bit: true
   max_new_tokens: 128
   temperature: 0.5
   reasoning_max_tokens: 0
+  # 全注意層の KV を「先頭の sink ＋直近この数のトークン」まで間引く
+  window_tokens: 8192
+  cot_mode: batch  # [batch, stream]
   cot_tokens_num: 0
   cot_steps_per_chain: 16
 

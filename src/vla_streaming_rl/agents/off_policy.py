@@ -86,7 +86,7 @@ class OffPolicyAgent(Agent):
         if text_action:
             assert isinstance(network.cot_module, CoTBatch), (
                 "text_action reads the action off a finished chain, which only "
-                "cot_module.mode=batch writes; set cot_tokens_num > 0 and cot_module.mode=batch"
+                "high_level.cot_mode=batch writes; set high_level.cot_tokens_num > 0 and high_level.cot_mode=batch"
             )
         self.parse_action_text = parse_action_text
         self.vlm_action = np.zeros(int(np.prod(action_space.shape)), dtype=np.float32)

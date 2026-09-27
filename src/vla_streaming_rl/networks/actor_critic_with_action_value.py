@@ -25,45 +25,17 @@ from vla_streaming_rl.reward_processor import RunningNormalizer
 from vla_streaming_rl.utils import render_conversation_panel
 
 
-def build_cot(
-    mode: str,
-    model_id: str,
-    load_in_4bit: bool,
-    tokens_per_step: int,
-    max_len: int,
-    temperature: float,
-    steps_per_chain: int,
-    chain_generator_factory,
-    prompt_builder,
-    device: torch.device,
-):
-    """The chain generator named by `mode`, both of which advance() the same way.
+def build_cot(high_level_config: DictConfig, prompt_builder, device: torch.device):
+    """The chain generator named by `cot_mode`, both of which advance() the same way.
 
-    "stream" keeps one chain mid-thought and issues `tokens_per_step` of it per
-    environment step; "batch" writes a whole chain every `steps_per_chain` steps
-    and holds it in between. Every mode's parameters are always supplied; a mode
-    ignores the ones that do not apply to it.
+    "stream" keeps one chain mid-thought and issues `cot_tokens_num` of it per
+    environment step; "batch" writes a whole chain every `cot_steps_per_chain`
+    steps and holds it in between.
     """
-    builders = {
-        "stream": lambda: CoTStream(
-            model_id=model_id,
-            load_in_4bit=load_in_4bit,
-            tokens_per_step=tokens_per_step,
-            max_len=max_len,
-            temperature=temperature,
-            prompt_builder=prompt_builder,
-            device=device,
-        ),
-        "batch": lambda: CoTBatch(
-            chain_generator_factory=chain_generator_factory,
-            tokens_per_step=tokens_per_step,
-            steps_per_chain=steps_per_chain,
-            prompt_builder=prompt_builder,
-            device=device,
-        ),
-    }
+    builders = {"stream": CoTStream, "batch": CoTBatch}
+    mode = high_level_config.cot_mode
     assert mode in builders, f"unknown cot_mode {mode!r}; expected one of {sorted(builders)}"
-    return builders[mode]()
+    return builders[mode](high_level_config, prompt_builder, device)
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -81,10 +53,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         policy_head_factory,
         detach_actor: bool,
         detach_critic: bool,
-        vlm_model_id: str,
-        cot_tokens_num: int,
-        cot_steps_per_chain: int,
-        cot_module_factory,
+        high_level_config: DictConfig,
         prompt_builder,
     ) -> None:
         super().__init__()
@@ -110,7 +79,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         # and the same loss with the chain's tokens taken out of the space axis,
         # which is what isolates what the chain contributes. No chain means no
         # VLM to load, so the width comes from the config, not a loaded model.
-        text_config = AutoConfig.from_pretrained(vlm_model_id).text_config
+        cot_tokens_num = high_level_config.cot_tokens_num
+        text_config = AutoConfig.from_pretrained(high_level_config.model_id).text_config
         cot_dim = text_config.hidden_size
         # The embedding plus every layer's output.
         cot_layers = text_config.num_hidden_layers + 1
@@ -119,9 +89,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
         self.cot_module = None
         if cot_tokens_num > 0:
-            self.cot_module = cot_module_factory(
-                prompt_builder=prompt_builder, device=torch.device("cuda")
-            )
+            self.cot_module = build_cot(high_level_config, prompt_builder, torch.device("cuda"))
 
         self.encoder = SpatialTemporalEncoder(
             image_features_shape=tuple(self.image_processor.output_shape),
@@ -136,7 +104,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             cot_layers=cot_layers,
             cot_dim=cot_dim,
             cot_pool=actor_critic_config.cot_pool,
-            cot_steps_per_chain=cot_steps_per_chain,
+            cot_steps_per_chain=high_level_config.cot_steps_per_chain,
             layer_scale_init=actor_critic_config.layer_scale_init,
         )
 

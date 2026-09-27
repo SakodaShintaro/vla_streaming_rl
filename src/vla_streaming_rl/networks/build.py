@@ -107,10 +107,7 @@ def build_network(
             policy_head_factory=policy_head_factory,
             detach_actor=args.detach_actor,
             detach_critic=args.detach_critic,
-            vlm_model_id=args.high_level.model_id,
-            cot_tokens_num=args.high_level.cot_tokens_num,
-            cot_steps_per_chain=args.high_level.cot_steps_per_chain,
-            cot_module_factory=hydra.utils.instantiate(args.cot_module),
+            high_level_config=args.high_level,
             prompt_builder=prompt_builder,
         ).to(device)
 

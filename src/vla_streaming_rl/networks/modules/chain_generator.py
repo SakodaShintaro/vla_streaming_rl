@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 
 import torch
+from omegaconf import DictConfig
 from torchvision.transforms.v2 import functional as TF
 from transformers.cache_utils import DynamicLayer
 
@@ -65,19 +66,21 @@ class ChainGenerator:
 
     def __init__(
         self,
-        model_id: str,
-        load_in_4bit: bool,
-        max_len: int,
-        temperature: float,
+        high_level_config: DictConfig,
         enable_thinking: bool,
-        window_tokens: int,
         device: torch.device,
     ) -> None:
+        max_len = high_level_config.max_new_tokens
+        temperature = high_level_config.temperature
+        window_tokens = high_level_config.window_tokens
         assert max_len >= 1, max_len
         assert temperature >= 0.0, temperature
         assert window_tokens >= 1, window_tokens
         self.model, self.processor = load_model(
-            model_id, use_lora=False, load_in_4bit=load_in_4bit, device=device
+            model_id=high_level_config.model_id,
+            use_lora=False,
+            load_in_4bit=high_level_config.load_in_4bit,
+            device=device,
         )
         self.model.eval().requires_grad_(False)
         self._token = torch.zeros(1, 1, dtype=torch.long, device=device)
