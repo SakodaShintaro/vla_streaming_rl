@@ -49,4 +49,4 @@ replay_buffer:
   device: cpu
   size: 20000
   max_prompt_tokens: 512
-  pad_token_id: 0
+  pad_token_id: -1
