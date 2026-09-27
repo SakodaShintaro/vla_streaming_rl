@@ -20,7 +20,6 @@ from .interface import (
 )
 from .modules.head_output import HeadOutput
 from .modules.image_processor import ImageProcessor
-from .modules.policy_head import build_policy_head
 from .modules.prediction_head import StatePredictionHead
 from .modules.reward_processor import RewardProcessor
 from .modules.value_head import DistributionalValueHead
@@ -82,12 +81,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         seq_len: int,
         horizon: int,
         critic_loss_weight: float,
-        denoising_steps: int,
-        denoising_time: float,
-        dacer_loss_weight: float,
-        target_entropy_scale: float,
-        init_temperature: float,
-        temperature_lr: float,
+        policy_head_factory,
         reasoning_loss_weight: float,
         reasoning_max_tokens: int,
         reasoning_temperature: float,
@@ -102,14 +96,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         pad_token_id: int,
         num_state_queries: int,
         state_out_dim: int,
-        actor_hidden_dim: int,
-        actor_block_num: int,
         predictor_hidden_dim: int,
         predictor_block_num: int,
-        sparsity: float,
         cot_steps_per_chain: int,
         predictor_type: str,
-        policy_type: str,
         image_encoder_type: str,
         image_encoder_output_dim: int,
     ) -> None:
@@ -174,21 +164,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # state_dim is determined purely by config.
         state_dim = num_state_queries * state_out_dim
 
-        self.policy_head = build_policy_head(
-            policy_type=policy_type,
-            state_dim=state_dim,
-            action_dim=self.action_dim,
-            hidden_dim=actor_hidden_dim,
-            block_num=actor_block_num,
-            horizon=horizon,
-            sparsity=sparsity,
-            denoising_time=denoising_time,
-            denoising_steps=denoising_steps,
-            dacer_loss_weight=dacer_loss_weight,
-            target_entropy_scale=target_entropy_scale,
-            init_temperature=init_temperature,
-            temperature_lr=temperature_lr,
-        )
+        self.policy_head = policy_head_factory(state_dim=state_dim, action_dim=self.action_dim)
 
         # Critic: Q(state, action)
         self.value_head = value_head_factory(state_dim, self.action_dim)

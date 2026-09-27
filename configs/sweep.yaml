@@ -19,6 +19,6 @@ command:
   - actor_lr=1e-5
   - critic_lr=1e-5
   - env=car_racing
-  - policy_type=tanh
+  - policy_head.policy_type=tanh
   - step_limit=50_000
   - ${args_no_hyphens}

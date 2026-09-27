@@ -18,7 +18,6 @@ from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
 from vla_streaming_rl.networks.modules.cot_stream import CoTStream
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
-from vla_streaming_rl.networks.modules.policy_head import build_policy_head
 from vla_streaming_rl.networks.modules.prediction_head import StatePredictionHead
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
@@ -77,22 +76,13 @@ class ActorCriticWithActionValue(NetworkInterface):
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
         value_head_factory: Callable[[int, int], DistributionalValueHead],
-        sparsity: float,
         seq_len: int,
-        dacer_loss_weight: float,
         critic_loss_weight: float,
         predictor_step_num: int,
         encoder_block_num: int,
         temporal_model_type: str,
         horizon: int,
-        policy_type: str,
-        actor_hidden_dim: int,
-        actor_block_num: int,
-        denoising_time: float,
-        denoising_steps: int,
-        target_entropy_scale: float,
-        init_temperature: float,
-        temperature_lr: float,
+        policy_head_factory,
         predictor_hidden_dim: int,
         predictor_block_num: int,
         detach_actor: bool,
@@ -181,20 +171,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
 
         self.horizon = horizon
-        self.policy_head = build_policy_head(
-            policy_type=policy_type,
-            state_dim=self.encoder.output_dim,
-            action_dim=self.action_dim,
-            hidden_dim=actor_hidden_dim,
-            block_num=actor_block_num,
-            horizon=horizon,
-            sparsity=sparsity,
-            denoising_time=denoising_time,
-            denoising_steps=denoising_steps,
-            dacer_loss_weight=dacer_loss_weight,
-            target_entropy_scale=target_entropy_scale,
-            init_temperature=init_temperature,
-            temperature_lr=temperature_lr,
+        self.policy_head = policy_head_factory(
+            state_dim=self.encoder.output_dim, action_dim=self.action_dim
         )
 
         self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)

@@ -3,10 +3,6 @@ encoder_block_num: 8
 temporal_model_type: gru
 layer_scale_init: 0.0001
 weight_decay: 0.01
-actor_hidden_dim: 512
-actor_block_num: 1
-policy_type: tanh
-denoising_time: 0.9
 critic_hidden_dim: 1024
 critic_block_num: 1
 # Action-value critic architecture:
@@ -28,16 +24,6 @@ detach_actor: true
 detach_critic: false
 detach_predictor: false
 disable_state_predictor: false
-dacer_loss_weight: 0.05
-denoising_steps: 1
-# policy_type=tanh: the entropy per action dimension the temperature holds the
-# squashed Gaussian to, where that temperature starts, and how fast it moves.
-# It starts low because the critic starts at zero: a temperature of 1 there
-# leaves the actor maximizing entropy alone, and the temperature rises by
-# itself once the policy is more certain than the target asks.
-target_entropy_scale: 1.0
-init_temperature: 0.01
-temperature_lr: 3e-3
 
 # Chain-of-thought stream. A frozen VLM keeps
 # one chain of thought running across environment steps: cot_tokens_num tokens
@@ -72,6 +58,27 @@ cot_pool: mean
 # running them, so replaying one call is several times faster. Off falls back to
 # issuing the step normally.
 cot_cuda_graph: true
+
+# 方策ヘッドの組み立て。実行時引数は state_dim と action_dim だけで、残りは
+# ここが単一ソース。horizon と sparsity だけは他所と共有なので補間で参照する。
+# target_entropy_scale 以下3つは policy_type=tanh 用: 温度が方策を保つ
+# 1行動次元あたりのエントロピー、温度の初期値、その動く速さ。critic が
+# ゼロから始まるので温度は低く始める。1 で始めるとアクターがエントロピー
+# 最大化だけをやり、方策が目標より確信的になれば温度は自分で上がる。
+policy_head:
+  _target_: vla_streaming_rl.networks.modules.policy_head.build_policy_head
+  _partial_: true
+  policy_type: tanh
+  hidden_dim: 512
+  block_num: 1
+  horizon: ${horizon}
+  sparsity: ${sparsity}
+  denoising_time: 0.9
+  denoising_steps: 1
+  dacer_loss_weight: 0.05
+  target_entropy_scale: 1.0
+  init_temperature: 0.01
+  temperature_lr: 3e-3
 
 chain_generator:
   _target_: vla_streaming_rl.networks.modules.chain_generator.ChainGenerator
