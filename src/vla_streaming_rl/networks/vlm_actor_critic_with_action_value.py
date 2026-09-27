@@ -20,8 +20,6 @@ from .interface import (
     NetworkInterface,
 )
 from .modules.head_output import HeadOutput
-from .modules.image_processor import ImageProcessor
-from .modules.reward_processor import RewardProcessor
 from .modules.value_head import DistributionalValueHead
 from .modules.vlm_backbone import load_model
 from .modules.vlm_inputs import build_vlm_inputs, render_conversation
@@ -83,16 +81,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         critic_loss_weight: float,
         policy_head_factory,
         vla_config: DictConfig,
-        predictor_step_num: int,
-        prediction_head_factory,
-        disable_state_predictor: bool,
         detach_actor: bool,
         detach_critic: bool,
-        detach_predictor: bool,
         pad_token_id: int,
         cot_steps_per_chain: int,
-        image_encoder_type: str,
-        image_encoder_output_dim: int,
     ) -> None:
         super().__init__()
         self.seq_len = seq_len
@@ -111,18 +103,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.reasoning_max_tokens = vla_config.reasoning_max_tokens
         self.reasoning_temperature = vla_config.reasoning_temperature
 
-        self.predictor_step_num = predictor_step_num
-        self.disable_state_predictor = disable_state_predictor
         self.detach_actor = detach_actor
         self.detach_critic = detach_critic
-        self.detach_predictor = detach_predictor
-
-        self.image_processor = ImageProcessor(observation_space_shape, image_encoder_type)
-        hidden_image_dim = image_encoder_output_dim
-        self.image_projection = nn.Conv2d(
-            self.image_processor.output_shape[0], hidden_image_dim, kernel_size=1
-        )
-        self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
         # Load VLM
         device = "cuda"
@@ -159,14 +141,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
         # Critic: Q(state, action)
         self.value_head = value_head_factory(state_dim, self.action_dim)
-
-        self.prediction_head = prediction_head_factory(
-            image_latent_shape=(hidden_image_dim, *self.image_processor.output_shape[1:]),
-            reward_processor=self.reward_processor,
-            action_dim=self.action_dim,
-        )
-        # Project state output to match FluxDiT context_in_dim
-        self.state_to_predictor_proj = nn.Linear(vla_config.state_out_dim, hidden_image_dim)
 
         self._dummy_state = torch.zeros(1, 1, 1)
         self._last_reasoning_text = ""
@@ -309,29 +283,22 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             -1,
         )
         state, action, actor_activation, critic_out = self._infer(texts, images)
-
-        next_image_latent, next_reward_latent, predictor_activation = (
-            self.prediction_head.predict_next_state(
-                self._state_for_predictor(state),
-                action[:, 0],
-                self.predictor_step_num,
-                self.disable_state_predictor,
-            )
-        )
+        # 状態予測器を持たないので、予測系の欄は空テンソルで埋める。
+        empty = state.new_zeros(state.shape[0], 0)
 
         activations = ActivationFeatures(
             state=state,
             actor=actor_activation,
             critic=critic_out.activation,
-            state_predictor=predictor_activation,
+            state_predictor=empty,
         )
 
         return InferResult(
             action=action,
             value_report=self.value_head.value_report(critic_out.output),
             rnn_state=data.rnn_state,
-            next_image_latent=next_image_latent,
-            next_reward_latent=next_reward_latent,
+            next_image_latent=empty,
+            next_reward_latent=empty,
             activations=activations,
             features=state,
         )
@@ -365,30 +332,15 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             detach_actor=self.detach_actor,
         )
 
-        # Sequence (state prediction) loss
-        with torch.no_grad():
-            next_image_latent = self.image_projection(
-                self.image_processor.encode(data.observations[:, -self.horizon])
-            )
-        seq_loss, seq_info = self.prediction_head.compute_loss(
-            self._state_for_predictor(state),
-            data.actions[:, -self.horizon],
-            next_image_latent,
-            data.rewards[:, -self.horizon],
-            self.detach_predictor,
-            self.disable_state_predictor,
-        )
-
         reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(prompt)
 
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss + reasoning_loss
+        total_loss = self.critic_loss_weight * critic_loss + actor_loss + reasoning_loss
 
         info_dict = {
             f"losses/{key}": value
             for key, value in {
                 **critic_info,
                 **actor_info,
-                **seq_info,
                 **reasoning_info,
             }.items()
         }
@@ -423,54 +375,34 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             detach_actor=self.detach_actor,
         )
 
-        # Sequence (state prediction) loss
-        with torch.no_grad():
-            next_image_latent = self.image_projection(
-                self.image_processor.encode(data.observations[:, -self.horizon])
-            )
-        seq_loss, seq_info = self.prediction_head.compute_loss(
-            self._state_for_predictor(state),
-            data.actions[:, -self.horizon],
-            next_image_latent,
-            data.rewards[:, -self.horizon],
-            self.detach_predictor,
-            self.disable_state_predictor,
-        )
-
         reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(prompt)
 
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss + reasoning_loss
+        total_loss = self.critic_loss_weight * critic_loss + actor_loss + reasoning_loss
 
         # Actor-only loss (no critic component)
-        actor_entropy_loss = actor_loss + seq_loss + reasoning_loss
+        actor_entropy_loss = actor_loss + reasoning_loss
 
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
             state.detach(), action_chunk.detach()
         ).mean()
 
-        next_image_latent, next_reward_latent, predictor_activation = (
-            self.prediction_head.predict_next_state(
-                self._state_for_predictor(state),
-                next_action[:, 0],
-                self.predictor_step_num,
-                self.disable_state_predictor,
-            )
-        )
+        # 状態予測器を持たないので、予測系の欄は空テンソルで埋める。
+        empty = next_state.new_zeros(next_state.shape[0], 0)
 
         activations = ActivationFeatures(
             state=next_state,
             actor=actor_activation,
             critic=critic_activation,
-            state_predictor=predictor_activation,
+            state_predictor=empty,
         )
 
         infer_result = InferResult(
             action=next_action,
             value_report=self.value_head.value_report(critic_out.output),
             rnn_state=self._dummy_state.clone(),
-            next_image_latent=next_image_latent,
-            next_reward_latent=next_reward_latent,
+            next_image_latent=empty,
+            next_reward_latent=empty,
             activations=activations,
             features=next_state,
         )
@@ -479,7 +411,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             for key, value in {
                 **critic_info,
                 **actor_info,
-                **seq_info,
                 **reasoning_info,
             }.items()
         }
@@ -739,9 +670,3 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
         critic_out = self.value_head(state, action)
         return state, action, actor_activation, critic_out
-
-    def _state_for_predictor(self, state: torch.Tensor) -> torch.Tensor:
-        """Reshape and project state for StatePredictionHead context."""
-        B = state.shape[0]
-        x = state.view(B, self.num_state_queries, -1)
-        return self.state_to_predictor_proj(x)

@@ -133,16 +133,10 @@ def build_network(
             critic_loss_weight=args.critic_loss_weight,
             policy_head_factory=policy_head_factory,
             vla_config=args.vla,
-            predictor_step_num=args.predictor_step_num,
-            prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
-            disable_state_predictor=args.disable_state_predictor,
             detach_actor=args.detach_actor,
             detach_critic=args.detach_critic,
-            detach_predictor=args.detach_predictor,
             pad_token_id=args.pad_token_id,
             cot_steps_per_chain=args.high_level.cot_steps_per_chain,
-            image_encoder_type=args.image_encoder_type,
-            image_encoder_output_dim=args.image_encoder_output_dim,
         ).to(device)
 
     else:
