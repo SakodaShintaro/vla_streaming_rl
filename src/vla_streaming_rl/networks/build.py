@@ -130,7 +130,7 @@ def build_network(
             vla_config=args.vla,
             detach_actor=args.detach_actor,
             detach_critic=args.detach_critic,
-            pad_token_id=args.pad_token_id,
+            pad_token_id=args.replay_buffer.pad_token_id,
             cot_steps_per_chain=args.high_level.cot_steps_per_chain,
         ).to(device)
 

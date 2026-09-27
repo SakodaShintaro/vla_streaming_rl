@@ -617,7 +617,7 @@ def hydra_main(cfg: DictConfig) -> None:
         cfg.learning_starts = max(10, cfg.seq_len + cfg.horizon + 5)
         cfg.render = False
         cfg.step_limit = 100
-        cfg.buffer_size = int(2e4)
+        cfg.replay_buffer.size = int(2e4)
 
     if cfg.off_wandb:
         os.environ["WANDB_MODE"] = "offline"

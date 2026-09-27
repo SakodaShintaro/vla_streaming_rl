@@ -58,9 +58,6 @@ chain_generator:
   temperature: ${high_level.temperature}
   window_tokens: 8192
 
-max_prompt_tokens: 512
-pad_token_id: 0
-
 high_level:
   model_id: Qwen/Qwen3.8-27B
   load_in_4bit: true
@@ -82,7 +79,6 @@ vla:
 
 actor_critic:
   image_encoder_type: qwen  # [taesd, dinov2, siglip2, vjepa2, qwen]
-  # 凍結バックボーンのチャネル次元を学習可能な1x1畳み込みでこの次元へ落とす
   image_encoder_output_dim: 16
   detach_predictor: false
   disable_state_predictor: false
