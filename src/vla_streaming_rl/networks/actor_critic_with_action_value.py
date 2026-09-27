@@ -7,7 +7,6 @@ from omegaconf import DictConfig
 from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
-    ActivationFeatures,
     EligibilityTraceInfo,
     InferInput,
     InferLossResult,
@@ -76,17 +75,12 @@ class ActorCriticWithActionValue(NetworkInterface):
         value_head_factory: Callable[[int, int], DistributionalValueHead],
         seq_len: int,
         critic_loss_weight: float,
-        predictor_step_num: int,
         prediction_head_factory,
         actor_critic_config: DictConfig,
         horizon: int,
         policy_head_factory,
         detach_actor: bool,
         detach_critic: bool,
-        detach_predictor: bool,
-        disable_state_predictor: bool,
-        image_encoder_type: str,
-        image_encoder_output_dim: int,
         vlm_model_id: str,
         cot_tokens_num: int,
         cot_steps_per_chain: int,
@@ -98,10 +92,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.critic_loss_weight = critic_loss_weight
 
         self.action_dim = action_space_shape[0]
-        self.predictor_step_num = predictor_step_num
 
-        self.image_processor = ImageProcessor(observation_space_shape, image_encoder_type)
-        hidden_image_dim = image_encoder_output_dim
+        self.image_processor = ImageProcessor(
+            observation_space_shape, actor_critic_config.image_encoder_type
+        )
+        hidden_image_dim = actor_critic_config.image_encoder_output_dim
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
         assert 0.0 <= actor_critic_config.cot_dropout < 1.0, actor_critic_config.cot_dropout
@@ -159,8 +154,8 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         self.detach_actor = detach_actor
         self.detach_critic = detach_critic
-        self.detach_predictor = detach_predictor
-        self.disable_state_predictor = disable_state_predictor
+        self.detach_predictor = actor_critic_config.detach_predictor
+        self.disable_state_predictor = actor_critic_config.disable_state_predictor
 
     # Fixed so the render strip keeps one shape for the whole run; wide enough
     # to read a chain of ``max_new_tokens`` tokens.
@@ -381,36 +376,16 @@ class ActorCriticWithActionValue(NetworkInterface):
         )  # (B, state_dim)
 
         # Get action chunk from policy_head
-        action, actor_activation = self.policy_head.get_action(x)  # (B, horizon, action_dim)
+        action, _ = self.policy_head.get_action(x)  # (B, horizon, action_dim)
 
         # Get action-value from value_head
         q_out = self.value_head(x, action)
         value_report = self.value_head.value_report(q_out.output)
 
-        # Get predicted next state (image + reward, both in latent space)
-        next_image_latent, next_reward_latent, predictor_activation = (
-            self.prediction_head.predict_next_state(
-                x,
-                action[:, 0],  # use first action in chunk for prediction
-                self.predictor_step_num,
-                self.disable_state_predictor,
-            )
-        )
-
-        activations = ActivationFeatures(
-            state=x,
-            actor=actor_activation,
-            critic=q_out.activation,
-            state_predictor=predictor_activation,
-        )
-
         return InferResult(
             action=action,
             value_report=value_report,
             rnn_state=rnn_state,
-            next_image_latent=next_image_latent,
-            next_reward_latent=next_reward_latent,
-            activations=activations,
             features=x,
         )
 
@@ -475,13 +450,11 @@ class ActorCriticWithActionValue(NetworkInterface):
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         """Combined inference and loss computation."""
-        # Next-step inference (no grad): the action the agent will take, its Q,
-        # and the activations carried into the InferResult.
+        # Next-step inference (no grad): the action the agent will take and its Q.
         with torch.inference_mode():
             next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None))
-            next_action, actor_activation = self.policy_head.get_action(next_state)
+            next_action, _ = self.policy_head.get_action(next_state)
             next_q_out = self.value_head(next_state, next_action)
-            critic_activation = next_q_out.activation
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(
@@ -522,29 +495,10 @@ class ActorCriticWithActionValue(NetworkInterface):
             prev_state.detach(), action_chunk.detach()
         ).mean()
 
-        next_image_latent, next_reward_latent, predictor_activation = (
-            self.prediction_head.predict_next_state(
-                next_state,
-                next_action[:, 0],
-                self.predictor_step_num,
-                self.disable_state_predictor,
-            )
-        )
-
-        activations = ActivationFeatures(
-            state=next_state,
-            actor=actor_activation,
-            critic=critic_activation,
-            state_predictor=predictor_activation,
-        )
-
         infer_result = InferResult(
             action=next_action,
             value_report=self.value_head.value_report(next_q_out.output),
             rnn_state=next_rnn_state,
-            next_image_latent=next_image_latent,
-            next_reward_latent=next_reward_latent,
-            activations=activations,
             features=next_state,
         )
 

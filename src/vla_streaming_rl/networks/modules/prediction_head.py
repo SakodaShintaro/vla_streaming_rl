@@ -38,92 +38,6 @@ class StatePredictionHead(nn.Module):
             use_r_time=(predictor_type == "mean_flow"),
         )
 
-    def _sample_flow_matching(
-        self,
-        z: torch.Tensor,
-        state_curr: torch.Tensor,
-        action_curr: torch.Tensor,
-        predictor_step_num: int,
-    ) -> torch.Tensor:
-        B = z.shape[0]
-        device = z.device
-        dt = 1.0 / predictor_step_num
-        curr_time = torch.zeros((B,), device=device)
-        activation = None
-        for _ in range(predictor_step_num):
-            head_out = self.state_predictor.forward(z, curr_time, state_curr, action_curr, None)
-            activation = head_out.activation
-            z = z + dt * head_out.output
-            curr_time = curr_time + dt
-        return z, activation
-
-    def _sample_mean_flow(
-        self,
-        z: torch.Tensor,
-        state_curr: torch.Tensor,
-        action_curr: torch.Tensor,
-        predictor_step_num: int,
-    ) -> torch.Tensor:
-        B = z.shape[0]
-        device = z.device
-        # Integrate from t=0 (noise) to t=1 (target) in `predictor_step_num` jumps.
-        # At each segment [t, r] (t<r) the network predicts the average velocity u,
-        # and we step z_r = z_t + (r - t) * u(z_t, t, r).
-        time_steps = torch.linspace(0.0, 1.0, predictor_step_num + 1, device=device)
-        activation = None
-        for i in range(predictor_step_num):
-            t = torch.full((B,), time_steps[i].item(), device=device)
-            r = torch.full((B,), time_steps[i + 1].item(), device=device)
-            head_out = self.state_predictor.forward(z, t, state_curr, action_curr, r)
-            activation = head_out.activation
-            z = z + (time_steps[i + 1].item() - time_steps[i].item()) * head_out.output
-        return z, activation
-
-    @torch.inference_mode()
-    def predict_next_state(
-        self,
-        state_curr: torch.Tensor,
-        action_curr: torch.Tensor,
-        predictor_step_num: int,
-        disable_state_predictor: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        device = state_curr.device
-        B = state_curr.size(0)
-        C, H, W = self.image_latent_shape
-
-        if disable_state_predictor:
-            next_image_latent = torch.zeros((B, C, H, W), device=device)
-            next_reward_latent = torch.zeros((B, C), device=device)
-            dummy_activation = torch.zeros((B, 1), device=device)
-            return next_image_latent, next_reward_latent, dummy_activation
-
-        state_curr = state_curr.view(B, -1, C)
-        noise_shape = (B, (H * W) + 1, C)
-        normal = torch.distributions.Normal(
-            torch.zeros(noise_shape, device=device),
-            torch.ones(noise_shape, device=device),
-        )
-        next_hidden_state = normal.sample().to(device)
-        next_hidden_state = torch.clamp(next_hidden_state, -3.0, 3.0)
-
-        if self.predictor_type == "flow_matching":
-            next_hidden_state, activation = self._sample_flow_matching(
-                next_hidden_state, state_curr, action_curr, predictor_step_num
-            )
-        elif self.predictor_type == "mean_flow":
-            next_hidden_state, activation = self._sample_mean_flow(
-                next_hidden_state, state_curr, action_curr, predictor_step_num
-            )
-        else:
-            raise ValueError(f"Unknown predictor_type: {self.predictor_type}")
-
-        image_part = next_hidden_state[:, :-1, :]
-        next_image_latent = image_part.permute(0, 2, 1).view(B, C, H, W)
-
-        next_reward_latent = next_hidden_state[:, -1, :]
-
-        return next_image_latent, next_reward_latent, activation
-
     def _loss_flow_matching(
         self,
         predictor_state: torch.Tensor,
@@ -233,8 +147,8 @@ class StatePredictionHead(nn.Module):
         if detach_predictor:
             predictor_state = predictor_state.detach()
 
-        # Context layout mirrors predict_next_state: (B, tokens, C) where C is
-        # the image channel dim (no-op for callers already in that shape).
+        # Context layout: (B, tokens, C) where C is the image channel dim
+        # (no-op for callers already in that shape).
         C = self.image_latent_shape[0]
         predictor_state = predictor_state.view(predictor_state.size(0), -1, C)
 

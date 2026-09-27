@@ -11,7 +11,6 @@ from torch.nn import functional as F
 from ..replay_buffer import ReplayBufferData
 from ..utils import render_text_panel
 from .interface import (
-    ActivationFeatures,
     EligibilityTraceInfo,
     InferInput,
     InferLossResult,
@@ -282,24 +281,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             data.reply_token_ids_seq,
             -1,
         )
-        state, action, actor_activation, critic_out = self._infer(texts, images)
-        # 状態予測器を持たないので、予測系の欄は空テンソルで埋める。
-        empty = state.new_zeros(state.shape[0], 0)
-
-        activations = ActivationFeatures(
-            state=state,
-            actor=actor_activation,
-            critic=critic_out.activation,
-            state_predictor=empty,
-        )
+        state, action, critic_out = self._infer(texts, images)
 
         return InferResult(
             action=action,
             value_report=self.value_head.value_report(critic_out.output),
             rnn_state=data.rnn_state,
-            next_image_latent=empty,
-            next_reward_latent=empty,
-            activations=activations,
             features=state,
         )
 
@@ -309,7 +296,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         next_prompts = self._prompts_at(*_rows(data), -1)
         curr_prompts = self._prompts_at(*_rows(data), -self.horizon - 1)
 
-        _, _, _, next_critic_out = self._infer(*next_prompts)
+        _, _, next_critic_out = self._infer(*next_prompts)
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(
@@ -351,8 +338,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         next_prompts = self._prompts_at(*_rows(data), -1)
         curr_prompts = self._prompts_at(*_rows(data), -self.horizon - 1)
 
-        next_state, next_action, actor_activation, critic_out = self._infer(*next_prompts)
-        critic_activation = critic_out.activation
+        next_state, next_action, critic_out = self._infer(*next_prompts)
         chunk_rewards = data.rewards[:, -self.horizon :]
         chunk_dones = data.dones[:, -self.horizon :]
         target_value = self.value_head.compute_target_value(
@@ -387,23 +373,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             state.detach(), action_chunk.detach()
         ).mean()
 
-        # 状態予測器を持たないので、予測系の欄は空テンソルで埋める。
-        empty = next_state.new_zeros(next_state.shape[0], 0)
-
-        activations = ActivationFeatures(
-            state=next_state,
-            actor=actor_activation,
-            critic=critic_activation,
-            state_predictor=empty,
-        )
-
         infer_result = InferResult(
             action=next_action,
             value_report=self.value_head.value_report(critic_out.output),
             rnn_state=self._dummy_state.clone(),
-            next_image_latent=empty,
-            next_reward_latent=empty,
-            activations=activations,
             features=next_state,
         )
         info_dict = {
@@ -662,11 +635,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     @torch.inference_mode()
     def _infer(
         self, texts: list[str], images: list[list[torch.Tensor]]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, HeadOutput]:
+    ) -> tuple[torch.Tensor, torch.Tensor, HeadOutput]:
         # The chain reaches the policy as text in the conversation, not as a
         # fresh sample here: the state is the prompt's own.
         state = self._forward_prompt(texts, images).state
-        action, actor_activation = self.policy_head.get_action(state)
+        action, _ = self.policy_head.get_action(state)
 
         critic_out = self.value_head(state, action)
-        return state, action, actor_activation, critic_out
+        return state, action, critic_out

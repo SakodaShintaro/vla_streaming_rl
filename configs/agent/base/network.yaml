@@ -1,14 +1,7 @@
 # @package _global_
 weight_decay: 0.01
-# Image encoder: taesd, dinov2, siglip2, vjepa2, qwen (see IMAGE_ENCODERS in image_processor.py).
-image_encoder_type: qwen
-# Trainable 1x1 conv projects the (frozen) backbone's channel dim down to this.
-image_encoder_output_dim: 16
-predictor_step_num: 1
 detach_actor: true
 detach_critic: false
-detach_predictor: false
-disable_state_predictor: false
 
 prediction_head:
   _target_: vla_streaming_rl.networks.modules.prediction_head.StatePredictionHead
@@ -88,6 +81,11 @@ vla:
   reasoning_temperature: 1.0
 
 actor_critic:
+  image_encoder_type: qwen  # [taesd, dinov2, siglip2, vjepa2, qwen]
+  # 凍結バックボーンのチャネル次元を学習可能な1x1畳み込みでこの次元へ落とす
+  image_encoder_output_dim: 16
+  detach_predictor: false
+  disable_state_predictor: false
   encoder_block_num: 8
   temporal_model_type: gru
   layer_scale_init: 0.0001

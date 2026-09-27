@@ -53,18 +53,6 @@ class InferInput:
 
 
 @dataclass
-class ActivationFeatures:
-    """2D feature tensors of the four monitored submodules, captured during the
-    inference forward pass and fed to the statistical-metrics computer (stable
-    rank / dormant ratio / ...)."""
-
-    state: torch.Tensor  # encoder output
-    actor: torch.Tensor  # policy head
-    critic: torch.Tensor  # value head
-    state_predictor: torch.Tensor  # sequence prediction head
-
-
-@dataclass
 class InferResult:
     """Structured return value of a network's ``infer`` / ``infer_and_compute_loss``.
 
@@ -77,9 +65,6 @@ class InferResult:
     action: torch.Tensor  # (B, horizon, action_dim)
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
     rnn_state: torch.Tensor  # (B, ...)
-    next_image_latent: torch.Tensor  # predicted next image, in encoder latent space
-    next_reward_latent: torch.Tensor  # predicted next reward, in encoder latent space
-    activations: ActivationFeatures  # forward-pass features for statistical metrics
     features: torch.Tensor
 
 
@@ -107,11 +92,7 @@ class LossResult:
 
 @dataclass
 class InferLossResult:
-    """Structured return value of a network's ``infer_and_compute_loss``.
-
-    Activations now live on ``infer_result`` (captured during the inference
-    forward), so they are reached via ``infer_result.activations``.
-    """
+    """Structured return value of a network's ``infer_and_compute_loss``."""
 
     infer_result: InferResult
     loss_result: LossResult

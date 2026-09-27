@@ -13,4 +13,5 @@ critic_lr: 1e-6
 # 0 is its ablation: same body, same heads, same loss, no chain on the space axis.
 high_level:
   cot_tokens_num: 4
-disable_state_predictor: true
+actor_critic:
+  disable_state_predictor: true
