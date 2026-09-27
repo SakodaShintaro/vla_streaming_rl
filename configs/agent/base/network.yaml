@@ -24,15 +24,6 @@ disable_state_predictor: false
 # 0 = no chain, which is the plain actor-critic and the ablation a
 # chain-carrying run is measured against. The cot_* agent configs turn it on.
 cot_tokens_num: 0
-# When the VLM runs, which is what decides how fresh the chain is and how
-# much of a control tick it costs.
-#   stream : one chain kept mid-thought, cot_tokens_num tokens issued per
-#            step, so every step pays a slice of it and the chain is always
-#            partly written (cot_steps_per_chain is ignored).
-#   batch  : a whole chain written every cot_steps_per_chain steps and held
-#            in between, so what the agent reads is a finished thought about
-#            a frame up to that many ticks old.
-cot_mode: batch
 cot_steps_per_chain: 16
 # Share of learning batches the chain is taken away from, so the critic is
 # calibrated on states with and without one and the gap between them means
@@ -44,11 +35,19 @@ bc_loss_weight: 0.0
 #   mean : one slot per step, whose temporal recurrence follows the chain
 #   none : one slot per token, each recurring on a stride-L phase of the chain
 cot_pool: mean
-# Record the decode step as a CUDA graph and replay it. At batch 1 the step is
-# ~2500 tiny kernels and the host spends longer issuing them than the GPU does
-# running them, so replaying one call is several times faster. Off falls back to
-# issuing the step normally.
-cot_cuda_graph: true
+
+cot_module:
+  _target_: vla_streaming_rl.networks.actor_critic_with_action_value.build_cot
+  _partial_: true
+  mode: batch  # [batch, stream]
+  model_id: ${vlm_model_id}
+  load_in_4bit: ${vlm_load_in_4bit}
+  tokens_per_step: ${cot_tokens_num}
+  max_len: ${max_new_tokens}
+  temperature: ${temperature}
+  steps_per_chain: ${cot_steps_per_chain}
+  use_cuda_graph: true
+  chain_generator_factory: ${chain_generator}
 
 value_head:
   _target_: vla_streaming_rl.networks.build._build_value_head

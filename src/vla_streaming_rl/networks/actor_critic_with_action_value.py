@@ -93,18 +93,13 @@ class ActorCriticWithActionValue(NetworkInterface):
         image_encoder_type: str,
         image_encoder_output_dim: int,
         vlm_model_id: str,
-        vlm_load_in_4bit: bool,
         cot_tokens_num: int,
-        max_new_tokens: int,
-        temperature: float,
-        cot_mode: str,
         cot_steps_per_chain: int,
         cot_dropout: float,
         token_dropout: float,
         bc_loss_weight: float,
         cot_pool: str,
-        cot_cuda_graph: bool,
-        chain_generator_factory,
+        cot_module_factory,
         prompt_builder,
         layer_scale_init: float,
     ) -> None:
@@ -139,18 +134,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
         self.cot_module = None
         if cot_tokens_num > 0:
-            self.cot_module = build_cot(
-                mode=cot_mode,
-                model_id=vlm_model_id,
-                load_in_4bit=vlm_load_in_4bit,
-                tokens_per_step=cot_tokens_num,
-                max_len=max_new_tokens,
-                temperature=temperature,
-                steps_per_chain=cot_steps_per_chain,
-                use_cuda_graph=cot_cuda_graph,
-                chain_generator_factory=chain_generator_factory,
-                prompt_builder=prompt_builder,
-                device=torch.device("cuda"),
+            self.cot_module = cot_module_factory(
+                prompt_builder=prompt_builder, device=torch.device("cuda")
             )
 
         self.encoder = SpatialTemporalEncoder(
