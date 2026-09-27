@@ -141,6 +141,9 @@ class OpenRouterBackend:
             completion_tokens=int(completion.usage.completion_tokens),
         )
 
+    def reset_cache(self) -> None:
+        """ホスト側のキャッシュはプロバイダ任せなので、何もすることがない。"""
+
 
 class LocalVLMBackend:
     def __init__(
@@ -151,8 +154,7 @@ class LocalVLMBackend:
         max_new_tokens: int,
         reasoning_max_tokens: int,
         temperature: float,
-        use_cuda_graph: bool,
-        prompt_budget: int,
+        window_tokens: int,
     ) -> None:
         # As on the hosted backend, 0 means the model does no thinking of its
         # own; here that is the chat template's block, which it then renders
@@ -163,8 +165,7 @@ class LocalVLMBackend:
             max_len=max_new_tokens,
             temperature=temperature,
             enable_thinking=reasoning_max_tokens != 0,
-            use_cuda_graph=use_cuda_graph,
-            prompt_budget=prompt_budget,
+            window_tokens=window_tokens,
             device=torch.device("cuda"),
         )
 
@@ -178,6 +179,10 @@ class LocalVLMBackend:
             prompt_tokens=chain.prompt_tokens,
             completion_tokens=len(chain.tokens),
         )
+
+    def reset_cache(self) -> None:
+        """会話が仕切り直されるエピソード境界で呼ぶ。"""
+        self.generator.reset_cache()
 
 
 def build_vlm_backend(args: DictConfig):
@@ -197,6 +202,5 @@ def build_vlm_backend(args: DictConfig):
         max_new_tokens=args.max_new_tokens,
         reasoning_max_tokens=args.reasoning_max_tokens,
         temperature=args.temperature,
-        use_cuda_graph=args.cot_cuda_graph,
-        prompt_budget=args.cot_prompt_budget,
+        window_tokens=args.cot_window_tokens,
     )

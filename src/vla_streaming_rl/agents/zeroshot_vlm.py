@@ -175,6 +175,7 @@ class ZeroShotVLMAgent(Agent):
         del score
         if self.reset_on_episode_end:
             self.prompt_builder.reset()
+            self.backend.reset_cache()
             self.held_action = np.zeros(self.action_dim, dtype=np.float32)
             self.hold_steps = 0
             self.held_exchange = []

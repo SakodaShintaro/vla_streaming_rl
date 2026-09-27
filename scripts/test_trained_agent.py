@@ -100,6 +100,7 @@ def run_arena(
 
     score = env_info["episode"]["r"]
     success = bool(score >= env_info["pass_mark"])
+    agent.on_episode_end(score)
     return arena_name, success, score
 
 

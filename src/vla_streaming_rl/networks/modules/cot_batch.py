@@ -26,8 +26,7 @@ class CoTBatch:
         max_len: int,
         temperature: float,
         steps_per_chain: int,
-        use_cuda_graph: bool,
-        prompt_budget: int,
+        window_tokens: int,
         prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
@@ -45,8 +44,7 @@ class CoTBatch:
             max_len=max_len,
             temperature=temperature,
             enable_thinking=False,
-            use_cuda_graph=use_cuda_graph,
-            prompt_budget=prompt_budget,
+            window_tokens=window_tokens,
             device=device,
         )
         self.tokens_per_step = tokens_per_step
@@ -60,6 +58,7 @@ class CoTBatch:
     def reset(self) -> None:
         """Drop the chain. The next advance writes a new one on the frame it is
         given; the conversation it is written into is the builder's to reset."""
+        self.generator.reset_cache()
         self._text = ""
         self._output_tokens = 0
         self._last_conversation = []
