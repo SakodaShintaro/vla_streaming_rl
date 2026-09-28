@@ -567,6 +567,12 @@ class RandomSelector(ArenaSelector):
         super().__init__(arenas)
         self._rng = np.random.default_rng(seed)
         self._queue: list[str] = []
+        # 1周（全アリーナ1回ずつ）ごとの成功率。success モードのラウンドと同じ形で出す。
+        self._round_attempts = 0
+        self._round_successes = 0
+        self._round_by_level: dict[str, list[int]] = {}
+        self._last_round_rate = 0.0
+        self._last_round_level_rate: dict[str, float] = {}
 
     def next_arena(self, global_step: int) -> Arena:
         if not self._queue:
@@ -574,17 +580,60 @@ class RandomSelector(ArenaSelector):
             self._queue = [self.arenas[int(i)].name for i in order]
         return self._arena_by_name[self._queue.pop(0)]
 
+    def on_episode_end(self, arena: Arena, success: bool) -> None:
+        super().on_episode_end(arena, success)
+        self._round_attempts += 1
+        self._round_successes += int(success)
+        level = self._round_by_level.setdefault(arena.name.split("-")[0], [0, 0])
+        level[0] += int(success)
+        level[1] += 1
+        if self._round_attempts < len(self.arenas):
+            return
+        self._last_round_rate = self._round_successes / self._round_attempts
+        self._last_round_level_rate = {
+            level: successes / attempts
+            for level, (successes, attempts) in sorted(self._round_by_level.items())
+        }
+        self._round_attempts = 0
+        self._round_successes = 0
+        self._round_by_level = {}
+
     def progress_state(self) -> dict:
-        return {"queue": list(self._queue)}
+        return {
+            "queue": list(self._queue),
+            "round_attempts": self._round_attempts,
+            "round_successes": self._round_successes,
+            "round_by_level": {
+                level: list(counts) for level, counts in self._round_by_level.items()
+            },
+            "last_round_rate": self._last_round_rate,
+            "last_round_level_rate": dict(self._last_round_level_rate),
+        }
 
     def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
-        """Resume mid-lap: what is left of the lap's draw order."""
+        """Resume mid-lap: what is left of the lap's draw order and its tally."""
         super().load_state(arena_attempts, arena_successes, progress)
         known = set(self._attempts)
         self._queue = [name for name in progress["queue"] if name in known]
+        self._round_attempts = int(progress["round_attempts"])
+        self._round_successes = int(progress["round_successes"])
+        self._round_by_level = {
+            level: list(counts) for level, counts in progress["round_by_level"].items()
+        }
+        self._last_round_rate = float(progress["last_round_rate"])
+        self._last_round_level_rate = dict(progress["last_round_level_rate"])
 
     def info(self, global_step: int) -> dict:
-        return {"arena_total": len(self._arena_by_name), "cleared_count": self.cleared_count()}
+        return {
+            "arena_total": len(self._arena_by_name),
+            "cleared_count": self.cleared_count(),
+            "round_index": self._round_attempts,
+            "round_success_rate": (
+                self._round_successes / self._round_attempts if self._round_attempts > 0 else 0.0
+            ),
+            "last_round_success_rate": self._last_round_rate,
+            "last_round_level_success_rate": dict(self._last_round_level_rate),
+        }
 
     def status(self, global_step: int) -> str:
         del global_step
