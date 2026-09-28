@@ -337,9 +337,11 @@ def build_episode_log(
             data_dict["cleared_count"] = env_info["cleared_count"]
             data_dict["round_index"] = env_info["round_index"]
             data_dict["round_success_rate"] = env_info["round_success_rate"]
-            data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
-            for level, rate in env_info["last_round_level_success_rate"].items():
-                data_dict[f"last_round_success_rate/{level}"] = rate
+            # 周が閉じたエピソードでだけ記録する（それ以外は前周の値の繰り返しになる）
+            if env_info["round_closed"]:
+                data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
+                for level, rate in env_info["last_round_level_success_rate"].items():
+                    data_dict[f"last_round_success_rate/{level}"] = rate
         if mode == "success":
             data_dict["stage"] = env_info["stage"]
             data_dict["advanced"] = float(env_info["advanced"])

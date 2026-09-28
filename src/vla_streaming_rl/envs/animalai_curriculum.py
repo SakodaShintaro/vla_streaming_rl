@@ -402,6 +402,9 @@ class SuccessDrivenSelector(ArenaSelector):
         self._round_by_level: dict[str, list[int]] = {}
         self._last_round_rate = 0.0
         self._last_round_level_rate: dict[str, float] = {}
+        self._round_closed = False
+        # 周を閉じた時点のラウンドの大きさ。閉じた直後に段階が進むとプールの大きさが変わるため
+        self._round_size_closed = 0
         self._advanced = False
 
     def _refill(self) -> None:
@@ -428,8 +431,11 @@ class SuccessDrivenSelector(ArenaSelector):
         level[0] += int(success)
         level[1] += 1
         self._advanced = False
+        self._round_closed = False
         if self._round_attempts < len(self._stages[self._stage]):
             return
+        self._round_closed = True
+        self._round_size_closed = self._round_attempts
         # The counters reset here but info() is read after this call, so the
         # rate the decision was made on is kept rather than reported as 0/0.
         self._last_round_rate = self._round_rate()
@@ -450,8 +456,16 @@ class SuccessDrivenSelector(ArenaSelector):
     def info(self, global_step: int) -> dict:
         return {
             "stage": self._stage + 1,
-            "round_index": self._round_attempts,
-            "round_success_rate": (self._round_rate() if self._round_attempts > 0 else 0.0),
+            # 周を閉じたエピソードでは、リセット後の 0 ではなく閉じた周の値を出す
+            "round_index": (
+                self._round_size_closed if self._round_closed else self._round_attempts
+            ),
+            "round_success_rate": (
+                self._last_round_rate
+                if self._round_closed
+                else (self._round_rate() if self._round_attempts > 0 else 0.0)
+            ),
+            "round_closed": self._round_closed,
             "last_round_success_rate": self._last_round_rate,
             "last_round_level_success_rate": dict(self._last_round_level_rate),
             "advanced": self._advanced,
@@ -573,6 +587,8 @@ class RandomSelector(ArenaSelector):
         self._round_by_level: dict[str, list[int]] = {}
         self._last_round_rate = 0.0
         self._last_round_level_rate: dict[str, float] = {}
+        # info() は on_episode_end の後に読まれるので、周を閉じたエピソードかを覚えておく
+        self._round_closed = False
 
     def next_arena(self, global_step: int) -> Arena:
         if not self._queue:
@@ -587,8 +603,10 @@ class RandomSelector(ArenaSelector):
         level = self._round_by_level.setdefault(arena.name.split("-")[0], [0, 0])
         level[0] += int(success)
         level[1] += 1
+        self._round_closed = False
         if self._round_attempts < len(self.arenas):
             return
+        self._round_closed = True
         self._last_round_rate = self._round_successes / self._round_attempts
         self._last_round_level_rate = {
             level: successes / attempts
@@ -627,10 +645,18 @@ class RandomSelector(ArenaSelector):
         return {
             "arena_total": len(self._arena_by_name),
             "cleared_count": self.cleared_count(),
-            "round_index": self._round_attempts,
+            # 周を閉じたエピソードでは、リセット後の 0 ではなく閉じた周の値を出す
+            "round_index": len(self.arenas) if self._round_closed else self._round_attempts,
             "round_success_rate": (
-                self._round_successes / self._round_attempts if self._round_attempts > 0 else 0.0
+                self._last_round_rate
+                if self._round_closed
+                else (
+                    self._round_successes / self._round_attempts
+                    if self._round_attempts > 0
+                    else 0.0
+                )
             ),
+            "round_closed": self._round_closed,
             "last_round_success_rate": self._last_round_rate,
             "last_round_level_success_rate": dict(self._last_round_level_rate),
         }
