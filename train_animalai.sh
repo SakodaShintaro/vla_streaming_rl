@@ -1,9 +1,10 @@
 #!/bin/bash
 set -eux
 
-# Usage: ./train_animalai.sh <agent> <exp_name>
+# Usage: ./train_animalai.sh <agent> <exp_name> [hydra overrides...]
 agent=${1}
 exp_name=${2}
+shift 2
 cd $(dirname $0)
 
 export GRPC_VERBOSITY=ERROR
@@ -28,4 +29,5 @@ uv run python scripts/train.py \
   agent=${agent} \
   env=animalai \
   exp_name=${exp_name} \
-  resume_dir=null
+  resume_dir=null \
+  "$@"
