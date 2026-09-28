@@ -68,6 +68,6 @@ actor_critic:
   temporal_model_type: gru
   layer_scale_init: 0.0001
   cot_dropout: 0.5
-  token_dropout: 0.2
+  token_dropout: 0.0
   bc_loss_weight: 0.0
   cot_pool: mean  # [mean, none]
