@@ -57,6 +57,7 @@ def make_animalai_env(
     topdown_resolution: int,
     colored_walls: bool,
     end_at_pass_mark: bool,
+    seed: int,
 ) -> gym.Env:
     from vla_streaming_rl.envs.animalai_curriculum import build_selector
     from vla_streaming_rl.envs.animalai_env import AnimalAIEnv
@@ -67,11 +68,13 @@ def make_animalai_env(
         train_levels=list(train_levels),
         steps_per_stage=steps_per_stage,
         advance_success_rate=advance_success_rate,
-        seed=0,
+        seed=seed,
     )
+    # アリーナの選択順と、Unity 側の乱数（位置 -1 の物体の配置など）の両方を
+    # トップレベルのシードに従わせる。
     return AnimalAIEnv(
         resolution=resolution,
-        seed=0,
+        seed=seed,
         base_port=5005,
         binary_path=binary_path,
         continuous_action=continuous_action,
@@ -126,7 +129,7 @@ def make_carla_env(
     )
 
 
-def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
+def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
     """Build the training env.
 
     ``result_dir`` (when set) is the Hydra run dir; for the CARLA env it
@@ -174,7 +177,7 @@ def make_env(env_id: str, env_factory, result_dir) -> gym.Env:
         return env
 
     elif env_id == "AnimalAI-v0":
-        env = hydra.utils.instantiate(env_factory)
+        env = hydra.utils.instantiate(env_factory, seed=seed)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = DictObsWrapper(env)
         env = TransposeAndNormalizeObs(env)

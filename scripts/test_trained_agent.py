@@ -188,7 +188,7 @@ def main(
 
     global_step = load_global_step(checkpoint_path.parent)
 
-    env = make_env(args.env_id, args.env_factory, result_dir=None)
+    env = make_env(args.env_id, args.env_factory, result_dir=None, seed=seed)
     env.action_space.seed(seed)
     # The network reads the global step as an observation, so a fresh env's 0
     # would be far outside anything the checkpoint was trained at.

@@ -357,7 +357,7 @@ def final_evaluation(
         from test_trained_agent import run_testbed
 
         eval_factory = OmegaConf.merge(args.env_factory, {"mode": "eval"})
-        eval_env = make_env(args.env_id, eval_factory, result_dir=None)
+        eval_env = make_env(args.env_id, eval_factory, result_dir=None, seed=seed)
         eval_env.action_space.seed(seed)
         # A fresh env starts its counter at 0, but the network reads the global
         # step as an observation and was trained at this run's values.
@@ -418,7 +418,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     log_episode_writer = None
 
     # env setup
-    env = make_env(args.env_id, args.env_factory, result_dir=result_dir)
+    env = make_env(args.env_id, args.env_factory, result_dir=result_dir, seed=seed)
     env.action_space.seed(seed)
 
     eval_range = env.unwrapped.eval_range

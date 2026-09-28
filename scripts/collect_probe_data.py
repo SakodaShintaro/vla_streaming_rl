@@ -85,7 +85,7 @@ def main(args: DictConfig, result_dir: Path) -> None:
     seed = resolve_seed(args.seed)
     seed_everything(seed)
 
-    env = make_env(args.env_id, args.env_factory, result_dir=None)
+    env = make_env(args.env_id, args.env_factory, result_dir=None, seed=seed)
     env.action_space.seed(seed)
 
     network, agent = build_all(env, args)
