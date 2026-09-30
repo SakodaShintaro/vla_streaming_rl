@@ -102,7 +102,6 @@ def build_network(
             observation_space_shape=observation_space_shape,
             action_space_shape=action_space_shape,
             value_head_factory=value_head_factory,
-            seq_len=args.seq_len,
             critic_loss_weight=args.critic_loss_weight,
             prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
             actor_critic_config=args.actor_critic,
@@ -113,6 +112,11 @@ def build_network(
         ).to(device)
 
     elif args.network_class == "vlm_actor_critic_with_action_value":
+        # このネットワークは会話をリプレイバッファの seq_len 行から組み直すので、
+        # 高レベル方策の窓も同じ長さでなければならない
+        assert args.high_level.seq_len == args.vla.seq_len, (
+            f"high_level.seq_len {args.high_level.seq_len} must equal vla.seq_len {args.vla.seq_len}"
+        )
         from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
             VLMActorCriticWithActionValue,
         )
@@ -121,7 +125,6 @@ def build_network(
             observation_space_shape=observation_space_shape,
             action_space_shape=action_space_shape,
             value_head_factory=value_head_factory,
-            seq_len=args.seq_len,
             horizon=args.horizon,
             critic_loss_weight=args.critic_loss_weight,
             policy_head_factory=policy_head_factory,

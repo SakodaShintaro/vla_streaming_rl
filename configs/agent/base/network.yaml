@@ -48,8 +48,14 @@ high_level:
   cot_mode: batch  # [batch, stream]
   cot_tokens_num: 0
   cot_steps_per_chain: 16
+  # 高レベル方策が会話として読む窓のステップ数。cot_steps_per_chain ステップごとに1回の
+  # やり取りなので、履歴は (seq_len - 1) // cot_steps_per_chain 回分になる。
+  # また、実際に読める長さは window_tokens で頭打ちになる
+  seq_len: 8193
 
 vla:
+  # リプレイバッファから読む時間窓のステップ数
+  seq_len: 1
   model_id: Qwen/Qwen3.5-0.8B
   load_in_4bit: true
   use_lora: false
@@ -60,6 +66,7 @@ vla:
   reasoning_temperature: 1.0
 
 actor_critic:
+  seq_len: 1
   image_encoder_type: qwen  # [taesd, dinov2, siglip2, vjepa2, qwen]
   image_encoder_output_dim: 16
   detach_predictor: false

@@ -45,7 +45,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
         value_head_factory: Callable[[int, int], DistributionalValueHead],
-        seq_len: int,
         critic_loss_weight: float,
         prediction_head_factory,
         actor_critic_config: DictConfig,
@@ -55,7 +54,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         prompt_builder,
     ) -> None:
         super().__init__()
-        self.seq_len = seq_len
+        self.seq_len = actor_critic_config.seq_len
         self.critic_loss_weight = critic_loss_weight
 
         self.action_dim = action_space_shape[0]

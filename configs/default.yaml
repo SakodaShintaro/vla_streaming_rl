@@ -30,7 +30,6 @@ max_grad_norm: 5.0
 sparsity: 0.0
 gamma: 0.99
 multi_gammas: []
-seq_len: 1
 horizon: 1
 learning_starts: 2000
 critic_loss_weight: 1.0

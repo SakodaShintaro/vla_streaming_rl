@@ -341,8 +341,6 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
-    # The exchanges a window of ``seq_len`` ticks holds at the chain's cadence:
-    # the same count the trained network reads off its replay buffer, so the
-    # two see the same history for the same config.
-    history_turns = (args.seq_len - 1) // args.high_level.cot_steps_per_chain
+    # 高レベル方策の窓 high_level.seq_len に、チェーンの周期で収まるやり取りの数
+    history_turns = (args.high_level.seq_len - 1) // args.high_level.cot_steps_per_chain
     return PROMPT_BUILDERS[args.env_id](env, history_turns, args.high_level.cot_steps_per_chain)

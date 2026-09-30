@@ -75,7 +75,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
         value_head_factory: Callable[[int, int], DistributionalValueHead],
-        seq_len: int,
         horizon: int,
         critic_loss_weight: float,
         policy_head_factory,
@@ -84,7 +83,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         cot_steps_per_chain: int,
     ) -> None:
         super().__init__()
-        self.seq_len = seq_len
+        self.seq_len = vla_config.seq_len
         self.horizon = horizon
         self.action_dim = action_space_shape[0]
         self.observation_space_shape = observation_space_shape
