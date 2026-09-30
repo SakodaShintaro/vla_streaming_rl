@@ -44,7 +44,7 @@ high_level:
   temperature: 0.5
   reasoning_max_tokens: 0
   # 全注意層の KV を「先頭の sink ＋直近この数のトークン」まで間引く
-  window_tokens: 8192
+  window_tokens: 16384
   cot_mode: batch  # [batch, stream]
   cot_tokens_num: 0
   cot_steps_per_chain: 16

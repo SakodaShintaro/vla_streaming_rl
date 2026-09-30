@@ -8,3 +8,7 @@ network_class: actor_critic_with_action_value
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
+learning_starts: 2000
+seq_len: 65
+actor_critic:
+  disable_state_predictor: true
