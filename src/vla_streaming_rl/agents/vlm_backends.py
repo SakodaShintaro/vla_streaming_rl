@@ -157,7 +157,7 @@ class LocalVLMBackend:
         )
 
     def generate(self, messages: list[dict]) -> VLMResponse:
-        chain = self.generator.generate(messages)
+        chain = self.generator.generate(messages, [], self.generator.max_len, commit=True)
         return VLMResponse(
             text=chain.text,
             # What the hosted backend reports: the model ended the reply, or

@@ -88,14 +88,17 @@ class CoTBatch:
             on every step until the next chain is written.
         """
         if self._until_next == 0:
-            self._write_chain()
+            self._write_chain([])
             self._until_next = self.steps_per_chain
         self._until_next -= 1
         return self._activations
 
-    def _write_chain(self) -> None:
+    def _write_chain(self, prefix: list[int]) -> None:
+        """書きかけ ``prefix`` の続きを最後まで書いて、会話の返答として確定する。"""
         self._last_conversation = self.prompt_builder.conversation()
-        chain = self.generator.generate(self._last_conversation)
+        chain = self.generator.generate(
+            self._last_conversation, prefix, self.generator.max_len - len(prefix), commit=True
+        )
         subtask_positions = self._subtask_positions(chain)
         if subtask_positions.shape[0] == 0:
             self._activations = torch.zeros_like(self._activations)

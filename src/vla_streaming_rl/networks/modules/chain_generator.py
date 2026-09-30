@@ -133,12 +133,31 @@ class ChainGenerator:
         self._boundary_state: list[dict] = []
         self._boundary_kv_len = 0
         self._boundary_next_pos = 0
+        # 書きかけの返答。extend() はここから続きを書く
+        self._tokens: list[int] = []
+        self._positions: list[torch.Tensor] = []
+        self._kv_pos = 0
+        self._rope_pos = 0
+        # 次のトークンを選ぶ位置の活性とロジット
+        self._next_position = None
+        self._next_logits = None
+        # 最後に選んだトークンがまだキャッシュに入っていないか
+        self._unfed = False
+        self._prompt_tokens = 0
 
     @torch.inference_mode()
-    def generate(self, conversation: list[dict]) -> Chain:
+    def generate(
+        self, conversation: list[dict], prefix: list[int], budget: int, commit: bool
+    ) -> Chain:
         """Write a reply to ``conversation``. A frame in it is whatever the
         agent hands its builder -- an 8-bit picture or a (C, H, W) float tensor
-        in [0, 1] -- and reaches the processor as the latter."""
+        in [0, 1] -- and reaches the processor as the latter.
+
+        ``prefix`` は返答の書きかけのトークン列で、生成プロンプトの後ろに積み
+        直してから続きを書く。新しく書くのは最大 ``budget`` トークンで、返答
+        全体は ``max_len`` で打ち切る。``commit`` が偽のときは会話の新しい
+        メッセージを境界に確定させない。次の呼び出しで境界へ巻き戻されるので、
+        最新の観測を読んで書きかけを進めるだけの呼び出しになる。"""
         start = time.perf_counter()
         if self._last_consumed is None:
             new_messages = list(conversation)
@@ -202,24 +221,32 @@ class ChainGenerator:
         self._cache = stage.past_key_values
         self._kv_len += delta_len
         self._next_pos = int(pos.max().item()) + 1
-        if self._sink_len == 0:
-            self._sink_len = len(
-                self.processor.tokenizer.encode(
-                    _history_text(conversation[0]), add_special_tokens=False
+        if commit:
+            if self._sink_len == 0:
+                self._sink_len = len(
+                    self.processor.tokenizer.encode(
+                        _history_text(conversation[0]), add_special_tokens=False
+                    )
                 )
+            self._evict()
+            self._last_consumed = conversation[-1]
+            self._save_boundary()
+        else:
+            assert self._last_consumed is not None, (
+                "a reply can only be continued after one has been committed"
             )
-        self._evict()
-        self._last_consumed = conversation[-1]
-        self._save_boundary()
 
-        tail_len = len(self._tail_ids)
+        # 生成プロンプトの末尾と書きかけの返答を一度に積む。書きかけの i 番目の
+        # トークンを選んだのは、その直前の位置の活性。
+        tail_ids = self._tail_ids + prefix
+        tail_len = len(tail_ids)
         tail_positions = (
             (torch.arange(tail_len, device=self.device) + self._next_pos)
             .view(1, 1, -1)
             .expand(3, 1, -1)
         )
         outputs = self.model(
-            input_ids=torch.tensor([self._tail_ids], device=self.device),
+            input_ids=torch.tensor([tail_ids], device=self.device),
             attention_mask=torch.ones(1, self._kv_len + tail_len, device=self.device),
             position_ids=tail_positions,
             cache_position=torch.arange(self._kv_len, self._kv_len + tail_len, device=self.device),
@@ -227,27 +254,62 @@ class ChainGenerator:
             use_cache=True,
             output_hidden_states=True,
         )
-        kv_pos = self._kv_len + tail_len
-        rope_pos = self._next_pos + tail_len
+        self._kv_pos = self._kv_len + tail_len
+        self._rope_pos = self._next_pos + tail_len
+        first = len(self._tail_ids) - 1
+        self._positions = [
+            torch.stack([depth[0, first + i] for depth in outputs.hidden_states]).to(torch.bfloat16)
+            for i in range(len(prefix))
+        ]
+        self._tokens = list(prefix)
+        self._next_position = self._last_position(outputs.hidden_states)
+        self._next_logits = outputs.logits[0, -1]
+        self._unfed = False
+        self._prompt_tokens = self._kv_len + tail_len
+        self._write(budget)
+        assert len(self._tokens) > 0, "nothing was written: a fresh reply needs a positive budget"
+        return self._chain(start)
 
-        positions = [self._last_position(outputs.hidden_states)]
-        tokens = [self._sample(outputs.logits[0, -1])]
-        while tokens[-1] != self.eos_token_id and len(tokens) < self.max_len:
-            self._token.fill_(tokens[-1])
-            self._cache_position.fill_(kv_pos)
-            self._position_ids.fill_(rope_pos)
-            outputs = self._forward_step(self._token, self._cache_position, self._position_ids)
-            positions.append(self._last_position(outputs.hidden_states))
-            tokens.append(self._sample(outputs.logits[0, -1]))
-            kv_pos += 1
-            rope_pos += 1
+    @torch.inference_mode()
+    def extend(self, budget: int) -> Chain:
+        """直前の ``generate`` で書いた返答の続きを、キャッシュを巻き戻さずに
+        最大 ``budget`` トークン書き進める。新しい観測は読まない。"""
+        start = time.perf_counter()
+        assert len(self._tokens) > 0, "extend() continues a reply that generate() started"
+        self._write(budget)
+        return self._chain(start)
+
+    def _write(self, budget: int) -> None:
+        """書きかけの返答に最大 ``budget`` トークンを足す。最後に選んだトークンは
+        次に書くときまでキャッシュに入れないので、書き終わりの前進は払わない。"""
+        written = 0
+        while self._writable(written, budget):
+            if self._unfed:
+                self._token.fill_(self._tokens[-1])
+                self._cache_position.fill_(self._kv_pos)
+                self._position_ids.fill_(self._rope_pos)
+                outputs = self._forward_step(self._token, self._cache_position, self._position_ids)
+                self._next_position = self._last_position(outputs.hidden_states)
+                self._next_logits = outputs.logits[0, -1]
+                self._kv_pos += 1
+                self._rope_pos += 1
+            self._positions.append(self._next_position)
+            self._tokens.append(self._sample(self._next_logits))
+            self._unfed = True
+            written += 1
+
+    def _writable(self, written: int, budget: int) -> bool:
+        ended = len(self._tokens) > 0 and self._tokens[-1] == self.eos_token_id
+        return not ended and written < budget and len(self._tokens) < self.max_len
+
+    def _chain(self, start: float) -> Chain:
         return Chain(
-            tokens=tokens,
-            text=self.processor.tokenizer.decode(tokens, skip_special_tokens=True).strip(),
-            positions=torch.stack(positions),
-            prompt_tokens=self._kv_len + tail_len,
+            tokens=list(self._tokens),
+            text=self.processor.tokenizer.decode(self._tokens, skip_special_tokens=True).strip(),
+            positions=torch.stack(self._positions),
+            prompt_tokens=self._prompt_tokens,
             msec=(time.perf_counter() - start) * 1000.0,
-            finished=tokens[-1] == self.eos_token_id,
+            finished=self._tokens[-1] == self.eos_token_id,
         )
 
     def _evict(self) -> None:
