@@ -39,6 +39,21 @@ class PromptForward:
     inputs_embeds: torch.Tensor
 
 
+@dataclass
+class LossTerms:
+    """リプレイバッチ1つ分の損失と、それを計算する途中で得た推論結果。"""
+
+    total_loss: torch.Tensor
+    actor_loss: torch.Tensor
+    reasoning_loss: torch.Tensor
+    info: dict
+    state: torch.Tensor
+    action_chunk: torch.Tensor
+    next_state: torch.Tensor
+    next_action: torch.Tensor
+    next_critic_out: HeadOutput
+
+
 def _user_turn(image: torch.Tensor, text: str) -> dict:
     return {
         "role": "user",
@@ -285,116 +300,70 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
-        # The prompt of each state is the one stored on its own tick: the last
-        # slot for the next state, the slot before the chunk for the current.
-        next_prompts = self._prompts_at(*_rows(data), -1)
-        curr_prompts = self._prompts_at(*_rows(data), -self.horizon - 1)
-
-        _, _, next_critic_out = self._infer(*next_prompts)
-        chunk_rewards = data.rewards[:, -self.horizon :]
-        chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self.value_head.compute_target_value(
-            next_critic_out.output, chunk_rewards, chunk_dones
-        )
-
-        prompt = self._forward_prompt(*curr_prompts)
-        state = prompt.state
-        action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
-
-        # Critic loss
-        critic_loss, critic_info = self.value_head.compute_critic_loss(
-            state, action_chunk, target_value
-        )
-
-        actor_loss, actor_info = self.policy_head.compute_actor_loss(
-            state,
-            action_chunk,
-            value_head=self.value_head,
-        )
-
-        reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(prompt)
-
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + reasoning_loss
-
-        info_dict = {
-            f"losses/{key}": value
-            for key, value in {
-                **critic_info,
-                **actor_info,
-                **reasoning_info,
-            }.items()
-        }
-
-        return LossResult(loss=total_loss, info=info_dict)
+        terms = self._loss_terms(data)
+        return LossResult(loss=terms.total_loss, info=terms.info)
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
-        next_prompts = self._prompts_at(*_rows(data), -1)
-        curr_prompts = self._prompts_at(*_rows(data), -self.horizon - 1)
-
-        next_state, next_action, critic_out = self._infer(*next_prompts)
-        chunk_rewards = data.rewards[:, -self.horizon :]
-        chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self.value_head.compute_target_value(
-            critic_out.output, chunk_rewards, chunk_dones
-        )
-
-        prompt = self._forward_prompt(*curr_prompts)
-        state = prompt.state
-        action_chunk = data.actions[:, -self.horizon :]
-
-        # Critic loss
-        critic_loss, critic_info = self.value_head.compute_critic_loss(
-            state, action_chunk, target_value
-        )
-
-        actor_loss, actor_info = self.policy_head.compute_actor_loss(
-            state,
-            action_chunk,
-            value_head=self.value_head,
-        )
-
-        reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(prompt)
-
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + reasoning_loss
-
-        # Actor-only loss (no critic component)
-        actor_entropy_loss = actor_loss + reasoning_loss
-
+        terms = self._loss_terms(data)
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
-            state.detach(), action_chunk.detach()
+            terms.state.detach(), terms.action_chunk.detach()
         ).mean()
-
-        infer_result = InferResult(
-            action=next_action,
-            value_report=self.value_head.value_report(critic_out.output),
-            rnn_state=self._dummy_state.clone(),
-            features=next_state,
-        )
-        info_dict = {
-            f"losses/{key}": value
-            for key, value in {
-                **critic_info,
-                **actor_info,
-                **reasoning_info,
-            }.items()
-        }
-
-        et_info = EligibilityTraceInfo(
-            actor_entropy_loss=actor_entropy_loss,
-            neg_value=neg_value_detached,
-            delta=critic_info["delta"],
-        )
-
         return InferLossResult(
-            infer_result=infer_result,
-            loss_result=LossResult(loss=total_loss, info=info_dict),
-            et_info=et_info,
+            infer_result=InferResult(
+                action=terms.next_action,
+                value_report=self.value_head.value_report(terms.next_critic_out.output),
+                rnn_state=self._dummy_state.clone(),
+                features=terms.next_state,
+            ),
+            loss_result=LossResult(loss=terms.total_loss, info=terms.info),
+            et_info=EligibilityTraceInfo(
+                # Actor-only loss (no critic component)
+                actor_entropy_loss=terms.actor_loss + terms.reasoning_loss,
+                neg_value=neg_value_detached,
+                delta=terms.info["losses/delta"],
+            ),
         )
 
     ####################
     # Internal methods #
     ####################
+
+    def _loss_terms(self, data: ReplayBufferData) -> LossTerms:
+        """リプレイバッチの損失。各状態のプロンプトはその状態のステップに保存されたもので、
+        次の状態は最後のステップ、現在の状態はチャンクの手前のステップのもの。"""
+        next_state, next_action, next_critic_out = self._infer(*self._prompts_at(*_rows(data), -1))
+        target_value = self.value_head.compute_target_value(
+            next_critic_out.output,
+            data.rewards[:, -self.horizon :],
+            data.dones[:, -self.horizon :],
+        )
+
+        prompt = self._forward_prompt(*self._prompts_at(*_rows(data), -self.horizon - 1))
+        state = prompt.state
+        action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
+        critic_loss, critic_info = self.value_head.compute_critic_loss(
+            state, action_chunk, target_value
+        )
+        actor_loss, actor_info = self.policy_head.compute_actor_loss(
+            state, action_chunk, value_head=self.value_head
+        )
+        reasoning_loss, reasoning_info = self._reasoning_loss_or_zero(prompt)
+        info = {
+            f"losses/{key}": value
+            for key, value in {**critic_info, **actor_info, **reasoning_info}.items()
+        }
+        return LossTerms(
+            total_loss=self.critic_loss_weight * critic_loss + actor_loss + reasoning_loss,
+            actor_loss=actor_loss,
+            reasoning_loss=reasoning_loss,
+            info=info,
+            state=state,
+            action_chunk=action_chunk,
+            next_state=next_state,
+            next_action=next_action,
+            next_critic_out=next_critic_out,
+        )
 
     def _get_vlm_model_inner(self) -> nn.Module:
         """Get the inner Qwen3_5Model (handles PEFT wrapping)."""
