@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: MIT
+import dataclasses
+
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.prompt import ACHIEVED_TAG, SUBTASK_RE, PromptBuilder, assistant_turn
 
+from ..interface import HighLevelPolicyOutput
 from .chain_generator import ChainGenerator
 
 
@@ -40,102 +43,68 @@ class HighLevelPolicy:
         """返答を捨てる。次の advance はそのフレームで新しい返答を書く。書き込む先の
         会話をリセットするのは builder の側。"""
         self.generator.reset_cache()
-        self._text = ""
-        # 確定した返答が判定した、前の返答のサブタスクの達成度。エピソードの最初の
-        # 返答には前のサブタスクがないので None
-        self._achieved: float | None = None
-        self._replies_written = 0
-        self._last_conversation = []
-        # 最後の返答の費用。返答を持ち続けるステップは費用を払ったステップと違うので保持する
-        self._input_tokens = 0
-        self._output_tokens = 0
-        self._msec = 0.0
-        self._activations = torch.zeros(
-            (self.tokens_per_step, self.generator.layers_num, self.generator.hidden_size),
-            dtype=torch.bfloat16,
-            device=self.device,
-        )
+        # いま持っている返答。エピソードの最初の返答を書くまでは None
+        self._reply: HighLevelPolicyOutput | None = None
         # 0 は「いま書く」。エピソードの最初の advance は、そのエピソードの最初のフレームで書く
         self._until_next = 0
 
-    def age(self) -> int:
-        """いま読んでいる返答を何ステップ前に書いたか。書いたステップで 0、持ち続ける
-        最後のステップで ``steps_per_reply - 1``。同じ活性でも、書いたフレームの上と
-        十数ステップ後とでは意味が違うので、エンコーダは活性と一緒にこれを読む。"""
-        return self.steps_per_reply - 1 - self._until_next
-
     @torch.inference_mode()
-    def advance(self) -> torch.Tensor:
-        """このステップの活性。返答を書く番なら書いて確定する。
-
-        Returns:
-            (tokens_per_step, layers_num, hidden_size) bfloat16。次の返答を書くまで同じもの。
-        """
+    def advance(self) -> HighLevelPolicyOutput:
+        """このステップの返答。返答を書く番なら書いて確定する。次の返答を書くまで同じ
+        ものを返し、``age`` だけが進む。同じ活性でも、書いたフレームの上と十数ステップ
+        後とでは意味が違うので、エンコーダは活性と一緒に ``age`` を読む。"""
         if self._until_next == 0:
-            self._last_conversation = self.prompt_builder.conversation()
-            reply = self.generator.generate(
-                self._last_conversation, [], self.generator.max_len, commit=True
-            )
-            self._achieved = (
-                self.generator.yes_probability(reply, ACHIEVED_TAG)
-                if self._replies_written > 0
+            conversation = self.prompt_builder.conversation()
+            chain = self.generator.generate(conversation, [], self.generator.max_len, commit=True)
+            # エピソードの最初の返答には判定すべき前のサブタスクがない
+            achieved = (
+                self.generator.yes_probability(chain, ACHIEVED_TAG)
+                if self._reply is not None
                 else None
             )
-            self._replies_written += 1
 
             # <subtask> 区間のトークンの活性だけを読む。区間の長さによらず、区間方向に
             # 均して1ステップに読む幅にそろえる。区間がなければ 0
             tokenizer = self.generator.processor.tokenizer
-            match = SUBTASK_RE.search(tokenizer.decode(reply.tokens, skip_special_tokens=True))
+            match = SUBTASK_RE.search(tokenizer.decode(chain.tokens, skip_special_tokens=True))
             rows = []
             if match is not None:
                 start = 0
-                for i in range(len(reply.tokens)):
-                    end = len(tokenizer.decode(reply.tokens[: i + 1], skip_special_tokens=True))
+                for i in range(len(chain.tokens)):
+                    end = len(tokenizer.decode(chain.tokens[: i + 1], skip_special_tokens=True))
                     if start < match.end(1) and end > match.start(1):
                         rows.append(i)
                     start = end
             if len(rows) == 0:
-                self._activations = torch.zeros_like(self._activations)
+                activations = torch.zeros(
+                    (self.tokens_per_step, self.generator.layers_num, self.generator.hidden_size),
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                )
             else:
-                span = reply.positions[rows].to(torch.float32).permute(1, 2, 0)
+                span = chain.positions[rows].to(torch.float32).permute(1, 2, 0)
                 pooled = F.adaptive_avg_pool1d(span, self.tokens_per_step)
-                self._activations = pooled.permute(2, 0, 1).to(torch.bfloat16)
+                activations = pooled.permute(2, 0, 1).to(torch.bfloat16)
 
-            self._text = reply.text
-            self._input_tokens = reply.prompt_tokens
-            self._output_tokens = len(reply.tokens)
-            self._msec = reply.msec
-            self.prompt_builder.add_reply(reply.text)
+            self._reply = HighLevelPolicyOutput(
+                activations=activations,
+                age=0,
+                text=chain.text,
+                exchange=conversation + [assistant_turn(chain.text)],
+                achieved=achieved,
+                input_tokens=chain.prompt_tokens,
+                output_tokens=len(chain.tokens),
+                msec=chain.msec,
+            )
+            self.prompt_builder.add_reply(chain.text)
             self._until_next = self.steps_per_reply
         self._until_next -= 1
-        return self._activations
+        return dataclasses.replace(self._reply, age=self.steps_per_reply - 1 - self._until_next)
 
     def judge_current(self) -> float:
         """いま実行中のサブタスクの達成度を、いまのターンで判定する。エピソードが
         終わり、次の返答が来ないサブタスクのため。"""
-        assert self._replies_written > 0, "there is no subtask running before the first reply"
+        assert self._reply is not None, "there is no subtask running before the first reply"
         return self.generator.yes_probability_after(
             self.prompt_builder.conversation(), ACHIEVED_TAG
         )
-
-    def achieved(self) -> float | None:
-        """最後に確定した返答が判定した、前の返答のサブタスクの達成度（yes の確率）。
-        前のサブタスクがないか、返答に判定がなければ None。"""
-        return self._achieved
-
-    def stats(self) -> dict:
-        """最後の返答の費用。読んだトークン数、書いたトークン数、かかった時間。"""
-        return {
-            "input_tokens": self._input_tokens,
-            "output_tokens": self._output_tokens,
-            "msec": self._msec,
-        }
-
-    def text(self) -> str:
-        """最後に確定した返答。"""
-        return self._text
-
-    def exchange(self) -> list[dict]:
-        """最後の返答を書いたときの会話と返答。描画用。"""
-        return self._last_conversation + [assistant_turn(self.text())]

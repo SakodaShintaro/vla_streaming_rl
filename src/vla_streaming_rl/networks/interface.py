@@ -52,6 +52,26 @@ class InferInput:
     subtask_age_seq: torch.Tensor  # (B, T, 1)
 
 
+@dataclass(frozen=True)
+class HighLevelPolicyOutput:
+    """高レベル方策がいま持っている返答。返答を書いたステップから次を書くまで同じ
+    ものを返し、``age`` だけが進む。高レベル方策を持たないネットワークでは空。"""
+
+    # (*subtask_shape)。返答の <subtask> 区間の活性を、1ステップに読む幅へ均したもの
+    activations: torch.Tensor
+    # 何ステップ前に書いたか。書いたステップで 0
+    age: int
+    text: str
+    # 書いたときの会話と、この返答。描画用
+    exchange: list[dict]
+    # この返答が判定した、前の返答のサブタスクの達成度（yes の確率）。前のサブタスクが
+    # ないか、返答に判定がなければ None
+    achieved: float | None
+    input_tokens: int
+    output_tokens: int
+    msec: float
+
+
 @dataclass
 class InferResult:
     """Structured return value of a network's ``infer`` / ``infer_and_compute_loss``.
@@ -117,29 +137,34 @@ class NetworkInterface(nn.Module, abc.ABC):
 
     def advance_high_level(
         self, episode_started: bool, window: ReplayBufferData
-    ) -> tuple[torch.Tensor, int]:
-        """This step's chain-of-thought activations and how many steps ago they
-        were generated, empty and 0 unless the network carries a chain (see
-        ``networks/actor_critic_with_action_value.py``). ``window`` is the buffer's newest
-        rows, this step's last, for a chain that reads its prompt off them."""
+    ) -> HighLevelPolicyOutput:
+        """このステップの高レベル方策の返答。高レベル方策を持たないネットワークでは空
+        （``networks/actor_critic_with_action_value.py`` を参照）。``window`` はバッファの
+        最新の行で、このステップが最後。プロンプトをそこから読む高レベル方策のため。"""
         del episode_started, window
-        return torch.zeros(self.subtask_shape), 0
+        return HighLevelPolicyOutput(
+            activations=torch.zeros(self.subtask_shape),
+            age=0,
+            text="",
+            exchange=[],
+            achieved=None,
+            input_tokens=0,
+            output_tokens=0,
+            msec=0.0,
+        )
 
-    def thought_text(self) -> str:
-        """What the network's chain wrote last, empty without one. Stored as
-        the reply of the step it was written on."""
-        return ""
-
-    def render_panels(self) -> dict[str, np.ndarray]:
-        """Named RGB panels this network contributes to the render strip. The
-        agents pass these through verbatim, so the stable-panel contract of
-        :class:`agents.base.StepResult` applies: the same keys with the same
-        shapes on every step of a run."""
+    def render_panels(self, reply: HighLevelPolicyOutput) -> dict[str, np.ndarray]:
+        """Named RGB panels this network contributes to the render strip, drawn
+        from this step's ``reply``. The agents pass these through verbatim, so
+        the stable-panel contract of :class:`agents.base.StepResult` applies:
+        the same keys with the same shapes on every step of a run."""
+        del reply
         return {}
 
-    def render_texts(self) -> dict[str, str]:
+    def render_texts(self, reply: HighLevelPolicyOutput) -> dict[str, str]:
         """Named free-form text this network contributes to the episode log,
         the readable counterpart of ``render_panels``."""
+        del reply
         return {}
 
     @abc.abstractmethod

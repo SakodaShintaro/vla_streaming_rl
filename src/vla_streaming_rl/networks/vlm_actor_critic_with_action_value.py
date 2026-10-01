@@ -12,6 +12,7 @@ from ..replay_buffer import ReplayBufferData
 from ..utils import render_text_panel
 from .interface import (
     EligibilityTraceInfo,
+    HighLevelPolicyOutput,
     InferInput,
     InferLossResult,
     InferResult,
@@ -153,18 +154,18 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self._dummy_state = torch.zeros(1, 1, 1)
         self._last_reasoning_text = ""
 
-    def render_panels(self) -> dict[str, np.ndarray]:
+    def render_panels(self, reply: HighLevelPolicyOutput) -> dict[str, np.ndarray]:
         """The reasoning chain, drawn on a panel of a size fixed for the whole
         run so the render strip keeps one shape, wide and tall enough to read a
         chain of ``reasoning_max_tokens`` tokens."""
         if self.reasoning_max_tokens == 0:
             return {}
-        return {"reasoning": render_text_panel(self._last_reasoning_text, 480, 360)}
+        return {"reasoning": render_text_panel(reply.text, 480, 360)}
 
-    def render_texts(self) -> dict[str, str]:
+    def render_texts(self, reply: HighLevelPolicyOutput) -> dict[str, str]:
         if self.reasoning_max_tokens == 0:
             return {}
-        return {"reasoning": self._last_reasoning_text}
+        return {"reasoning": reply.text}
 
     def init_state(self) -> torch.Tensor:
         return self._dummy_state.clone()
@@ -199,17 +200,15 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def tokenize(self, text: str) -> list[int]:
         return self.processor.tokenizer.encode(text, add_special_tokens=False)
 
-    def thought_text(self) -> str:
-        return self._last_reasoning_text
-
     def advance_high_level(
         self, episode_started: bool, window: ReplayBufferData
-    ) -> tuple[torch.Tensor, int]:
+    ) -> HighLevelPolicyOutput:
         """Every ``steps_per_reply`` ticks, write a chain on this tick's
         prompt, read off ``window`` (the buffer's newest rows, this tick last).
 
-        Returns no activations -- the chain reaches the policy as text, as the
-        reply of this tick's turn in the prompts that follow -- and 0.
+        The reply carries no activations -- the chain reaches the policy as
+        text, as the reply of this tick's turn in the prompts that follow --
+        and its age is 0.
         """
         if episode_started:
             self._since_write = self.steps_per_reply
@@ -218,7 +217,16 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         if self.reasoning_max_tokens > 0 and self._since_write >= self.steps_per_reply:
             self._write_chain(window)
             self._since_write = 0
-        return torch.zeros(self.subtask_shape), 0
+        return HighLevelPolicyOutput(
+            activations=torch.zeros(self.subtask_shape),
+            age=0,
+            text=self._last_reasoning_text,
+            exchange=[],
+            achieved=None,
+            input_tokens=0,
+            output_tokens=0,
+            msec=0.0,
+        )
 
     @torch.inference_mode()
     def _write_chain(self, window: ReplayBufferData) -> None:

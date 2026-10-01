@@ -23,7 +23,7 @@ from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder
-from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.networks.interface import HighLevelPolicyOutput, InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -200,12 +200,8 @@ class StreamingAgent(Agent):
         )
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
-        subtask_activation, subtask_age = self.network.advance_high_level(
-            episode_started, self.rb.get_latest(self.seq_len)
-        )
-        self.rb.amend_latest(
-            subtask_activation, subtask_age, self.network.tokenize(self.network.thought_text())
-        )
+        reply = self.network.advance_high_level(episode_started, self.rb.get_latest(self.seq_len))
+        self.rb.amend_latest(reply.activations, reply.age, self.network.tokenize(reply.text))
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
             self.prev_action = action
@@ -214,8 +210,8 @@ class StreamingAgent(Agent):
             return StepResult(
                 action=action,
                 metrics=metrics,
-                panels=self.network.render_panels(),
-                texts={"prompt": prompt, **self.network.render_texts()},
+                panels=self.network.render_panels(reply),
+                texts={"prompt": prompt, **self.network.render_texts(reply)},
             )
 
         # Right after an episode boundary the newest window spans two episodes:
@@ -224,7 +220,7 @@ class StreamingAgent(Agent):
         # it, but a chunk still has to be started, so the tick acts without a
         # learning step.
         if not self.rb.latest_window_is_clean(self.seq_len + self.horizon):
-            return self._act(prompt, metrics)
+            return self._act(prompt, metrics, reply)
 
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
@@ -263,11 +259,11 @@ class StreamingAgent(Agent):
         return StepResult(
             action=action,
             metrics=metrics,
-            panels=self.network.render_panels(),
-            texts={"prompt": prompt, **self.network.render_texts()},
+            panels=self.network.render_panels(reply),
+            texts={"prompt": prompt, **self.network.render_texts(reply)},
         )
 
-    def _act(self, prompt: str, metrics: dict) -> StepResult:
+    def _act(self, prompt: str, metrics: dict, reply: HighLevelPolicyOutput) -> StepResult:
         """Start a chunk from the newest state window, with no learning step."""
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
@@ -304,8 +300,8 @@ class StreamingAgent(Agent):
         return StepResult(
             action=action,
             metrics=metrics,
-            panels=self.network.render_panels(),
-            texts={"prompt": prompt, **self.network.render_texts()},
+            panels=self.network.render_panels(reply),
+            texts={"prompt": prompt, **self.network.render_texts(reply)},
         )
 
     def on_episode_end(self, score: float) -> dict:
@@ -408,12 +404,8 @@ class StreamingAgent(Agent):
         )
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
-        subtask_activation, subtask_age = self.network.advance_high_level(
-            episode_started, self.rb.get_latest(self.seq_len)
-        )
-        self.rb.amend_latest(
-            subtask_activation, subtask_age, self.network.tokenize(self.network.thought_text())
-        )
+        reply = self.network.advance_high_level(episode_started, self.rb.get_latest(self.seq_len))
+        self.rb.amend_latest(reply.activations, reply.age, self.network.tokenize(reply.text))
 
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -423,11 +415,11 @@ class StreamingAgent(Agent):
             return StepResult(
                 action=action,
                 metrics=metrics,
-                panels=self.network.render_panels(),
-                texts={"prompt": prompt, **self.network.render_texts()},
+                panels=self.network.render_panels(reply),
+                texts={"prompt": prompt, **self.network.render_texts(reply)},
             )
 
-        return self._act(prompt, metrics)
+        return self._act(prompt, metrics, reply)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

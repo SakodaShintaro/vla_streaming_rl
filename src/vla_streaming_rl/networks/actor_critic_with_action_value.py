@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import dataclasses
 from collections.abc import Callable
 
 import numpy as np
@@ -8,6 +9,7 @@ from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
     EligibilityTraceInfo,
+    HighLevelPolicyOutput,
     InferInput,
     InferLossResult,
     InferResult,
@@ -137,60 +139,45 @@ class ActorCriticWithActionValue(NetworkInterface):
 
     def advance_high_level(
         self, episode_started: bool, window: ReplayBufferData
-    ) -> tuple[torch.Tensor, int]:
-        """This step's chain-of-thought activations and how many steps ago they
-        were generated, or nothing when the chain is off. The first tick of an
+    ) -> HighLevelPolicyOutput:
+        """This step's reply, empty when the chain is off. The first tick of an
         episode ends whatever chain was running, so an episode's commentary
         starts on its own first frame rather than carrying the one written about
         the frame the last episode ended on. The chain reads the conversation
         the builder holds, not ``window``."""
-        del window
         if self.high_level_policy is None:
-            return torch.zeros(self.subtask_shape), 0
+            return super().advance_high_level(episode_started, window)
         if episode_started:
             self.high_level_policy.reset()
-        # Advanced first: `age` is about the chain the call hands back, which is
-        # a fresh one on the steps that write.
-        activations = self.high_level_policy.advance()
+        reply = self.high_level_policy.advance()
         if self.pool_subtask:
-            activations = activations.float().mean(dim=0, keepdim=True).to(activations.dtype)
-        return activations, self.high_level_policy.age()
+            pooled = reply.activations.float().mean(dim=0, keepdim=True)
+            reply = dataclasses.replace(reply, activations=pooled.to(reply.activations.dtype))
+        return reply
 
-    def render_panels(self) -> dict[str, np.ndarray]:
-        """The conversation as it currently stands, drawn for the render strip:
-        the turn the agent was shown this tick and the chains written about the
-        ones before it, under what the last run of the VLM cost. Without a chain
-        there is no panel at all rather than a blank one, which keeps that run's
-        strip the width of what it has."""
+    def render_panels(self, reply: HighLevelPolicyOutput) -> dict[str, np.ndarray]:
+        """The conversation the reply was written for and the reply, drawn for
+        the render strip under what writing it cost. Without a chain there is
+        no panel at all rather than a blank one, which keeps that run's strip
+        the width of what it has."""
         if self.high_level_policy is None:
             return {}
-        stats = self.high_level_policy.stats()
         status = (
-            f"in {stats['input_tokens']} tok   out {stats['output_tokens']} tok   "
-            f"{stats['msec']:.0f} ms"
+            f"in {reply.input_tokens} tok   out {reply.output_tokens} tok   {reply.msec:.0f} ms"
         )
         return {
             "conversation": render_conversation_panel(
-                self.high_level_policy.exchange(),
+                reply.exchange,
                 status,
                 self.CONVERSATION_PANEL_WIDTH,
                 self.CONVERSATION_PANEL_HEIGHT,
             )
         }
 
-    def render_texts(self) -> dict[str, str]:
+    def render_texts(self, reply: HighLevelPolicyOutput) -> dict[str, str]:
         if self.high_level_policy is None:
             return {}
-        return {"chain_of_thought": self.high_level_policy.text()}
-
-    def thought_text(self) -> str:
-        if self.high_level_policy is None:
-            return ""
-        return self.high_level_policy.text()
-
-    def achieved(self) -> float | None:
-        """最後に確定したチェーンが判定した、前のサブタスクの達成度。"""
-        return self.high_level_policy.achieved()
+        return {"chain_of_thought": reply.text}
 
     def judge_current(self) -> float:
         """いま実行中のサブタスクの、いまのフレームでの達成度。"""

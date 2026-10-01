@@ -55,10 +55,8 @@ class ZeroShotVLMAgent(Agent):
 
         self.held_action = np.zeros(self.action_dim, dtype=np.float32)
         self.hold_steps = 0
-        self.held_exchange = []
-        self.held_status = ""
-        self.held_metrics = {}
-        self.fresh_metrics = {}
+        # 持っている返答の <action> を読めたか
+        self.parse_ok = True
 
     # ------------------------------------------------------------------
     # Agent interface
@@ -79,58 +77,54 @@ class ZeroShotVLMAgent(Agent):
         self.prompt_builder.observe(obs, reward, info, torch.from_numpy(obs["image"]))
         prompt = self.prompt_builder.task_text()
 
-        # チェーンを進め、返答を確定したステップでその行動を読む
-        self.chain.advance()
-        steps_since_write = self.chain.age()
-        if steps_since_write == 0:
+        # 高レベル方策を進め、返答を確定したステップでその行動を読む
+        reply = self.chain.advance()
+        # 達成度は判定したステップでだけ記録する
+        achieved_metrics = {}
+        if reply.age == 0:
             # 確定した返答の <action> を読み、その行動と続けるステップ数を保持する。読め
             # なかったときは、行動として実行できず止まっていたことを伝える user の発言を
             # 会話に足す
-            self.held_exchange = self.chain.exchange()
-            answer_text, self.held_action, self.hold_steps, parse_ok = read_action_reply(
-                self.chain.text(),
+            answer_text, self.held_action, self.hold_steps, self.parse_ok = read_action_reply(
+                reply.text,
                 self.parse_action_text,
                 self.action_space.low,
                 self.action_space.high,
                 self.steps_per_action,
             )
-            if not parse_ok:
+            if not self.parse_ok:
                 self.prompt_builder.reject(answer_text)
-            stats = self.chain.stats()
-            self.held_metrics = {
-                "vlm/parse_failed": float(not parse_ok),
-                "vlm/msec": stats["msec"],
-                "vlm/prompt_tokens": float(stats["input_tokens"]),
-                "vlm/completion_tokens": float(stats["output_tokens"]),
-            }
-            self.held_status = (
-                f"in {stats['input_tokens']} tok   out {stats['output_tokens']} tok   "
-                f"{stats['msec']:.0f} ms   parse {'ok' if parse_ok else 'failed'}"
-            )
-            achieved = self.chain.achieved()
-            if achieved is not None:
-                self.fresh_metrics = {"vlm/achieved": achieved}
+            if reply.achieved is not None:
+                achieved_metrics = {"vlm/achieved": reply.achieved}
         elif episode_done:
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
             # フレームで判定する
-            self.fresh_metrics = {"vlm/achieved": self.chain.judge_current()}
+            achieved_metrics = {"vlm/achieved": self.chain.judge_current()}
         action = (
             self.held_action
-            if steps_since_write < self.hold_steps
+            if reply.age < self.hold_steps
             else np.zeros(self.action_dim, dtype=np.float32)
         )
 
+        status = (
+            f"in {reply.input_tokens} tok   out {reply.output_tokens} tok   "
+            f"{reply.msec:.0f} ms   parse {'ok' if self.parse_ok else 'failed'}"
+        )
         panels = {
             "conversation": render_conversation_panel(
-                self.held_exchange,
-                self.held_status,
+                reply.exchange,
+                status,
                 self.PANEL_WIDTH,
                 self.PANEL_HEIGHT,
             )
         }
-        # 達成度は判定したステップでだけ記録する
-        metrics = {**self.held_metrics, **self.fresh_metrics}
-        self.fresh_metrics = {}
+        metrics = {
+            "vlm/parse_failed": float(not self.parse_ok),
+            "vlm/msec": reply.msec,
+            "vlm/prompt_tokens": float(reply.input_tokens),
+            "vlm/completion_tokens": float(reply.output_tokens),
+            **achieved_metrics,
+        }
         return StepResult(
             action=action,
             metrics=metrics,

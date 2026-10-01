@@ -31,7 +31,7 @@ from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder, read_action_reply
-from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.networks.interface import HighLevelPolicyOutput, InferInput
 from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -300,22 +300,17 @@ class OffPolicyAgent(Agent):
         )
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
-        subtask_activation, subtask_age = self.network.advance_high_level(
-            episode_started, self.rb.get_latest(self.seq_len)
-        )
-        self.rb.amend_latest(
-            subtask_activation, subtask_age, self.network.tokenize(self.network.thought_text())
-        )
-        if self.text_action and subtask_age == 0:
-            self._read_vlm_action()
-            achieved = self.network.achieved()
-            if achieved is not None:
-                self._reward_achieved(achieved, metrics)
+        reply = self.network.advance_high_level(episode_started, self.rb.get_latest(self.seq_len))
+        self.rb.amend_latest(reply.activations, reply.age, self.network.tokenize(reply.text))
+        if self.text_action and reply.age == 0:
+            self._read_vlm_action(reply.text)
+            if reply.achieved is not None:
+                self._reward_achieved(reply.achieved, metrics)
         elif self.text_action and episode_done:
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
             # フレームで判定する
             self._reward_achieved(self.network.judge_current(), metrics)
-        holding = subtask_age < self.hold_steps
+        holding = reply.age < self.hold_steps
         vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = vlm_action
         self.prev_vlm_holding = holding
@@ -332,8 +327,8 @@ class OffPolicyAgent(Agent):
             return StepResult(
                 action=action,
                 metrics=metrics,
-                panels=self._panels(),
-                texts={"prompt": prompt, **self.network.render_texts()},
+                panels=self._panels(reply),
+                texts={"prompt": prompt, **self.network.render_texts(reply)},
             )
 
         latest_data = self.rb.get_latest(self.seq_len)
@@ -374,7 +369,7 @@ class OffPolicyAgent(Agent):
             self.decisions_num += 1
             self.vlm_chosen_num += int(vlm_chosen)
             self.selection_status = (
-                f"step {global_step}, chain age {subtask_age}, "
+                f"step {global_step}, chain age {reply.age}, "
                 f"{'warmup: VLM only' if warmup else 'chosen by Q'}. "
                 f"VLM chosen {self.vlm_chosen_num}/{self.decisions_num} this episode."
             )
@@ -409,14 +404,14 @@ class OffPolicyAgent(Agent):
         return StepResult(
             action=action,
             metrics=metrics,
-            panels=self._panels(),
-            texts={"prompt": prompt, **self.network.render_texts()},
+            panels=self._panels(reply),
+            texts={"prompt": prompt, **self.network.render_texts(reply)},
         )
 
-    def _panels(self) -> dict[str, np.ndarray]:
+    def _panels(self, reply: HighLevelPolicyOutput) -> dict[str, np.ndarray]:
         """The network's panels, plus the two candidates and their action values
         when the chain's answer is one: the same keys on every step of a run."""
-        panels = self.network.render_panels()
+        panels = self.network.render_panels(reply)
         if self.text_action:
             panels["selection"] = render_selection_panel(
                 self.selection_status,
@@ -438,13 +433,13 @@ class OffPolicyAgent(Agent):
         metrics["text/achieved"] = achieved
         metrics["text/achieved_bonus"] = bonus
 
-    def _read_vlm_action(self) -> None:
+    def _read_vlm_action(self, text: str) -> None:
         """Read the action the chain just written names and how many steps it
         asks to hold it, as the zero-shot controller does. A reply that
         named no runnable action makes the candidate standing still, and is
         answered by the env in its own turn."""
         answer_text, self.vlm_action, self.hold_steps, parse_ok = read_action_reply(
-            self.network.thought_text(),
+            text,
             self.parse_action_text,
             self.action_low,
             self.action_high,
