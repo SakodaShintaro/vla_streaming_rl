@@ -68,6 +68,13 @@ def build_agent(
             prompt_builder=prompt_builder,
         )
 
+    # 高レベル方策の返答を書くランかどうか。描画するパネルはラン全体で固定なので、
+    # 構成から決める
+    if args.network_class == "vlm_actor_critic_with_action_value":
+        render_high_level = args.vla.reasoning_max_tokens > 0
+    else:
+        render_high_level = args.high_level.subtask_tokens_num > 0
+
     if args.agent_type == "streaming":
         from vla_streaming_rl.agents.streaming import StreamingAgent
 
@@ -90,6 +97,7 @@ def build_agent(
             pad_token_id=args.replay_buffer.pad_token_id,
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
+            render_high_level=render_high_level,
         )
 
     assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
@@ -120,4 +128,5 @@ def build_agent(
         achieved_reward_weight=args.achieved_reward_weight,
         steps_per_reply=args.high_level.steps_per_reply,
         parse_action_text=parse_action_text,
+        render_high_level=render_high_level,
     )

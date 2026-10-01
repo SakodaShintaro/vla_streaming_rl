@@ -14,7 +14,6 @@ part of the public surface.
 import abc
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -152,20 +151,6 @@ class NetworkInterface(nn.Module, abc.ABC):
             output_tokens=0,
             msec=0.0,
         )
-
-    def render_panels(self, reply: HighLevelPolicyOutput) -> dict[str, np.ndarray]:
-        """Named RGB panels this network contributes to the render strip, drawn
-        from this step's ``reply``. The agents pass these through verbatim, so
-        the stable-panel contract of :class:`agents.base.StepResult` applies:
-        the same keys with the same shapes on every step of a run."""
-        del reply
-        return {}
-
-    def render_texts(self, reply: HighLevelPolicyOutput) -> dict[str, str]:
-        """Named free-form text this network contributes to the episode log,
-        the readable counterpart of ``render_panels``."""
-        del reply
-        return {}
 
     @abc.abstractmethod
     def init_state(self) -> torch.Tensor:

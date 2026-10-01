@@ -23,7 +23,6 @@ from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
-from vla_streaming_rl.utils import render_conversation_panel
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -114,13 +113,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.detach_predictor = actor_critic_config.detach_predictor
         self.disable_state_predictor = actor_critic_config.disable_state_predictor
 
-    # Fixed so the render strip keeps one shape for the whole run; wide enough
-    # to read a chain of ``max_new_tokens`` tokens.
-    # Wide and tall enough for several turns of the conversation at once: the
-    # panel is the only place a run shows what the chain was actually asked.
-    CONVERSATION_PANEL_WIDTH = 680
-    CONVERSATION_PANEL_HEIGHT = 560
-
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
@@ -154,30 +146,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             pooled = reply.activations.float().mean(dim=0, keepdim=True)
             reply = dataclasses.replace(reply, activations=pooled.to(reply.activations.dtype))
         return reply
-
-    def render_panels(self, reply: HighLevelPolicyOutput) -> dict[str, np.ndarray]:
-        """The conversation the reply was written for and the reply, drawn for
-        the render strip under what writing it cost. Without a chain there is
-        no panel at all rather than a blank one, which keeps that run's strip
-        the width of what it has."""
-        if self.high_level_policy is None:
-            return {}
-        status = (
-            f"in {reply.input_tokens} tok   out {reply.output_tokens} tok   {reply.msec:.0f} ms"
-        )
-        return {
-            "conversation": render_conversation_panel(
-                reply.exchange,
-                status,
-                self.CONVERSATION_PANEL_WIDTH,
-                self.CONVERSATION_PANEL_HEIGHT,
-            )
-        }
-
-    def render_texts(self, reply: HighLevelPolicyOutput) -> dict[str, str]:
-        if self.high_level_policy is None:
-            return {}
-        return {"chain_of_thought": reply.text}
 
     def judge_current(self) -> float:
         """いま実行中のサブタスクの、いまのフレームでの達成度。"""

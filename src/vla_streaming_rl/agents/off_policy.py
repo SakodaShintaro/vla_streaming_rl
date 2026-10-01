@@ -29,9 +29,9 @@ import numpy as np
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import Agent, StepResult
+from vla_streaming_rl.agents.base import Agent, StepResult, render_high_level
 from vla_streaming_rl.agents.prompt import PromptBuilder, read_action_reply
-from vla_streaming_rl.networks.interface import HighLevelPolicyOutput, InferInput
+from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -77,12 +77,14 @@ class OffPolicyAgent(Agent):
         achieved_reward_weight: float,
         steps_per_reply: int,
         parse_action_text,
+        render_high_level: bool,
     ) -> None:
         super().__init__(
             horizon=horizon,
             reset_on_episode_end=reset_on_episode_end,
             prompt_builder=prompt_builder,
         )
+        self.render_high_level = render_high_level
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.text_action = text_action
@@ -301,6 +303,9 @@ class OffPolicyAgent(Agent):
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
         reply = self.network.advance_high_level(episode_started, self.rb.get_latest(self.seq_len))
+        # 高レベル方策の返答を書くランでだけ、その会話を描く
+        panels, texts = render_high_level(reply) if self.render_high_level else ({}, {})
+        texts = {"prompt": prompt, **texts}
         self.rb.amend_latest(reply.activations, reply.age, self.network.tokenize(reply.text))
         if self.text_action and reply.age == 0:
             self._read_vlm_action(reply.text)
@@ -327,8 +332,8 @@ class OffPolicyAgent(Agent):
             return StepResult(
                 action=action,
                 metrics=metrics,
-                panels=self._panels(reply),
-                texts={"prompt": prompt, **self.network.render_texts(reply)},
+                panels=self._panels(panels),
+                texts=texts,
             )
 
         latest_data = self.rb.get_latest(self.seq_len)
@@ -404,15 +409,15 @@ class OffPolicyAgent(Agent):
         return StepResult(
             action=action,
             metrics=metrics,
-            panels=self._panels(reply),
-            texts={"prompt": prompt, **self.network.render_texts(reply)},
+            panels=self._panels(panels),
+            texts=texts,
         )
 
-    def _panels(self, reply: HighLevelPolicyOutput) -> dict[str, np.ndarray]:
-        """The network's panels, plus the two candidates and their action values
-        when the chain's answer is one: the same keys on every step of a run."""
-        panels = self.network.render_panels(reply)
+    def _panels(self, panels: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """高レベル方策のパネルに、行動が返答から読めるときは2つの候補とその行動価値を
+        足したもの。ラン中は毎ステップ同じキーになる。"""
         if self.text_action:
+            panels = {**panels}
             panels["selection"] = render_selection_panel(
                 self.selection_status,
                 self.selection_rows,

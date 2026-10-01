@@ -6,6 +6,13 @@ from typing import Any
 import numpy as np
 
 from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.networks.interface import HighLevelPolicyOutput
+from vla_streaming_rl.utils import render_conversation_panel
+
+# 会話のパネルの大きさ。数ターン分の会話が一度に見える幅と高さで、ラン全体で固定する
+# （StepResult の固定パネルの約束）。モデルに実際に何を見せたかが分かるのはこのパネルだけ
+CONVERSATION_PANEL_WIDTH = 680
+CONVERSATION_PANEL_HEIGHT = 560
 
 
 @dataclass
@@ -37,6 +44,18 @@ class StepResult:
     metrics: dict[str, float]
     panels: dict[str, np.ndarray]
     texts: dict[str, str]
+
+
+def render_high_level(
+    output: HighLevelPolicyOutput,
+) -> tuple[dict[str, np.ndarray], dict[str, str]]:
+    """高レベル方策の返答を、それを書いた会話と費用とともに描いたパネルと、エピソードの
+    記録に残すテキスト。"""
+    status = f"in {output.input_tokens} tok   out {output.output_tokens} tok   {output.msec:.0f} ms"
+    panel = render_conversation_panel(
+        output.exchange, status, CONVERSATION_PANEL_WIDTH, CONVERSATION_PANEL_HEIGHT
+    )
+    return {"conversation": panel}, {"high_level": output.text}
 
 
 class Agent(ABC):

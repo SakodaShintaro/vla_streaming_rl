@@ -14,21 +14,18 @@ import gymnasium as gym
 import numpy as np
 import torch
 
-from vla_streaming_rl.agents.base import Agent, StepResult
+from vla_streaming_rl.agents.base import (
+    CONVERSATION_PANEL_HEIGHT,
+    CONVERSATION_PANEL_WIDTH,
+    Agent,
+    StepResult,
+)
 from vla_streaming_rl.agents.prompt import PromptBuilder, read_action_reply
 from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.utils import render_conversation_panel
 
 
 class ZeroShotVLMAgent(Agent):
-    # Wide and tall enough for several turns of the conversation at once, as on
-    # the trained side: the panel is the only place a run shows what the model
-    # was actually asked. Fixed rather than grown from the text, so the strip
-    # keeps a constant size across a run (the stable-panel contract in
-    # ``StepResult``).
-    PANEL_WIDTH = 680
-    PANEL_HEIGHT = 560
-
     def __init__(
         self,
         *,
@@ -114,8 +111,8 @@ class ZeroShotVLMAgent(Agent):
             "conversation": render_conversation_panel(
                 reply.exchange,
                 status,
-                self.PANEL_WIDTH,
-                self.PANEL_HEIGHT,
+                CONVERSATION_PANEL_WIDTH,
+                CONVERSATION_PANEL_HEIGHT,
             )
         }
         metrics = {

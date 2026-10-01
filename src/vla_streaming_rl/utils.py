@@ -118,29 +118,6 @@ def wrap_text(text: str, width: int, font_scale: float, thickness: int) -> list[
     return lines
 
 
-def render_text_panel(text: str, width: int, height: int) -> np.ndarray:
-    """Free-form text word-wrapped onto a dark panel of exactly ``width`` x
-    ``height``.
-
-    A panel rather than a caption band, so free-form text can stand as its own
-    entry in the render strip. The size is fixed by the arguments and not by the
-    text, which is what the stable-panel contract needs; text past the last line
-    that fits is dropped.
-    """
-    font_scale = 0.45
-    thickness = 1
-    (_, text_height), baseline = cv2.getTextSize("Ag", _FONT, font_scale, thickness)
-    line_height = text_height + baseline + 4
-
-    panel = np.full((height, width, 3), (30, 30, 30), dtype=np.uint8)
-    lines = wrap_text(text, width, font_scale, thickness)[: height // line_height]
-    for i, line in enumerate(lines):
-        cv2.putText(
-            panel, line, (5, (i + 1) * line_height), _FONT, font_scale, (235, 235, 235), thickness
-        )
-    return panel
-
-
 # The chain's conversation, drawn the way a chat log reads: what the agent was
 # shown on one side, what it wrote on the other.
 _USER_BUBBLE = (78, 62, 48)

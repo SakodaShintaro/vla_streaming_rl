@@ -2,14 +2,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 from omegaconf import DictConfig
 from torch import nn
 from torch.nn import functional as F
 
+from ..agents.prompt import assistant_turn
 from ..replay_buffer import ReplayBufferData
-from ..utils import render_text_panel
 from .interface import (
     EligibilityTraceInfo,
     HighLevelPolicyOutput,
@@ -154,19 +153,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self._dummy_state = torch.zeros(1, 1, 1)
         self._last_reasoning_text = ""
 
-    def render_panels(self, reply: HighLevelPolicyOutput) -> dict[str, np.ndarray]:
-        """The reasoning chain, drawn on a panel of a size fixed for the whole
-        run so the render strip keeps one shape, wide and tall enough to read a
-        chain of ``reasoning_max_tokens`` tokens."""
-        if self.reasoning_max_tokens == 0:
-            return {}
-        return {"reasoning": render_text_panel(reply.text, 480, 360)}
-
-    def render_texts(self, reply: HighLevelPolicyOutput) -> dict[str, str]:
-        if self.reasoning_max_tokens == 0:
-            return {}
-        return {"reasoning": reply.text}
-
     def init_state(self) -> torch.Tensor:
         return self._dummy_state.clone()
 
@@ -221,7 +207,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             activations=torch.zeros(self.subtask_shape),
             age=0,
             text=self._last_reasoning_text,
-            exchange=[],
+            exchange=[assistant_turn(self._last_reasoning_text)],
             achieved=None,
             input_tokens=0,
             output_tokens=0,
