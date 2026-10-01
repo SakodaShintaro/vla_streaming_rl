@@ -196,6 +196,14 @@ class ActorCriticWithActionValue(NetworkInterface):
             return ""
         return self.cot_module.text()
 
+    def achieved(self) -> float | None:
+        """最後に確定したチェーンが判定した、前のサブタスクの達成度。"""
+        return self.cot_module.achieved()
+
+    def judge_current(self) -> float | None:
+        """いま実行中のサブタスクの、いまのフレームでの達成度。"""
+        return self.cot_module.judge_current()
+
     def _cot_keep(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Which sequences of a batch keep their chain, the rest being the share
         ``cot_dropout`` it is taken away from. Handed to the encoder as a mask

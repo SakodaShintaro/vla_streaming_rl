@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.prompt import SUBTASK_RE, PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import ACHIEVED_TAG, SUBTASK_RE, PromptBuilder, assistant_turn
 
 from .chain_generator import Chain, ChainGenerator
 
@@ -49,6 +49,10 @@ class CoTBatch:
         given; the conversation it is written into is the builder's to reset."""
         self.generator.reset_cache()
         self._text = ""
+        # 確定した返答が判定した、前の返答のサブタスクの達成度。エピソードの最初の
+        # 返答には前のサブタスクがないので None
+        self._achieved: float | None = None
+        self._chains_taken = 0
         self._output_tokens = 0
         self._last_conversation = []
         # What the last chain cost. Kept between writes, since the steps that
@@ -103,6 +107,10 @@ class CoTBatch:
 
     def _take_chain(self, chain: Chain) -> None:
         """確定したチェーンを読む側に渡し、会話の返答として足す。"""
+        self._achieved = (
+            self.generator.yes_probability(chain, ACHIEVED_TAG) if self._chains_taken > 0 else None
+        )
+        self._chains_taken += 1
         subtask_positions = self._subtask_positions(chain)
         if subtask_positions.shape[0] == 0:
             self._activations = torch.zeros_like(self._activations)
@@ -147,6 +155,20 @@ class CoTBatch:
             positions.to(torch.float32).permute(1, 2, 0), self.tokens_per_step
         )
         return pooled.permute(2, 0, 1).to(torch.bfloat16)
+
+    def judge_current(self) -> float | None:
+        """いま実行中のサブタスクの達成度を、いまのターンで判定する。エピソードが
+        終わり、次の返答が来ないサブタスクのため。まだ返答がなければ None。"""
+        if self._chains_taken == 0:
+            return None
+        return self.generator.yes_probability_after(
+            self.prompt_builder.conversation(), ACHIEVED_TAG
+        )
+
+    def achieved(self) -> float | None:
+        """最後に確定した返答が判定した、前の返答のサブタスクの達成度（yes の確率）。
+        前のサブタスクがないか、返答に判定がなければ None。"""
+        return self._achieved
 
     def stats(self) -> dict:
         """What the last chain cost: the tokens it was given, the tokens it

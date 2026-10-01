@@ -180,6 +180,10 @@ class ReplayBuffer:
         self.cot_age[latest].fill_(cot_age)
         self._store_token_ids(self.reply_token_ids, latest, reply_token_ids)
 
+    def add_latest_reward(self, bonus: float) -> None:
+        """最新の行の報酬（その行に入る遷移で得た報酬）に ``bonus`` を足す。"""
+        self.rewards[(self.idx - 1) % self.size] += bonus
+
     def _store_token_ids(self, storage: torch.Tensor, row: int, token_ids: list[int]) -> None:
         assert len(token_ids) <= self.max_prompt_tokens, (
             f"text of {len(token_ids)} tokens exceeds max_prompt_tokens="

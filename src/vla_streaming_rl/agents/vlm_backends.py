@@ -20,6 +20,7 @@ from omegaconf import DictConfig
 from openai import BadRequestError, OpenAI
 from PIL import Image
 
+from vla_streaming_rl.agents.prompt import ACHIEVED_TAG
 from vla_streaming_rl.networks.modules.chain_generator import ChainGenerator
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -33,6 +34,9 @@ class VLMResponse:
     finish_reason: str
     prompt_tokens: int
     completion_tokens: int
+    # 返答が判定した前のサブタスクの達成度（yes の確率）。確率を読めない
+    # ホスト側のモデルや、返答に判定がないときは None
+    achieved: float | None
 
 
 def _png_data_url(image: Image.Image) -> str:
@@ -139,10 +143,16 @@ class OpenRouterBackend:
             finish_reason=str(choice.finish_reason),
             prompt_tokens=int(completion.usage.prompt_tokens),
             completion_tokens=int(completion.usage.completion_tokens),
+            achieved=None,
         )
 
     def reset_cache(self) -> None:
         """ホスト側のキャッシュはプロバイダ任せなので、何もすることがない。"""
+
+    def judge_current(self, messages: list[dict]) -> float | None:
+        """ホスト側のモデルからは確率を読めないので、判定しない。"""
+        del messages
+        return None
 
 
 class LocalVLMBackend:
@@ -165,11 +175,16 @@ class LocalVLMBackend:
             finish_reason="stop" if chain.finished else "length",
             prompt_tokens=chain.prompt_tokens,
             completion_tokens=len(chain.tokens),
+            achieved=self.generator.yes_probability(chain, ACHIEVED_TAG),
         )
 
     def reset_cache(self) -> None:
         """会話が仕切り直されるエピソード境界で呼ぶ。"""
         self.generator.reset_cache()
+
+    def judge_current(self, messages: list[dict]) -> float:
+        """いま実行中のサブタスクの、最新のターンでの達成度（yes の確率）。"""
+        return self.generator.yes_probability_after(messages, ACHIEVED_TAG)
 
 
 def build_vlm_backend(args: DictConfig):

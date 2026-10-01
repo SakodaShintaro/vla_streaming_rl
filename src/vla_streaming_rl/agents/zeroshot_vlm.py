@@ -74,6 +74,8 @@ class ZeroShotVLMAgent(Agent):
         self.held_status = ""
         self.held_metrics = {}
         self.steps_until_next = 0
+        self.replies_in_episode = 0
+        self.fresh_metrics = {}
 
     # ------------------------------------------------------------------
     # Agent interface
@@ -88,7 +90,8 @@ class ZeroShotVLMAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step, terminated, truncated
+        del global_step
+        episode_done = terminated or truncated
 
         image = preprocess_image(obs["image"])
         self.prompt_builder.observe(obs, reward, info, image)
@@ -104,6 +107,7 @@ class ZeroShotVLMAgent(Agent):
                     self.backend.exchange(),
                     self.backend.stats(),
                     "stop",
+                    self.backend.achieved(),
                 )
         else:
             if self.steps_until_next == 0:
@@ -111,6 +115,16 @@ class ZeroShotVLMAgent(Agent):
                 self.steps_until_next = self.steps_per_action
             steps_since_write = self.steps_per_action - self.steps_until_next
             self.steps_until_next -= 1
+        if episode_done and steps_since_write != 0 and self.replies_in_episode > 0:
+            # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
+            # フレームで判定する
+            achieved = (
+                self.backend.judge_current()
+                if isinstance(self.backend, CoTStream)
+                else self.backend.judge_current(self.prompt_builder.conversation())
+            )
+            if achieved is not None:
+                self.fresh_metrics = {"vlm/achieved": achieved}
         action = (
             self.held_action
             if steps_since_write < self.hold_steps
@@ -125,9 +139,12 @@ class ZeroShotVLMAgent(Agent):
                 self.PANEL_HEIGHT,
             )
         }
+        # 達成度は返答を確定したステップでだけ記録する
+        metrics = {**self.held_metrics, **self.fresh_metrics}
+        self.fresh_metrics = {}
         return StepResult(
             action=action,
-            metrics=self.held_metrics,
+            metrics=metrics,
             panels=panels,
             texts={"prompt": prompt},
         )
@@ -156,9 +173,18 @@ class ZeroShotVLMAgent(Agent):
                 "msec": api_msec,
             },
             response.finish_reason,
+            # エピソードの最初の返答には判定すべき前のサブタスクがない
+            response.achieved if self.replies_in_episode > 0 else None,
         )
 
-    def _hold_reply(self, text: str, exchange: list[dict], stats: dict, finish_reason: str) -> None:
+    def _hold_reply(
+        self,
+        text: str,
+        exchange: list[dict],
+        stats: dict,
+        finish_reason: str,
+        achieved: float | None,
+    ) -> None:
         """返答の <action> を読み、その行動と続けるステップ数を保持する。読めなかった
         ときは、行動として実行できず止まっていたことを伝える user の発言を会話に足す。"""
         self.held_exchange = exchange
@@ -182,6 +208,9 @@ class ZeroShotVLMAgent(Agent):
             f"{stats['msec']:.0f} ms   parse {'ok' if parse_ok else 'failed'}   "
             f"{finish_reason}"
         )
+        self.replies_in_episode += 1
+        if achieved is not None:
+            self.fresh_metrics = {"vlm/achieved": achieved}
 
     def step(
         self,
@@ -210,6 +239,8 @@ class ZeroShotVLMAgent(Agent):
             # Zero means "generate now", so the first step of an episode decides
             # on that episode's own first frame.
             self.steps_until_next = 0
+            self.replies_in_episode = 0
+            self.fresh_metrics = {}
         return {}
 
     def optimizer_state_dict(self) -> dict:

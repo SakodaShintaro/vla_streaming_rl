@@ -12,6 +12,8 @@ from .vlm_backbone import load_model
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
+YES_WORDS = ("yes", "Yes", " yes", " Yes")
+NO_WORDS = ("no", "No", " no", " No")
 
 
 def _history_text(turn: dict) -> str:
@@ -118,6 +120,10 @@ class ChainGenerator:
         # 返答を閉じるトークン。生成はこの <|im_end|> で止まる
         assert self.processor.tokenizer.eos_token == IM_END, self.processor.tokenizer.eos_token
         self._newline_ids = self.processor.tokenizer.encode("\n", add_special_tokens=False)
+        # yes / no を書き出しうる最初のトークン。大文字と前の空白の有無を含める
+        tokenizer = self.processor.tokenizer
+        self._yes_ids = [tokenizer.encode(w, add_special_tokens=False)[0] for w in YES_WORDS]
+        self._no_ids = [tokenizer.encode(w, add_special_tokens=False)[0] for w in NO_WORDS]
         self.reset_cache()
 
     def reset_cache(self) -> None:
@@ -233,6 +239,35 @@ class ChainGenerator:
         if commit:
             self._close_reply(conversation, chain.text)
         return chain
+
+    @torch.inference_mode()
+    def yes_probability(self, chain: Chain, tag: str) -> float | None:
+        """返答で ``tag`` の直後に書いた最初のトークンの位置で、yes を選ぶ確率を
+        yes と no の確率の和で割って返す。返答に ``tag`` がなければ None。
+
+        その位置の活性の最終層に lm_head を掛けると、そのトークンを選んだときの
+        ロジットになる。"""
+        tokenizer = self.processor.tokenizer
+        for i in range(len(chain.tokens)):
+            written = tokenizer.decode(chain.tokens[:i], skip_special_tokens=True)
+            if written.rstrip().endswith(tag):
+                head = self.model.lm_head
+                return self._yes_share(head(chain.positions[i, -1].to(head.weight.dtype)))
+        return None
+
+    @torch.inference_mode()
+    def yes_probability_after(self, conversation: list[dict], tag: str) -> float:
+        """最新のターンへの返答を ``tag`` まで書いたところで、次に yes を選ぶ確率を
+        yes と no の確率の和で割って返す。返答は書かず、会話にも確定させない。"""
+        prefix = self.processor.tokenizer.encode(tag, add_special_tokens=False)
+        self.generate(conversation, prefix, 0, commit=False)
+        return self._yes_share(self._next_logits)
+
+    def _yes_share(self, logits: torch.Tensor) -> float:
+        probs = torch.softmax(logits.float(), dim=-1)
+        yes = probs[self._yes_ids].sum()
+        no = probs[self._no_ids].sum()
+        return float(yes / (yes + no))
 
     @torch.inference_mode()
     def commit_draft(self, conversation: list[dict], text: str) -> None:

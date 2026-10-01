@@ -124,6 +124,7 @@ def build_agent(
         prompt_builder=prompt_builder,
         text_action=args.text_action,
         select_margin=args.select_margin,
+        achieved_reward_weight=args.achieved_reward_weight,
         cot_steps_per_chain=args.high_level.cot_steps_per_chain,
         parse_action_text=parse_action_text,
     )

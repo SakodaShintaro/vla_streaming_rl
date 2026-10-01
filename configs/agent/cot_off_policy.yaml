@@ -8,3 +8,4 @@ high_level:
 actor_critic:
   bc_loss_weight: 0.5
 text_action: true
+achieved_reward_weight: 1.0
