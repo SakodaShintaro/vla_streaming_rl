@@ -16,26 +16,12 @@ from vla_streaming_rl.networks.interface import (
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
-from vla_streaming_rl.networks.modules.cot_stream import CoTStream
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
 from vla_streaming_rl.utils import render_conversation_panel
-
-
-def build_cot(high_level_config: DictConfig, prompt_builder, device: torch.device):
-    """The chain generator named by `cot_mode`, both of which advance() the same way.
-
-    "stream" keeps one chain mid-thought and issues `cot_tokens_num` of it per
-    environment step; "batch" writes a whole chain every `cot_steps_per_chain`
-    steps and holds it in between.
-    """
-    builders = {"stream": CoTStream, "batch": CoTBatch}
-    mode = high_level_config.cot_mode
-    assert mode in builders, f"unknown cot_mode {mode!r}; expected one of {sorted(builders)}"
-    return builders[mode](high_level_config, prompt_builder, device)
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -86,7 +72,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
         self.cot_module = None
         if cot_tokens_num > 0:
-            self.cot_module = build_cot(high_level_config, prompt_builder, torch.device("cuda"))
+            self.cot_module = CoTBatch(high_level_config, prompt_builder, torch.device("cuda"))
 
         self.encoder = SpatialTemporalEncoder(
             image_features_shape=tuple(self.image_processor.output_shape),

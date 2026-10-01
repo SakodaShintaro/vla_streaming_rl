@@ -102,7 +102,7 @@ class ChainGenerator:
         self.enable_thinking = enable_thinking
         self.device = device
         self.hidden_size = text_config.hidden_size
-        # The embedding plus every layer's output, matching `CoTStream`.
+        # The embedding plus every layer's output.
         self.layers_num = text_config.num_hidden_layers + 1
         # テンプレートが会話の末尾に付ける生成プロンプトのトークン列。
         # 会話の中身に依らない定数なので、ここで一度だけ測る。
@@ -141,7 +141,7 @@ class ChainGenerator:
         self._boundary_state: list[dict] = []
         self._boundary_kv_len = 0
         self._boundary_next_pos = 0
-        # 書きかけの返答。extend() はここから続きを書く
+        # 書いている返答
         self._tokens: list[int] = []
         self._positions: list[torch.Tensor] = []
         self._kv_pos = 0
@@ -154,8 +154,6 @@ class ChainGenerator:
         self._prompt_tokens = 0
         # 確定してキャッシュに入れた返答の文字列。builder が会話に足した返答と照合する
         self._committed_reply: str | None = None
-        # 確定させずに積んだ最新のターン。書き終えた返答をこのまま閉じて確定できる
-        self._draft_turn: dict | None = None
 
     @torch.inference_mode()
     def generate(
@@ -165,11 +163,10 @@ class ChainGenerator:
         agent hands its builder -- an 8-bit picture or a (C, H, W) float tensor
         in [0, 1] -- and reaches the processor as the latter.
 
-        ``prefix`` は返答の書きかけのトークン列で、生成プロンプトの後ろに積み
-        直してから続きを書く。新しく書くのは最大 ``budget`` トークンで、返答
-        全体は ``max_len`` で打ち切る。``commit`` が偽のときは会話の新しい
-        メッセージを境界に確定させない。次の呼び出しで境界へ巻き戻されるので、
-        最新の観測を読んで書きかけを進めるだけの呼び出しになる。"""
+        ``prefix`` は返答の書き出しとして生成プロンプトの後ろに積むトークン列で、
+        その続きを最大 ``budget`` トークン書く。返答全体は ``max_len`` で打ち切る。
+        ``commit`` が偽のときは最新のターンを境界に確定させず、返答も会話に残さない。
+        次の呼び出しで境界へ巻き戻される。"""
         start = time.perf_counter()
         if self._last_consumed is None:
             new_messages = list(conversation)
@@ -207,7 +204,6 @@ class ChainGenerator:
             self._prefill(ids, pos, pixel_values, image_grid_thw, hidden=False)
             self._settle(conversation, settled[-1])
             new_messages = new_messages[-1:]
-        self._draft_turn = None if commit else new_messages[-1]
 
         # 会話の差分、生成プロンプト、書きかけを1回の forward で積む。書きかけの i 番目の
         # トークンを選んだのは、その直前の位置の活性。
@@ -268,17 +264,6 @@ class ChainGenerator:
         yes = probs[self._yes_ids].sum()
         no = probs[self._no_ids].sum()
         return float(yes / (yes + no))
-
-    @torch.inference_mode()
-    def commit_draft(self, conversation: list[dict], text: str) -> None:
-        """書き終えた書きかけを、それを書いたときの最新のターンの返答としてそのまま
-        確定する。キャッシュには境界の後ろにそのターン、生成プロンプト、返答が
-        積まれているので、返答を閉じて境界を取り直すだけで済む。"""
-        assert self._draft_turn is not None and self._draft_turn is conversation[-1], (
-            "the draft can only be committed under the turn it was written on"
-        )
-        self._close_reply(conversation, text)
-        self._draft_turn = None
 
     def _close_reply(self, conversation: list[dict], text: str) -> None:
         """書き終えた返答を <|im_end|> と改行で閉じてキャッシュに積み、その直後を
@@ -381,18 +366,9 @@ class ChainGenerator:
         """テキストだけの区間の 3D 位置 (3, 1, length)。3軸とも同じ値で ``start`` から数える。"""
         return (torch.arange(length, device=self.device) + start).view(1, 1, -1).expand(3, 1, -1)
 
-    @torch.inference_mode()
-    def extend(self, budget: int) -> Chain:
-        """直前の ``generate`` で書いた返答の続きを、キャッシュを巻き戻さずに
-        最大 ``budget`` トークン書き進める。新しい観測は読まない。"""
-        start = time.perf_counter()
-        assert len(self._tokens) > 0, "extend() continues a reply that generate() started"
-        self._write(budget)
-        return self._chain(start)
-
     def _write(self, budget: int) -> None:
-        """書きかけの返答に最大 ``budget`` トークンを足す。最後に選んだトークンは
-        次に書くときまでキャッシュに入れないので、書き終わりの前進は払わない。"""
+        """返答に最大 ``budget`` トークンを足す。最後に選んだトークンはキャッシュに
+        入れずにおき、確定するときに閉じのトークンと一緒に積む。"""
         written = 0
         while self._writable(written, budget):
             if self._unfed:

@@ -2,8 +2,7 @@
 """Zero-shot VLM controller.
 
 The high-level policy alone: the same chain module the trained agents carry
-(`CoTBatch` or `CoTStream`, by ``high_level.cot_mode``) writes the replies on
-the same conversation, and the action each reply names is held for as many
+(`CoTBatch`) writes the replies on the same conversation, and the action each reply names is held for as many
 steps as it asks. It learns nothing: it is the zero-shot baseline the trained
 agents are measured against, so it plugs into the same trainer loop and reports
 the same telemetry.

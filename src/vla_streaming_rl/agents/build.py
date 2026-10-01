@@ -30,13 +30,13 @@ def build_agent(
 ):
     if args.agent_type == "zeroshot_vlm":
         from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent
-        from vla_streaming_rl.networks.actor_critic_with_action_value import build_cot
+        from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
 
         # 提案手法と同じチェーンのモジュールが返答を書き、確定した返答から行動を読む
         return ZeroShotVLMAgent(
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,
-            chain=build_cot(args.high_level, prompt_builder, torch.device("cuda")),
+            chain=CoTBatch(args.high_level, prompt_builder, torch.device("cuda")),
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
             steps_per_action=args.high_level.cot_steps_per_chain,

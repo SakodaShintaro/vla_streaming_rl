@@ -44,15 +44,9 @@ high_level:
   temperature: 0.5
   # 全注意層の KV を「先頭の sink ＋直近この数のトークン」まで間引く
   window_tokens: 16384
-  cot_mode: batch  # [batch, stream]
   cot_tokens_num: 0
-  # batch ではチェーンを確定して行動を読む間隔。stream では書き終えたステップで確定し、
-  # この長さで書き終わらなければ残りを書き切って確定する
+  # チェーンを書いて確定し、行動を読む間隔
   cot_steps_per_chain: 16
-  # stream で、書きかけのチェーンに最新の画像を差し込んで書き進める間隔
-  cot_steps_per_image: 16
-  # stream で、各ステップに書き進めるトークン数。返答の長さ / これ が確定の間隔になる
-  cot_write_tokens_per_step: 2
   # 高レベル方策が会話として読む窓のステップ数。cot_steps_per_chain ステップごとに1回の
   # やり取りなので、履歴は (seq_len - 1) // cot_steps_per_chain 回分になる。
   # また、実際に読める長さは window_tokens で頭打ちになる
