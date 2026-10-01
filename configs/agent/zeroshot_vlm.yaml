@@ -5,5 +5,5 @@ defaults:
 
 agent_type: zeroshot_vlm
 high_level:
-  # チェーンのモジュールが読むサブタスクの活性の幅。行動には使わないが1以上が要る
+  # 高レベル方策が渡すサブタスクの活性の幅。行動には使わないが1以上が要る
   subtask_tokens_num: 1

@@ -31,10 +31,6 @@ def _history_text(turn: dict) -> str:
     return f"{IM_START}{turn['role']}\n{''.join(parts)}{IM_END}\n"
 
 
-def _turn_images(turn: dict) -> list:
-    return [part["image"] for part in turn["content"] if part["type"] == "image"]
-
-
 @dataclass(frozen=True)
 class Chain:
     """One generation: the tokens, the text they decode to, the activation
@@ -181,7 +177,13 @@ class ChainGenerator:
                 "reset_cache() where the conversation restarts"
             )
             new_messages = list(conversation[index + 1 :])
-            self._restore_boundary()
+            # キャッシュを境界スナップショットの状態へ書き戻す。スナップショット自体は
+            # 後続の in-place 更新から守るため、渡すのは常に複製
+            for layer, snapshot in zip(self._cache.layers, self._boundary_state, strict=True):
+                for name, value in snapshot.items():
+                    setattr(layer, name, self._copied_value(value))
+            self._kv_len = self._boundary_kv_len
+            self._next_pos = self._boundary_next_pos
         if self._committed_reply is not None:
             # 前回確定した返答は、書いたトークンのまま境界の手前に入っている
             reply = new_messages[0]
@@ -229,11 +231,77 @@ class ChainGenerator:
         self._next_logits = outputs.logits[0, -1]
         self._unfed = False
         self._prompt_tokens = self._kv_len
-        self._write(budget)
+
+        # 返答に最大 budget トークンを足す。最後に選んだトークンはキャッシュに入れずにおき、
+        # 確定するときに閉じのトークンと一緒に積む
+        written = 0
+        while (
+            not (len(self._tokens) > 0 and self._tokens[-1] == self.eos_token_id)
+            and written < budget
+            and len(self._tokens) < self.max_len
+        ):
+            if self._unfed:
+                # キャッシュの上での1デコードステップ。位置はモデル任せにせず走行カウンタから渡す
+                self._token.fill_(self._tokens[-1])
+                self._cache_position.fill_(self._kv_pos)
+                self._position_ids.fill_(self._rope_pos)
+                outputs = self.model(
+                    input_ids=self._token,
+                    past_key_values=self._cache,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    cache_position=self._cache_position,
+                    position_ids=self._position_ids,
+                )
+                self._next_position = self._last_position(outputs.hidden_states)
+                self._next_logits = outputs.logits[0, -1]
+                self._kv_pos += 1
+                self._rope_pos += 1
+            self._positions.append(self._next_position)
+            # 温度 0 なら貪欲。それ以外はモデルの生成設定に従い、温度を掛け、上位 top_k に絞り、
+            # そのうち確率の和が top_p に届く最少のものから引く
+            if self.temperature == 0.0:
+                token = int(self._next_logits.argmax().item())
+            else:
+                top = torch.topk(self._next_logits.float() / self.temperature, self.top_k)
+                probs = torch.softmax(top.values, dim=-1)
+                kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
+                token = int(top.indices[torch.multinomial(kept, 1)].item())
+            self._tokens.append(token)
+            self._unfed = True
+            written += 1
         assert len(self._tokens) > 0, "nothing was written: a fresh reply needs a positive budget"
-        chain = self._chain(start)
+        ended = self._tokens[-1] == self.eos_token_id
+        chain = Chain(
+            tokens=list(self._tokens),
+            text=self.processor.tokenizer.decode(self._tokens, skip_special_tokens=True).strip(),
+            positions=torch.stack(self._positions),
+            prompt_tokens=self._prompt_tokens,
+            msec=(time.perf_counter() - start) * 1000.0,
+            finished=ended,
+        )
+
         if commit:
-            self._close_reply(conversation, chain.text)
+            # 書き終えた返答を <|im_end|> と改行で閉じてキャッシュに積み、その直後を境界として
+            # 確定させる。最後に選んだトークンがまだ入っていなければ一緒に積む
+            assert ended or len(self._tokens) >= self.max_len, "a committed reply must be complete"
+            close = (
+                ([self._tokens[-1]] if self._unfed else [])
+                + ([] if ended else [self.eos_token_id])
+                + self._newline_ids
+            )
+            self._kv_len = self._kv_pos
+            self._next_pos = self._rope_pos
+            self._prefill(
+                torch.tensor([close], device=self.device),
+                self._linear_positions(len(close), self._next_pos),
+                None,
+                None,
+                hidden=False,
+            )
+            self._unfed = False
+            self._settle(conversation, conversation[-1])
+            self._committed_reply = chain.text
         return chain
 
     @torch.inference_mode()
@@ -265,35 +333,17 @@ class ChainGenerator:
         no = probs[self._no_ids].sum()
         return float(yes / (yes + no))
 
-    def _close_reply(self, conversation: list[dict], text: str) -> None:
-        """書き終えた返答を <|im_end|> と改行で閉じてキャッシュに積み、その直後を
-        境界として確定させる。最後に選んだトークンがまだ入っていなければ一緒に積む。"""
-        ended = self._tokens[-1] == self.eos_token_id
-        assert ended or len(self._tokens) >= self.max_len, "a committed reply must be complete"
-        close = (
-            ([self._tokens[-1]] if self._unfed else [])
-            + ([] if ended else [self.eos_token_id])
-            + self._newline_ids
-        )
-        self._kv_len = self._kv_pos
-        self._next_pos = self._rope_pos
-        self._prefill(
-            torch.tensor([close], device=self.device),
-            self._linear_positions(len(close), self._next_pos),
-            None,
-            None,
-            hidden=False,
-        )
-        self._unfed = False
-        self._settle(conversation, conversation[-1])
-        self._committed_reply = text
-
     def _encode(self, messages: list[dict]):
         """メッセージを履歴の書式でトークン列にし、これまでの位置の続きの 3D 位置と
         画像の入力を添えて返す。mrope の位置割り当ては走査中の基点にしか依存しない
         ので、全体で計算して切り出すのと同じ値になる。"""
         text = "".join(_history_text(turn) for turn in messages)
-        images = [image for turn in messages for image in _turn_images(turn)]
+        images = [
+            part["image"]
+            for turn in messages
+            for part in turn["content"]
+            if part["type"] == "image"
+        ]
         if len(images) == 0:
             # テキストだけなら 3 軸とも同じ値の連番になる
             ids = self.processor(text=[text], return_tensors="pt")["input_ids"].to(self.device)
@@ -330,9 +380,43 @@ class ChainGenerator:
                     _history_text(conversation[0]), add_special_tokens=False
                 )
             )
-        self._evict()
+        # 全注意層の KV を「sink ＋ 直近 window_tokens 行」まで間引く。線形注意層は固定サイズの
+        # 再帰状態なので対象外。行を捨てるだけで位置は元のまま残るから、残った行どうしの
+        # 相対位置は変わらない
+        limit = self._sink_len + self.window_tokens
+        if self._kv_len > limit:
+            for layer in self._cache.layers:
+                if isinstance(layer, DynamicLayer):
+                    layer.keys = torch.cat(
+                        [
+                            layer.keys[..., : self._sink_len, :],
+                            layer.keys[..., -self.window_tokens :, :],
+                        ],
+                        dim=-2,
+                    )
+                    layer.values = torch.cat(
+                        [
+                            layer.values[..., : self._sink_len, :],
+                            layer.values[..., -self.window_tokens :, :],
+                        ],
+                        dim=-2,
+                    )
+            self._kv_len = limit
         self._last_consumed = last
-        self._save_boundary()
+        # いまのキャッシュ状態を境界スナップショットとして写し取る。全注意層は追記のたびに
+        # cat で新しいテンソルを作るが、線形注意層は再帰状態を in-place に更新するので、
+        # 保存も復元も参照の共有ではなく複製で行う。層の属性のうちモジュール以外
+        # （テンソル、テンソルの並び、長さなどの数値）を丸ごと控える
+        self._boundary_state = [
+            {
+                name: self._copied_value(value)
+                for name, value in vars(layer).items()
+                if not isinstance(value, torch.nn.Module)
+            }
+            for layer in self._cache.layers
+        ]
+        self._boundary_kv_len = self._kv_len
+        self._boundary_next_pos = self._next_pos
 
     def _prefill(
         self,
@@ -366,65 +450,6 @@ class ChainGenerator:
         """テキストだけの区間の 3D 位置 (3, 1, length)。3軸とも同じ値で ``start`` から数える。"""
         return (torch.arange(length, device=self.device) + start).view(1, 1, -1).expand(3, 1, -1)
 
-    def _write(self, budget: int) -> None:
-        """返答に最大 ``budget`` トークンを足す。最後に選んだトークンはキャッシュに
-        入れずにおき、確定するときに閉じのトークンと一緒に積む。"""
-        written = 0
-        while self._writable(written, budget):
-            if self._unfed:
-                self._token.fill_(self._tokens[-1])
-                self._cache_position.fill_(self._kv_pos)
-                self._position_ids.fill_(self._rope_pos)
-                outputs = self._forward_step(self._token, self._cache_position, self._position_ids)
-                self._next_position = self._last_position(outputs.hidden_states)
-                self._next_logits = outputs.logits[0, -1]
-                self._kv_pos += 1
-                self._rope_pos += 1
-            self._positions.append(self._next_position)
-            self._tokens.append(self._sample(self._next_logits))
-            self._unfed = True
-            written += 1
-
-    def _writable(self, written: int, budget: int) -> bool:
-        ended = len(self._tokens) > 0 and self._tokens[-1] == self.eos_token_id
-        return not ended and written < budget and len(self._tokens) < self.max_len
-
-    def _chain(self, start: float) -> Chain:
-        return Chain(
-            tokens=list(self._tokens),
-            text=self.processor.tokenizer.decode(self._tokens, skip_special_tokens=True).strip(),
-            positions=torch.stack(self._positions),
-            prompt_tokens=self._prompt_tokens,
-            msec=(time.perf_counter() - start) * 1000.0,
-            finished=self._tokens[-1] == self.eos_token_id,
-        )
-
-    def _evict(self) -> None:
-        """全注意層の KV を「sink ＋ 直近 window_tokens 行」まで間引く。
-
-        線形注意層は固定サイズの再帰状態なので対象外。行を捨てるだけで
-        位置は元のまま残るから、残った行どうしの相対位置は変わらない。"""
-        limit = self._sink_len + self.window_tokens
-        if self._kv_len <= limit:
-            return
-        for layer in self._cache.layers:
-            if isinstance(layer, DynamicLayer):
-                layer.keys = torch.cat(
-                    [
-                        layer.keys[..., : self._sink_len, :],
-                        layer.keys[..., -self.window_tokens :, :],
-                    ],
-                    dim=-2,
-                )
-                layer.values = torch.cat(
-                    [
-                        layer.values[..., : self._sink_len, :],
-                        layer.values[..., -self.window_tokens :, :],
-                    ],
-                    dim=-2,
-                )
-        self._kv_len = limit
-
     @classmethod
     def _copied_value(cls, value):
         """スナップショットに保存できる形の複製。テンソルは clone、テンソルを
@@ -439,60 +464,7 @@ class ChainGenerator:
             return {key: cls._copied_value(item) for key, item in value.items()}
         return value
 
-    def _save_boundary(self) -> None:
-        """いまのキャッシュ状態を境界スナップショットとして写し取る。
-
-        DynamicCache の全注意層は追記のたびに cat で新しいテンソルを作るが、
-        線形注意層は再帰状態を in-place に更新するので、保存も復元も参照の
-        共有ではなく複製で行う。層の属性のうちモジュール以外（テンソル、
-        テンソルの並び、長さなどの数値）を丸ごと控える。"""
-        self._boundary_state = [
-            {
-                name: self._copied_value(value)
-                for name, value in vars(layer).items()
-                if not isinstance(value, torch.nn.Module)
-            }
-            for layer in self._cache.layers
-        ]
-        self._boundary_kv_len = self._kv_len
-        self._boundary_next_pos = self._next_pos
-
-    def _restore_boundary(self) -> None:
-        """キャッシュを境界スナップショットの状態へ書き戻す。スナップショット
-        自体は後続の in-place 更新から守るため、渡すのは常に複製。"""
-        for layer, snapshot in zip(self._cache.layers, self._boundary_state, strict=True):
-            for name, value in snapshot.items():
-                setattr(layer, name, self._copied_value(value))
-        self._kv_len = self._boundary_kv_len
-        self._next_pos = self._boundary_next_pos
-
-    def _forward_step(
-        self, token: torch.Tensor, cache_position: torch.Tensor, position_ids: torch.Tensor
-    ):
-        """キャッシュの上での1デコードステップ。位置はモデル任せにせず
-        呼び出し側の走行カウンタから渡す。"""
-        return self.model(
-            input_ids=token,
-            past_key_values=self._cache,
-            use_cache=True,
-            output_hidden_states=True,
-            cache_position=cache_position,
-            position_ids=position_ids,
-        )
-
     def _last_position(self, hidden_states) -> torch.Tensor:
         """The activation at the newest position at every depth, (layers_num,
         hidden_size)."""
         return torch.stack([depth[0, -1] for depth in hidden_states]).to(torch.bfloat16)
-
-    def _sample(self, logits: torch.Tensor) -> int:
-        """The token the logits imply: greedy at temperature 0, otherwise
-        sampled under the model's own generation config -- the temperature, then
-        the ``top_k`` likeliest tokens, then the fewest of those that hold
-        ``top_p`` of the probability."""
-        if self.temperature == 0.0:
-            return int(logits.argmax().item())
-        top = torch.topk(logits.float() / self.temperature, self.top_k)
-        probs = torch.softmax(top.values, dim=-1)
-        kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
-        return int(top.indices[torch.multinomial(kept, 1)].item())

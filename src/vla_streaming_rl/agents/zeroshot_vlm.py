@@ -83,7 +83,33 @@ class ZeroShotVLMAgent(Agent):
         self.chain.advance()
         steps_since_write = self.chain.age()
         if steps_since_write == 0:
-            self._hold_reply()
+            # 確定した返答の <action> を読み、その行動と続けるステップ数を保持する。読め
+            # なかったときは、行動として実行できず止まっていたことを伝える user の発言を
+            # 会話に足す
+            self.held_exchange = self.chain.exchange()
+            answer_text, self.held_action, self.hold_steps, parse_ok = read_action_reply(
+                self.chain.text(),
+                self.parse_action_text,
+                self.action_space.low,
+                self.action_space.high,
+                self.steps_per_action,
+            )
+            if not parse_ok:
+                self.prompt_builder.reject(answer_text)
+            stats = self.chain.stats()
+            self.held_metrics = {
+                "vlm/parse_failed": float(not parse_ok),
+                "vlm/msec": stats["msec"],
+                "vlm/prompt_tokens": float(stats["input_tokens"]),
+                "vlm/completion_tokens": float(stats["output_tokens"]),
+            }
+            self.held_status = (
+                f"in {stats['input_tokens']} tok   out {stats['output_tokens']} tok   "
+                f"{stats['msec']:.0f} ms   parse {'ok' if parse_ok else 'failed'}"
+            )
+            achieved = self.chain.achieved()
+            if achieved is not None:
+                self.fresh_metrics = {"vlm/achieved": achieved}
         elif episode_done:
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
             # フレームで判定する
@@ -111,35 +137,6 @@ class ZeroShotVLMAgent(Agent):
             panels=panels,
             texts={"prompt": prompt},
         )
-
-    def _hold_reply(self) -> None:
-        """確定した返答の <action> を読み、その行動と続けるステップ数を保持する。読め
-        なかったときは、行動として実行できず止まっていたことを伝える user の発言を
-        会話に足す。"""
-        self.held_exchange = self.chain.exchange()
-        answer_text, self.held_action, self.hold_steps, parse_ok = read_action_reply(
-            self.chain.text(),
-            self.parse_action_text,
-            self.action_space.low,
-            self.action_space.high,
-            self.steps_per_action,
-        )
-        if not parse_ok:
-            self.prompt_builder.reject(answer_text)
-        stats = self.chain.stats()
-        self.held_metrics = {
-            "vlm/parse_failed": float(not parse_ok),
-            "vlm/msec": stats["msec"],
-            "vlm/prompt_tokens": float(stats["input_tokens"]),
-            "vlm/completion_tokens": float(stats["output_tokens"]),
-        }
-        self.held_status = (
-            f"in {stats['input_tokens']} tok   out {stats['output_tokens']} tok   "
-            f"{stats['msec']:.0f} ms   parse {'ok' if parse_ok else 'failed'}"
-        )
-        achieved = self.chain.achieved()
-        if achieved is not None:
-            self.fresh_metrics = {"vlm/achieved": achieved}
 
     def step(
         self,
