@@ -156,11 +156,10 @@ class CoTBatch:
         )
         return pooled.permute(2, 0, 1).to(torch.bfloat16)
 
-    def judge_current(self) -> float | None:
+    def judge_current(self) -> float:
         """いま実行中のサブタスクの達成度を、いまのターンで判定する。エピソードが
-        終わり、次の返答が来ないサブタスクのため。まだ返答がなければ None。"""
-        if self._chains_taken == 0:
-            return None
+        終わり、次の返答が来ないサブタスクのため。"""
+        assert self._chains_taken > 0, "there is no subtask running before the first reply"
         return self.generator.yes_probability_after(
             self.prompt_builder.conversation(), ACHIEVED_TAG
         )

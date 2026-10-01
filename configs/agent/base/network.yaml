@@ -42,7 +42,6 @@ high_level:
   load_in_4bit: true
   max_new_tokens: 128
   temperature: 0.5
-  reasoning_max_tokens: 0
   # 全注意層の KV を「先頭の sink ＋直近この数のトークン」まで間引く
   window_tokens: 16384
   cot_mode: batch  # [batch, stream]

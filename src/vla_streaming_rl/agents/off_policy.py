@@ -313,10 +313,8 @@ class OffPolicyAgent(Agent):
                 self._reward_achieved(achieved, metrics)
         elif self.text_action and episode_done:
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
-            # フレーム（球に触れた瞬間など）で判定する
-            achieved = self.network.judge_current()
-            if achieved is not None:
-                self._reward_achieved(achieved, metrics)
+            # フレームで判定する
+            self._reward_achieved(self.network.judge_current(), metrics)
         holding = cot_age < self.hold_steps
         vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = vlm_action

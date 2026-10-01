@@ -29,21 +29,14 @@ def build_agent(
     env: Env, network: torch.nn.Module, prompt_builder: PromptBuilder, args: DictConfig
 ):
     if args.agent_type == "zeroshot_vlm":
-        from vla_streaming_rl.agents.vlm_backends import build_vlm_backend
         from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent
-        from vla_streaming_rl.networks.modules.cot_stream import CoTStream
+        from vla_streaming_rl.networks.actor_critic_with_action_value import build_cot
 
-        # stream では提案手法と同じ CoTStream が毎ステップ書き進め、確定した返答から
-        # 行動を読む。途中からの書き進めはキャッシュの巻き戻しが要るので手元のモデルだけ
-        if args.high_level.cot_mode == "stream":
-            assert args.vlm_backend == "local", "stream writes need the local backend"
-            backend = CoTStream(args.high_level, prompt_builder, torch.device("cuda"))
-        else:
-            backend = build_vlm_backend(args)
+        # 提案手法と同じチェーンのモジュールが返答を書き、確定した返答から行動を読む
         return ZeroShotVLMAgent(
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,
-            backend=backend,
+            chain=build_cot(args.high_level, prompt_builder, torch.device("cuda")),
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
             steps_per_action=args.high_level.cot_steps_per_chain,

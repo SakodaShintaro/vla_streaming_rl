@@ -200,7 +200,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         """最後に確定したチェーンが判定した、前のサブタスクの達成度。"""
         return self.cot_module.achieved()
 
-    def judge_current(self) -> float | None:
+    def judge_current(self) -> float:
         """いま実行中のサブタスクの、いまのフレームでの達成度。"""
         return self.cot_module.judge_current()
 
