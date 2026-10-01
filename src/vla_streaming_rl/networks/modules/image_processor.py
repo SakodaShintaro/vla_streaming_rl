@@ -4,10 +4,9 @@ import torch.nn.functional as F
 from diffusers import AutoencoderTiny
 from torch import nn
 from transformers import AutoModel, AutoModelForImageTextToText, AutoProcessor
-
-from vla_streaming_rl.networks.modules.qwen_vision import (
-    interpolated_pos_embed,
-    rotary_pos_embed,
+from transformers.vision_utils import (
+    get_vision_interpolation_indices_and_weights,
+    get_vision_position_ids,
 )
 
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -116,11 +115,22 @@ class QwenImageEncoder(nn.Module):
         pixel_values = img_out["pixel_values"].type(self.visual.dtype)
         image_grid_thw = img_out["image_grid_thw"].to(x.device)
 
+        # タワーの forward を使わずブロックごとに回すので、学習済みの位置埋め込みをこの
+        # グリッドへ補間したものと、パッチ位置の回転埋め込みをここで作る
         hidden_states = self.visual.patch_embed(pixel_values)
-        pos_embeds = interpolated_pos_embed(self.visual, image_grid_thw)
+        indices, weights = get_vision_interpolation_indices_and_weights(
+            image_grid_thw,
+            num_grid_per_side=self.visual.num_grid_per_side,
+            mode=self.visual.interpolation_mode,
+            align_corners=self.visual.interpolation_align_corners,
+            spatial_merge_size=self.visual.config.spatial_merge_size,
+        )
+        pos_embeds = (self.visual.pos_embed(indices) * weights[:, :, None]).sum(1)
         hidden_states = hidden_states + pos_embeds.to(hidden_states.dtype)
 
-        rotary_pos_emb = rotary_pos_embed(self.visual, image_grid_thw)
+        rotary_pos_emb = self.visual.rotary_pos_emb(
+            get_vision_position_ids(image_grid_thw, self.visual.spatial_merge_size)
+        )
         total_tokens, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(total_tokens, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(total_tokens, -1)
