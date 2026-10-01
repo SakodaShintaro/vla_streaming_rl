@@ -55,7 +55,7 @@ class HighLevelPolicy:
         後とでは意味が違うので、エンコーダは活性と一緒に ``age`` を読む。"""
         if self._until_next == 0:
             conversation = self.prompt_builder.conversation()
-            chain = self.generator.generate(conversation, [], self.generator.max_len, commit=True)
+            chain = self.generator.generate(conversation)
             # エピソードの最初の返答には判定すべき前のサブタスクがない
             achieved = (
                 self.generator.yes_probability(chain, ACHIEVED_TAG)
