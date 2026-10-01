@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: MIT
-"""書きかけのチェーンを毎ステップ少しずつ書き進め、生成の費用を全ステップに
-償却するチェーン。
+"""書きかけのチェーンを毎ステップ少しずつ書き進め、書き終えたところで確定する
+チェーン。
 
-チェーンを確定して行動を読む周期は ``CoTBatch`` と同じ ``steps_per_chain`` で、
-確定の次のステップから新しいチェーンを書き始め、以降の毎ステップ
+エピソードの最初のステップでは ``CoTBatch`` と同じくチェーンを一度に書いて
+確定する。以降は確定の次のステップから新しいチェーンを書き始め、毎ステップ
 ``write_tokens_per_step`` トークンずつ書き進める。``steps_per_image`` ステップ
 ごとの書き進めでは、確定済みの会話の境界までキャッシュを巻き戻し、最新の
-フレームのターン（履歴には確定させない）、生成プロンプトの末尾、書きかけの
-返答を積み直してから続きを書く。それ以外のステップはキャッシュの続きを書く
-だけで、新しいフレームは読まない。確定のステップでは最新のフレームの下で
-書きかけを積み直し、残りを書き切る。
+フレームのターン（まだ確定させない）、生成プロンプト、書きかけの返答を積み
+直してから続きを書く。それ以外のステップはキャッシュの続きを書くだけで、新しい
+フレームは読まない。
+
+返答を書き終えたステップで確定し、行動を読ませる。そのステップで最新の
+フレームを読んでいれば、キャッシュの中身をそのまま確定させる。読んでいなければ
+最新のフレームの下で積み直してから確定する。``steps_per_chain`` ステップ経っても
+書き終わらなければ、最新のフレームの下で残りを書き切って確定する。
 
 書きかけの ``<subtask>`` 区間の活性は書き進めるたびに読み直されるので、
 低レベル方策が読むサブタスクの表現はチェーンの確定を待たずに新しくなる。
@@ -31,14 +35,9 @@ class CoTStream(CoTBatch):
         prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
-        steps_per_chain = high_level_config.cot_steps_per_chain
         steps_per_image = high_level_config.cot_steps_per_image
         write_tokens_per_step = high_level_config.cot_write_tokens_per_step
         assert steps_per_image >= 1, steps_per_image
-        assert steps_per_chain % steps_per_image == 0, (
-            f"cot_steps_per_image {steps_per_image} must divide "
-            f"cot_steps_per_chain {steps_per_chain}"
-        )
         assert write_tokens_per_step >= 1, write_tokens_per_step
         self.steps_per_image = steps_per_image
         self.write_tokens_per_step = write_tokens_per_step
@@ -47,31 +46,57 @@ class CoTStream(CoTBatch):
     def reset(self) -> None:
         super().reset()
         self._draft: list[int] = []
+        # 最後に確定してからのステップ数。None はエピソードの最初でまだ確定していないこと
+        self._since_commit: int | None = None
+
+    def age(self) -> int:
+        """How many environment steps ago the chain now being read was committed:
+        0 on the step that committed it, below ``steps_per_chain`` always."""
+        assert self._since_commit is not None, "age() is read after advance()"
+        return self._since_commit
 
     @torch.inference_mode()
     def advance(self) -> torch.Tensor:
-        """This environment step's activations: the chain is committed every
-        ``steps_per_chain`` steps and advanced on every step in between, on the
-        latest frame every ``steps_per_image`` steps.
+        """This environment step's activations: the chain is advanced every step,
+        on the latest frame every ``steps_per_image`` steps, and committed on the
+        step it is finished.
 
         Returns:
             (tokens_per_step, layers_num, hidden_size) bfloat16.
         """
-        if self._until_next == 0:
-            self._write_chain(self._draft)
-            self._draft = []
-            self._until_next = self.steps_per_chain
-        elif (self.steps_per_chain - self._until_next - 1) % self.steps_per_image == 0:
+        if self._since_commit is None:
+            # エピソードの最初のフレームでは、そのフレームについて一度に書き切る
+            self._commit(self._draft)
+            return self._activations
+        self._since_commit += 1
+        if self._since_commit >= self.steps_per_chain:
+            self._commit(self._draft)
+            return self._activations
+        refresh = (self._since_commit - 1) % self.steps_per_image == 0
+        if refresh:
             self._last_conversation = self.prompt_builder.conversation()
-            self._take_draft(
-                self.generator.generate(
-                    self._last_conversation, self._draft, self.write_tokens_per_step, commit=False
-                )
+            chain = self.generator.generate(
+                self._last_conversation, self._draft, self.write_tokens_per_step, commit=False
             )
         else:
-            self._take_draft(self.generator.extend(self.write_tokens_per_step))
-        self._until_next -= 1
+            chain = self.generator.extend(self.write_tokens_per_step)
+        self._take_draft(chain)
+        if chain.finished or len(chain.tokens) >= self.generator.max_len:
+            if refresh:
+                # このステップで最新のフレームを読んで書き終えたので、そのまま確定する
+                self.generator.commit_draft(self._last_conversation, chain.text)
+                self._take_chain(chain)
+                self._draft = []
+                self._since_commit = 0
+            else:
+                self._commit(self._draft)
         return self._activations
+
+    def _commit(self, prefix: list[int]) -> None:
+        """最新のフレームの下で書きかけを積み直し、残りを書き切って確定する。"""
+        self._write_chain(prefix)
+        self._draft = []
+        self._since_commit = 0
 
     def _take_draft(self, chain: Chain) -> None:
         """書き進めた書きかけを持つ。会話には確定させない。書きかけにサブタスクが

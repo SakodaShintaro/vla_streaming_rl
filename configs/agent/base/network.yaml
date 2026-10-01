@@ -47,14 +47,13 @@ high_level:
   window_tokens: 16384
   cot_mode: batch  # [batch, stream]
   cot_tokens_num: 0
-  # チェーンを確定して行動を読む間隔
+  # batch ではチェーンを確定して行動を読む間隔。stream では書き終えたステップで確定し、
+  # この長さで書き終わらなければ残りを書き切って確定する
   cot_steps_per_chain: 16
-  # stream で、書きかけのチェーンに最新の画像を差し込んで書き進める間隔。
-  # cot_steps_per_chain を割り切る値で、等しければ書き始めのステップだけ画像を読む
-  cot_steps_per_image: 1
-  # stream で、確定以外の各ステップに書き進めるトークン数。確定のステップで残りを
-  # 書き切るので、チェーン長 / (cot_steps_per_chain - 1) 程度にすると全ステップに償却される
-  cot_write_tokens_per_step: 4
+  # stream で、書きかけのチェーンに最新の画像を差し込んで書き進める間隔
+  cot_steps_per_image: 16
+  # stream で、各ステップに書き進めるトークン数。返答の長さ / これ が確定の間隔になる
+  cot_write_tokens_per_step: 2
   # 高レベル方策が会話として読む窓のステップ数。cot_steps_per_chain ステップごとに1回の
   # やり取りなので、履歴は (seq_len - 1) // cot_steps_per_chain 回分になる。
   # また、実際に読める長さは window_tokens で頭打ちになる

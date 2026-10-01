@@ -148,6 +148,8 @@ class ChainGenerator:
         self._prompt_tokens = 0
         # 確定してキャッシュに入れた返答の文字列。builder が会話に足した返答と照合する
         self._committed_reply: str | None = None
+        # 確定させずに積んだ最新のターン。書き終えた返答をこのまま閉じて確定できる
+        self._draft_turn: dict | None = None
 
     @torch.inference_mode()
     def generate(
@@ -199,6 +201,7 @@ class ChainGenerator:
             self._prefill(ids, pos, pixel_values, image_grid_thw, hidden=False)
             self._settle(conversation, settled[-1])
             new_messages = new_messages[-1:]
+        self._draft_turn = None if commit else new_messages[-1]
 
         # 会話の差分、生成プロンプト、書きかけを1回の forward で積む。書きかけの i 番目の
         # トークンを選んだのは、その直前の位置の活性。
@@ -230,6 +233,17 @@ class ChainGenerator:
         if commit:
             self._close_reply(conversation, chain.text)
         return chain
+
+    @torch.inference_mode()
+    def commit_draft(self, conversation: list[dict], text: str) -> None:
+        """書き終えた書きかけを、それを書いたときの最新のターンの返答としてそのまま
+        確定する。キャッシュには境界の後ろにそのターン、生成プロンプト、返答が
+        積まれているので、返答を閉じて境界を取り直すだけで済む。"""
+        assert self._draft_turn is not None and self._draft_turn is conversation[-1], (
+            "the draft can only be committed under the turn it was written on"
+        )
+        self._close_reply(conversation, text)
+        self._draft_turn = None
 
     def _close_reply(self, conversation: list[dict], text: str) -> None:
         """書き終えた返答を <|im_end|> と改行で閉じてキャッシュに積み、その直後を

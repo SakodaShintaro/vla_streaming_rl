@@ -99,6 +99,10 @@ class CoTBatch:
         chain = self.generator.generate(
             self._last_conversation, prefix, self.generator.max_len - len(prefix), commit=True
         )
+        self._take_chain(chain)
+
+    def _take_chain(self, chain: Chain) -> None:
+        """確定したチェーンを読む側に渡し、会話の返答として足す。"""
         subtask_positions = self._subtask_positions(chain)
         if subtask_positions.shape[0] == 0:
             self._activations = torch.zeros_like(self._activations)
