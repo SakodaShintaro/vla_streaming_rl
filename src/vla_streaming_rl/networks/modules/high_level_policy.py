@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 import dataclasses
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -7,8 +8,28 @@ from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.prompt import ACHIEVED_TAG, SUBTASK_RE, PromptBuilder, assistant_turn
 
-from ..interface import HighLevelPolicyOutput
 from .chain_generator import ChainGenerator
+
+
+@dataclass(frozen=True)
+class HighLevelPolicyOutput:
+    """高レベル方策がいま持っている返答。返答を書いたステップから次を書くまで同じ
+    ものを返し、``age`` だけが進む。"""
+
+    # (tokens_per_step, layers_num, hidden_size)。返答の <subtask> 区間の活性を、
+    # 1ステップに読む幅へ均したもの
+    activations: torch.Tensor
+    # 何ステップ前に書いたか。書いたステップで 0
+    age: int
+    text: str
+    # 書いたときの会話と、この返答。描画用
+    exchange: list[dict]
+    # この返答が判定した、前の返答のサブタスクの達成度（yes の確率）。前のサブタスクが
+    # ないか、返答に判定がなければ None
+    achieved: float | None
+    input_tokens: int
+    output_tokens: int
+    msec: float
 
 
 class HighLevelPolicy:

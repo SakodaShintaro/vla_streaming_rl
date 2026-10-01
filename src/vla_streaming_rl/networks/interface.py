@@ -51,26 +51,6 @@ class InferInput:
     subtask_age_seq: torch.Tensor  # (B, T, 1)
 
 
-@dataclass(frozen=True)
-class HighLevelPolicyOutput:
-    """高レベル方策がいま持っている返答。返答を書いたステップから次を書くまで同じ
-    ものを返し、``age`` だけが進む。高レベル方策を持たないネットワークでは空。"""
-
-    # (*subtask_shape)。返答の <subtask> 区間の活性を、1ステップに読む幅へ均したもの
-    activations: torch.Tensor
-    # 何ステップ前に書いたか。書いたステップで 0
-    age: int
-    text: str
-    # 書いたときの会話と、この返答。描画用
-    exchange: list[dict]
-    # この返答が判定した、前の返答のサブタスクの達成度（yes の確率）。前のサブタスクが
-    # ないか、返答に判定がなければ None
-    achieved: float | None
-    input_tokens: int
-    output_tokens: int
-    msec: float
-
-
 @dataclass
 class InferResult:
     """Structured return value of a network's ``infer`` / ``infer_and_compute_loss``.
@@ -128,29 +108,10 @@ class NetworkInterface(nn.Module, abc.ABC):
     metaclass conflict.
     """
 
-    # A chain-of-thought stream is opt-in: a network that runs one declares the
-    # shape of what it hands out per step, and the agents size the replay
-    # buffer's chain field from it and store what ``advance_high_level`` returns
-    # verbatim. Everything else contributes no tokens.
+    # 高レベル方策のサブタスクの活性を読むネットワークは、1ステップ分を保存する形を宣言する。
+    # エージェントはこれでバッファの欄の大きさを決め、``to_stored_subtask`` を通した
+    # ものを入れる。読まないネットワークは何も持たない
     subtask_shape: tuple[int, int] = (0, 0)
-
-    def advance_high_level(
-        self, episode_started: bool, window: ReplayBufferData
-    ) -> HighLevelPolicyOutput:
-        """このステップの高レベル方策の返答。高レベル方策を持たないネットワークでは空
-        （``networks/actor_critic_with_action_value.py`` を参照）。``window`` はバッファの
-        最新の行で、このステップが最後。プロンプトをそこから読む高レベル方策のため。"""
-        del episode_started, window
-        return HighLevelPolicyOutput(
-            activations=torch.zeros(self.subtask_shape),
-            age=0,
-            text="",
-            exchange=[],
-            achieved=None,
-            input_tokens=0,
-            output_tokens=0,
-            msec=0.0,
-        )
 
     @abc.abstractmethod
     def init_state(self) -> torch.Tensor:
@@ -166,6 +127,11 @@ class NetworkInterface(nn.Module, abc.ABC):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         """The stored form of one raw observation image, matching
         ``stored_image_shape``."""
+
+    @abc.abstractmethod
+    def to_stored_subtask(self, activations: torch.Tensor) -> torch.Tensor:
+        """高レベル方策の1ステップ分のサブタスクの活性を、``subtask_shape`` の保存形に
+        したもの。"""
 
     @abc.abstractmethod
     def observe_scalar_obs(

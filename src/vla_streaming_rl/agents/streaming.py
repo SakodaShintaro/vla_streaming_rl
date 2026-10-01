@@ -24,6 +24,7 @@ from torch import nn, optim
 from vla_streaming_rl.agents.base import Agent, StepResult, render_high_level
 from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -51,14 +52,15 @@ class StreamingAgent(Agent):
         pad_token_id: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
-        render_high_level: bool,
+        high_level_policy: HighLevelPolicy | None,
     ) -> None:
         super().__init__(
             horizon=horizon,
             reset_on_episode_end=reset_on_episode_end,
             prompt_builder=prompt_builder,
         )
-        self.render_high_level = render_high_level
+        # 凍結した高レベル方策。持たない学習では None
+        self.high_level_policy = high_level_policy
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # action properties
@@ -200,13 +202,23 @@ class StreamingAgent(Agent):
             episode_step_obs,
             health_obs,
         )
-        # The chain reads its prompt off the rows just stored, and what it
-        # writes completes this tick's row.
-        reply = self.network.advance_high_level(episode_started, self.rb.get_latest(self.seq_len))
-        # 高レベル方策の返答を書くランでだけ、その会話を描く
-        panels, texts = render_high_level(reply) if self.render_high_level else ({}, {})
-        texts = {"prompt": prompt, **texts}
-        self.rb.amend_latest(reply.activations, reply.age, self.network.tokenize(reply.text))
+        # 高レベル方策を進め、その返答でこのステップの行を埋める。エピソードの最初の
+        # ステップでは、前のエピソードの返答を捨ててそのフレームで書き直す
+        panels = {}
+        texts = {"prompt": prompt}
+        if self.high_level_policy is None:
+            self.rb.amend_latest(torch.zeros(self.network.subtask_shape), 0, [])
+        else:
+            if episode_started:
+                self.high_level_policy.reset()
+            reply = self.high_level_policy.advance()
+            self.rb.amend_latest(
+                self.network.to_stored_subtask(reply.activations),
+                reply.age,
+                self.network.tokenize(reply.text),
+            )
+            panels, high_level_texts = render_high_level(reply)
+            texts.update(high_level_texts)
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
             self.prev_action = action
@@ -409,13 +421,23 @@ class StreamingAgent(Agent):
             episode_step_obs,
             health_obs,
         )
-        # The chain reads its prompt off the rows just stored, and what it
-        # writes completes this tick's row.
-        reply = self.network.advance_high_level(episode_started, self.rb.get_latest(self.seq_len))
-        # 高レベル方策の返答を書くランでだけ、その会話を描く
-        panels, texts = render_high_level(reply) if self.render_high_level else ({}, {})
-        texts = {"prompt": prompt, **texts}
-        self.rb.amend_latest(reply.activations, reply.age, self.network.tokenize(reply.text))
+        # 高レベル方策を進め、その返答でこのステップの行を埋める。エピソードの最初の
+        # ステップでは、前のエピソードの返答を捨ててそのフレームで書き直す
+        panels = {}
+        texts = {"prompt": prompt}
+        if self.high_level_policy is None:
+            self.rb.amend_latest(torch.zeros(self.network.subtask_shape), 0, [])
+        else:
+            if episode_started:
+                self.high_level_policy.reset()
+            reply = self.high_level_policy.advance()
+            self.rb.amend_latest(
+                self.network.to_stored_subtask(reply.activations),
+                reply.age,
+                self.network.tokenize(reply.text),
+            )
+            panels, high_level_texts = render_high_level(reply)
+            texts.update(high_level_texts)
 
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])

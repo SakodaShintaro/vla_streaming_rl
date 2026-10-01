@@ -60,9 +60,6 @@ vla:
   use_lora: false
   num_state_queries: 100
   state_out_dim: 4
-  reasoning_loss_weight: 1.0
-  reasoning_max_tokens: 0
-  reasoning_temperature: 1.0
 
 actor_critic:
   seq_len: 1

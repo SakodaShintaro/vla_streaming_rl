@@ -77,14 +77,15 @@ class OffPolicyAgent(Agent):
         achieved_reward_weight: float,
         steps_per_reply: int,
         parse_action_text,
-        render_high_level: bool,
+        high_level_policy: HighLevelPolicy | None,
     ) -> None:
         super().__init__(
             horizon=horizon,
             reset_on_episode_end=reset_on_episode_end,
             prompt_builder=prompt_builder,
         )
-        self.render_high_level = render_high_level
+        # 凍結した高レベル方策。持たない学習では None
+        self.high_level_policy = high_level_policy
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.text_action = text_action
@@ -97,7 +98,7 @@ class OffPolicyAgent(Agent):
         assert steps_per_reply >= 1, steps_per_reply
         self.steps_per_reply = steps_per_reply
         if text_action:
-            assert isinstance(network.high_level_policy, HighLevelPolicy), (
+            assert high_level_policy is not None, (
                 "text_action reads the action off a finished chain, which only "
                 "the high-level chain writes; set high_level.subtask_tokens_num > 0"
             )
@@ -300,13 +301,24 @@ class OffPolicyAgent(Agent):
             episode_step_obs,
             health_obs,
         )
-        # The chain reads its prompt off the rows just stored, and what it
-        # writes completes this tick's row.
-        reply = self.network.advance_high_level(episode_started, self.rb.get_latest(self.seq_len))
-        # 高レベル方策の返答を書くランでだけ、その会話を描く
-        panels, texts = render_high_level(reply) if self.render_high_level else ({}, {})
-        texts = {"prompt": prompt, **texts}
-        self.rb.amend_latest(reply.activations, reply.age, self.network.tokenize(reply.text))
+        # 高レベル方策を進め、その返答でこのステップの行を埋める。エピソードの最初の
+        # ステップでは、前のエピソードの返答を捨ててそのフレームで書き直す
+        reply = None
+        panels = {}
+        texts = {"prompt": prompt}
+        if self.high_level_policy is None:
+            self.rb.amend_latest(torch.zeros(self.network.subtask_shape), 0, [])
+        else:
+            if episode_started:
+                self.high_level_policy.reset()
+            reply = self.high_level_policy.advance()
+            self.rb.amend_latest(
+                self.network.to_stored_subtask(reply.activations),
+                reply.age,
+                self.network.tokenize(reply.text),
+            )
+            panels, high_level_texts = render_high_level(reply)
+            texts.update(high_level_texts)
         if self.text_action and reply.age == 0:
             self._read_vlm_action(reply.text)
             if reply.achieved is not None:
@@ -314,8 +326,8 @@ class OffPolicyAgent(Agent):
         elif self.text_action and episode_done:
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
             # フレームで判定する
-            self._reward_achieved(self.network.judge_current(), metrics)
-        holding = reply.age < self.hold_steps
+            self._reward_achieved(self.high_level_policy.judge_current(), metrics)
+        holding = self.text_action and reply.age < self.hold_steps
         vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = vlm_action
         self.prev_vlm_holding = holding
@@ -415,7 +427,7 @@ class OffPolicyAgent(Agent):
 
     def _panels(self, panels: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         """高レベル方策のパネルに、行動が返答から読めるときは2つの候補とその行動価値を
-        足したもの。ラン中は毎ステップ同じキーになる。"""
+        足したもの。学習中は毎ステップ同じキーになる。"""
         if self.text_action:
             panels = {**panels}
             panels["selection"] = render_selection_panel(

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: MIT
-import dataclasses
 from collections.abc import Callable
 
 import numpy as np
@@ -9,7 +8,6 @@ from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
     EligibilityTraceInfo,
-    HighLevelPolicyOutput,
     InferInput,
     InferLossResult,
     InferResult,
@@ -17,7 +15,6 @@ from vla_streaming_rl.networks.interface import (
     NetworkInterface,
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
-from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
@@ -38,7 +35,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         horizon: int,
         policy_head_factory,
         high_level_config: DictConfig,
-        prompt_builder,
     ) -> None:
         super().__init__()
         self.seq_len = actor_critic_config.seq_len
@@ -74,12 +70,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             subtask_layers,
             subtask_dim,
         )
-        # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
-        self.high_level_policy = None
-        if subtask_tokens_num > 0:
-            self.high_level_policy = HighLevelPolicy(
-                high_level_config, prompt_builder, torch.device("cuda")
-            )
 
         self.encoder = SpatialTemporalEncoder(
             image_features_shape=tuple(self.image_processor.output_shape),
@@ -129,27 +119,11 @@ class ActorCriticWithActionValue(NetworkInterface):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         return self.image_processor.encode(image.unsqueeze(0)).squeeze(0)
 
-    def advance_high_level(
-        self, episode_started: bool, window: ReplayBufferData
-    ) -> HighLevelPolicyOutput:
-        """This step's reply, empty when the chain is off. The first tick of an
-        episode ends whatever chain was running, so an episode's commentary
-        starts on its own first frame rather than carrying the one written about
-        the frame the last episode ended on. The chain reads the conversation
-        the builder holds, not ``window``."""
-        if self.high_level_policy is None:
-            return super().advance_high_level(episode_started, window)
-        if episode_started:
-            self.high_level_policy.reset()
-        reply = self.high_level_policy.advance()
+    def to_stored_subtask(self, activations: torch.Tensor) -> torch.Tensor:
+        """平均でまとめる設定なら、ステップのトークンを1つに均してから保存する。"""
         if self.pool_subtask:
-            pooled = reply.activations.float().mean(dim=0, keepdim=True)
-            reply = dataclasses.replace(reply, activations=pooled.to(reply.activations.dtype))
-        return reply
-
-    def judge_current(self) -> float:
-        """いま実行中のサブタスクの、いまのフレームでの達成度。"""
-        return self.high_level_policy.judge_current()
+            return activations.float().mean(dim=0, keepdim=True).to(activations.dtype)
+        return activations
 
     def _subtask_keep(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Which sequences of a batch keep their chain, the rest being the share

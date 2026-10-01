@@ -19,7 +19,6 @@ def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module | None, objec
             args,
             observation_space_shape=env.observation_space["image"].shape,
             action_space_shape=env.action_space.shape,
-            prompt_builder=prompt_builder,
             device=torch.device("cuda"),
         )
     return network, build_agent(env, network, prompt_builder, args)
@@ -68,12 +67,12 @@ def build_agent(
             prompt_builder=prompt_builder,
         )
 
-    # 高レベル方策の返答を書くランかどうか。描画するパネルはラン全体で固定なので、
-    # 構成から決める
-    if args.network_class == "vlm_actor_critic_with_action_value":
-        render_high_level = args.vla.reasoning_max_tokens > 0
-    else:
-        render_high_level = args.high_level.subtask_tokens_num > 0
+    # 高レベル方策。サブタスクの活性を低レベル方策に渡す学習でだけ持つ
+    from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
+
+    high_level_policy = None
+    if args.high_level.subtask_tokens_num > 0:
+        high_level_policy = HighLevelPolicy(args.high_level, prompt_builder, torch.device("cuda"))
 
     if args.agent_type == "streaming":
         from vla_streaming_rl.agents.streaming import StreamingAgent
@@ -97,7 +96,7 @@ def build_agent(
             pad_token_id=args.replay_buffer.pad_token_id,
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
-            render_high_level=render_high_level,
+            high_level_policy=high_level_policy,
         )
 
     assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
@@ -128,5 +127,5 @@ def build_agent(
         achieved_reward_weight=args.achieved_reward_weight,
         steps_per_reply=args.high_level.steps_per_reply,
         parse_action_text=parse_action_text,
-        render_high_level=render_high_level,
+        high_level_policy=high_level_policy,
     )

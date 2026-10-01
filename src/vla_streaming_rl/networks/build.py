@@ -71,7 +71,6 @@ def build_network(
     args: DictConfig,
     observation_space_shape: tuple[int, ...],
     action_space_shape: tuple[int, ...],
-    prompt_builder,
     device: torch.device,
 ) -> nn.Module:
     # The PPO network has its own value head baked in and reads no critic
@@ -108,7 +107,6 @@ def build_network(
             horizon=args.horizon,
             policy_head_factory=policy_head_factory,
             high_level_config=args.high_level,
-            prompt_builder=prompt_builder,
         ).to(device)
 
     elif args.network_class == "vlm_actor_critic_with_action_value":

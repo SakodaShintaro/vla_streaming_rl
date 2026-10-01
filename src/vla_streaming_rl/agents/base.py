@@ -6,10 +6,10 @@ from typing import Any
 import numpy as np
 
 from vla_streaming_rl.agents.prompt import PromptBuilder
-from vla_streaming_rl.networks.interface import HighLevelPolicyOutput
+from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicyOutput
 from vla_streaming_rl.utils import render_conversation_panel
 
-# 会話のパネルの大きさ。数ターン分の会話が一度に見える幅と高さで、ラン全体で固定する
+# 会話のパネルの大きさ。数ターン分の会話が一度に見える幅と高さで、学習全体で固定する
 # （StepResult の固定パネルの約束）。モデルに実際に何を見せたかが分かるのはこのパネルだけ
 CONVERSATION_PANEL_WIDTH = 680
 CONVERSATION_PANEL_HEIGHT = 560
