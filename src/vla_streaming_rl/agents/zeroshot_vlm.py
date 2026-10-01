@@ -2,7 +2,7 @@
 """Zero-shot VLM controller.
 
 The high-level policy alone: the same chain module the trained agents carry
-(`CoTBatch`) writes the replies on the same conversation, and the action each reply names is held for as many
+(`HighLevelPolicy`) writes the replies on the same conversation, and the action each reply names is held for as many
 steps as it asks. It learns nothing: it is the zero-shot baseline the trained
 agents are measured against, so it plugs into the same trainer loop and reports
 the same telemetry.
@@ -16,7 +16,7 @@ import torch
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder, read_action_reply
-from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
+from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.utils import render_conversation_panel
 
 
@@ -34,7 +34,7 @@ class ZeroShotVLMAgent(Agent):
         *,
         action_space: gym.spaces.Box,
         parse_action_text,
-        chain: CoTBatch,
+        chain: HighLevelPolicy,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
         steps_per_action: int,

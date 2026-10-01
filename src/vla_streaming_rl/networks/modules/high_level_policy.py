@@ -8,8 +8,8 @@ from vla_streaming_rl.agents.prompt import ACHIEVED_TAG, SUBTASK_RE, PromptBuild
 from .chain_generator import Chain, ChainGenerator
 
 
-class CoTBatch:
-    """A whole chain of thought written every ``steps_per_chain`` environment
+class HighLevelPolicy:
+    """A whole chain of thought written every ``steps_per_reply`` environment
     steps and held in between.
 
     The chain is written by :class:`ChainGenerator`, the generator the zero-shot
@@ -25,10 +25,10 @@ class CoTBatch:
         prompt_builder: PromptBuilder,
         device: torch.device,
     ) -> None:
-        tokens_per_step = high_level_config.cot_tokens_num
-        steps_per_chain = high_level_config.cot_steps_per_chain
+        tokens_per_step = high_level_config.subtask_tokens_num
+        steps_per_reply = high_level_config.steps_per_reply
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
-        assert steps_per_chain >= 1, f"steps_per_chain must be positive; got {steps_per_chain}"
+        assert steps_per_reply >= 1, f"steps_per_reply must be positive; got {steps_per_reply}"
         # Thinking off: with the <think> block left open the model spends the
         # chain reasoning about the request rather than about the scene.
         self.generator = ChainGenerator(high_level_config, enable_thinking=False, device=device)
@@ -37,7 +37,7 @@ class CoTBatch:
             "stretch a chain shorter than one step's read"
         )
         self.tokens_per_step = tokens_per_step
-        self.steps_per_chain = steps_per_chain
+        self.steps_per_reply = steps_per_reply
         # The conversation is the agent's; a chain reads it on the steps it
         # writes and puts what it wrote back as that turn's reply.
         self.prompt_builder = prompt_builder
@@ -71,14 +71,14 @@ class CoTBatch:
     def age(self) -> int:
         """How many environment steps ago the chain now being read was written.
 
-        0 on the step that wrote it, up to ``steps_per_chain - 1`` on the last
+        0 on the step that wrote it, up to ``steps_per_reply - 1`` on the last
         step that holds it. What the encoder needs alongside the activations:
         the same chain means something different on the frame it was written
         about than it does fifteen steps later, and nothing else in the
         observation says which of the two this is -- `episode_step` carries it
         only modulo a period the encoder cannot take.
         """
-        return self.steps_per_chain - 1 - self._until_next
+        return self.steps_per_reply - 1 - self._until_next
 
     @torch.inference_mode()
     def advance(self) -> torch.Tensor:
@@ -93,7 +93,7 @@ class CoTBatch:
         """
         if self._until_next == 0:
             self._write_chain([])
-            self._until_next = self.steps_per_chain
+            self._until_next = self.steps_per_reply
         self._until_next -= 1
         return self._activations
 

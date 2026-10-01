@@ -95,7 +95,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         policy_head_factory,
         vla_config: DictConfig,
         pad_token_id: int,
-        cot_steps_per_chain: int,
+        steps_per_reply: int,
     ) -> None:
         super().__init__()
         self.seq_len = vla_config.seq_len
@@ -104,12 +104,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
         # The prompt of a tick is the conversation the zero-shot controller
-        # would read there: its turns are the buffer rows ``cot_steps_per_chain``
+        # would read there: its turns are the buffer rows ``steps_per_reply``
         # apart ending on the tick, as many as ``seq_len`` ticks hold, each
         # a frame under its own text answered by the chain its tick wrote.
-        assert cot_steps_per_chain >= 1, cot_steps_per_chain
-        self.cot_steps_per_chain = cot_steps_per_chain
-        self._since_write = cot_steps_per_chain
+        assert steps_per_reply >= 1, steps_per_reply
+        self.steps_per_reply = steps_per_reply
+        self._since_write = steps_per_reply
         self.reasoning_loss_weight = vla_config.reasoning_loss_weight
         self.reasoning_max_tokens = vla_config.reasoning_max_tokens
         self.reasoning_temperature = vla_config.reasoning_temperature
@@ -202,23 +202,23 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def thought_text(self) -> str:
         return self._last_reasoning_text
 
-    def advance_cot(
+    def advance_high_level(
         self, episode_started: bool, window: ReplayBufferData
     ) -> tuple[torch.Tensor, int]:
-        """Every ``cot_steps_per_chain`` ticks, write a chain on this tick's
+        """Every ``steps_per_reply`` ticks, write a chain on this tick's
         prompt, read off ``window`` (the buffer's newest rows, this tick last).
 
         Returns no activations -- the chain reaches the policy as text, as the
         reply of this tick's turn in the prompts that follow -- and 0.
         """
         if episode_started:
-            self._since_write = self.cot_steps_per_chain
+            self._since_write = self.steps_per_reply
         else:
             self._since_write += 1
-        if self.reasoning_max_tokens > 0 and self._since_write >= self.cot_steps_per_chain:
+        if self.reasoning_max_tokens > 0 and self._since_write >= self.steps_per_reply:
             self._write_chain(window)
             self._since_write = 0
-        return torch.zeros(self.cot_shape), 0
+        return torch.zeros(self.subtask_shape), 0
 
     @torch.inference_mode()
     def _write_chain(self, window: ReplayBufferData) -> None:
@@ -247,14 +247,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     ) -> tuple[list[str], list[list[torch.Tensor]]]:
         """The conversation of each batch element's ``slot`` tick, rendered.
 
-        Its turns are the rows ``cot_steps_per_chain`` apart ending on the slot:
+        Its turns are the rows ``steps_per_reply`` apart ending on the slot:
         each a frame under its own text, the earlier ones answered by the reply
         their tick wrote, as many as ``seq_len`` ticks hold; an episode boundary
         does not cut them, so what the episodes before did and what came of them
         stays in view.
         """
         cursor = slot % observations.shape[1]
-        stride = self.cot_steps_per_chain
+        stride = self.steps_per_reply
         system_texts = self._decode(system_token_ids[:, cursor])
         texts, images = [], []
         for b in range(observations.shape[0]):

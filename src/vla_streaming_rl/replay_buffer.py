@@ -36,8 +36,8 @@ class ReplayBufferData:
     global_step: torch.Tensor  # (B, T, 1)
     episode_step: torch.Tensor  # (B, T, 1)
     health: torch.Tensor  # (B, T, 1)
-    cot_activations: torch.Tensor  # (B, T, *cot_shape)
-    cot_age: torch.Tensor  # (B, T, 1)
+    subtask_activations: torch.Tensor  # (B, T, *subtask_shape)
+    subtask_age: torch.Tensor  # (B, T, 1)
 
 
 class ReplayBuffer:
@@ -49,7 +49,7 @@ class ReplayBuffer:
         obs_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
-        cot_shape: tuple[int, ...],
+        subtask_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
         max_prompt_tokens: int,
@@ -90,8 +90,8 @@ class ReplayBuffer:
         self.global_step = init_tensor((size, 1))
         self.episode_step = init_tensor((size, 1))
         self.health = init_tensor((size, 1))
-        self.cot_activations = torch.zeros(
-            (size, *cot_shape),
+        self.subtask_activations = torch.zeros(
+            (size, *subtask_shape),
             dtype=torch.bfloat16,
             device=self.storage_device,
         )
@@ -99,7 +99,7 @@ class ReplayBuffer:
         # transition because a sampled step is any step of an episode and the
         # age cannot be recovered from one: it is periodic in the writing
         # cadence, which no other stored field carries.
-        self.cot_age = init_tensor((size, 1))
+        self.subtask_age = init_tensor((size, 1))
         # What the tick said, tokenized: the standing task, the text under the
         # frame, and the chain written on the tick. A conversation is rebuilt
         # from rows a fixed stride apart, each a frame under its text answered
@@ -172,12 +172,12 @@ class ReplayBuffer:
         self.full = self.full or self.idx == 0
 
     def amend_latest(
-        self, cot_activation: torch.Tensor, cot_age: int, reply_token_ids: list[int]
+        self, subtask_activation: torch.Tensor, subtask_age: int, reply_token_ids: list[int]
     ) -> None:
         """Complete the newest row with what the chain wrote on it."""
         latest = (self.idx - 1) % self.size
-        self.cot_activations[latest].copy_(cot_activation)
-        self.cot_age[latest].fill_(cot_age)
+        self.subtask_activations[latest].copy_(subtask_activation)
+        self.subtask_age[latest].fill_(subtask_age)
         self._store_token_ids(self.reply_token_ids, latest, reply_token_ids)
 
     def add_latest_reward(self, bonus: float) -> None:
@@ -239,8 +239,8 @@ class ReplayBuffer:
             self._gather("global_step", self.global_step, indices),
             self._gather("episode_step", self.episode_step, indices),
             self._gather("health", self.health, indices),
-            self._gather("cot_activations", self.cot_activations, indices),
-            self._gather("cot_age", self.cot_age, indices),
+            self._gather("subtask_activations", self.subtask_activations, indices),
+            self._gather("subtask_age", self.subtask_age, indices),
         )
 
     def valid_start_indices(self) -> torch.Tensor:

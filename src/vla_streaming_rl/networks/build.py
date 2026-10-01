@@ -130,7 +130,7 @@ def build_network(
             policy_head_factory=policy_head_factory,
             vla_config=args.vla,
             pad_token_id=args.replay_buffer.pad_token_id,
-            cot_steps_per_chain=args.high_level.cot_steps_per_chain,
+            steps_per_reply=args.high_level.steps_per_reply,
         ).to(device)
 
     else:

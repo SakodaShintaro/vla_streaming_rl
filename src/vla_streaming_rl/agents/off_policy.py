@@ -32,7 +32,7 @@ from torch import nn, optim
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder, read_action_reply
 from vla_streaming_rl.networks.interface import InferInput
-from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
+from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.utils import render_selection_panel
@@ -75,7 +75,7 @@ class OffPolicyAgent(Agent):
         text_action: bool,
         select_margin: float,
         achieved_reward_weight: float,
-        cot_steps_per_chain: int,
+        steps_per_reply: int,
         parse_action_text,
     ) -> None:
         super().__init__(
@@ -92,12 +92,12 @@ class OffPolicyAgent(Agent):
         self.achieved_reward_weight = achieved_reward_weight
         self.achieved_mean = 0.0
         self.achieved_count = 0
-        assert cot_steps_per_chain >= 1, cot_steps_per_chain
-        self.cot_steps_per_chain = cot_steps_per_chain
+        assert steps_per_reply >= 1, steps_per_reply
+        self.steps_per_reply = steps_per_reply
         if text_action:
-            assert isinstance(network.cot_module, CoTBatch), (
+            assert isinstance(network.high_level_policy, HighLevelPolicy), (
                 "text_action reads the action off a finished chain, which only "
-                "the high-level chain writes; set high_level.cot_tokens_num > 0"
+                "the high-level chain writes; set high_level.subtask_tokens_num > 0"
             )
         self.parse_action_text = parse_action_text
         self.vlm_action = np.zeros(int(np.prod(action_space.shape)), dtype=np.float32)
@@ -149,7 +149,7 @@ class OffPolicyAgent(Agent):
             obs_shape=self.network.stored_image_shape(),
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
-            cot_shape=self.network.cot_shape,
+            subtask_shape=self.network.subtask_shape,
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             max_prompt_tokens=max_prompt_tokens,
@@ -300,13 +300,13 @@ class OffPolicyAgent(Agent):
         )
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
-        cot_activation, cot_age = self.network.advance_cot(
+        subtask_activation, subtask_age = self.network.advance_high_level(
             episode_started, self.rb.get_latest(self.seq_len)
         )
         self.rb.amend_latest(
-            cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
+            subtask_activation, subtask_age, self.network.tokenize(self.network.thought_text())
         )
-        if self.text_action and cot_age == 0:
+        if self.text_action and subtask_age == 0:
             self._read_vlm_action()
             achieved = self.network.achieved()
             if achieved is not None:
@@ -315,7 +315,7 @@ class OffPolicyAgent(Agent):
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
             # フレームで判定する
             self._reward_achieved(self.network.judge_current(), metrics)
-        holding = cot_age < self.hold_steps
+        holding = subtask_age < self.hold_steps
         vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = vlm_action
         self.prev_vlm_holding = holding
@@ -355,8 +355,8 @@ class OffPolicyAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
-                cot_activations_seq=latest_data.cot_activations,
-                cot_age_seq=latest_data.cot_age,
+                subtask_activations_seq=latest_data.subtask_activations,
+                subtask_age_seq=latest_data.subtask_age,
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -374,7 +374,7 @@ class OffPolicyAgent(Agent):
             self.decisions_num += 1
             self.vlm_chosen_num += int(vlm_chosen)
             self.selection_status = (
-                f"step {global_step}, chain age {cot_age}, "
+                f"step {global_step}, chain age {subtask_age}, "
                 f"{'warmup: VLM only' if warmup else 'chosen by Q'}. "
                 f"VLM chosen {self.vlm_chosen_num}/{self.decisions_num} this episode."
             )
@@ -448,7 +448,7 @@ class OffPolicyAgent(Agent):
             self.parse_action_text,
             self.action_low,
             self.action_high,
-            self.cot_steps_per_chain,
+            self.steps_per_reply,
         )
         self.vlm_answer_text = answer_text if parse_ok else f"(unparsed: {answer_text})"
         if not parse_ok:

@@ -15,7 +15,7 @@ from vla_streaming_rl.networks.interface import (
     NetworkInterface,
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
-from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
+from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
 from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
@@ -51,28 +51,34 @@ class ActorCriticWithActionValue(NetworkInterface):
         hidden_image_dim = actor_critic_config.image_encoder_output_dim
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
-        assert 0.0 <= actor_critic_config.cot_dropout < 1.0, actor_critic_config.cot_dropout
-        self.cot_dropout = actor_critic_config.cot_dropout
+        assert 0.0 <= actor_critic_config.subtask_dropout < 1.0, actor_critic_config.subtask_dropout
+        self.subtask_dropout = actor_critic_config.subtask_dropout
         assert 0.0 <= actor_critic_config.token_dropout < 1.0, actor_critic_config.token_dropout
         self.token_dropout = actor_critic_config.token_dropout
         self.bc_loss_weight = actor_critic_config.bc_loss_weight
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
-        # ``cot_tokens_num = 0`` is the ablation: the same body, the same heads
+        # ``subtask_tokens_num = 0`` is the ablation: the same body, the same heads
         # and the same loss with the chain's tokens taken out of the space axis,
         # which is what isolates what the chain contributes. No chain means no
         # VLM to load, so the width comes from the config, not a loaded model.
-        cot_tokens_num = high_level_config.cot_tokens_num
+        subtask_tokens_num = high_level_config.subtask_tokens_num
         text_config = AutoConfig.from_pretrained(high_level_config.model_id).text_config
-        cot_dim = text_config.hidden_size
+        subtask_dim = text_config.hidden_size
         # The embedding plus every layer's output.
-        cot_layers = text_config.num_hidden_layers + 1
-        self.pool_cot = actor_critic_config.cot_pool == "mean" and cot_tokens_num > 0
-        self.cot_shape = (1 if self.pool_cot else cot_tokens_num, cot_layers, cot_dim)
+        subtask_layers = text_config.num_hidden_layers + 1
+        self.pool_subtask = actor_critic_config.subtask_pool == "mean" and subtask_tokens_num > 0
+        self.subtask_shape = (
+            1 if self.pool_subtask else subtask_tokens_num,
+            subtask_layers,
+            subtask_dim,
+        )
         # Not a submodule: the frozen VLM must stay out of parameters()/state_dict().
-        self.cot_module = None
-        if cot_tokens_num > 0:
-            self.cot_module = CoTBatch(high_level_config, prompt_builder, torch.device("cuda"))
+        self.high_level_policy = None
+        if subtask_tokens_num > 0:
+            self.high_level_policy = HighLevelPolicy(
+                high_level_config, prompt_builder, torch.device("cuda")
+            )
 
         self.encoder = SpatialTemporalEncoder(
             image_features_shape=tuple(self.image_processor.output_shape),
@@ -83,11 +89,11 @@ class ActorCriticWithActionValue(NetworkInterface):
             action_dim=self.action_dim,
             scalar_obs_dim=self.scalar_obs_dim,
             temporal_model_type=actor_critic_config.temporal_model_type,
-            cot_tokens_num=cot_tokens_num,
-            cot_layers=cot_layers,
-            cot_dim=cot_dim,
-            cot_pool=actor_critic_config.cot_pool,
-            cot_steps_per_chain=high_level_config.cot_steps_per_chain,
+            subtask_tokens_num=subtask_tokens_num,
+            subtask_layers=subtask_layers,
+            subtask_dim=subtask_dim,
+            subtask_pool=actor_critic_config.subtask_pool,
+            steps_per_reply=high_level_config.steps_per_reply,
             layer_scale_init=actor_critic_config.layer_scale_init,
         )
 
@@ -110,8 +116,8 @@ class ActorCriticWithActionValue(NetworkInterface):
     # to read a chain of ``max_new_tokens`` tokens.
     # Wide and tall enough for several turns of the conversation at once: the
     # panel is the only place a run shows what the chain was actually asked.
-    COT_PANEL_WIDTH = 680
-    COT_PANEL_HEIGHT = 560
+    CONVERSATION_PANEL_WIDTH = 680
+    CONVERSATION_PANEL_HEIGHT = 560
 
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
@@ -129,7 +135,7 @@ class ActorCriticWithActionValue(NetworkInterface):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         return self.image_processor.encode(image.unsqueeze(0)).squeeze(0)
 
-    def advance_cot(
+    def advance_high_level(
         self, episode_started: bool, window: ReplayBufferData
     ) -> tuple[torch.Tensor, int]:
         """This step's chain-of-thought activations and how many steps ago they
@@ -139,16 +145,16 @@ class ActorCriticWithActionValue(NetworkInterface):
         the frame the last episode ended on. The chain reads the conversation
         the builder holds, not ``window``."""
         del window
-        if self.cot_module is None:
-            return torch.zeros(self.cot_shape), 0
+        if self.high_level_policy is None:
+            return torch.zeros(self.subtask_shape), 0
         if episode_started:
-            self.cot_module.reset()
+            self.high_level_policy.reset()
         # Advanced first: `age` is about the chain the call hands back, which is
         # a fresh one on the steps that write.
-        activations = self.cot_module.advance()
-        if self.pool_cot:
+        activations = self.high_level_policy.advance()
+        if self.pool_subtask:
             activations = activations.float().mean(dim=0, keepdim=True).to(activations.dtype)
-        return activations, self.cot_module.age()
+        return activations, self.high_level_policy.age()
 
     def render_panels(self) -> dict[str, np.ndarray]:
         """The conversation as it currently stands, drawn for the render strip:
@@ -156,43 +162,43 @@ class ActorCriticWithActionValue(NetworkInterface):
         ones before it, under what the last run of the VLM cost. Without a chain
         there is no panel at all rather than a blank one, which keeps that run's
         strip the width of what it has."""
-        if self.cot_module is None:
+        if self.high_level_policy is None:
             return {}
-        stats = self.cot_module.stats()
+        stats = self.high_level_policy.stats()
         status = (
             f"in {stats['input_tokens']} tok   out {stats['output_tokens']} tok   "
             f"{stats['msec']:.0f} ms"
         )
         return {
             "conversation": render_conversation_panel(
-                self.cot_module.exchange(),
+                self.high_level_policy.exchange(),
                 status,
-                self.COT_PANEL_WIDTH,
-                self.COT_PANEL_HEIGHT,
+                self.CONVERSATION_PANEL_WIDTH,
+                self.CONVERSATION_PANEL_HEIGHT,
             )
         }
 
     def render_texts(self) -> dict[str, str]:
-        if self.cot_module is None:
+        if self.high_level_policy is None:
             return {}
-        return {"chain_of_thought": self.cot_module.text()}
+        return {"chain_of_thought": self.high_level_policy.text()}
 
     def thought_text(self) -> str:
-        if self.cot_module is None:
+        if self.high_level_policy is None:
             return ""
-        return self.cot_module.text()
+        return self.high_level_policy.text()
 
     def achieved(self) -> float | None:
         """最後に確定したチェーンが判定した、前のサブタスクの達成度。"""
-        return self.cot_module.achieved()
+        return self.high_level_policy.achieved()
 
     def judge_current(self) -> float:
         """いま実行中のサブタスクの、いまのフレームでの達成度。"""
-        return self.cot_module.judge_current()
+        return self.high_level_policy.judge_current()
 
-    def _cot_keep(self, batch_size: int, device: torch.device) -> torch.Tensor:
+    def _subtask_keep(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Which sequences of a batch keep their chain, the rest being the share
-        ``cot_dropout`` it is taken away from. Handed to the encoder as a mask
+        ``subtask_dropout`` it is taken away from. Handed to the encoder as a mask
         rather than applied to the activations here, which would copy them.
 
         Only on the learning path. Without it the critic has never scored a
@@ -202,9 +208,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         Dropping whole sequences rather than single steps keeps a sampled window
         internally consistent.
         """
-        if self.cot_dropout == 0.0:
+        if self.subtask_dropout == 0.0:
             return torch.ones(batch_size, dtype=torch.bool, device=device)
-        return torch.rand(batch_size, device=device) >= self.cot_dropout
+        return torch.rand(batch_size, device=device) >= self.subtask_dropout
 
     def _token_keep(self, batch_size: int, steps: int, device: torch.device) -> torch.Tensor:
         """Which tokens of a batch's windows the encoder gets to read, the rest
@@ -215,8 +221,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         return torch.rand(shape, device=device) >= self.token_dropout
 
     def _window(self, data: ReplayBufferData, start, stop) -> tuple:
-        """The ``(image, action, reward, rnn_state, scalar_obs, cot, cot_age,
-        cot_keep, token_keep)`` the encoder reads, sliced out of a replay batch
+        """The ``(image, action, reward, rnn_state, scalar_obs, subtask, subtask_age,
+        subtask_keep, token_keep)`` the encoder reads, sliced out of a replay batch
         over ``[start, stop)`` steps."""
         observations = data.observations[:, start:stop]
         return (
@@ -235,9 +241,9 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.episode_step[:, start:stop],
                 data.health[:, start:stop],
             ),
-            data.cot_activations[:, start:stop],
-            data.cot_age[:, start:stop],
-            self._cot_keep(data.cot_activations.shape[0], data.cot_activations.device),
+            data.subtask_activations[:, start:stop],
+            data.subtask_age[:, start:stop],
+            self._subtask_keep(data.subtask_activations.shape[0], data.subtask_activations.device),
             self._token_keep(observations.shape[0], observations.shape[1], observations.device),
         )
 
@@ -322,9 +328,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.r_seq,
             data.rnn_state,
             scalar_obs,
-            data.cot_activations_seq,
-            data.cot_age_seq,
-            torch.ones(1, dtype=torch.bool, device=data.cot_activations_seq.device),
+            data.subtask_activations_seq,
+            data.subtask_age_seq,
+            torch.ones(1, dtype=torch.bool, device=data.subtask_activations_seq.device),
             torch.ones(
                 (1, data.s_seq.shape[1], self.encoder.space_len),
                 dtype=torch.bool,

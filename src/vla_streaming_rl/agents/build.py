@@ -30,16 +30,16 @@ def build_agent(
 ):
     if args.agent_type == "zeroshot_vlm":
         from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent
-        from vla_streaming_rl.networks.modules.cot_batch import CoTBatch
+        from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 
         # 提案手法と同じチェーンのモジュールが返答を書き、確定した返答から行動を読む
         return ZeroShotVLMAgent(
             action_space=env.action_space,
             parse_action_text=env.unwrapped.parse_action_text,
-            chain=CoTBatch(args.high_level, prompt_builder, torch.device("cuda")),
+            chain=HighLevelPolicy(args.high_level, prompt_builder, torch.device("cuda")),
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
-            steps_per_action=args.high_level.cot_steps_per_chain,
+            steps_per_action=args.high_level.steps_per_reply,
         )
 
     if args.agent_type == "animal_ppo":
@@ -118,6 +118,6 @@ def build_agent(
         text_action=args.text_action,
         select_margin=args.select_margin,
         achieved_reward_weight=args.achieved_reward_weight,
-        cot_steps_per_chain=args.high_level.cot_steps_per_chain,
+        steps_per_reply=args.high_level.steps_per_reply,
         parse_action_text=parse_action_text,
     )

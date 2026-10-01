@@ -48,8 +48,8 @@ class InferInput:
     global_step_seq: torch.Tensor  # (B, T, 1)
     episode_step_seq: torch.Tensor  # (B, T, 1)
     health_seq: torch.Tensor  # (B, T, 1)
-    cot_activations_seq: torch.Tensor  # (B, T, *cot_shape)
-    cot_age_seq: torch.Tensor  # (B, T, 1)
+    subtask_activations_seq: torch.Tensor  # (B, T, *subtask_shape)
+    subtask_age_seq: torch.Tensor  # (B, T, 1)
 
 
 @dataclass
@@ -111,19 +111,19 @@ class NetworkInterface(nn.Module, abc.ABC):
 
     # A chain-of-thought stream is opt-in: a network that runs one declares the
     # shape of what it hands out per step, and the agents size the replay
-    # buffer's chain field from it and store what ``advance_cot`` returns
+    # buffer's chain field from it and store what ``advance_high_level`` returns
     # verbatim. Everything else contributes no tokens.
-    cot_shape: tuple[int, int] = (0, 0)
+    subtask_shape: tuple[int, int] = (0, 0)
 
-    def advance_cot(
+    def advance_high_level(
         self, episode_started: bool, window: ReplayBufferData
     ) -> tuple[torch.Tensor, int]:
         """This step's chain-of-thought activations and how many steps ago they
         were generated, empty and 0 unless the network carries a chain (see
-        ``networks/cot_actor_critic.py``). ``window`` is the buffer's newest
+        ``networks/actor_critic_with_action_value.py``). ``window`` is the buffer's newest
         rows, this step's last, for a chain that reads its prompt off them."""
         del episode_started, window
-        return torch.zeros(self.cot_shape), 0
+        return torch.zeros(self.subtask_shape), 0
 
     def thought_text(self) -> str:
         """What the network's chain wrote last, empty without one. Stored as

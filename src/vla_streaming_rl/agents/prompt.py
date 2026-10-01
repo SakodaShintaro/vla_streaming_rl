@@ -95,7 +95,7 @@ class PromptBuilder(ABC):
 
     Every tick ``observe`` records what the agent is looking at. A chain reads
     that through ``conversation`` on the steps it actually writes -- one step in
-    ``cot_steps_per_chain`` -- and hands back what it wrote through
+    ``steps_per_reply`` -- and hands back what it wrote through
     ``add_reply``, which is what puts the turn it answered into the conversation
     for good. The ticks in between are overwritten rather than accumulated, so
     the conversation holds the turns a chain saw and not every step of the run.
@@ -348,5 +348,5 @@ PROMPT_BUILDERS = {
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
     # 高レベル方策の窓 high_level.seq_len に、チェーンの周期で収まるやり取りの数
-    history_turns = (args.high_level.seq_len - 1) // args.high_level.cot_steps_per_chain
-    return PROMPT_BUILDERS[args.env_id](env, history_turns, args.high_level.cot_steps_per_chain)
+    history_turns = (args.high_level.seq_len - 1) // args.high_level.steps_per_reply
+    return PROMPT_BUILDERS[args.env_id](env, history_turns, args.high_level.steps_per_reply)

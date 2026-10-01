@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 high_level:
-  cot_tokens_num: 4
+  subtask_tokens_num: 4
 actor_critic:
   bc_loss_weight: 0.5
 text_action: true

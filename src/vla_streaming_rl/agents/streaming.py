@@ -107,7 +107,7 @@ class StreamingAgent(Agent):
             obs_shape=self.network.stored_image_shape(),
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
-            cot_shape=self.network.cot_shape,
+            subtask_shape=self.network.subtask_shape,
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             max_prompt_tokens=max_prompt_tokens,
@@ -200,11 +200,11 @@ class StreamingAgent(Agent):
         )
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
-        cot_activation, cot_age = self.network.advance_cot(
+        subtask_activation, subtask_age = self.network.advance_high_level(
             episode_started, self.rb.get_latest(self.seq_len)
         )
         self.rb.amend_latest(
-            cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
+            subtask_activation, subtask_age, self.network.tokenize(self.network.thought_text())
         )
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
@@ -288,8 +288,8 @@ class StreamingAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
-                cot_activations_seq=latest_data.cot_activations,
-                cot_age_seq=latest_data.cot_age,
+                subtask_activations_seq=latest_data.subtask_activations,
+                subtask_age_seq=latest_data.subtask_age,
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -408,11 +408,11 @@ class StreamingAgent(Agent):
         )
         # The chain reads its prompt off the rows just stored, and what it
         # writes completes this tick's row.
-        cot_activation, cot_age = self.network.advance_cot(
+        subtask_activation, subtask_age = self.network.advance_high_level(
             episode_started, self.rb.get_latest(self.seq_len)
         )
         self.rb.amend_latest(
-            cot_activation, cot_age, self.network.tokenize(self.network.thought_text())
+            subtask_activation, subtask_age, self.network.tokenize(self.network.thought_text())
         )
 
         if self.action_chunk is not None and self.chunk_step < self.horizon:
