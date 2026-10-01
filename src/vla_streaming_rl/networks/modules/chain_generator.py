@@ -15,20 +15,17 @@ IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 
 
 def _history_text(turn: dict) -> str:
-    """1メッセージをチャットテンプレートの履歴と同じ書式で文字列にする。
-
-    assistant の <think> ブロックはテンプレートの履歴レンダリングと同じ規則
-    （最後の </think> から後ろだけ残す）で剥ぐ。テンプレート本体を使わない
-    のは、会話全体ではなく新しいメッセージの差分だけを文字列にするため。"""
+    """system / user の1メッセージをチャットテンプレートの履歴と同じ書式で文字列に
+    する。テンプレート本体を使わないのは、会話全体ではなく新しいメッセージの差分
+    だけを文字列にするため。返答はこの生成器が書いたトークンのままキャッシュに
+    残るので、ここで描き直すことはない。"""
+    assert turn["role"] != "assistant", "a reply stays in the cache as written"
     parts = []
     for part in turn["content"]:
         if part["type"] == "image":
             parts.append(IMAGE_PLACEHOLDER)
         else:
-            text = part["text"]
-            if turn["role"] == "assistant" and "</think>" in text:
-                text = text.split("</think>")[-1].lstrip("\n")
-            parts.append(text)
+            parts.append(part["text"])
     return f"{IM_START}{turn['role']}\n{''.join(parts)}{IM_END}\n"
 
 
@@ -54,10 +51,12 @@ class ChainGenerator:
     """
     生成は純増分で行う。会話全体を毎回プロンプトに組み直すのではなく、前回
     から増えたメッセージだけを履歴書式の文字列にしてトークン化し、持ち越した
-    キャッシュの上に積む。返答と生成プロンプト末尾のトークンは、履歴の末尾で
-    取ったスナップショットへ巻き戻すことで捨て、返答は次の差分に履歴形
-    （<think> 内を除いた形）で入り直す。モデルの文脈の実体はこのキャッシュで、
-    builder の会話リストは差分生成と表示・パース用になる。
+    キャッシュの上に積む。確定した返答は、生成プロンプトの後ろに書いたトークンを
+    <|im_end|> で閉じたものをそのまま履歴として残す。テンプレートが過去の思考を
+    残す形（preserve_thinking）では、これが履歴の書式そのものになる。境界は
+    確定した返答の直後に取り、書きかけを進めるだけの呼び出しはそこへ巻き戻す。
+    モデルの文脈の実体はこのキャッシュで、builder の会話リストは差分生成と
+    表示・パース用になる。
 
     キャッシュは実トークン数分だけ使う DynamicCache。全注意層の KV だけが会話長に
     比例するので、そこを「先頭の sink（システムプロンプト）＋直近
@@ -116,6 +115,9 @@ class ChainGenerator:
         self._tail_ids = self.processor.tokenizer.encode(
             with_tail[len(without_tail) :], add_special_tokens=False
         )
+        # 返答を閉じるトークン。生成はこの <|im_end|> で止まる
+        assert self.processor.tokenizer.eos_token == IM_END, self.processor.tokenizer.eos_token
+        self._newline_ids = self.processor.tokenizer.encode("\n", add_special_tokens=False)
         self.reset_cache()
 
     def reset_cache(self) -> None:
@@ -144,6 +146,8 @@ class ChainGenerator:
         # 最後に選んだトークンがまだキャッシュに入っていないか
         self._unfed = False
         self._prompt_tokens = 0
+        # 確定してキャッシュに入れた返答の文字列。builder が会話に足した返答と照合する
+        self._committed_reply: str | None = None
 
     @torch.inference_mode()
     def generate(
@@ -173,32 +177,106 @@ class ChainGenerator:
             )
             new_messages = list(conversation[index + 1 :])
             self._restore_boundary()
+        if self._committed_reply is not None:
+            # 前回確定した返答は、書いたトークンのまま境界の手前に入っている
+            reply = new_messages[0]
+            assert (
+                reply["role"] == "assistant"
+                and reply["content"][0]["text"] == self._committed_reply
+            ), "the conversation must hold the reply this generator committed, as written"
+            self._last_consumed = reply
+            self._committed_reply = None
+            new_messages = new_messages[1:]
         assert len(new_messages) > 0, "generate() got no new message"
+        assert commit or self._last_consumed is not None, (
+            "a reply can only be continued after one has been committed"
+        )
+        if not commit and len(new_messages) > 1:
+            # 最新のターンより前（行動を読めなかったときの環境の返事など）はもう変わらない
+            # ので、ここで確定させて境界を進める。以降は最新のターンだけを積み直せばよい。
+            settled = new_messages[:-1]
+            ids, pos, pixel_values, image_grid_thw = self._encode(settled)
+            self._prefill(ids, pos, pixel_values, image_grid_thw, hidden=False)
+            self._settle(conversation, settled[-1])
+            new_messages = new_messages[-1:]
 
-        delta_text = "".join(_history_text(turn) for turn in new_messages)
-        images = [image for turn in new_messages for image in _turn_images(turn)]
-        if len(images) > 0:
-            inputs = self.processor(
-                text=[delta_text],
-                images=[
-                    TF.to_dtype(TF.to_image(image), torch.float32, scale=True) for image in images
-                ],
-                return_tensors="pt",
-                do_rescale=False,
-            ).to(self.device)
-        else:
-            inputs = self.processor(text=[delta_text], return_tensors="pt").to(self.device)
+        # 会話の差分、生成プロンプト、書きかけを1回の forward で積む。書きかけの i 番目の
+        # トークンを選んだのは、その直前の位置の活性。
+        ids, pos, pixel_values, image_grid_thw = self._encode(new_messages)
+        tail_ids = torch.tensor([self._tail_ids + prefix], device=self.device)
+        tail_pos = self._linear_positions(int(tail_ids.shape[1]), int(pos.max().item()) + 1)
+        outputs = self._prefill(
+            torch.cat([ids, tail_ids], dim=1),
+            torch.cat([pos, tail_pos], dim=2),
+            pixel_values,
+            image_grid_thw,
+            hidden=True,
+        )
+        first = int(ids.shape[1]) + len(self._tail_ids) - 1
+        self._kv_pos = self._kv_len
+        self._rope_pos = self._next_pos
+        self._positions = [
+            torch.stack([depth[0, first + i] for depth in outputs.hidden_states]).to(torch.bfloat16)
+            for i in range(len(prefix))
+        ]
+        self._tokens = list(prefix)
+        self._next_position = self._last_position(outputs.hidden_states)
+        self._next_logits = outputs.logits[0, -1]
+        self._unfed = False
+        self._prompt_tokens = self._kv_len
+        self._write(budget)
+        assert len(self._tokens) > 0, "nothing was written: a fresh reply needs a positive budget"
+        chain = self._chain(start)
+        if commit:
+            self._close_reply(conversation, chain.text)
+        return chain
+
+    def _close_reply(self, conversation: list[dict], text: str) -> None:
+        """書き終えた返答を <|im_end|> と改行で閉じてキャッシュに積み、その直後を
+        境界として確定させる。最後に選んだトークンがまだ入っていなければ一緒に積む。"""
+        ended = self._tokens[-1] == self.eos_token_id
+        assert ended or len(self._tokens) >= self.max_len, "a committed reply must be complete"
+        close = (
+            ([self._tokens[-1]] if self._unfed else [])
+            + ([] if ended else [self.eos_token_id])
+            + self._newline_ids
+        )
+        self._kv_len = self._kv_pos
+        self._next_pos = self._rope_pos
+        self._prefill(
+            torch.tensor([close], device=self.device),
+            self._linear_positions(len(close), self._next_pos),
+            None,
+            None,
+            hidden=False,
+        )
+        self._unfed = False
+        self._settle(conversation, conversation[-1])
+        self._committed_reply = text
+
+    def _encode(self, messages: list[dict]):
+        """メッセージを履歴の書式でトークン列にし、これまでの位置の続きの 3D 位置と
+        画像の入力を添えて返す。mrope の位置割り当ては走査中の基点にしか依存しない
+        ので、全体で計算して切り出すのと同じ値になる。"""
+        text = "".join(_history_text(turn) for turn in messages)
+        images = [image for turn in messages for image in _turn_images(turn)]
+        if len(images) == 0:
+            # テキストだけなら 3 軸とも同じ値の連番になる
+            ids = self.processor(text=[text], return_tensors="pt")["input_ids"].to(self.device)
+            return ids, self._linear_positions(int(ids.shape[1]), self._next_pos), None, None
+        inputs = self.processor(
+            text=[text],
+            images=[TF.to_dtype(TF.to_image(image), torch.float32, scale=True) for image in images],
+            return_tensors="pt",
+            do_rescale=False,
+        ).to(self.device)
         ids = inputs["input_ids"]
-        delta_len = int(ids.shape[1])
-
-        # 差分だけの 3D 位置を出して、これまでの位置の続きへずらす。mrope の
-        # 位置割り当ては走査中の基点にしか依存しないので、全体で計算して
-        # 切り出すのと同じ値になる。
+        image_grid_thw = inputs["image_grid_thw"]
         pos = (
             self.model.model.compute_3d_position_ids(
                 input_ids=ids,
                 inputs_embeds=None,
-                image_grid_thw=(inputs["image_grid_thw"] if "image_grid_thw" in inputs else None),
+                image_grid_thw=image_grid_thw,
                 video_grid_thw=None,
                 attention_mask=inputs["attention_mask"],
                 past_key_values=None,
@@ -208,67 +286,51 @@ class ChainGenerator:
             )
             + self._next_pos
         )
-        stage = self.model(
-            input_ids=ids,
-            attention_mask=torch.ones(1, self._kv_len + delta_len, device=self.device),
-            position_ids=pos,
-            cache_position=torch.arange(self._kv_len, self._kv_len + delta_len, device=self.device),
-            past_key_values=self._cache,
-            use_cache=True,
-            pixel_values=inputs["pixel_values"] if "pixel_values" in inputs else None,
-            image_grid_thw=inputs["image_grid_thw"] if "image_grid_thw" in inputs else None,
-        )
-        self._cache = stage.past_key_values
-        self._kv_len += delta_len
-        self._next_pos = int(pos.max().item()) + 1
-        if commit:
-            if self._sink_len == 0:
-                self._sink_len = len(
-                    self.processor.tokenizer.encode(
-                        _history_text(conversation[0]), add_special_tokens=False
-                    )
-                )
-            self._evict()
-            self._last_consumed = conversation[-1]
-            self._save_boundary()
-        else:
-            assert self._last_consumed is not None, (
-                "a reply can only be continued after one has been committed"
-            )
+        return ids, pos, inputs["pixel_values"], image_grid_thw
 
-        # 生成プロンプトの末尾と書きかけの返答を一度に積む。書きかけの i 番目の
-        # トークンを選んだのは、その直前の位置の活性。
-        tail_ids = self._tail_ids + prefix
-        tail_len = len(tail_ids)
-        tail_positions = (
-            (torch.arange(tail_len, device=self.device) + self._next_pos)
-            .view(1, 1, -1)
-            .expand(3, 1, -1)
-        )
+    def _settle(self, conversation: list[dict], last: dict) -> None:
+        """``last`` までを積んだいまのキャッシュを確定させ、境界にする。"""
+        if self._sink_len == 0:
+            self._sink_len = len(
+                self.processor.tokenizer.encode(
+                    _history_text(conversation[0]), add_special_tokens=False
+                )
+            )
+        self._evict()
+        self._last_consumed = last
+        self._save_boundary()
+
+    def _prefill(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        pixel_values: torch.Tensor | None,
+        image_grid_thw: torch.Tensor | None,
+        hidden: bool,
+    ):
+        """``input_ids`` をキャッシュの続きに積み、キャッシュの長さと次の 3D 位置を進める。"""
+        length = int(input_ids.shape[1])
         outputs = self.model(
-            input_ids=torch.tensor([tail_ids], device=self.device),
-            attention_mask=torch.ones(1, self._kv_len + tail_len, device=self.device),
-            position_ids=tail_positions,
-            cache_position=torch.arange(self._kv_len, self._kv_len + tail_len, device=self.device),
+            input_ids=input_ids,
+            attention_mask=torch.ones(1, self._kv_len + length, device=self.device),
+            position_ids=position_ids,
+            cache_position=torch.arange(self._kv_len, self._kv_len + length, device=self.device),
             past_key_values=self._cache,
             use_cache=True,
-            output_hidden_states=True,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            output_hidden_states=hidden,
+            # 次のトークンを選ぶ最後の位置のロジットだけを使う
+            logits_to_keep=1,
         )
-        self._kv_pos = self._kv_len + tail_len
-        self._rope_pos = self._next_pos + tail_len
-        first = len(self._tail_ids) - 1
-        self._positions = [
-            torch.stack([depth[0, first + i] for depth in outputs.hidden_states]).to(torch.bfloat16)
-            for i in range(len(prefix))
-        ]
-        self._tokens = list(prefix)
-        self._next_position = self._last_position(outputs.hidden_states)
-        self._next_logits = outputs.logits[0, -1]
-        self._unfed = False
-        self._prompt_tokens = self._kv_len + tail_len
-        self._write(budget)
-        assert len(self._tokens) > 0, "nothing was written: a fresh reply needs a positive budget"
-        return self._chain(start)
+        self._cache = outputs.past_key_values
+        self._kv_len += length
+        self._next_pos = int(position_ids.max().item()) + 1
+        return outputs
+
+    def _linear_positions(self, length: int, start: int) -> torch.Tensor:
+        """テキストだけの区間の 3D 位置 (3, 1, length)。3軸とも同じ値で ``start`` から数える。"""
+        return (torch.arange(length, device=self.device) + start).view(1, 1, -1).expand(3, 1, -1)
 
     @torch.inference_mode()
     def extend(self, budget: int) -> Chain:

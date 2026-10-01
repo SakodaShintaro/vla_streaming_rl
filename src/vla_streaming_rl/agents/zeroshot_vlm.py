@@ -17,6 +17,7 @@ from PIL import Image
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn, read_action_reply
+from vla_streaming_rl.networks.modules.cot_stream import CoTStream
 from vla_streaming_rl.utils import render_conversation_panel
 
 
@@ -93,16 +94,28 @@ class ZeroShotVLMAgent(Agent):
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
 
-        if self.steps_until_next == 0:
-            self._write_action()
-            self.steps_until_next = self.steps_per_action
-        steps_since_write = self.steps_per_action - self.steps_until_next
+        if isinstance(self.backend, CoTStream):
+            # stream: チェーンは毎ステップ書き進められ、確定したステップで行動を読む
+            self.backend.advance()
+            steps_since_write = self.backend.age()
+            if steps_since_write == 0:
+                self._hold_reply(
+                    self.backend.text(),
+                    self.backend.exchange(),
+                    self.backend.stats(),
+                    "stop",
+                )
+        else:
+            if self.steps_until_next == 0:
+                self._write_action()
+                self.steps_until_next = self.steps_per_action
+            steps_since_write = self.steps_per_action - self.steps_until_next
+            self.steps_until_next -= 1
         action = (
             self.held_action
             if steps_since_write < self.hold_steps
             else np.zeros(self.action_dim, dtype=np.float32)
         )
-        self.steps_until_next -= 1
 
         panels = {
             "conversation": render_conversation_panel(
@@ -130,34 +143,44 @@ class ZeroShotVLMAgent(Agent):
         response = self.backend.generate(conversation)
         api_msec = (time.time() - request_start) * 1000
 
-        response_text = response.text
-        self.held_exchange = conversation + [assistant_turn(response_text)]
+        # The reply is handed back as written, <think> section and all, so the
+        # conversation is the whole record of what the model said -- what the
+        # render panel draws is then what the model itself reads.
+        self.prompt_builder.add_reply(response.text)
+        self._hold_reply(
+            response.text,
+            conversation + [assistant_turn(response.text)],
+            {
+                "input_tokens": response.prompt_tokens,
+                "output_tokens": response.completion_tokens,
+                "msec": api_msec,
+            },
+            response.finish_reason,
+        )
+
+    def _hold_reply(self, text: str, exchange: list[dict], stats: dict, finish_reason: str) -> None:
+        """返答の <action> を読み、その行動と続けるステップ数を保持する。読めなかった
+        ときは、行動として実行できず止まっていたことを伝える user の発言を会話に足す。"""
+        self.held_exchange = exchange
         answer_text, self.held_action, self.hold_steps, parse_ok = read_action_reply(
-            response_text,
+            text,
             self.parse_action_text,
             self.action_space.low,
             self.action_space.high,
             self.steps_per_action,
         )
-
-        # The reply is handed back as written, <think> section and all, so the
-        # conversation is the whole record of what the model said -- what the
-        # render panel draws is then what the model itself reads. A reply that
-        # named no runnable action is answered by the env in its own turn.
-        self.prompt_builder.add_reply(response_text)
         if not parse_ok:
             self.prompt_builder.reject(answer_text)
-
         self.held_metrics = {
             "vlm/parse_failed": float(not parse_ok),
-            "vlm/api_msec": api_msec,
-            "vlm/prompt_tokens": float(response.prompt_tokens),
-            "vlm/completion_tokens": float(response.completion_tokens),
+            "vlm/api_msec": stats["msec"],
+            "vlm/prompt_tokens": float(stats["input_tokens"]),
+            "vlm/completion_tokens": float(stats["output_tokens"]),
         }
         self.held_status = (
-            f"in {response.prompt_tokens} tok   out {response.completion_tokens} tok   "
-            f"{api_msec:.0f} ms   parse {'ok' if parse_ok else 'failed'}   "
-            f"{response.finish_reason}"
+            f"in {stats['input_tokens']} tok   out {stats['output_tokens']} tok   "
+            f"{stats['msec']:.0f} ms   parse {'ok' if parse_ok else 'failed'}   "
+            f"{finish_reason}"
         )
 
     def step(
@@ -175,7 +198,10 @@ class ZeroShotVLMAgent(Agent):
         del score
         if self.reset_on_episode_end:
             self.prompt_builder.reset()
-            self.backend.reset_cache()
+            if isinstance(self.backend, CoTStream):
+                self.backend.reset()
+            else:
+                self.backend.reset_cache()
             self.held_action = np.zeros(self.action_dim, dtype=np.float32)
             self.hold_steps = 0
             self.held_exchange = []
