@@ -246,18 +246,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-if __name__ == "__main__":
-    cli_args = parse_args()
-    checkpoint_path = cli_args.checkpoint.resolve()
-    run_dir = checkpoint_path.parent
+def load_eval_config(run_dir: Path) -> DictConfig:
+    """学習時の config に、評価の設定を重ねたもの。評価で回すアリーナは、学習時ではなく、
+    いまの configs/env/animalai.yaml に従う。"""
     cfg = load_wandb_config(run_dir)
     # Always evaluate on the eval sweep, regardless of which mode trained this
     # checkpoint (see SequentialSelector in animalai_curriculum.py).
     cfg.env_factory.mode = "eval"
-    # 評価で回すアリーナは、学習時の設定ではなく、いまの configs/env/animalai.yaml に従う
     env_config = OmegaConf.load(Path(__file__).parents[1] / "configs" / "env" / "animalai.yaml")
     cfg.env_factory.eval_levels = env_config.env_factory.eval_levels
     cfg.env_factory.eval_variants = env_config.env_factory.eval_variants
+    return cfg
+
+
+if __name__ == "__main__":
+    cli_args = parse_args()
+    checkpoint_path = cli_args.checkpoint.resolve()
+    run_dir = checkpoint_path.parent
+    cfg = load_eval_config(run_dir)
 
     seed = resolve_seed(cli_args.seed)
     eval_dir = run_dir / "eval" / checkpoint_path.stem
