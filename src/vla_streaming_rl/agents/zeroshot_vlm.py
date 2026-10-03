@@ -126,7 +126,7 @@ class ZeroShotVLMAgent(Agent):
             action=action,
             metrics=metrics,
             panels=panels,
-            texts={"prompt": prompt},
+            texts={"prompt": prompt, "high_level": reply.text},
         )
 
     def step(
