@@ -10,8 +10,16 @@ def _unwrap_compiled(network: torch.nn.Module) -> torch.nn.Module:
     return network._orig_mod if hasattr(network, "_orig_mod") else network
 
 
+def _persistent_buffer_names(module: torch.nn.Module) -> set[str]:
+    """state_dict に載る buffer の名前。観測の正規化の統計や温度のように、学習中に
+    更新されるがパラメータではないものを含む。"""
+    buffer_names = {name for name, _ in module.named_buffers()}
+    return {name for name in module.state_dict() if name in buffer_names}
+
+
 def save_checkpoint(result_dir: Path, network, agent) -> None:
-    """Save trainable weights (checkpoint.pt) and optimizer states (optimizer.pt).
+    """Save trainable weights and persistent buffers (checkpoint.pt) and
+    optimizer states (optimizer.pt).
 
     A no-op for the zero-shot VLM baseline, which carries no network and so has
     nothing to checkpoint."""
@@ -24,6 +32,9 @@ def save_checkpoint(result_dir: Path, network, agent) -> None:
         for name, param in module.named_parameters()
         if param.requires_grad
     }
+    state = module.state_dict()
+    for name in _persistent_buffer_names(module):
+        trainable_state[name] = state[name].detach().cpu()
     torch.save(trainable_state, result_dir / "checkpoint.pt")
     torch.save(agent.optimizer_state_dict(), result_dir / "optimizer.pt")
 
@@ -55,5 +66,10 @@ def load_checkpoint_weights(checkpoint_path: Path, network: torch.nn.Module) -> 
     ]
     assert not unaccounted_missing, (
         f"trainable network parameters not found in the checkpoint: {unaccounted_missing[:5]}"
+    )
+    # 正規化の統計などが欠けたまま読むと、学習時と違う入力で動いてしまう
+    missing_buffers = sorted(_persistent_buffer_names(module) - set(trainable_state))
+    assert not missing_buffers, (
+        f"network buffers not found in the checkpoint: {missing_buffers[:5]}"
     )
     print(f"Loaded {len(trainable_state)} weight tensors from {checkpoint_path}")
