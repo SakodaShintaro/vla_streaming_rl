@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: MIT
-"""Run every Animal-AI Olympics arena exactly once with a frozen policy.
+"""Run the Animal-AI Olympics evaluation arenas exactly once with a frozen policy.
 
-Loads a trained checkpoint (weights only), then sweeps every XX-YY-ZZ.yaml
-arena under external/animal-ai/configs/competition/ in order, one episode
+Loads a trained checkpoint (weights only), then sweeps the XX-YY-ZZ.yaml arenas
+under external/animal-ai/configs/competition/ that ``eval_levels`` and
+``eval_variants`` in configs/env/animalai.yaml pick (all 900 for the paper's
+Testbed), in order, one episode
 each, with the network in eval mode and no optimizer step ever taken. The
-sweep order and its end come from the env's SequentialSelector.
+sweep order and its end come from the env's SequentialSelector. Every
+episode's videos, actions, rewards, positions and texts are kept under
+``episode_log/<arena>``.
 
 Instead of hydra flags, this script takes the path to a checkpoint.pt file
 (as saved by scripts/train.py) and reconstructs the training config from
@@ -19,6 +23,7 @@ setup_runtime()
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -29,9 +34,12 @@ from omegaconf import DictConfig, OmegaConf
 from vla_streaming_rl.agents.build import build_all
 from vla_streaming_rl.checkpoint import load_checkpoint_weights
 from vla_streaming_rl.envs.animalai_curriculum import seen_in_training, training_levels
+from vla_streaming_rl.episode_log import EpisodeRecord, save_episode_data
 from vla_streaming_rl.script_setup import disable_render_if_headless, resolve_seed, seed_everything
 from vla_streaming_rl.utils import render_frame
 from vla_streaming_rl.wrappers import make_env
+
+EXPONENT_FLOAT_RE = re.compile(r"-?\d+(\.\d*)?[eE][-+]?\d+")
 
 
 def _coerce_numeric_strings(value):
@@ -40,11 +48,9 @@ def _coerce_numeric_strings(value):
         return {key: _coerce_numeric_strings(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_coerce_numeric_strings(item) for item in value]
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return value
+    # "01" のようなゼロ埋めのラベルは文字列のまま残す
+    if isinstance(value, str) and EXPONENT_FLOAT_RE.fullmatch(value) is not None:
+        return float(value)
     return value
 
 
@@ -65,18 +71,11 @@ def load_global_step(run_dir: Path) -> int:
     return int(json.loads(train_state_path.read_text())["global_step"])
 
 
-def _show(env, obs, result, render: bool, window_name: str) -> None:
-    if not render:
-        return
-    frame = render_frame(env, obs, result, 1.0)
-    cv2.imshow(window_name, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    cv2.waitKey(1)
-
-
 def run_arena(
-    agent, env, seed: int, render: bool, window_name: str, global_step: int
-) -> tuple[str, bool, float]:
-    """Play the next arena the env serves; return its (name, passed, score).
+    agent, env, seed: int, render: bool, render_scale: float, window_name: str, global_step: int
+) -> tuple[str, bool, float, EpisodeRecord]:
+    """Play the next arena the env serves; return its (name, passed, score) and
+    what the episode leaves behind, recorded the way training records it.
 
     `global_step` is the training step the checkpoint was written at. It gates
     OffPolicyAgent's warmup (below `learning_starts` it returns
@@ -87,13 +86,27 @@ def run_arena(
     arena_name = reset_info["arena_name"]
     result = agent.select_action(global_step, obs, 0.0, False, False, reset_info)
     action = result.action
-    _show(env, obs, result, render, window_name)
+    record = EpisodeRecord.fresh()
+    record.bgr_images.append(
+        cv2.cvtColor(render_frame(env, obs, result, render_scale), cv2.COLOR_RGB2BGR)
+    )
+    record.observations.append(obs["image"].copy())
+    record.texts.append(result.texts)
 
     while True:
         obs, reward, terminated, truncated, env_info = env.step(action)
+        record.actions.append(action.copy())
+        record.rewards.append(reward)
+        record.observations.append(obs["image"].copy())
+        record.xyzs.append(env_info["agent_xyz"])
         result = agent.select_action(global_step, obs, reward, terminated, truncated, env_info)
         action = result.action
-        _show(env, obs, result, render, window_name)
+        bgr_image = cv2.cvtColor(render_frame(env, obs, result, render_scale), cv2.COLOR_RGB2BGR)
+        record.bgr_images.append(bgr_image)
+        record.texts.append(result.texts)
+        if render:
+            cv2.imshow(window_name, bgr_image)
+            cv2.waitKey(1)
 
         if terminated or truncated:
             break
@@ -101,7 +114,7 @@ def run_arena(
     score = env_info["episode"]["r"]
     success = bool(score >= env_info["pass_mark"])
     agent.on_episode_end(score)
-    return arena_name, success, score
+    return arena_name, success, score, record
 
 
 def run_testbed(
@@ -109,6 +122,7 @@ def run_testbed(
     env,
     seed: int,
     render: bool,
+    render_scale: float,
     window_name: str,
     global_step: int,
     result_dir: Path,
@@ -121,7 +135,8 @@ def run_testbed(
     "success_rate" so callers can push them into run summaries. Training draws
     one variant of every competition task, so part of the Testbed is arenas the
     run has trained on; `seen_in_training` splits the sweep into that part and
-    the held-out one, and both rates are reported.
+    the held-out one, and both rates are reported. Every episode is kept under
+    ``episode_log/<arena>``.
     """
     result_dir.mkdir(parents=True, exist_ok=True)
     selector = env.unwrapped.selector
@@ -138,9 +153,10 @@ def run_testbed(
         f.write("arena\tsuccess\tscore\tseen_in_training\n")
         success_count = 0
         while not selector.is_exhausted:
-            arena_name, success, score = run_arena(
-                agent, env, seed, render, window_name, global_step
+            arena_name, success, score, record = run_arena(
+                agent, env, seed, render, render_scale, window_name, global_step
             )
+            save_episode_data(result_dir / "episode_log", arena_name, record)
             success_count += int(success)
             # Competition arenas are named XX-YY-ZZ (level-task-variant).
             level = arena_name.split("-")[0]
@@ -203,6 +219,7 @@ def main(
         env,
         seed,
         render,
+        args.render_scale,
         args.env_id,
         global_step,
         result_dir,
@@ -225,7 +242,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to a checkpoint.pt file saved by scripts/train.py",
     )
     parser.add_argument("--seed", type=int, default=-1)
-    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--no-render", action="store_true")
     return parser.parse_args()
 
 
@@ -234,13 +251,17 @@ if __name__ == "__main__":
     checkpoint_path = cli_args.checkpoint.resolve()
     run_dir = checkpoint_path.parent
     cfg = load_wandb_config(run_dir)
-    # Always evaluate on the paper's Testbed sweep, regardless of which mode
-    # trained this checkpoint (see SequentialSelector in animalai_curriculum.py).
+    # Always evaluate on the eval sweep, regardless of which mode trained this
+    # checkpoint (see SequentialSelector in animalai_curriculum.py).
     cfg.env_factory.mode = "eval"
+    # 評価で回すアリーナは、学習時の設定ではなく、いまの configs/env/animalai.yaml に従う
+    env_config = OmegaConf.load(Path(__file__).parents[1] / "configs" / "env" / "animalai.yaml")
+    cfg.env_factory.eval_levels = env_config.env_factory.eval_levels
+    cfg.env_factory.eval_variants = env_config.env_factory.eval_variants
 
     seed = resolve_seed(cli_args.seed)
     eval_dir = run_dir / "eval" / checkpoint_path.stem
-    render = disable_render_if_headless(cli_args.render)
+    render = disable_render_if_headless(not cli_args.no_render)
 
     print(OmegaConf.to_yaml(cfg))
     main(cfg, checkpoint_path, eval_dir, seed, render)

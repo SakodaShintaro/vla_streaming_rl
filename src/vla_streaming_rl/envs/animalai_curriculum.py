@@ -18,8 +18,9 @@ field (see `build_selector`):
               then the run ends (`SequentialSelector`, not cycling).
   - "random"  no curriculum: the whole training set in laps, each lap a fresh
               shuffle drawn without replacement (`RandomSelector`).
-  - "eval"    every configs/competition/ arena once, in order -- the
-              900-arena Testbed sweep (the same `SequentialSelector`, not
+  - "eval"    every configs/competition/ arena of `eval_levels` and
+              `eval_variants` once, in order -- with every level and variant,
+              the 900-arena Testbed sweep (the same `SequentialSelector`, not
               cycling, so it ends).
 
 Every arena comes from configs/competition/, whose files are named
@@ -128,6 +129,17 @@ def _competition_arenas() -> list[Arena]:
     paths = sorted(COMPETITION_DIR.glob("*.yaml"))
     assert paths, f"no arena yamls under {COMPETITION_DIR}"
     return [Arena(path, path.stem) for path in paths]
+
+
+def _eval_arenas(levels: list[str], variants: list[str]) -> list[Arena]:
+    """評価で回すアリーナ。`levels` のレベルの、`variants` の版だけに絞る。"""
+    arenas = [
+        arena
+        for arena in _competition_arenas()
+        if arena.name.split("-")[0] in levels and arena.name.rsplit("-", 1)[1] in variants
+    ]
+    assert arenas, f"no competition arena has a level in {levels} and a variant in {variants}"
+    return arenas
 
 
 def _variant_arenas(variant: str) -> list[Arena]:
@@ -673,6 +685,8 @@ def build_selector(
     mode: str,
     train_variant: str,
     train_levels: list[str],
+    eval_levels: list[str],
+    eval_variants: list[str],
     steps_per_stage: int,
     advance_success_rate: float,
     seed: int,
@@ -703,7 +717,9 @@ def build_selector(
         "random": lambda: RandomSelector(
             arenas=_training_arenas(train_variant, train_levels), seed=seed
         ),
-        "eval": lambda: SequentialSelector(arenas=_competition_arenas(), cycle=False),
+        "eval": lambda: SequentialSelector(
+            arenas=_eval_arenas(eval_levels, eval_variants), cycle=False
+        ),
     }
     assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"
     return builders[mode]()

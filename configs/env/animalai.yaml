@@ -30,8 +30,9 @@ env_factory:
   #     random  : no curriculum. The whole training set in laps, each lap a
   #               fresh shuffle drawn without replacement, with nothing
   #               withheld (steps_per_stage is ignored).
-  #     eval    : run each of the 900 external/animal-ai/configs/competition/
-  #               arenas once, in order (the paper's Testbed protocol).
+  #     eval    : run each external/animal-ai/configs/competition/ arena of
+  #               eval_levels and eval_variants once, in order (with every level
+  #               and variant, the paper's 900-arena Testbed protocol).
   #   Training and eval overlap on purpose: eval is the fixed 900-arena
   #   benchmark and the trained variant is part of it, so test_result.tsv also
   #   reports the score over the arenas no training episode has seen.
@@ -39,13 +40,19 @@ env_factory:
   # - train_variant: which of a task's three variants the training modes use.
   #   Competition arenas are named XX-YY-ZZ (level-task-variant), so this picks
   #   one arena per task: 300 arenas, 30 per level. "eval" ignores it and
-  #   always sweeps all 900.
+  #   sweeps eval_variants instead.
   train_variant: "01"
   # - train_levels: the Olympics levels the training set is held to, e.g.
   #   ["01", "02"]. For looking at some levels on their own without waiting for a
   #   curriculum to reach them, so only "sequential" and "random" take anything
   #   short of every level: the other modes' stages are the levels.
   train_levels: ["01", "02"]
+  # - eval_levels / eval_variants ("eval"): the levels and variants the
+  #   evaluation sweeps. The paper's Testbed is every level ("01" to "10") and
+  #   every variant ("01" to "03"), 900 arenas; the values below are the 60
+  #   arenas of the training set.
+  eval_levels: ["01", "02"]
+  eval_variants: ["01"]
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 20_000
   # - advance_success_rate ("success"): the share of a round that has to be
