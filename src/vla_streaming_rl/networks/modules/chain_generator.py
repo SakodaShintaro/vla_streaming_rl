@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MIT
+import copy
 import time
 from dataclasses import dataclass
 
 import torch
 from omegaconf import DictConfig
 from torchvision.transforms.v2 import functional as TF
-from transformers.cache_utils import DynamicLayer
+from transformers.cache_utils import DynamicLayer, LinearAttentionCacheLayerMixin
 
 from .vlm_backbone import load_model
 
@@ -34,13 +35,17 @@ def _history_text(turn: dict) -> str:
 @dataclass(frozen=True)
 class Chain:
     """書いた1つの返答。トークン、そのテキスト、各トークンを選んだ位置の活性
-    (chain_len, layers_num, hidden_size)、読んだプロンプトのトークン数、かかった時間。"""
+    (chain_len, layers_num, hidden_size)、読んだプロンプトのトークン数、かかった時間。
+    返答を学習するときは、書く直前（プロンプトを積んだところ）のキャッシュの写しと、
+    返答の最初のトークンの 3D 位置も持つ。学習しないときは None と 0。"""
 
     tokens: list[int]
     text: str
     positions: torch.Tensor
     prompt_tokens: int
     msec: float
+    prompt_cache: object | None
+    prompt_next_pos: int
 
 
 class ChainGenerator:
@@ -70,13 +75,21 @@ class ChainGenerator:
         assert max_len >= 1, max_len
         assert temperature >= 0.0, temperature
         assert window_tokens >= 1, window_tokens
-        self.model, self.processor = load_model(
+        # 返答を強化学習するなら LoRA を付け、その重みだけに勾配を流す。学習の対数確率は
+        # 標本を引いた分布（温度で割ったもの）で取るので、温度は正でなければならない
+        self.trainable = high_level_config.learning_rate > 0.0
+        assert not self.trainable or temperature > 0.0, "a trained reply needs sampling"
+        model, self.processor = load_model(
             model_id=high_level_config.model_id,
-            use_lora=False,
+            use_lora=self.trainable,
             load_in_4bit=high_level_config.load_in_4bit,
             device=device,
         )
+        # LoRA は元のモデルの層に差し込まれるので、元のモデルを呼べば LoRA も効く
+        self.model = model.get_base_model() if self.trainable else model
         self.model.eval().requires_grad_(False)
+        for name, param in self.model.named_parameters():
+            param.requires_grad_(self.trainable and "lora_" in name)
         self._token = torch.zeros(1, 1, dtype=torch.long, device=device)
         self._cache_position = torch.zeros(1, dtype=torch.long, device=device)
         self._position_ids = torch.zeros(3, 1, 1, dtype=torch.long, device=device)
@@ -150,6 +163,9 @@ class ChainGenerator:
             hidden=True,
         )
         prompt_tokens = self._kv_len
+        prompt_next_pos = self._next_pos
+        # 学習するときは、返答を書く前のキャッシュを写しておく。書くあいだにその場で更新される
+        prompt_cache = copy.deepcopy(self._cache) if self.trainable else None
         position = self._last_position(outputs.hidden_states)
         logits = outputs.logits[0, -1]
 
@@ -193,6 +209,8 @@ class ChainGenerator:
             positions=torch.stack(positions),
             prompt_tokens=prompt_tokens,
             msec=(time.perf_counter() - start) * 1000.0,
+            prompt_cache=prompt_cache,
+            prompt_next_pos=prompt_next_pos,
         )
 
         # 最後に選んだトークンを、<|im_end|>（打ち切ったときだけ足す）と改行で閉じて積む
@@ -239,6 +257,41 @@ class ChainGenerator:
         self._last_consumed = conversation[-1]
         self._committed_reply = chain.text
         return chain
+
+    def reply_log_prob(self, chain: Chain) -> torch.Tensor:
+        """返答のトークンを、書いたときと同じ分布（温度で割ったもの）で選ぶ対数確率の平均。
+        勾配は LoRA にだけ流れる。会話の部分は書く前に写したキャッシュを定数として使い、
+        返答の部分だけを計算し直す。最初のトークンを選んだ位置はキャッシュの側にあるので除く。"""
+        assert chain.prompt_cache is not None, "the reply was written without keeping its prompt"
+        assert len(chain.tokens) >= 2, "a reply of one token has nothing to score"
+        # 推論モードの外で複製すると、勾配を記録できる通常のテンソルになる
+        cache = copy.deepcopy(chain.prompt_cache)
+        # キャッシュは線形注意層の再帰状態をその場で上書きするが、その状態は backward の
+        # ために初期状態として保存される。保存するときだけ複製しておく
+        protected = {
+            state.data_ptr()
+            for layer in cache.layers
+            if isinstance(layer, LinearAttentionCacheLayerMixin)
+            for state in layer.recurrent_states.values()
+        }
+        inputs = torch.tensor([chain.tokens[:-1]], device=self.device)
+        targets = torch.tensor(chain.tokens[1:], device=self.device)
+        length = len(chain.tokens) - 1
+        with torch.autograd.graph.saved_tensors_hooks(
+            lambda t: t.clone() if t.data_ptr() in protected else t, lambda t: t
+        ):
+            outputs = self.model(
+                input_ids=inputs,
+                attention_mask=torch.ones(1, chain.prompt_tokens + length, device=self.device),
+                position_ids=self._linear_positions(length, chain.prompt_next_pos),
+                cache_position=torch.arange(
+                    chain.prompt_tokens, chain.prompt_tokens + length, device=self.device
+                ),
+                past_key_values=cache,
+                use_cache=True,
+            )
+        log_probs = torch.log_softmax(outputs.logits[0].float() / self.temperature, dim=-1)
+        return log_probs.gather(1, targets[:, None]).mean()
 
     @torch.inference_mode()
     def yes_probability(self, chain: Chain, tag: str) -> float | None:

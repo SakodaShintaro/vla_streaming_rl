@@ -128,4 +128,5 @@ def build_agent(
         steps_per_reply=args.high_level.steps_per_reply,
         parse_action_text=parse_action_text,
         high_level_policy=high_level_policy,
+        gamma=args.gamma,
     )

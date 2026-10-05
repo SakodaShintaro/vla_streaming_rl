@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.prompt import ACHIEVED_TAG, SUBTASK_RE, PromptBuilder, assistant_turn
 
-from .chain_generator import ChainGenerator
+from .chain_generator import Chain, ChainGenerator
 
 
 @dataclass(frozen=True)
@@ -30,12 +30,19 @@ class HighLevelPolicyOutput:
     input_tokens: int
     output_tokens: int
     msec: float
+    # 書いた返答そのもの。返答を強化学習するときに、その対数確率を計算し直すのに使う
+    chain: Chain
+
+
+# 返答の方策勾配の勾配のノルムの上限
+GRAD_CLIP = 1.0
 
 
 class HighLevelPolicy:
-    """凍結 VLM による高レベル方策。``steps_per_reply`` ステップごとに builder の会話へ
+    """VLM による高レベル方策。``steps_per_reply`` ステップごとに builder の会話へ
     返答を書いて確定し、その間は同じ返答を持ち続ける。低レベル方策には返答の
-    ``<subtask>`` 区間の活性を、1ステップに読む幅へ均して渡す。"""
+    ``<subtask>`` 区間の活性を、1ステップに読む幅へ均して渡す。``learning_rate`` が正なら、
+    返答を LoRA で強化学習する（``reinforce``）。0 なら凍結したまま。"""
 
     def __init__(
         self,
@@ -58,6 +65,13 @@ class HighLevelPolicy:
         # 会話はエージェントのもの。返答を書くステップでだけ読み、書いた返答をそのターンに足す
         self.prompt_builder = prompt_builder
         self.device = device
+        self.trainable = self.generator.trainable
+        self.lora_parameters = [p for p in self.generator.model.parameters() if p.requires_grad]
+        self.optimizer = (
+            torch.optim.AdamW(self.lora_parameters, lr=high_level_config.learning_rate)
+            if self.trainable
+            else None
+        )
         self.reset()
 
     def reset(self) -> None:
@@ -116,11 +130,28 @@ class HighLevelPolicy:
                 input_tokens=chain.prompt_tokens,
                 output_tokens=len(chain.tokens),
                 msec=chain.msec,
+                chain=chain,
             )
             self.prompt_builder.add_reply(chain.text)
             self._until_next = self.steps_per_reply
         self._until_next -= 1
         return dataclasses.replace(self._reply, age=self.steps_per_reply - 1 - self._until_next)
+
+    def reinforce(self, chain: Chain, advantage: float) -> dict[str, float]:
+        """書いた返答 ``chain`` を、その後に起きたことの利得 ``advantage`` で1歩学習する
+        （REINFORCE）。返答のトークンの対数確率の平均に利得を掛けて上げる。"""
+        assert self.trainable, "reinforce needs high_level.learning_rate > 0"
+        with torch.enable_grad():
+            log_prob = self.generator.reply_log_prob(chain)
+            self.optimizer.zero_grad(set_to_none=True)
+            (-advantage * log_prob).backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.lora_parameters, GRAD_CLIP)
+            self.optimizer.step()
+        return {
+            "high_level/log_prob": log_prob.item(),
+            "high_level/advantage": advantage,
+            "high_level/grad_norm": grad_norm.item(),
+        }
 
     def judge_current(self) -> float:
         """いま実行中のサブタスクの達成度を、いまのターンで判定する。エピソードが

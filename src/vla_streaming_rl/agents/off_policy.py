@@ -22,6 +22,7 @@ costs some repetition in the per-tick path and buys each mode being readable
 end to end in one file.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 import gymnasium as gym
@@ -32,8 +33,9 @@ from torch import nn, optim
 from vla_streaming_rl.agents.base import Agent, StepResult, render_high_level
 from vla_streaming_rl.agents.prompt import PromptBuilder, read_action_reply
 from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.networks.modules.chain_generator import Chain
 from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
-from vla_streaming_rl.replay_buffer import ReplayBuffer
+from vla_streaming_rl.replay_buffer import ReplayBuffer, ReplayBufferData
 from vla_streaming_rl.reward_processor import RewardProcessor
 from vla_streaming_rl.utils import render_selection_panel
 
@@ -45,6 +47,18 @@ def _format_action(action: np.ndarray) -> str:
 # サブタスクの達成度の移動平均を更新する割合の下限。判定の回数がこの逆数に届くまでは
 # 単純平均（回数で割る）で取るので、決め打ちの初期値に引きずられない
 ACHIEVED_MEAN_RATE = 0.01
+
+
+@dataclass
+class PendingReply:
+    """利得がまだ決まっていない返答。書いてからの割引報酬を積み、区間が閉じたら学習する。"""
+
+    chain: Chain
+    # 書いた時点の、返答に依存しない値
+    baseline: float
+    # 書いてからの報酬の割引和と、次の報酬に掛ける割引
+    ret: float
+    discount: float
 
 
 class OffPolicyAgent(Agent):
@@ -76,6 +90,7 @@ class OffPolicyAgent(Agent):
         select_margin: float,
         achieved_reward_weight: float,
         steps_per_reply: int,
+        gamma: float,
         parse_action_text,
         high_level_policy: HighLevelPolicy | None,
     ) -> None:
@@ -97,6 +112,12 @@ class OffPolicyAgent(Agent):
         self.achieved_count = 0
         assert steps_per_reply >= 1, steps_per_reply
         self.steps_per_reply = steps_per_reply
+        # 返答の強化学習の割引。critic と同じ割引で値と報酬を足し合わせる
+        self.gamma = gamma
+        self.pending_reply: PendingReply | None = None
+        if high_level_policy is not None and high_level_policy.trainable:
+            # critic の値（value_report の "value"）が割引 gamma のものであるために、割引は1つ
+            assert network.value_head.num_gammas == 1, "reply training reads a single-gamma value"
         if text_action:
             assert high_level_policy is not None, (
                 "text_action reads the action off a finished chain, which only "
@@ -327,6 +348,30 @@ class OffPolicyAgent(Agent):
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
             # フレームで判定する
             self._reward_achieved(self.high_level_policy.judge_current(), metrics)
+        if self.high_level_policy is not None and self.high_level_policy.trainable:
+            # 返答の強化学習。返答を書いてから次を書くまで（またはエピソードの終わりまで）の
+            # 区間の割引報酬に、区間の終わりの値を足し、書いた時点の値を引いたものを利得にする。
+            # 値は低レベル方策の critic の、このステップの行のサブタスクを 0 にした窓での値で、
+            # 返答に依存しない基準になる。このステップの報酬は、前の返答の区間に入る
+            pending = self.pending_reply
+            if pending is not None:
+                pending.ret += pending.discount * metrics["processed_reward"]
+                pending.discount *= self.gamma
+            if reply.age == 0 or episode_done:
+                value = 0.0
+                if not episode_done:
+                    window = self.rb.get_latest(self.seq_len)
+                    window.subtask_activations[:, -1] = 0.0
+                    value = self.network.infer(self._infer_input(window)).value_report["value"]
+                if pending is not None:
+                    advantage = pending.ret + pending.discount * value - pending.baseline
+                    metrics.update(self.high_level_policy.reinforce(pending.chain, advantage))
+                # 終端のフレームで書いた返答には区間がないので学習しない
+                self.pending_reply = (
+                    None
+                    if episode_done
+                    else PendingReply(chain=reply.chain, baseline=value, ret=0.0, discount=1.0)
+                )
         holding = self.text_action and reply.age < self.hold_steps
         vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = vlm_action
@@ -348,29 +393,7 @@ class OffPolicyAgent(Agent):
                 texts=texts,
             )
 
-        latest_data = self.rb.get_latest(self.seq_len)
-        infer_result = self.network.infer(
-            InferInput(
-                s_seq=latest_data.observations,
-                a_seq=latest_data.actions,
-                r_seq=latest_data.rewards,
-                rnn_state=self.rnn_state,
-                system_token_ids_seq=latest_data.system_token_ids,
-                turn_token_ids_seq=latest_data.turn_token_ids,
-                reply_token_ids_seq=latest_data.reply_token_ids,
-                velocity_x_seq=latest_data.velocity_x,
-                velocity_y_seq=latest_data.velocity_y,
-                velocity_z_seq=latest_data.velocity_z,
-                episode_return_seq=latest_data.episode_return,
-                pass_mark_seq=latest_data.pass_mark,
-                remaining_return_seq=latest_data.remaining_return,
-                global_step_seq=latest_data.global_step,
-                episode_step_seq=latest_data.episode_step,
-                health_seq=latest_data.health,
-                subtask_activations_seq=latest_data.subtask_activations,
-                subtask_age_seq=latest_data.subtask_age,
-            )
-        )
+        infer_result = self.network.infer(self._infer_input(self.rb.get_latest(self.seq_len)))
         self.rnn_state = infer_result.rnn_state
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
@@ -423,6 +446,29 @@ class OffPolicyAgent(Agent):
             metrics=metrics,
             panels=self._panels(panels),
             texts=texts,
+        )
+
+    def _infer_input(self, window: ReplayBufferData) -> InferInput:
+        """バッファの最新の窓と、持ち回している再帰状態から作るネットワークの入力。"""
+        return InferInput(
+            s_seq=window.observations,
+            a_seq=window.actions,
+            r_seq=window.rewards,
+            rnn_state=self.rnn_state,
+            system_token_ids_seq=window.system_token_ids,
+            turn_token_ids_seq=window.turn_token_ids,
+            reply_token_ids_seq=window.reply_token_ids,
+            velocity_x_seq=window.velocity_x,
+            velocity_y_seq=window.velocity_y,
+            velocity_z_seq=window.velocity_z,
+            episode_return_seq=window.episode_return,
+            pass_mark_seq=window.pass_mark,
+            remaining_return_seq=window.remaining_return,
+            global_step_seq=window.global_step,
+            episode_step_seq=window.episode_step,
+            health_seq=window.health,
+            subtask_activations_seq=window.subtask_activations,
+            subtask_age_seq=window.subtask_age,
         )
 
     def _panels(self, panels: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
