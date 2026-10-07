@@ -15,7 +15,8 @@ from vla_streaming_rl.envs.animalai_curriculum import COMPETITION_DIR
 
 # 橋のアリーナの寸法（アリーナは 40 x 40、x が右、z が前）。z = 0〜10 は全幅が安全な床で、
 # エージェントは中央から前を向いて始まる。z = 10〜32 は左右の橋以外がマグマ、z = 32〜40 は
-# 橋の先の安全な床で、中央の壁で左右を分ける
+# 橋の先の安全な床で、中央の壁で左右を分ける。スタートの正面は、橋の間のマグマの手前を透明な
+# 低い壁で塞ぐ
 BRIDGE_ARENA_SIZE = 40.0
 BRIDGE_LEFT_X = 10.0
 BRIDGE_RIGHT_X = 30.0
@@ -23,6 +24,9 @@ BRIDGE_START_Z = 10.0
 BRIDGE_END_Z = 32.0
 BRIDGE_GOAL_Z = 36.0
 BRIDGE_AGENT_Z = 4.0
+# スタートの正面を塞ぐ透明な壁の奥行きと高さ
+BRIDGE_GUARD_DEPTH = 1.0
+BRIDGE_GUARD_HEIGHT = 0.5
 # レベル 11 の橋の課題。タスク番号 YY の組は (YY + 1) // 2 で、奇数はハイリスク側が左、
 # 偶数はその左右反転。組ごとの (ハイリスク側の道幅, ローリスク側の道幅) と、ローリスク側の
 # 報酬（組 5 だけ報酬なし）
@@ -99,6 +103,19 @@ def bridge_arena_yaml(task: BridgeTask) -> str:
             BRIDGE_ARENA_SIZE - BRIDGE_END_Z,
         )
     ]
+    # スタートの正面、2本の橋の内側の縁の間を、マグマの手前で塞ぐ透明な低い壁。まっすぐ
+    # 進むと橋の間のマグマに落ちるのではなく壁で止まり、橋に入るには左右へ向きを変える。
+    # 透明なので、向こう側の橋と報酬は見える
+    guard_left = BRIDGE_LEFT_X + left_width / 2
+    guard_right = BRIDGE_RIGHT_X - right_width / 2
+    guard = [
+        (
+            (guard_left + guard_right) / 2,
+            BRIDGE_START_Z - BRIDGE_GUARD_DEPTH / 2,
+            guard_right - guard_left,
+            BRIDGE_GUARD_DEPTH,
+        )
+    ]
     goals = [
         (x, size)
         for x, size in ((BRIDGE_LEFT_X, left_reward), (BRIDGE_RIGHT_X, right_reward))
@@ -126,6 +143,7 @@ def bridge_arena_yaml(task: BridgeTask) -> str:
                 "      rotations: [0]",
                 _bridge_item("DeathZone", lava, 0.0),
                 _bridge_item("Wall", divider, 2.0),
+                _bridge_item("WallTransparent", guard, BRIDGE_GUARD_HEIGHT),
                 "\n".join(goal_lines),
             ]
         )
