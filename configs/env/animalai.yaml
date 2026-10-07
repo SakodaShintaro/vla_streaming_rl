@@ -6,8 +6,8 @@ env_id: AnimalAI-v0
 # For "staged": stages 1-10 take steps_per_stage each and stage 11 runs out the
 # remainder, so the paper's 2M x 10 + 5M = 25M is step_limit == 12.5 x
 # steps_per_stage; the values below keep that ratio at 1/1000 scale.
-step_limit: 200_000
-episode_limit: 560
+step_limit: 800_000
+episode_limit: 4480
 image_save_interval: 40
 final_evaluation: false
 
