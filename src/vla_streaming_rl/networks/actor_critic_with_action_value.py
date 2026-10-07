@@ -52,6 +52,15 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.subtask_dropout = actor_critic_config.subtask_dropout
         assert 0.0 <= actor_critic_config.token_dropout < 1.0, actor_critic_config.token_dropout
         self.token_dropout = actor_critic_config.token_dropout
+        # サブタスクを残した系列のうち、この割合でサブタスク以外の入力をすべて落とし、
+        # テキストの指示だけから行動と価値を学ばせる
+        assert 0.0 <= actor_critic_config.observation_dropout < 1.0, (
+            actor_critic_config.observation_dropout
+        )
+        assert actor_critic_config.observation_dropout == 0.0 or (
+            high_level_config.subtask_tokens_num > 0
+        ), "observation_dropout leaves only the subtask, so it needs subtask_tokens_num > 0"
+        self.observation_dropout = actor_critic_config.observation_dropout
         self.bc_loss_weight = actor_critic_config.bc_loss_weight
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
@@ -154,6 +163,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         subtask_keep, token_keep)`` the encoder reads, sliced out of a replay batch
         over ``[start, stop)`` steps."""
         observations = data.observations[:, start:stop]
+        batch_size = observations.shape[0]
+        subtask_keep = self._subtask_keep(batch_size, observations.device)
+        token_keep = self._token_keep(batch_size, observations.shape[1], observations.device)
+        # サブタスクのトークンは1ステップのトークンの最後に並ぶので、それより前をすべて落とす
+        subtask_only = subtask_keep & (
+            torch.rand(batch_size, device=observations.device) < self.observation_dropout
+        )
+        token_keep[subtask_only, :, : -self.subtask_shape[0]] = False
         return (
             observations,
             data.actions[:, start:stop],
@@ -172,8 +189,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             ),
             data.subtask_activations[:, start:stop],
             data.subtask_age[:, start:stop],
-            self._subtask_keep(data.subtask_activations.shape[0], data.subtask_activations.device),
-            self._token_keep(observations.shape[0], observations.shape[1], observations.device),
+            subtask_keep,
+            token_keep,
         )
 
     def tokenize(self, text: str) -> list[int]:

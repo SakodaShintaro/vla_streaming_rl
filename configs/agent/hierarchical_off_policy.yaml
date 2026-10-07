@@ -7,5 +7,6 @@ high_level:
   subtask_tokens_num: 4
 actor_critic:
   bc_loss_weight: 0.5
+  observation_dropout: 0.25
 text_action: true
 achieved_reward_weight: 1.0
