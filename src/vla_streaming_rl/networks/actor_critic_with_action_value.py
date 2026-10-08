@@ -61,7 +61,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             high_level_config.subtask_tokens_num > 0
         ), "observation_dropout leaves only the subtask, so it needs subtask_tokens_num > 0"
         self.observation_dropout = actor_critic_config.observation_dropout
-        self.bc_loss_weight = actor_critic_config.bc_loss_weight
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
         # ``subtask_tokens_num = 0`` is the ablation: the same body, the same heads
@@ -114,12 +113,6 @@ class ActorCriticWithActionValue(NetworkInterface):
 
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
-
-    def action_value(self, features: torch.Tensor, action_chunk: np.ndarray) -> float:
-        """Q(s, a) the critic gives one ``(horizon, action_dim)`` chunk at the
-        state ``infer`` handed back as ``features``."""
-        chunk = torch.from_numpy(action_chunk).to(features.device, features.dtype).unsqueeze(0)
-        return self.value_head.scalar_value(features, chunk).item()
 
     def stored_image_shape(self) -> tuple[int, ...]:
         """The frozen encoder's output for the frame, not the frame."""
@@ -322,10 +315,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             action_chunk,
             value_head=self.value_head,
         )
-        head_action, _ = self.policy_head.get_action(curr_state)
-        bc_gap = (head_action - data.vlm_actions[:, -self.horizon :]).pow(2).mean(dim=-1)
-        bc_holds = data.vlm_holds[:, -self.horizon :, 0]
-        bc_loss = (bc_gap * bc_holds).sum() / bc_holds.sum().clamp(min=1.0)
         with torch.no_grad():
             next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
         seq_loss, seq_info = self.prediction_head.compute_loss(
@@ -337,12 +326,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             self.disable_state_predictor,
         )
 
-        total_loss = (
-            self.critic_loss_weight * critic_loss
-            + actor_loss
-            + seq_loss
-            + self.bc_loss_weight * bc_loss
-        )
+        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
         info_dict = {
             f"losses/{key}": value
@@ -350,7 +334,6 @@ class ActorCriticWithActionValue(NetworkInterface):
                 **critic_info,
                 **actor_info,
                 **seq_info,
-                "bc_loss": bc_loss.item(),
             }.items()
         }
 

@@ -80,5 +80,4 @@ actor_critic:
   token_dropout: 0.0
   # サブタスクだけを見て行動する系列の割合。サブタスク以外の入力をすべて落とす
   observation_dropout: 0.0
-  bc_loss_weight: 0.0
   subtask_pool: none  # [mean, none]

@@ -7,13 +7,10 @@ observation the env already publishes, so the prompt belongs to the run's agent
 config rather than to the simulator: two agents can drive the same env with
 different framing, and the env carries no text of its own.
 
-There is one builder per environment, and it always writes the prompt of an
-agent about to act: what the env asks, the action vocabulary it is asked in, the
-arena's own instruction, and the three sections the answer is read out of. Whether
-the action then comes from the reply or from a policy head is the reader's
-business, not the prompt's -- a run that reads the language as conditioning is
-reading the same words a run that acts on it would, so the two are comparable
-without a second wording to keep in step.
+There is one builder per environment, and it always writes the prompt of the
+high-level policy: what the env asks, how often it is asked, and the sections
+the reply is read out of. The reply names no action; the low-level policy acts
+on every step, reading the reply's subtask.
 
 A builder is called once per environment step with the observation, the reward
 and the info the agent itself received, and returns the conversation as it then
@@ -27,7 +24,6 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
-import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
@@ -35,41 +31,18 @@ from omegaconf import DictConfig
 # 適切だったかを 0〜9 の1桁で書かせ、その位置で各数字を選ぶ確率の期待値から点数を読む
 SCORE_TAG = "<score>"
 
-TEXT_ACTION_PROTOCOL = (
+REPLY_PROTOCOL = (
     "Before anything else, compare the frames since your previous reply with the subtask of "
     "that reply and judge how far the agent's actions moved toward it. "
     f"Reply with {SCORE_TAG}an integer from 0 to 9 for that judgment: 0 if the actions "
     "worked against the subtask, 9 if they got it done</score> "
     "then <subtask>one short sentence on what the agent should get done by your next "
-    "reply</subtask> then <action>the action only</action>."
+    "reply</subtask>."
 )
 
-# The LAST <action> is the one that counts: a model's reasoning sometimes quotes
-# the tag before writing the real section, and reading the first one then takes
-# the whole reasoning as the action.
-ACTION_RE = re.compile(r"<action>(?!.*<action>)(.*?)</action>", re.DOTALL)
-
+# 最後の <subtask> を読む。思考の中でタグを引用することがあり、最初のものを読むと
+# 思考全体をサブタスクとして取ってしまう
 SUBTASK_RE = re.compile(r"<subtask>(?!.*<subtask>)(.*?)</subtask>", re.DOTALL)
-
-
-def read_action_reply(
-    reply_text: str,
-    parse_action_text,
-    action_low: np.ndarray,
-    action_high: np.ndarray,
-    hold_cap: int,
-) -> tuple[str, np.ndarray, int, bool]:
-    """The action a reply's ``<action>`` block names, clipped to the action
-    bounds, with how many steps it asks to hold it, capped at ``hold_cap``.
-    A reply that named no runnable action yields standing still, one row."""
-    answer_match = ACTION_RE.search(reply_text)
-    answer_text = answer_match.group(1).strip() if answer_match is not None else ""
-    action_array, parse_ok = parse_action_text(answer_text)
-    if parse_ok:
-        action = np.clip(action_array[0].astype(np.float32), action_low, action_high)
-    else:
-        action = np.zeros(action_low.shape, dtype=np.float32)
-    return answer_text, action, min(len(action_array), hold_cap), parse_ok
 
 
 def assistant_turn(text: str) -> dict:
@@ -110,13 +83,13 @@ class PromptBuilder(ABC):
     """
 
     def __init__(
-        self, env: Env, history_turns: int, steps_per_action: int, steps_per_observation: int
+        self, env: Env, history_turns: int, steps_per_reply: int, steps_per_observation: int
     ) -> None:
         assert history_turns >= 0, history_turns
-        assert steps_per_action >= 1, steps_per_action
+        assert steps_per_reply >= 1, steps_per_reply
         assert steps_per_observation >= 1, steps_per_observation
         self.history_turns = history_turns
-        self.steps_per_action = steps_per_action
+        self.steps_per_reply = steps_per_reply
         # 返答を書かないステップでも、この間隔で観測を会話に残す
         self.steps_per_observation = steps_per_observation
         self.decision_fps = env.metadata["decision_fps"]
@@ -182,18 +155,6 @@ class PromptBuilder(ABC):
         self._turns = self._turns + [{"role": "user", "content": [{"type": "text", "text": text}]}]
         self._current = {}
 
-    def reject(self, answer: str) -> None:
-        """Say, as the env and not as the agent, that the last reply named no
-        action it could run. A complaint folded into the assistant's own turn
-        reads back as something the agent chose to say; this is what it was
-        told."""
-        self._turns = self._turns + [
-            {"role": "user", "content": [{"type": "text", "text": self._rejection_text(answer)}]}
-        ]
-
-    def _rejection_text(self, answer: str) -> str:
-        return f"({answer!r} is not an action -- nothing ran.)"
-
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         """The standing task: what the env asks, unchanged through an episode."""
@@ -205,11 +166,9 @@ class PromptBuilder(ABC):
 
 # --- CarRacing ---------------------------------------------------------------
 
-CAR_RACING_TEXT_ACTION_PROMPT = (
+CAR_RACING_FRAMING = (
     "You control the red car in CarRacing-v3 (top-down). Stay on the gray road "
-    "and avoid going onto the green grass; hug the road center when possible. "
-    "Write the action as `steer=<value>, accel=<value>`, where each <value> is a "
-    "float in [-1, 1]."
+    "and avoid going onto the green grass; hug the road center when possible."
 )
 
 
@@ -218,7 +177,7 @@ class CarRacingPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CAR_RACING_TEXT_ACTION_PROMPT}"
+        return f"{CAR_RACING_FRAMING}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward, info
@@ -244,16 +203,14 @@ ANIMALAI_FRAMING = (
     "behind you: turn back to that same target rather than switching to "
     "another. Move to a new spot only if a full turn shows nothing. "
 )
-ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
 
 
 def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: float) -> str:
     """Animal-AI's live scalars: the numbers the frame cannot show.
 
     The forward speed is the average over the steps since the last answer
-    rather than this tick's own: an action of fewer steps than the interval has
-    run out by the time the next answer is asked for, so the speed at that
-    moment reads 0 whether the move got somewhere or not.
+    rather than this tick's own, so it reports what came of that answer's
+    subtask rather than the motion of one moment.
 
     Read off the observation the network's scalar branch is fed, cut down to
     what a reply can act on: of the three velocity components only the forward
@@ -279,9 +236,9 @@ class AnimalAIPromptBuilder(PromptBuilder):
     task -- the prompt carries no per-task knowledge."""
 
     def __init__(
-        self, env: Env, history_turns: int, steps_per_action: int, steps_per_observation: int
+        self, env: Env, history_turns: int, steps_per_reply: int, steps_per_observation: int
     ) -> None:
-        super().__init__(env, history_turns, steps_per_action, steps_per_observation)
+        super().__init__(env, history_turns, steps_per_reply, steps_per_observation)
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
@@ -297,24 +254,16 @@ class AnimalAIPromptBuilder(PromptBuilder):
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
-    def _action_format(self) -> str:
+    def _cadence(self) -> str:
         return (
-            f"Write the action as `<name>(<n>)`, for example `move_forward(4)`: "
-            f"<name> is one of {ANIMALAI_ACTION_NAMES}, and <n> is how many steps "
-            f"in a row it is taken, an integer from 1 to {self.steps_per_action}. One turn "
-            f"step rotates 10 degrees; one forward step moves about 1.5 units, the arena "
-            f"being 40 units across. You are shown a new frame every "
-            f"{self.steps_per_observation} steps, but asked for a new action only every "
-            f"{self.steps_per_action} steps, and the steps left over after <n> are spent "
-            f"standing still."
+            f"You are shown a new frame every {self.steps_per_observation} steps and asked "
+            f"for a new reply every {self.steps_per_reply} steps; in between, the agent "
+            f"acts on its own toward the subtask of your latest reply."
         )
-
-    def _rejection_text(self, answer: str) -> str:
-        return f"(`{answer}` is not an action -- the agent stood still. {self._action_format()})"
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{ANIMALAI_FRAMING} {self._action_format()} {TEXT_ACTION_PROTOCOL}"
+        return f"{ANIMALAI_FRAMING} {self._cadence()} {REPLY_PROTOCOL}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del info
@@ -325,7 +274,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
 # --- CARLA -------------------------------------------------------------------
 
-CARLA_TEXT_ACTION_FRAMING = (
+CARLA_FRAMING = (
     "Drive a car along a route in CARLA. Follow the planned route, "
     "obey traffic rules, and avoid collisions."
 )
@@ -333,7 +282,7 @@ CARLA_TEXT_ACTION_FRAMING = (
 # maneuver sentence, so navigation intent reaches the policy as language. The
 # env reports the raw command through ``info["maneuver_command"]``; VOID (-1) is
 # what it reports when there is no route to read a maneuver off.
-CARLA_TEXT_ACTION_MANEUVER = {
+CARLA_MANEUVER = {
     -1: "The ego vehicle is following the lane straight ahead.",  # VOID
     1: "The ego vehicle is turning left at the upcoming intersection.",  # LEFT
     2: "The ego vehicle is turning right at the upcoming intersection.",  # RIGHT
@@ -349,11 +298,11 @@ class CarlaPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CARLA_TEXT_ACTION_FRAMING} {TEXT_ACTION_PROTOCOL}"
+        return f"{CARLA_FRAMING} {REPLY_PROTOCOL}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward
-        return CARLA_TEXT_ACTION_MANEUVER[info["maneuver_command"]]
+        return CARLA_MANEUVER[info["maneuver_command"]]
 
 
 # One builder per environment, whoever ends up acting on what it says.

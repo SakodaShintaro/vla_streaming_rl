@@ -258,8 +258,7 @@ def final_evaluation(
         # A fresh env starts its counter at 0, but the network reads the global
         # step as an observation and was trained at this run's values.
         eval_env.unwrapped.set_global_step(global_step)
-        if network is not None:
-            network.eval()
+        network.eval()
         testbed_metrics = run_testbed(
             agent,
             eval_env,
@@ -339,9 +338,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     # made before the network that carries the chain.
     network, agent = build_all(env, args)
 
-    parameter_count = (
-        sum(p.numel() for p in agent.network.parameters()) if network is not None else 0
-    )
+    parameter_count = sum(p.numel() for p in agent.network.parameters())
     print(f"Parameter count: {parameter_count:,}")
 
     if args.resume_dir is not None:

@@ -6,14 +6,7 @@ step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
 before the action of that tick is chosen. Below ``learning_starts`` the env is
 driven by uniform random actions, so the buffer fills with something other than
 an untrained policy's output while the network's recurrent state still follows
-the episode. With ``text_action`` on, the VLM policy is a second candidate,
-behaving exactly as the zero-shot controller does: the action the chain of
-thought names in its ``<action>``, held for the number of steps it asks for within
-the chain's cadence, then standing still until the next chain. It drives the env
-alone below ``learning_starts``, and from then on every tick runs the head's
-action only where the critic values it more than the VLM's by at least
-``select_margin``, the VLM's otherwise -- so a head that never earns that
-margin leaves the run performing as the zero-shot controller would.
+the episode.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
@@ -30,17 +23,11 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult, render_high_level
-from vla_streaming_rl.agents.prompt import PromptBuilder, read_action_reply
+from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
-from vla_streaming_rl.utils import render_selection_panel
-
-
-def _format_action(action: np.ndarray) -> str:
-    return "[" + ", ".join(f"{value:+.2f}" for value in action) + "]"
-
 
 # サブタスクに向けた行動の点数の移動平均を更新する割合の下限。判定の回数がこの逆数に届くまでは
 # 単純平均（回数で割る）で取るので、決め打ちの初期値に引きずられない
@@ -48,9 +35,6 @@ SCORE_MEAN_RATE = 0.01
 
 
 class OffPolicyAgent(Agent):
-    SELECTION_PANEL_WIDTH = 320
-    SELECTION_PANEL_HEIGHT = 560
-
     def __init__(
         self,
         *,
@@ -72,11 +56,7 @@ class OffPolicyAgent(Agent):
         pad_token_id: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
-        text_action: bool,
-        select_margin: float,
         score_reward_weight: float,
-        steps_per_reply: int,
-        parse_action_text,
         high_level_policy: HighLevelPolicy | None,
     ) -> None:
         super().__init__(
@@ -88,29 +68,11 @@ class OffPolicyAgent(Agent):
         self.high_level_policy = high_level_policy
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.text_action = text_action
-        self.select_margin = select_margin
         # サブタスクに向けた行動の点数を内発的な報酬にする重みと、点数の移動平均。報酬は
         # 平均との差にして、採点の甘さ・厳しさの偏りを打ち消す
         self.score_reward_weight = score_reward_weight
         self.score_mean = 0.0
         self.score_count = 0
-        assert steps_per_reply >= 1, steps_per_reply
-        self.steps_per_reply = steps_per_reply
-        if text_action:
-            assert high_level_policy is not None, (
-                "text_action reads the action off a finished chain, which only "
-                "the high-level chain writes; set high_level.subtask_tokens_num > 0"
-            )
-        self.parse_action_text = parse_action_text
-        self.vlm_action = np.zeros(int(np.prod(action_space.shape)), dtype=np.float32)
-        self.vlm_answer_text = ""
-        self.hold_steps = 0
-        self.text_parse_failed = 0.0
-        self.selection_status = ""
-        self.selection_rows = []
-        self.decisions_num = 0
-        self.vlm_chosen_num = 0
 
         # action properties
         self.action_space = action_space
@@ -160,8 +122,6 @@ class OffPolicyAgent(Agent):
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
-        self.prev_vlm_action = np.zeros(self.action_dim, dtype=np.float32)
-        self.prev_vlm_holding = False
         # the first observation of a run starts an episode
         self._previous_done = True
         # Shared representation fed to policy/value/prediction heads on the
@@ -252,12 +212,7 @@ class OffPolicyAgent(Agent):
             # new episode; the first action of an episode comes from its own frame.
             self.action_chunk = None
             self.chunk_step = 0
-            self.decisions_num = 0
-            self.vlm_chosen_num = 0
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
-        if self.text_action and self.prev_vlm_holding:
-            gap = self._to_net_action(self.prev_action) - self._to_net_action(self.prev_vlm_action)
-            metrics["text/similarity"] = 1.0 - float(np.mean(gap**2)) / 4.0
         if not self.normalizing_by_return:
             self.reward_processor.update(shaped_reward)
         metrics["processed_reward"] = self.reward_processor.normalize(
@@ -287,8 +242,6 @@ class OffPolicyAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            torch.from_numpy(self._to_net_action(self.prev_vlm_action)).to(self.device),
-            1.0 if self.prev_vlm_holding else 0.0,
             self.network.tokenize(prompt),
             self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
@@ -303,7 +256,6 @@ class OffPolicyAgent(Agent):
         )
         # 高レベル方策を進め、その返答でこのステップの行を埋める。エピソードの最初の
         # ステップでは、前のエピソードの返答を捨ててそのフレームで書き直す
-        reply = None
         panels = {}
         texts = {"prompt": prompt}
         if self.high_level_policy is None:
@@ -319,20 +271,12 @@ class OffPolicyAgent(Agent):
             )
             panels, high_level_texts = render_high_level(reply)
             texts.update(high_level_texts)
-        if self.text_action and reply.age == 0:
-            self._read_vlm_action(reply.text)
-            if reply.score is not None:
+            if reply.age == 0 and reply.score is not None:
                 self._reward_score(reply.score, metrics)
-        elif self.text_action and episode_done:
-            # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
-            # フレームで判定する
-            self._reward_score(self.high_level_policy.score_current(), metrics)
-        holding = self.text_action and reply.age < self.hold_steps
-        vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
-        self.prev_vlm_action = vlm_action
-        self.prev_vlm_holding = holding
-        if self.text_action:
-            metrics["text/parse_failed"] = self.text_parse_failed
+            elif reply.age > 0 and episode_done:
+                # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
+                # フレームで判定する
+                self._reward_score(self.high_level_policy.score_current(), metrics)
 
         warmup = global_step < self.learning_starts
 
@@ -344,7 +288,7 @@ class OffPolicyAgent(Agent):
             return StepResult(
                 action=action,
                 metrics=metrics,
-                panels=self._panels(panels),
+                panels=panels,
                 texts=texts,
             )
 
@@ -375,39 +319,7 @@ class OffPolicyAgent(Agent):
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
         action_chunk = infer_result.action[0].cpu().numpy()
-        if self.text_action:
-            vlm_chunk = np.repeat(self._to_net_action(vlm_action)[None], self.horizon, axis=0)
-            q_vlm = self.network.action_value(infer_result.features, vlm_chunk)
-            q_head = self.network.action_value(infer_result.features, action_chunk)
-            vlm_chosen = warmup or q_head - q_vlm <= self.select_margin
-            metrics["select/q_vlm"] = q_vlm
-            metrics["select/q_head"] = q_head
-            metrics["select/vlm_chosen"] = float(vlm_chosen)
-            self.decisions_num += 1
-            self.vlm_chosen_num += int(vlm_chosen)
-            self.selection_status = (
-                f"step {global_step}, chain age {reply.age}, "
-                f"{'warmup: VLM only' if warmup else 'chosen by Q'}. "
-                f"VLM chosen {self.vlm_chosen_num}/{self.decisions_num} this episode."
-            )
-            self.selection_rows = [
-                (
-                    "VLM",
-                    f"{self.vlm_answer_text}  {_format_action(vlm_action)}  "
-                    f"({'holding' if holding else 'standing still'}, hold {self.hold_steps})",
-                    q_vlm,
-                    vlm_chosen,
-                ),
-                (
-                    "head",
-                    _format_action(self._to_env_action(action_chunk[0])),
-                    q_head,
-                    not vlm_chosen,
-                ),
-            ]
-            if vlm_chosen:
-                action_chunk = vlm_chunk
-        elif warmup:
+        if warmup:
             # The network was queried anyway so its recurrent state keeps
             # following the episode; only the action it chose is dropped.
             action_chunk = np.repeat(
@@ -421,22 +333,9 @@ class OffPolicyAgent(Agent):
         return StepResult(
             action=action,
             metrics=metrics,
-            panels=self._panels(panels),
+            panels=panels,
             texts=texts,
         )
-
-    def _panels(self, panels: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """高レベル方策のパネルに、行動が返答から読めるときは2つの候補とその行動価値を
-        足したもの。学習中は毎ステップ同じキーになる。"""
-        if self.text_action:
-            panels = {**panels}
-            panels["selection"] = render_selection_panel(
-                self.selection_status,
-                self.selection_rows,
-                self.SELECTION_PANEL_WIDTH,
-                self.SELECTION_PANEL_HEIGHT,
-            )
-        return panels
 
     def _reward_score(self, score: float, metrics: dict) -> None:
         """サブタスクの区間はこの行に入る遷移で終わったので、点数を移動平均との差に
@@ -449,23 +348,6 @@ class OffPolicyAgent(Agent):
         self.rb.add_latest_reward(bonus)
         metrics["text/score"] = score
         metrics["text/score_bonus"] = bonus
-
-    def _read_vlm_action(self, text: str) -> None:
-        """Read the action the chain just written names and how many steps it
-        asks to hold it, as the zero-shot controller does. A reply that
-        named no runnable action makes the candidate standing still, and is
-        answered by the env in its own turn."""
-        answer_text, self.vlm_action, self.hold_steps, parse_ok = read_action_reply(
-            text,
-            self.parse_action_text,
-            self.action_low,
-            self.action_high,
-            self.steps_per_reply,
-        )
-        self.vlm_answer_text = answer_text if parse_ok else f"(unparsed: {answer_text})"
-        if not parse_ok:
-            self.prompt_builder.reject(answer_text)
-        self.text_parse_failed = float(not parse_ok)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

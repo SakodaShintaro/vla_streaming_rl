@@ -85,7 +85,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_dim = action_space_shape[0]
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
-        # The prompt of a tick is the conversation the zero-shot controller
+        # The prompt of a tick is the conversation the high-level policy
         # would read there: its turns are the buffer rows ``steps_per_reply``
         # apart ending on the tick, as many as ``seq_len`` ticks hold, each
         # a frame under its own text answered by the reply the high-level
