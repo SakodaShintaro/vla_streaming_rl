@@ -38,7 +38,6 @@ ACHIEVED_TAG = "<achieved>"
 TEXT_ACTION_PROTOCOL = (
     f"Reply with {ACHIEVED_TAG}yes or no: whether the subtask of your previous reply has "
     "been achieved (no if there was none)</achieved> "
-    "then <reason>one short sentence on what you see</reason> "
     "then <subtask>one short sentence on what the agent should get done by your next "
     "reply</subtask> then <action>the action only</action>."
 )
