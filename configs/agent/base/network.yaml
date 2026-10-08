@@ -49,7 +49,10 @@ high_level:
   window_tokens: 32768
   subtask_tokens_num: 0
   # チェーンを書いて確定し、行動を読む間隔
-  steps_per_reply: 16
+  steps_per_reply: 32
+  # 返答を書かないステップでも、この間隔で観測（画像とテキスト）を会話に残す。
+  # steps_per_reply はこの倍数にする
+  steps_per_observation: 8
   # 高レベル方策が会話として読む窓のステップ数。steps_per_reply ステップごとに1回の
   # やり取りなので、履歴は (seq_len - 1) // steps_per_reply 回分になる。
   # また、実際に読める長さは window_tokens で頭打ちになる

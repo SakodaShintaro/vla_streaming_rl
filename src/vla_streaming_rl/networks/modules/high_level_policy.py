@@ -47,6 +47,13 @@ class HighLevelPolicy:
         steps_per_reply = high_level_config.steps_per_reply
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
         assert steps_per_reply >= 1, f"steps_per_reply must be positive; got {steps_per_reply}"
+        # 返答を書かないステップでも、この間隔で観測を会話に残す。返答はその倍数の間隔で書く
+        steps_per_observation = high_level_config.steps_per_observation
+        assert steps_per_reply % steps_per_observation == 0, (
+            f"steps_per_reply {steps_per_reply} must be a multiple of "
+            f"steps_per_observation {steps_per_observation}"
+        )
+        self.steps_per_observation = steps_per_observation
         self.generator = ChainGenerator(high_level_config, device=device)
         assert self.generator.max_len >= tokens_per_step, (
             f"max_len {self.generator.max_len} below {tokens_per_step}: the pool would "
@@ -119,7 +126,10 @@ class HighLevelPolicy:
             self.prompt_builder.add_reply(chain.text)
             self._until_next = self.steps_per_reply
         self._until_next -= 1
-        return dataclasses.replace(self._reply, age=self.steps_per_reply - 1 - self._until_next)
+        age = self.steps_per_reply - 1 - self._until_next
+        if age > 0 and age % self.steps_per_observation == 0:
+            self.prompt_builder.add_observation()
+        return dataclasses.replace(self._reply, age=age)
 
     def judge_current(self) -> float:
         """いま実行中のサブタスクの達成度を、いまのターンで判定する。エピソードが

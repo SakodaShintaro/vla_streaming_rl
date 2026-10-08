@@ -96,8 +96,10 @@ class PromptBuilder(ABC):
     that through ``conversation`` on the steps it actually writes -- one step in
     ``steps_per_reply`` -- and hands back what it wrote through
     ``add_reply``, which is what puts the turn it answered into the conversation
-    for good. The ticks in between are overwritten rather than accumulated, so
-    the conversation holds the turns a chain saw and not every step of the run.
+    for good. Between replies, every ``steps_per_observation`` ticks the turn is
+    kept as a user turn with no reply (``add_observation``); the other ticks are
+    overwritten rather than accumulated, so the conversation holds the turns a
+    chain saw and not every step of the run.
 
     ``history_turns`` is how many of those exchanges it keeps. Every turn still
     held is re-read on every step that follows, so a conversation left to grow
@@ -105,11 +107,16 @@ class PromptBuilder(ABC):
     dropped instead.
     """
 
-    def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
+    def __init__(
+        self, env: Env, history_turns: int, steps_per_action: int, steps_per_observation: int
+    ) -> None:
         assert history_turns >= 0, history_turns
         assert steps_per_action >= 1, steps_per_action
+        assert steps_per_observation >= 1, steps_per_observation
         self.history_turns = history_turns
         self.steps_per_action = steps_per_action
+        # 返答を書かないステップでも、この間隔で観測を会話に残す
+        self.steps_per_observation = steps_per_observation
         self.decision_fps = env.metadata["decision_fps"]
         self._turns = []
         self._current = {}
@@ -148,6 +155,12 @@ class PromptBuilder(ABC):
         conversation, dropping the oldest exchange once ``history_turns`` are
         held."""
         turns = self._turns + [self._current, assistant_turn(text)]
+        self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
+
+    def add_observation(self) -> None:
+        """返答を書かないステップの観測を、返答のない user のターンとして会話に残す。
+        次に返答を書くとき、その間の観測をまとめて読めるようにするため。"""
+        turns = self._turns + [self._current]
         self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
 
     def task_text(self) -> str:
@@ -261,8 +274,10 @@ class AnimalAIPromptBuilder(PromptBuilder):
     """Animal-AI: the framing and the live scalars, the same words on every
     task -- the prompt carries no per-task knowledge."""
 
-    def __init__(self, env: Env, history_turns: int, steps_per_action: int) -> None:
-        super().__init__(env, history_turns, steps_per_action)
+    def __init__(
+        self, env: Env, history_turns: int, steps_per_action: int, steps_per_observation: int
+    ) -> None:
+        super().__init__(env, history_turns, steps_per_action, steps_per_observation)
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
@@ -284,7 +299,8 @@ class AnimalAIPromptBuilder(PromptBuilder):
             f"<name> is one of {ANIMALAI_ACTION_NAMES}, and <n> is how many steps "
             f"in a row it is taken, an integer from 1 to {self.steps_per_action}. One turn "
             f"step rotates 10 degrees; one forward step moves about 1.5 units, the arena "
-            f"being 40 units across. You are asked for a new action only every "
+            f"being 40 units across. You are shown a new frame every "
+            f"{self.steps_per_observation} steps, but asked for a new action only every "
             f"{self.steps_per_action} steps, and the steps left over after <n> are spent "
             f"standing still."
         )
@@ -348,4 +364,6 @@ def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
     # 高レベル方策の窓 high_level.seq_len に、チェーンの周期で収まるやり取りの数
     history_turns = (args.high_level.seq_len - 1) // args.high_level.steps_per_reply
-    return PROMPT_BUILDERS[args.env_id](env, history_turns, args.high_level.steps_per_reply)
+    return PROMPT_BUILDERS[args.env_id](
+        env, history_turns, args.high_level.steps_per_reply, args.high_level.steps_per_observation
+    )
