@@ -36,8 +36,10 @@ from omegaconf import DictConfig
 SCORE_TAG = "<score>"
 
 TEXT_ACTION_PROTOCOL = (
-    f"Reply with {SCORE_TAG}an integer from 0 to 9: how well the agent's actions since your "
-    "previous reply served the subtask of that reply (0 if there was none)</score> "
+    "Before anything else, compare the frames since your previous reply with the subtask of "
+    "that reply and judge how far the agent's actions moved toward it. "
+    f"Reply with {SCORE_TAG}an integer from 0 to 9 for that judgment: 0 if the actions "
+    "worked against the subtask, 9 if they got it done</score> "
     "then <subtask>one short sentence on what the agent should get done by your next "
     "reply</subtask> then <action>the action only</action>."
 )
