@@ -28,6 +28,7 @@ from collections import Counter
 from pathlib import Path
 
 import cv2
+import numpy as np
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
@@ -72,10 +73,18 @@ def load_global_step(run_dir: Path) -> int:
 
 
 def run_arena(
-    agent, env, seed: int, render: bool, render_scale: float, window_name: str, global_step: int
-) -> tuple[str, bool, float, EpisodeRecord]:
-    """Play the next arena the env serves; return its (name, passed, score) and
-    what the episode leaves behind, recorded the way training records it.
+    agent,
+    env,
+    seed: int,
+    render: bool,
+    render_scale: float,
+    window_name: str,
+    global_step: int,
+    prev_action: np.ndarray,
+) -> tuple[str, bool, float, EpisodeRecord, np.ndarray]:
+    """Play the next arena the env serves; return its (name, passed, score),
+    what the episode leaves behind, recorded the way training records it, and
+    the action the agent returned last, which it reads at the next reset.
 
     `global_step` is the training step the checkpoint was written at. It gates
     OffPolicyAgent's warmup (below `learning_starts` it returns
@@ -85,11 +94,14 @@ def run_arena(
     obs, reset_info = env.reset(seed=seed, options=None)
     arena_name = reset_info["arena_name"]
     result = agent.select_action(global_step, obs, 0.0, False, False, reset_info)
-    action = result.action
     record = EpisodeRecord.fresh()
     record.bgr_images.append(
-        cv2.cvtColor(render_frame(env, obs, result, render_scale), cv2.COLOR_RGB2BGR)
+        cv2.cvtColor(
+            render_frame(env, obs, reset_info, prev_action, result, render_scale),
+            cv2.COLOR_RGB2BGR,
+        )
     )
+    action = result.action
     record.observations.append(obs["image"].copy())
     record.texts.append(result.texts)
 
@@ -100,8 +112,10 @@ def run_arena(
         record.observations.append(obs["image"].copy())
         record.xyzs.append(env_info["agent_xyz"])
         result = agent.select_action(global_step, obs, reward, terminated, truncated, env_info)
+        bgr_image = cv2.cvtColor(
+            render_frame(env, obs, env_info, action, result, render_scale), cv2.COLOR_RGB2BGR
+        )
         action = result.action
-        bgr_image = cv2.cvtColor(render_frame(env, obs, result, render_scale), cv2.COLOR_RGB2BGR)
         record.bgr_images.append(bgr_image)
         record.texts.append(result.texts)
         if render:
@@ -114,7 +128,7 @@ def run_arena(
     score = env_info["episode"]["r"]
     success = bool(score >= env_info["pass_mark"])
     agent.on_episode_end(score)
-    return arena_name, success, score, record
+    return arena_name, success, score, record, action
 
 
 def run_testbed(
@@ -152,9 +166,11 @@ def run_testbed(
     with open(result_path, "w") as f:
         f.write("arena\tsuccess\tscore\tseen_in_training\n")
         success_count = 0
+        # エージェントは前の行動をエピソードをまたいで持ち越すので、表示もそれに合わせる
+        prev_action = np.zeros(env.action_space.shape, dtype=np.float32)
         while not selector.is_exhausted:
-            arena_name, success, score, record = run_arena(
-                agent, env, seed, render, render_scale, window_name, global_step
+            arena_name, success, score, record, prev_action = run_arena(
+                agent, env, seed, render, render_scale, window_name, global_step, prev_action
             )
             save_episode_data(result_dir / "episode_log", arena_name, record)
             success_count += int(success)

@@ -304,19 +304,56 @@ def overlay_caption(image: np.ndarray, text: str) -> np.ndarray:
     return np.vstack((image, band))
 
 
-def render_frame(env, obs, result, scale: float) -> np.ndarray:
+def append_scalar_rows(image: np.ndarray, rows: list[tuple[str, str]]) -> np.ndarray:
+    """画像の下に、名前と値の組を1行ずつ並べた暗い帯を足す。行の数が同じなら帯の高さも
+    同じなので、動画のフレームの大きさは一定に保たれる。"""
+    image = convert_to_uint8(image)
+    font_scale = 0.4
+    thickness = 1
+    (_, text_height), baseline = cv2.getTextSize("Ag", _FONT, font_scale, thickness)
+    line_height = text_height + baseline + 4
+    band_height = line_height * len(rows) + 6
+    # libx264 の動画書き出しのために偶数にそろえる
+    band_height += band_height % 2
+    band = np.full((band_height, image.shape[1], 3), (50, 50, 50), dtype=np.uint8)
+    value_x = image.shape[1] // 2
+    for i, (name, value) in enumerate(rows):
+        y = (i + 1) * line_height
+        cv2.putText(band, name, (5, y), _FONT, font_scale, (190, 190, 190), thickness)
+        cv2.putText(band, value, (value_x, y), _FONT, font_scale, (255, 255, 255), thickness)
+    return np.vstack((image, band))
+
+
+def render_frame(env, obs, info, prev_action, result, scale: float) -> np.ndarray:
     """One RGB frame of the render strip: the env panel captioned with the
-    prompt, the observation panel (rescaled by ``scale`` for display only),
-    then whatever panels the agent contributed."""
+    prompt, the observation panel (rescaled by ``scale`` for display only)
+    above the scalar inputs the network reads this tick, then whatever panels
+    the agent contributed. ``prev_action`` is the action the agent returned on
+    the previous tick, which the network reads as its action input."""
     obs_viz = obs["image"].copy().transpose(1, 2, 0)
     if scale != 1.0:
         h, w = obs_viz.shape[:2]
         obs_viz = cv2.resize(
             obs_viz, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
         )
+    # ネットワークが読む順に、正規化する前の値を並べる
+    velocity = obs["velocity"]
+    scalar_rows = [
+        ("prev_action", " ".join(f"{value:+.2f}" for value in prev_action)),
+        ("reward", f"{info['shaped_reward']:+.4f}"),
+        ("velocity_x", f"{velocity[0]:+.3f}"),
+        ("velocity_y", f"{velocity[1]:+.3f}"),
+        ("velocity_z", f"{velocity[2]:+.3f}"),
+        ("episode_return", f"{obs['episode_return'][0]:+.3f}"),
+        ("pass_mark", f"{obs['pass_mark'][0]:+.3f}"),
+        ("remaining_return", f"{obs['remaining_return'][0]:+.3f}"),
+        ("global_step", f"{int(obs['global_step'][0])}"),
+        ("episode_step", f"{int(obs['episode_step'][0])}"),
+        ("health", f"{obs['health'][0]:.2f}"),
+    ]
     panels = {
         "environment": overlay_caption(env.render(), result.texts["prompt"]),
-        "observation": obs_viz,
+        "observation": append_scalar_rows(obs_viz, scalar_rows),
         **result.panels,
     }
     return concat_labeled_images(panels)

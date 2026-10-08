@@ -49,16 +49,18 @@ def collect_arena(
     arena_list: list,
     episode_list: list,
     video_path: Path,
-) -> None:
+    prev_action: np.ndarray,
+) -> np.ndarray:
+    """エージェントが最後に返した行動を返す。次のリセットでエージェントが読む行動になる。"""
     obs, reset_info = env.reset(seed=seed, options={"arena_stem": arena_stem})
     result = agent.select_action(0, obs, 0.0, False, False, reset_info)
     feature_list.append(agent.last_features.squeeze(0).cpu().numpy())
     xyz_list.append(reset_info["agent_xyz"])
     arena_list.append(arena_stem)
     episode_list.append(episode_id)
-    action = result.action
 
-    frame_list = [render_frame(env, obs, result, 1.0)]
+    frame_list = [render_frame(env, obs, reset_info, prev_action, result, 1.0)]
+    action = result.action
 
     while True:
         obs, reward, terminated, truncated, env_info = env.step(action)
@@ -67,14 +69,15 @@ def collect_arena(
         xyz_list.append(env_info["agent_xyz"])
         arena_list.append(arena_stem)
         episode_list.append(episode_id)
-        action = result.action
 
-        frame_list.append(render_frame(env, obs, result, 1.0))
+        frame_list.append(render_frame(env, obs, env_info, action, result, 1.0))
+        action = result.action
 
         if terminated or truncated:
             break
 
     imageio.mimsave(str(video_path), frame_list, fps=10, macro_block_size=1)
+    return action
 
 
 def main(args: DictConfig, result_dir: Path) -> None:
@@ -98,9 +101,11 @@ def main(args: DictConfig, result_dir: Path) -> None:
     xyz_list: list = []
     arena_list: list = []
     episode_list: list = []
+    # エージェントは前の行動をエピソードをまたいで持ち越すので、表示もそれに合わせる
+    prev_action = np.zeros(env.action_space.shape, dtype=np.float32)
     for i in range(NUM_REPEATS):
         video_path = video_dir / f"ep_{i + 1:04d}_{ARENA_STEM}.mp4"
-        collect_arena(
+        prev_action = collect_arena(
             agent,
             env,
             seed + i,
@@ -111,6 +116,7 @@ def main(args: DictConfig, result_dir: Path) -> None:
             arena_list,
             episode_list,
             video_path,
+            prev_action,
         )
         print(f"[{i + 1}/{NUM_REPEATS}] {ARENA_STEM}\tsamples so far={len(feature_list)}")
 

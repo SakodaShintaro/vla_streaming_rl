@@ -354,6 +354,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         if set_global_step is not None:
             set_global_step(state.global_step)
 
+    # ネットワークが行動として読む、前のステップでエージェントが返した行動。エージェントは
+    # エピソードをまたいで持ち越すので、ここでも持ち越す
+    action = np.zeros(env.action_space.shape, dtype=np.float32)
     while True:
         # Stop when the env has dispensed every scenario in a fixed playlist:
         # Animal-AI's "sequential" and "eval" arena orders, Bench2Drive220's
@@ -372,12 +375,12 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         # initial action
         result = agent.select_action(state.global_step, obs, 0.0, False, False, reset_info)
-        action = result.action
 
         # The trainer only owns the environment / observation panels; goal,
         # bev, ... arrive via result.panels. The initial render leads.
         record = EpisodeRecord.fresh()
-        rgb_image = render_frame(env, obs, result, args.render_scale)
+        rgb_image = render_frame(env, obs, reset_info, action, result, args.render_scale)
+        action = result.action
         record.bgr_images.append(cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
         record.observations.append(obs["image"].copy())
         record.texts.append(result.texts)
@@ -401,7 +404,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
             agent_step_start = time.time()
             result = agent.step(state.global_step, obs, reward, terminated, truncated, env_info)
-            action = result.action
             agent_step_time_msec = (time.time() - agent_step_start) * 1000
 
             # log: metrics are already scalar telemetry (images live in panels)
@@ -418,7 +420,8 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 }
             )
 
-            rgb_image = render_frame(env, obs, result, args.render_scale)
+            rgb_image = render_frame(env, obs, env_info, action, result, args.render_scale)
+            action = result.action
             bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
             record.bgr_images.append(bgr_image)
             record.texts.append(result.texts)
