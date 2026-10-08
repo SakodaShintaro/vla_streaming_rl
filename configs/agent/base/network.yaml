@@ -40,7 +40,10 @@ policy_head:
 high_level:
   model_id: Qwen/Qwen3.8-27B
   load_in_4bit: true
-  max_new_tokens: 128
+  max_new_tokens: 512
+  # 思考の量。none なら思考を閉じて返答だけを書く。low / medium / xhigh は Qwen3.8 の
+  # テンプレートの reasoning_effort で、思考を書いてから返答する（max_new_tokens も思考込み）
+  reasoning_effort: low
   temperature: 0.5
   # 全注意層の KV を「先頭の sink ＋直近この数のトークン」まで間引く
   window_tokens: 32768

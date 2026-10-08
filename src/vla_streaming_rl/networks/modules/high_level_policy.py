@@ -47,8 +47,7 @@ class HighLevelPolicy:
         steps_per_reply = high_level_config.steps_per_reply
         assert tokens_per_step >= 1, f"tokens_per_step must be positive; got {tokens_per_step}"
         assert steps_per_reply >= 1, f"steps_per_reply must be positive; got {steps_per_reply}"
-        # 思考オフ。<think> を開けたままにすると、場面ではなく依頼について考えて返答を使い切る
-        self.generator = ChainGenerator(high_level_config, enable_thinking=False, device=device)
+        self.generator = ChainGenerator(high_level_config, device=device)
         assert self.generator.max_len >= tokens_per_step, (
             f"max_len {self.generator.max_len} below {tokens_per_step}: the pool would "
             "stretch a reply shorter than one step's read"

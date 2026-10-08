@@ -16,13 +16,14 @@ YES_WORDS = ("yes", "Yes", " yes", " Yes")
 NO_WORDS = ("no", "No", " no", " No")
 
 
-def _history_text(turn: dict) -> str:
+def _history_text(turn: dict, system_prefix: str) -> str:
     """system / user の1メッセージをチャットテンプレートの履歴と同じ書式で文字列に
     する。テンプレート本体を使わないのは、会話全体ではなく新しいメッセージの差分
     だけを文字列にするため。返答はこの生成器が書いたトークンのままキャッシュに
-    残るので、ここで描き直すことはない。"""
+    残るので、ここで描き直すことはない。``system_prefix`` はテンプレートがシステム
+    プロンプトの先頭に足す文言（思考の量の指示）。"""
     assert turn["role"] != "assistant", "a reply stays in the cache as written"
-    parts = []
+    parts = [system_prefix] if turn["role"] == "system" else []
     for part in turn["content"]:
         if part["type"] == "image":
             parts.append(IMAGE_PLACEHOLDER)
@@ -61,7 +62,6 @@ class ChainGenerator:
     def __init__(
         self,
         high_level_config: DictConfig,
-        enable_thinking: bool,
         device: torch.device,
     ) -> None:
         max_len = high_level_config.max_new_tokens
@@ -92,7 +92,16 @@ class ChainGenerator:
             else text_config.vocab_size
         )
         self.top_p = generation_config.top_p if generation_config.top_p is not None else 1.0
-        self.enable_thinking = enable_thinking
+        # 思考の量。"none" なら思考を閉じた形で返答を書かせ、それ以外はテンプレートの
+        # reasoning_effort（low / medium / xhigh）に渡して、思考を書いてから返答させる
+        reasoning_effort = high_level_config.reasoning_effort
+        assert reasoning_effort in ("none", "low", "medium", "xhigh"), reasoning_effort
+        self.enable_thinking = reasoning_effort != "none"
+        template_kwargs = (
+            {"enable_thinking": True, "reasoning_effort": reasoning_effort}
+            if self.enable_thinking
+            else {"enable_thinking": False}
+        )
         self.device = device
         self.hidden_size = text_config.hidden_size
         # The embedding plus every layer's output.
@@ -101,15 +110,29 @@ class ChainGenerator:
         # 会話の中身に依らない定数なので、ここで一度だけ測る。
         probe = [{"role": "user", "content": [{"type": "text", "text": "x"}]}]
         with_tail = self.processor.apply_chat_template(
-            probe, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking
+            probe, tokenize=False, add_generation_prompt=True, **template_kwargs
         )
         without_tail = self.processor.apply_chat_template(
-            probe, tokenize=False, add_generation_prompt=False, enable_thinking=enable_thinking
+            probe, tokenize=False, add_generation_prompt=False, **template_kwargs
         )
         assert with_tail.startswith(without_tail), (with_tail, without_tail)
         self._tail_ids = self.processor.tokenizer.encode(
             with_tail[len(without_tail) :], add_special_tokens=False
         )
+        # テンプレートがシステムプロンプトの先頭に足す文言。思考の量の指示があればそれが入る
+        marker = "SYSTEM_PROMPT_BODY"
+        rendered = self.processor.apply_chat_template(
+            [{"role": "system", "content": [{"type": "text", "text": marker}]}] + probe,
+            tokenize=False,
+            add_generation_prompt=False,
+            **template_kwargs,
+        )
+        system_start = f"{IM_START}system\n"
+        assert rendered.startswith(system_start) and marker in rendered, rendered
+        self._system_prefix = rendered[len(system_start) : rendered.index(marker)]
+        # 終端の判定で、返答の先頭に置く書き出し。思考を書かせる形では、空の思考を閉じてから
+        # タグを置く（テンプレートが思考なしの返答に付けるのと同じ形）
+        self._judge_prefix = "\n</think>\n\n" if self.enable_thinking else ""
         # 返答を閉じるトークン。生成はこの <|im_end|> で止まる
         assert self.processor.tokenizer.eos_token == IM_END, self.processor.tokenizer.eos_token
         self._newline_ids = self.processor.tokenizer.encode("\n", add_special_tokens=False)
@@ -211,7 +234,7 @@ class ChainGenerator:
         if self._sink_len == 0:
             self._sink_len = len(
                 self.processor.tokenizer.encode(
-                    _history_text(conversation[0]), add_special_tokens=False
+                    _history_text(conversation[0], self._system_prefix), add_special_tokens=False
                 )
             )
         # 全注意層の KV を「sink ＋ 直近 window_tokens 行」まで間引く。線形注意層は固定サイズの
@@ -242,18 +265,22 @@ class ChainGenerator:
 
     @torch.inference_mode()
     def yes_probability(self, chain: Chain, tag: str) -> float | None:
-        """返答で ``tag`` の直後に書いた最初のトークンの位置で、yes を選ぶ確率を
-        yes と no の確率の和で割って返す。返答に ``tag`` がなければ None。
+        """返答で最後の ``tag`` の直後に書いた最初のトークンの位置で、yes を選ぶ確率を
+        yes と no の確率の和で割って返す。返答に ``tag`` がなければ None。最後のものを
+        読むのは、思考の中で同じ文字列に触れていても、返答の本体の判定を読むため。
 
         その位置の活性の最終層に lm_head を掛けると、そのトークンを選んだときの
         ロジットになる。"""
         tokenizer = self.processor.tokenizer
+        found = None
         for i in range(len(chain.tokens)):
             written = tokenizer.decode(chain.tokens[:i], skip_special_tokens=True)
             if written.rstrip().endswith(tag):
-                head = self.model.lm_head
-                return self._yes_share(head(chain.positions[i, -1].to(head.weight.dtype)))
-        return None
+                found = i
+        if found is None:
+            return None
+        head = self.model.lm_head
+        return self._yes_share(head(chain.positions[found, -1].to(head.weight.dtype)))
 
     @torch.inference_mode()
     def yes_probability_after(self, conversation: list[dict], tag: str) -> float:
@@ -274,7 +301,9 @@ class ChainGenerator:
         next_pos = self._next_pos
 
         ids, pos, pixel_values, image_grid_thw = self._encode(self._new_messages(conversation))
-        tail_ids = self._tail_ids + self.processor.tokenizer.encode(tag, add_special_tokens=False)
+        tail_ids = self._tail_ids + self.processor.tokenizer.encode(
+            self._judge_prefix + tag, add_special_tokens=False
+        )
         outputs = self._prefill(
             torch.cat([ids, torch.tensor([tail_ids], device=self.device)], dim=1),
             torch.cat(
@@ -334,7 +363,7 @@ class ChainGenerator:
         """メッセージを履歴の書式でトークン列にし、これまでの位置の続きの 3D 位置と
         画像の入力を添えて返す。mrope の位置割り当ては走査中の基点にしか依存しない
         ので、全体で計算して切り出すのと同じ値になる。"""
-        text = "".join(_history_text(turn) for turn in messages)
+        text = "".join(_history_text(turn, self._system_prefix) for turn in messages)
         images = [
             part["image"]
             for turn in messages
