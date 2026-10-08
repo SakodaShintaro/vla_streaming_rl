@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.prompt import ACHIEVED_TAG, SUBTASK_RE, PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import SCORE_TAG, SUBTASK_RE, PromptBuilder, assistant_turn
 
 from .chain_generator import ChainGenerator
 
@@ -24,9 +24,9 @@ class HighLevelPolicyOutput:
     text: str
     # 書いたときの会話と、この返答。描画用
     exchange: list[dict]
-    # この返答が判定した、前の返答のサブタスクの達成度（yes の確率）。前のサブタスクが
-    # ないか、返答に判定がなければ None
-    achieved: float | None
+    # この返答が採点した、前の返答からの行動がそのサブタスクの実現に向けてどれだけ適切
+    # だったか（[0, 1]）。前のサブタスクがないか、返答に採点がなければ None
+    score: float | None
     input_tokens: int
     output_tokens: int
     msec: float
@@ -83,11 +83,9 @@ class HighLevelPolicy:
         if self._until_next == 0:
             conversation = self.prompt_builder.conversation()
             chain = self.generator.generate(conversation)
-            # エピソードの最初の返答には判定すべき前のサブタスクがない
-            achieved = (
-                self.generator.yes_probability(chain, ACHIEVED_TAG)
-                if self._reply is not None
-                else None
+            # エピソードの最初の返答には採点すべき前のサブタスクがない
+            score = (
+                self.generator.score_value(chain, SCORE_TAG) if self._reply is not None else None
             )
 
             # <subtask> 区間のトークンの活性だけを読む。区間の長さによらず、区間方向に
@@ -118,7 +116,7 @@ class HighLevelPolicy:
                 age=0,
                 text=chain.text,
                 exchange=conversation + [assistant_turn(chain.text)],
-                achieved=achieved,
+                score=score,
                 input_tokens=chain.prompt_tokens,
                 output_tokens=len(chain.tokens),
                 msec=chain.msec,
@@ -131,10 +129,8 @@ class HighLevelPolicy:
             self.prompt_builder.add_observation()
         return dataclasses.replace(self._reply, age=age)
 
-    def judge_current(self) -> float:
-        """いま実行中のサブタスクの達成度を、いまのターンで判定する。エピソードが
+    def score_current(self) -> float:
+        """いま実行中のサブタスクに向けた行動を、いまのターンで採点する。エピソードが
         終わり、次の返答が来ないサブタスクのため。"""
         assert self._reply is not None, "there is no subtask running before the first reply"
-        return self.generator.yes_probability_after(
-            self.prompt_builder.conversation(), ACHIEVED_TAG
-        )
+        return self.generator.score_after(self.prompt_builder.conversation(), SCORE_TAG)

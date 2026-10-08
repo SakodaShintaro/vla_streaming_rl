@@ -12,8 +12,8 @@ from .vlm_backbone import load_model
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
-YES_WORDS = ("yes", "Yes", " yes", " Yes")
-NO_WORDS = ("no", "No", " no", " No")
+# 採点に使う数字。0〜9 はそれぞれ1トークンになる
+SCORE_MAX = 9
 
 
 def _history_text(turn: dict, system_prefix: str) -> str:
@@ -136,10 +136,13 @@ class ChainGenerator:
         # 返答を閉じるトークン。生成はこの <|im_end|> で止まる
         assert self.processor.tokenizer.eos_token == IM_END, self.processor.tokenizer.eos_token
         self._newline_ids = self.processor.tokenizer.encode("\n", add_special_tokens=False)
-        # yes / no を書き出しうる最初のトークン。大文字と前の空白の有無を含める
+        # 0〜9 の数字のトークン。Qwen のトークナイザは数字を1文字ずつ1トークンにし、前の空白は
+        # 別のトークンになるので、数字そのものだけを並べる
         tokenizer = self.processor.tokenizer
-        self._yes_ids = [tokenizer.encode(w, add_special_tokens=False)[0] for w in YES_WORDS]
-        self._no_ids = [tokenizer.encode(w, add_special_tokens=False)[0] for w in NO_WORDS]
+        self._digit_ids = [
+            tokenizer.encode(str(digit), add_special_tokens=False) for digit in range(SCORE_MAX + 1)
+        ]
+        assert all(len(ids) == 1 for ids in self._digit_ids), self._digit_ids
         self.reset_cache()
 
     def reset_cache(self) -> None:
@@ -264,10 +267,11 @@ class ChainGenerator:
         return chain
 
     @torch.inference_mode()
-    def yes_probability(self, chain: Chain, tag: str) -> float | None:
-        """返答で最後の ``tag`` の直後に書いた最初のトークンの位置で、yes を選ぶ確率を
-        yes と no の確率の和で割って返す。返答に ``tag`` がなければ None。最後のものを
-        読むのは、思考の中で同じ文字列に触れていても、返答の本体の判定を読むため。
+    def score_value(self, chain: Chain, tag: str) -> float | None:
+        """返答で最後の ``tag`` の直後に書いた最初のトークンの位置で、0〜9 の数字を選ぶ
+        確率から点数の期待値を出し、[0, 1] に縮めて返す。返答に ``tag`` がなければ None。
+        最後のものを読むのは、思考の中で同じ文字列に触れていても、返答の本体の採点を
+        読むため。
 
         その位置の活性の最終層に lm_head を掛けると、そのトークンを選んだときの
         ロジットになる。"""
@@ -280,12 +284,12 @@ class ChainGenerator:
         if found is None:
             return None
         head = self.model.lm_head
-        return self._yes_share(head(chain.positions[found, -1].to(head.weight.dtype)))
+        return self._expected_score(head(chain.positions[found, -1].to(head.weight.dtype)))
 
     @torch.inference_mode()
-    def yes_probability_after(self, conversation: list[dict], tag: str) -> float:
-        """最新のターンへの返答を ``tag`` まで書いたところで、次に yes を選ぶ確率を
-        yes と no の確率の和で割って返す。返答は書かず、キャッシュも呼ぶ前に戻す。"""
+    def score_after(self, conversation: list[dict], tag: str) -> float:
+        """最新のターンへの返答を ``tag`` まで書いたところで、次に書く数字の確率から点数の
+        期待値を出し、[0, 1] に縮めて返す。返答は書かず、キャッシュも呼ぶ前に戻す。"""
         # 呼ぶ前のキャッシュを写し取る。全注意層は追記のたびに cat で新しいテンソルを作るが、
         # 線形注意層は再帰状態を in-place に更新するので、参照ではなく複製で控える。層の
         # 属性のうちモジュール以外（テンソル、テンソルの並び、長さなどの数値）を丸ごと控える
@@ -313,7 +317,7 @@ class ChainGenerator:
             image_grid_thw,
             hidden=False,
         )
-        probability = self._yes_share(outputs.logits[0, -1])
+        probability = self._expected_score(outputs.logits[0, -1])
 
         for layer, saved in zip(self._cache.layers, snapshot, strict=True):
             for name, value in saved.items():
@@ -353,11 +357,12 @@ class ChainGenerator:
         assert len(new_messages) > 0, "no new message since the last reply"
         return new_messages
 
-    def _yes_share(self, logits: torch.Tensor) -> float:
+    def _expected_score(self, logits: torch.Tensor) -> float:
+        """数字の確率だけを取り出して正規化し、点数の期待値を [0, 1] に縮めたもの。"""
         probs = torch.softmax(logits.float(), dim=-1)
-        yes = probs[self._yes_ids].sum()
-        no = probs[self._no_ids].sum()
-        return float(yes / (yes + no))
+        digit_probs = probs[[ids[0] for ids in self._digit_ids]]
+        digits = torch.arange(SCORE_MAX + 1, device=digit_probs.device, dtype=digit_probs.dtype)
+        return float((digit_probs * digits).sum() / digit_probs.sum() / SCORE_MAX)
 
     def _encode(self, messages: list[dict]):
         """メッセージを履歴の書式でトークン列にし、これまでの位置の続きの 3D 位置と

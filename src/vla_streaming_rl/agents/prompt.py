@@ -31,13 +31,13 @@ import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
-# 返答の先頭の判定の区間。前の返答のサブタスクが達成されたかを yes / no で書かせ、
-# 達成度はその位置で yes を選ぶ確率から読む
-ACHIEVED_TAG = "<achieved>"
+# 返答の先頭の採点の区間。前の返答からの行動が、そのサブタスクの実現に向けてどれだけ
+# 適切だったかを 0〜9 の1桁で書かせ、その位置で各数字を選ぶ確率の期待値から点数を読む
+SCORE_TAG = "<score>"
 
 TEXT_ACTION_PROTOCOL = (
-    f"Reply with {ACHIEVED_TAG}yes or no: whether the subtask of your previous reply has "
-    "been achieved (no if there was none)</achieved> "
+    f"Reply with {SCORE_TAG}an integer from 0 to 9: how well the agent's actions since your "
+    "previous reply served the subtask of that reply (0 if there was none)</score> "
     "then <subtask>one short sentence on what the agent should get done by your next "
     "reply</subtask> then <action>the action only</action>."
 )

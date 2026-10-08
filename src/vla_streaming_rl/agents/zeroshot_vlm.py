@@ -77,7 +77,7 @@ class ZeroShotVLMAgent(Agent):
         # 高レベル方策を進め、返答を確定したステップでその行動を読む
         reply = self.chain.advance()
         # 達成度は判定したステップでだけ記録する
-        achieved_metrics = {}
+        score_metrics = {}
         if reply.age == 0:
             # 確定した返答の <action> を読み、その行動と続けるステップ数を保持する。読め
             # なかったときは、行動として実行できず止まっていたことを伝える user の発言を
@@ -91,12 +91,12 @@ class ZeroShotVLMAgent(Agent):
             )
             if not self.parse_ok:
                 self.prompt_builder.reject(answer_text)
-            if reply.achieved is not None:
-                achieved_metrics = {"vlm/achieved": reply.achieved}
+            if reply.score is not None:
+                score_metrics = {"vlm/score": reply.score}
         elif episode_done:
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
             # フレームで判定する
-            achieved_metrics = {"vlm/achieved": self.chain.judge_current()}
+            score_metrics = {"vlm/score": self.chain.score_current()}
         action = (
             self.held_action
             if reply.age < self.hold_steps
@@ -120,7 +120,7 @@ class ZeroShotVLMAgent(Agent):
             "vlm/msec": reply.msec,
             "vlm/prompt_tokens": float(reply.input_tokens),
             "vlm/completion_tokens": float(reply.output_tokens),
-            **achieved_metrics,
+            **score_metrics,
         }
         return StepResult(
             action=action,

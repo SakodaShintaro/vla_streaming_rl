@@ -42,9 +42,9 @@ def _format_action(action: np.ndarray) -> str:
     return "[" + ", ".join(f"{value:+.2f}" for value in action) + "]"
 
 
-# サブタスクの達成度の移動平均を更新する割合の下限。判定の回数がこの逆数に届くまでは
+# サブタスクに向けた行動の点数の移動平均を更新する割合の下限。判定の回数がこの逆数に届くまでは
 # 単純平均（回数で割る）で取るので、決め打ちの初期値に引きずられない
-ACHIEVED_MEAN_RATE = 0.01
+SCORE_MEAN_RATE = 0.01
 
 
 class OffPolicyAgent(Agent):
@@ -74,7 +74,7 @@ class OffPolicyAgent(Agent):
         prompt_builder: PromptBuilder,
         text_action: bool,
         select_margin: float,
-        achieved_reward_weight: float,
+        score_reward_weight: float,
         steps_per_reply: int,
         parse_action_text,
         high_level_policy: HighLevelPolicy | None,
@@ -90,11 +90,11 @@ class OffPolicyAgent(Agent):
 
         self.text_action = text_action
         self.select_margin = select_margin
-        # サブタスクの達成度を内発的な報酬にする重みと、達成度の移動平均。報酬は
-        # 平均との差にして、判定の甘さ・厳しさの偏りを打ち消す
-        self.achieved_reward_weight = achieved_reward_weight
-        self.achieved_mean = 0.0
-        self.achieved_count = 0
+        # サブタスクに向けた行動の点数を内発的な報酬にする重みと、点数の移動平均。報酬は
+        # 平均との差にして、採点の甘さ・厳しさの偏りを打ち消す
+        self.score_reward_weight = score_reward_weight
+        self.score_mean = 0.0
+        self.score_count = 0
         assert steps_per_reply >= 1, steps_per_reply
         self.steps_per_reply = steps_per_reply
         if text_action:
@@ -321,12 +321,12 @@ class OffPolicyAgent(Agent):
             texts.update(high_level_texts)
         if self.text_action and reply.age == 0:
             self._read_vlm_action(reply.text)
-            if reply.achieved is not None:
-                self._reward_achieved(reply.achieved, metrics)
+            if reply.score is not None:
+                self._reward_score(reply.score, metrics)
         elif self.text_action and episode_done:
             # エピソードが終わると実行中のサブタスクには次の返答が来ないので、終端の
             # フレームで判定する
-            self._reward_achieved(self.high_level_policy.judge_current(), metrics)
+            self._reward_score(self.high_level_policy.score_current(), metrics)
         holding = self.text_action and reply.age < self.hold_steps
         vlm_action = self.vlm_action if holding else np.zeros(self.action_dim, dtype=np.float32)
         self.prev_vlm_action = vlm_action
@@ -438,17 +438,17 @@ class OffPolicyAgent(Agent):
             )
         return panels
 
-    def _reward_achieved(self, achieved: float, metrics: dict) -> None:
-        """サブタスクの区間はこの行に入る遷移で終わったので、達成度を移動平均との差に
+    def _reward_score(self, score: float, metrics: dict) -> None:
+        """サブタスクの区間はこの行に入る遷移で終わったので、点数を移動平均との差に
         して、その遷移の報酬に足す。"""
-        # 平均はこの判定を含めて更新してから差を取るので、最初の判定の報酬は 0 になる
-        self.achieved_count += 1
-        rate = max(1.0 / self.achieved_count, ACHIEVED_MEAN_RATE)
-        self.achieved_mean += rate * (achieved - self.achieved_mean)
-        bonus = self.achieved_reward_weight * (achieved - self.achieved_mean)
+        # 平均はこの採点を含めて更新してから差を取るので、最初の採点の報酬は 0 になる
+        self.score_count += 1
+        rate = max(1.0 / self.score_count, SCORE_MEAN_RATE)
+        self.score_mean += rate * (score - self.score_mean)
+        bonus = self.score_reward_weight * (score - self.score_mean)
         self.rb.add_latest_reward(bonus)
-        metrics["text/achieved"] = achieved
-        metrics["text/achieved_bonus"] = bonus
+        metrics["text/score"] = score
+        metrics["text/score_bonus"] = bonus
 
     def _read_vlm_action(self, text: str) -> None:
         """Read the action the chain just written names and how many steps it
