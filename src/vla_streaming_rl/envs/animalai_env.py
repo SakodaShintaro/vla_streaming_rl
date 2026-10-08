@@ -391,7 +391,6 @@ class AnimalAIEnv(gym.Env):
         header_lines = [
             f"{self.arena_name}  {successes}/{attempts}",
             self.selector.status(self.global_step),
-            f"step:{self.global_step}  health:{self._agent_health:.2f}",
         ]
         arena = (
             fit_square(self._latest_topdown_image, RENDER_SIZE_PX)
