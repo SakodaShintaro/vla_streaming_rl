@@ -29,7 +29,7 @@ from vla_streaming_rl.agents.base import (
     Agent,
     StepResult,
 )
-from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
+from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -295,8 +295,8 @@ class OffPolicyAgent(Agent):
             self.rb.set_latest_reply(self.network.tokenize(self.last_reply))
             self.reply_panels = {
                 "conversation": render_conversation_panel(
-                    self.prompt_builder.conversation() + [assistant_turn(self.last_reply)],
-                    f"step {global_step}",
+                    infer_result.exchange,
+                    infer_result.text_status,
                     CONVERSATION_PANEL_WIDTH,
                     CONVERSATION_PANEL_HEIGHT,
                 )

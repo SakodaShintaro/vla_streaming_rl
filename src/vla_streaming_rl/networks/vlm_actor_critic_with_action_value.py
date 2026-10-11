@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -256,8 +257,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             images.append(frames)
         return texts, images
 
-    def _generate(self, conversation: list[dict]) -> str:
-        """``conversation`` への返答を書く。ゼロショットの制御器が書くものと同じ。"""
+    def _generate(self, conversation: list[dict]) -> tuple[str, int, int, float]:
+        """``conversation`` への返答を書く。ゼロショットの制御器が書くものと同じ。返答と、
+        読んだトークン数、書いたトークン数、かかった時間（ミリ秒）を返す。"""
+        start = time.perf_counter()
         text, frames = render_conversation(
             self.processor, conversation, True, self.generation_template_kwargs
         )
@@ -271,8 +274,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             else {"do_sample": False}
         )
         output = self.vlm_model.generate(**inputs, max_new_tokens=self.max_new_tokens, **sampling)
-        written = output[0, inputs["input_ids"].shape[1] :]
-        return self.processor.tokenizer.decode(written, skip_special_tokens=True).strip()
+        prompt_tokens = int(inputs["input_ids"].shape[1])
+        written = output[0, prompt_tokens:]
+        reply = self.processor.tokenizer.decode(written, skip_special_tokens=True).strip()
+        return reply, prompt_tokens, len(written), (time.perf_counter() - start) * 1000.0
 
     def _text_actions(self, replies: list[str], like: torch.Tensor) -> tuple[torch.Tensor, list]:
         """各返答の <action> が指す行動を、方策の正規化した行動空間のチャンク
@@ -299,7 +304,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             data.episode_step_seq,
             -1,
         )
-        reply = self._generate(conversations[0])
+        reply, prompt_tokens, completion_tokens, msec = self._generate(conversations[0])
         state = self._forward_prompt(*self._state_prompts(conversations, [reply]))
         head_action, _ = self.policy_head.get_action(state)
         critic_out = self.value_head(state, head_action)
@@ -316,11 +321,20 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 "select/q_head": q_head,
                 "select/q_text": q_text,
                 "select/text_chosen": float(text_chosen),
-                "text/parse_failed": float(not parsed[0]),
+                "vlm/parse_failed": float(not parsed[0]),
+                "vlm/prompt_tokens": float(prompt_tokens),
+                "vlm/completion_tokens": float(completion_tokens),
+                "vlm/msec": msec,
             },
             rnn_state=data.rnn_state,
             features=state,
             text=reply,
+            text_status=(
+                f"in {prompt_tokens} tok   out {completion_tokens} tok   {msec:.0f} ms   "
+                f"parse {'ok' if parsed[0] else 'failed'}   "
+                f"{'reply' if text_chosen else 'head'} action runs"
+            ),
+            exchange=conversations[0] + [assistant_turn(reply)],
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -340,6 +354,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 rnn_state=self._dummy_state.clone(),
                 features=terms.next_state,
                 text=None,
+                text_status=None,
+                exchange=None,
             ),
             loss_result=LossResult(loss=terms.total_loss, info=terms.info),
             et_info=EligibilityTraceInfo(

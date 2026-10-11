@@ -66,8 +66,12 @@ class InferResult:
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
     rnn_state: torch.Tensor  # (B, ...)
     features: torch.Tensor
-    # このステップにネットワークが書いた文。文を書かないネットワークでは None
+    # このステップにネットワークが書いた文と、それに添える1行（読んだ・書いたトークン数、
+    # かかった時間など）。文を書かないネットワークではどちらも None
     text: str | None
+    text_status: str | None
+    # その文を書いたときに実際に読んだ会話と、その文。描画用。文を書かないネットワークでは None
+    exchange: list[dict] | None
 
 
 @dataclass
