@@ -22,11 +22,8 @@ class ReplayBufferData:
     dones: torch.Tensor  # (B, T)
     rnn_state: torch.Tensor  # (B, T, space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
-    vlm_actions: torch.Tensor  # (B, T, action_shape)
-    vlm_holds: torch.Tensor  # (B, T, 1)
     system_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     turn_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
-    reply_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     velocity_x: torch.Tensor  # (B, T, 1)
     velocity_y: torch.Tensor  # (B, T, 1)
     velocity_z: torch.Tensor  # (B, T, 1)
@@ -36,8 +33,6 @@ class ReplayBufferData:
     global_step: torch.Tensor  # (B, T, 1)
     episode_step: torch.Tensor  # (B, T, 1)
     health: torch.Tensor  # (B, T, 1)
-    subtask_activations: torch.Tensor  # (B, T, *subtask_shape)
-    subtask_age: torch.Tensor  # (B, T, 1)
 
 
 class ReplayBuffer:
@@ -49,7 +44,6 @@ class ReplayBuffer:
         obs_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
-        subtask_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
         max_prompt_tokens: int,
@@ -79,8 +73,6 @@ class ReplayBuffer:
         self.dones = init_tensor((size, 1))
         self.rnn_states = init_tensor((size, *rnn_state_shape))
         self.actions = init_tensor((size, *action_shape))
-        self.vlm_actions = init_tensor((size, *action_shape))
-        self.vlm_holds = init_tensor((size, 1))
         self.velocity_x = init_tensor((size, 1))
         self.velocity_y = init_tensor((size, 1))
         self.velocity_z = init_tensor((size, 1))
@@ -90,23 +82,12 @@ class ReplayBuffer:
         self.global_step = init_tensor((size, 1))
         self.episode_step = init_tensor((size, 1))
         self.health = init_tensor((size, 1))
-        self.subtask_activations = torch.zeros(
-            (size, *subtask_shape),
-            dtype=torch.bfloat16,
-            device=self.storage_device,
-        )
-        # How many steps ago each stored chain was generated. Kept per
-        # transition because a sampled step is any step of an episode and the
-        # age cannot be recovered from one: it is periodic in the writing
-        # cadence, which no other stored field carries.
-        self.subtask_age = init_tensor((size, 1))
-        # What the tick said, tokenized: the standing task, the text under the
-        # frame, and the chain written on the tick. A conversation is rebuilt
-        # from rows a fixed stride apart, each a frame under its text answered
-        # by its reply, so the rows hold the parts and never the whole.
+        # What the tick said, tokenized: the standing task and the text under
+        # the frame. A conversation is rebuilt from rows a fixed stride apart,
+        # each a frame under its text, so the rows hold the parts and never the
+        # whole.
         self.system_token_ids = self._init_token_ids()
         self.turn_token_ids = self._init_token_ids()
-        self.reply_token_ids = self._init_token_ids()
 
         self.pin_memory = self.storage_device.type == "cpu" and self.output_device.type == "cuda"
         self._staging = {}
@@ -132,8 +113,6 @@ class ReplayBuffer:
         done: bool,
         rnn_state: torch.Tensor,
         action: torch.Tensor,
-        vlm_action: torch.Tensor,
-        vlm_hold: float,
         system_token_ids: list[int],
         turn_token_ids: list[int],
         velocity_x: float,
@@ -146,16 +125,13 @@ class ReplayBuffer:
         episode_step: float,
         health: float,
     ) -> None:
-        """Store the tick. What its chain then writes -- the activations, their
-        age and the reply -- comes after, through :meth:`amend_latest`."""
+        """Store the tick."""
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
         self.rewards[self.idx].fill_(reward)
         self.dones[self.idx].fill_(done)
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
-        self.vlm_actions[self.idx].copy_(vlm_action.reshape(self.vlm_actions[self.idx].shape))
-        self.vlm_holds[self.idx].fill_(vlm_hold)
         self.velocity_x[self.idx].fill_(velocity_x)
         self.velocity_y[self.idx].fill_(velocity_y)
         self.velocity_z[self.idx].fill_(velocity_z)
@@ -170,19 +146,6 @@ class ReplayBuffer:
 
         self.idx = (self.idx + 1) % self.size
         self.full = self.full or self.idx == 0
-
-    def amend_latest(
-        self, subtask_activation: torch.Tensor, subtask_age: int, reply_token_ids: list[int]
-    ) -> None:
-        """Complete the newest row with what the chain wrote on it."""
-        latest = (self.idx - 1) % self.size
-        self.subtask_activations[latest].copy_(subtask_activation)
-        self.subtask_age[latest].fill_(subtask_age)
-        self._store_token_ids(self.reply_token_ids, latest, reply_token_ids)
-
-    def add_latest_reward(self, bonus: float) -> None:
-        """最新の行の報酬（その行に入る遷移で得た報酬）に ``bonus`` を足す。"""
-        self.rewards[(self.idx - 1) % self.size] += bonus
 
     def _store_token_ids(self, storage: torch.Tensor, row: int, token_ids: list[int]) -> None:
         assert len(token_ids) <= self.max_prompt_tokens, (
@@ -225,11 +188,8 @@ class ReplayBuffer:
             self._gather("dones", self.dones, indices),
             self._gather("rnn_states", self.rnn_states, indices),
             self._gather("actions", self.actions, indices),
-            self._gather("vlm_actions", self.vlm_actions, indices),
-            self._gather("vlm_holds", self.vlm_holds, indices),
             self._gather("system_token_ids", self.system_token_ids, indices),
             self._gather("turn_token_ids", self.turn_token_ids, indices),
-            self._gather("reply_token_ids", self.reply_token_ids, indices),
             self._gather("velocity_x", self.velocity_x, indices),
             self._gather("velocity_y", self.velocity_y, indices),
             self._gather("velocity_z", self.velocity_z, indices),
@@ -239,8 +199,6 @@ class ReplayBuffer:
             self._gather("global_step", self.global_step, indices),
             self._gather("episode_step", self.episode_step, indices),
             self._gather("health", self.health, indices),
-            self._gather("subtask_activations", self.subtask_activations, indices),
-            self._gather("subtask_age", self.subtask_age, indices),
         )
 
     def valid_start_indices(self) -> torch.Tensor:

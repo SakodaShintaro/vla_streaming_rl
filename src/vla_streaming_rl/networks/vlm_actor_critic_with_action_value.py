@@ -50,7 +50,6 @@ def _rows(data: ReplayBufferData) -> tuple[torch.Tensor, ...]:
         data.observations,
         data.system_token_ids,
         data.turn_token_ids,
-        data.reply_token_ids,
     )
 
 
@@ -85,11 +84,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_dim = action_space_shape[0]
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
-        # The prompt of a tick is the conversation the zero-shot controller
-        # would read there: its turns are the buffer rows ``steps_per_reply``
-        # apart ending on the tick, as many as ``seq_len`` ticks hold, each
-        # a frame under its own text answered by the reply the high-level
-        # policy wrote on its tick.
+        # The prompt of a tick is a conversation of the buffer rows
+        # ``steps_per_reply`` apart ending on the tick, as many as ``seq_len``
+        # ticks hold, each a frame under its own text.
         assert steps_per_reply >= 1, steps_per_reply
         self.steps_per_reply = steps_per_reply
 
@@ -137,11 +134,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         return image
 
-    def to_stored_subtask(self, activations: torch.Tensor) -> torch.Tensor:
-        """活性は読まない。高レベル方策の返答は会話のテキストとして届く。"""
-        del activations
-        return torch.zeros(self.subtask_shape)
-
     def observe_scalar_obs(
         self,
         velocity_x: float,
@@ -173,15 +165,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         observations: torch.Tensor,
         system_token_ids: torch.Tensor,
         turn_token_ids: torch.Tensor,
-        reply_token_ids: torch.Tensor,
         slot: int,
     ) -> tuple[list[str], list[list[torch.Tensor]]]:
         """The conversation of each batch element's ``slot`` tick, rendered.
 
-        Its turns are the rows ``steps_per_reply`` apart ending on the slot:
-        each a frame under its own text, the earlier ones answered by the reply
-        their tick wrote, as many as ``seq_len`` ticks hold; an episode boundary
-        does not cut them, so what the episodes before did and what came of them
+        Its turns are the rows ``steps_per_reply`` apart ending on the slot,
+        each a frame under its own text, as many as ``seq_len`` ticks hold; an
+        episode boundary does not cut them, so what the episodes before did
         stays in view.
         """
         cursor = slot % observations.shape[1]
@@ -194,18 +184,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             turns_num = min((self.seq_len - 1) // stride, cursor // stride)
             rows = [cursor - stride * k for k in range(turns_num, -1, -1)]
             turn_texts = self._decode(turn_token_ids[b, rows])
-            reply_texts = self._decode(reply_token_ids[b, rows[:-1]])
             conversation = [
                 {"role": "system", "content": [{"type": "text", "text": system_texts[b]}]}
             ]
-            for row, turn_text, reply_text in zip(rows, turn_texts, reply_texts, strict=False):
+            for row, turn_text in zip(rows, turn_texts, strict=True):
                 conversation.append(_user_turn(observations[b, row], turn_text))
-                if reply_text:
-                    conversation.append(
-                        {"role": "assistant", "content": [{"type": "text", "text": reply_text}]}
-                    )
-            conversation.append(_user_turn(observations[b, rows[-1]], turn_texts[-1]))
-            # ゼロショットの高レベル方策と同じく、モデル自身の思考は閉じる
+            # モデル自身の思考は閉じる
             text, frames = render_conversation(self.processor, conversation, False)
             texts.append(text)
             images.append(frames)
@@ -217,7 +201,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             data.s_seq,
             data.system_token_ids_seq,
             data.turn_token_ids_seq,
-            data.reply_token_ids_seq,
             -1,
         )
         state, action, critic_out = self._infer(texts, images)

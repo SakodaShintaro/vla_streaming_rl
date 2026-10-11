@@ -106,7 +106,6 @@ def build_network(
             actor_critic_config=args.actor_critic,
             horizon=args.horizon,
             policy_head_factory=policy_head_factory,
-            high_level_config=args.high_level,
         ).to(device)
 
     elif args.network_class == "vlm_actor_critic_with_action_value":

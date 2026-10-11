@@ -76,12 +76,7 @@ actor_critic:
   encoder_block_num: 8
   temporal_model_type: gru
   layer_scale_init: 0.0001
-  subtask_dropout: 0.1
   token_dropout: 0.0
-  # サブタスクだけを見て行動する系列の割合。サブタスク以外の入力をすべて落とす
-  observation_dropout: 0.0
   # 学習時に系列ごとに 0 からこの数までの一様なステップ数を引き、最新の方からその数の
   # ステップの観測（画像・報酬・スカラー）を落とす。行動は落とさない
   observation_drop_steps_max: 0
-  bc_loss_weight: 0.0
-  subtask_pool: none  # [mean, none]

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: MIT
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from .reward_processor import RewardProcessor
 from .self_attention import get_fourier_embeds_from_coordinates
@@ -13,25 +12,9 @@ class SpatialTemporalEncoder(nn.Module):
 
     Every input the network has becomes tokens on a single axis -- the patch
     grid, the previous action a token per component, the reward, the
-    interoceptive scalars, a register, and the activations a chain of thought
-    issued this step -- and :class:`SpatialTemporalTransformer` mixes them across
-    that axis and across the window. The last step's whole axis is the state the
-    heads read.
-
-    The chain's budget is fixed per step, so ``space_len`` is constant and the
-    recurrent state keeps its shape however the chain restarts.
-    ``subtask_tokens_num = 0`` leaves the axis without chain tokens, which is the
-    ablation a chain-carrying run is measured against.
-
-    The chain arrives with a depth axis -- one hidden state, or every one behind
-    it -- and a learned softmax over that axis picks which depth to read, the way
-    the VLM network weights its own. ``subtask_pool`` then decides how the step's
-    tokens reach the space axis. The temporal block runs one recurrence per space
-    position, so slot i of an unpooled chain holds tokens i, i+L, i+2L ... of one
-    continuous chain: a stride-L phase whose alignment shifts every restart,
-    which is not the correspondence the other tokens have. ``mean`` collapses the
-    step to a single slot whose recurrence follows the chain itself, and also
-    frees ``space_len`` -- and with it the recurrent state's shape -- from L.
+    interoceptive scalars and a register -- and
+    :class:`SpatialTemporalTransformer` mixes them across that axis and across
+    the window. The last step's whole axis is the state the heads read.
     """
 
     def __init__(
@@ -44,27 +27,11 @@ class SpatialTemporalEncoder(nn.Module):
         action_dim: int,
         scalar_obs_dim: int,
         temporal_model_type: str,
-        subtask_tokens_num: int,
-        subtask_layers: int,
-        subtask_dim: int,
-        subtask_pool: str,
-        steps_per_reply: int,
         layer_scale_init: float,
     ) -> None:
         super().__init__()
-        assert subtask_tokens_num >= 0, (
-            f"subtask_tokens_num must not be negative; got {subtask_tokens_num}"
-        )
-        assert subtask_pool in ("mean", "none"), f"Unknown subtask_pool: {subtask_pool}"
-        assert steps_per_reply >= 1, steps_per_reply
-        # Pooling leaves one slot per step; without it every token gets its own.
-        # With no chain at all there is nothing to pool, and averaging an empty
-        # axis would invent a slot full of NaN.
-        self.pool_subtask = subtask_pool == "mean" and subtask_tokens_num > 0
-        subtask_slots = 1 if self.pool_subtask else subtask_tokens_num
         self.n_layer = n_layer
         self.reward_processor = reward_processor
-        self.subtask_tokens_num = subtask_tokens_num
 
         # The frozen encoder's (C, H, W) grid, projected here to the token width
         # and read as [B, H * W, C'] tokens.
@@ -79,23 +46,7 @@ class SpatialTemporalEncoder(nn.Module):
             + 1  # reward
             + scalar_obs_dim  # interoceptive scalars
             + 1  # register
-            + subtask_slots  # this step's chain of thought
         )
-
-        # The VLM's hidden width down to the encoder's: the only trainable thing
-        # on the chain's path, since the VLM itself never learns.
-        # Input-independent logits over the chain's depth axis; the softmax over
-        # them is the weighting that picks which depth the encoder reads.
-        self.subtask_layer_logits = nn.Parameter(torch.zeros(subtask_layers))
-        self.subtask_proj = nn.Linear(subtask_dim, self.hidden_image_dim)
-        # How old the chain is, added onto the chain's own tokens rather than
-        # given a token of its own: the same activations mean one thing on the
-        # frame they were written about and another fifteen steps later, and
-        # what has to know that is the slot carrying them. Zero-initialized, so
-        # a run starts from exactly the chain embedding it had before and moves
-        # off it only if the age turns out to matter.
-        self.subtask_age_embed = nn.Embedding(steps_per_reply, self.hidden_image_dim)
-        nn.init.zeros_(self.subtask_age_embed.weight)
 
         self.spatial_temporal = SpatialTemporalTransformer(
             n_layer=n_layer,
@@ -123,9 +74,6 @@ class SpatialTemporalEncoder(nn.Module):
         rewards: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)
         scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
-        subtask_activations: torch.Tensor,  # (B, T, subtask_tokens_num, subtask_layers, subtask_dim)
-        subtask_age: torch.Tensor,  # (B, T, 1)
-        subtask_keep: torch.Tensor,  # (B,) bool: which sequences keep their chain
         token_keep: torch.Tensor,  # (B, T, space_len) bool: which tokens are kept
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -149,16 +97,6 @@ class SpatialTemporalEncoder(nn.Module):
         register_token = torch.zeros(
             (B, T, 1, self.hidden_image_dim), device=images.device, dtype=images.dtype
         )
-        weights = F.softmax(self.subtask_layer_logits, dim=0).to(subtask_activations.dtype)
-        subtask = torch.matmul(weights.view(1, 1, 1, 1, -1), subtask_activations).squeeze(3)
-        subtask = subtask.to(image_embed.dtype) * subtask_keep.view(-1, 1, 1, 1).to(
-            image_embed.dtype
-        )
-        subtask = subtask.mean(dim=2, keepdim=True) if self.pool_subtask else subtask
-        # [B, T, 1, C'], broadcast over the slots: every token of one step's
-        # chain is that step's chain, so they share its age.
-        age_embed = self.subtask_age_embed(subtask_age.squeeze(-1).long()).unsqueeze(2)
-        subtask_embed = self.subtask_proj(subtask) + age_embed  # [B, T, subtask_slots, C']
 
         all_embed = torch.cat(
             [
@@ -167,7 +105,6 @@ class SpatialTemporalEncoder(nn.Module):
                 reward_embed,
                 scalar_obs_embed,
                 register_token,
-                subtask_embed,
             ],
             dim=2,
         )

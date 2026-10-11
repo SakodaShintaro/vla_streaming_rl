@@ -37,7 +37,6 @@ class InferInput:
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
     system_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
     turn_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
-    reply_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
     velocity_x_seq: torch.Tensor  # (B, T, 1)
     velocity_y_seq: torch.Tensor  # (B, T, 1)
     velocity_z_seq: torch.Tensor  # (B, T, 1)
@@ -47,8 +46,6 @@ class InferInput:
     global_step_seq: torch.Tensor  # (B, T, 1)
     episode_step_seq: torch.Tensor  # (B, T, 1)
     health_seq: torch.Tensor  # (B, T, 1)
-    subtask_activations_seq: torch.Tensor  # (B, T, *subtask_shape)
-    subtask_age_seq: torch.Tensor  # (B, T, 1)
 
 
 @dataclass
@@ -108,11 +105,6 @@ class NetworkInterface(nn.Module, abc.ABC):
     metaclass conflict.
     """
 
-    # 高レベル方策のサブタスクの活性を読むネットワークは、1ステップ分を保存する形を宣言する。
-    # エージェントはこれでバッファの欄の大きさを決め、``to_stored_subtask`` を通した
-    # ものを入れる。読まないネットワークは何も持たない
-    subtask_shape: tuple[int, int] = (0, 0)
-
     @abc.abstractmethod
     def init_state(self) -> torch.Tensor:
         """Initial recurrent state the agent carries between steps."""
@@ -127,11 +119,6 @@ class NetworkInterface(nn.Module, abc.ABC):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         """The stored form of one raw observation image, matching
         ``stored_image_shape``."""
-
-    @abc.abstractmethod
-    def to_stored_subtask(self, activations: torch.Tensor) -> torch.Tensor:
-        """高レベル方策の1ステップ分のサブタスクの活性を、``subtask_shape`` の保存形に
-        したもの。"""
 
     @abc.abstractmethod
     def observe_scalar_obs(

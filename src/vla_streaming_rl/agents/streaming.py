@@ -21,10 +21,9 @@ import numpy as np
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import Agent, StepResult, render_high_level
+from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
-from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -52,15 +51,12 @@ class StreamingAgent(Agent):
         pad_token_id: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
-        high_level_policy: HighLevelPolicy | None,
     ) -> None:
         super().__init__(
             horizon=horizon,
             reset_on_episode_end=reset_on_episode_end,
             prompt_builder=prompt_builder,
         )
-        # 凍結した高レベル方策。持たない学習では None
-        self.high_level_policy = high_level_policy
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # action properties
@@ -111,7 +107,6 @@ class StreamingAgent(Agent):
             obs_shape=self.network.stored_image_shape(),
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
-            subtask_shape=self.network.subtask_shape,
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             max_prompt_tokens=max_prompt_tokens,
@@ -177,8 +172,7 @@ class StreamingAgent(Agent):
             health_obs,
         ) = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
-        # the observation. The chain reads the same conversation on the steps it
-        # writes, and writes its own turn back into it.
+        # the observation.
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
@@ -188,8 +182,6 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            torch.zeros(self.action_dim, device=self.device),
-            0.0,
             self.network.tokenize(prompt),
             self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
@@ -202,23 +194,8 @@ class StreamingAgent(Agent):
             episode_step_obs,
             health_obs,
         )
-        # 高レベル方策を進め、その返答でこのステップの行を埋める。エピソードの最初の
-        # ステップでは、前のエピソードの返答を捨ててそのフレームで書き直す
         panels = {}
         texts = {"prompt": prompt}
-        if self.high_level_policy is None:
-            self.rb.amend_latest(torch.zeros(self.network.subtask_shape), 0, [])
-        else:
-            if episode_started:
-                self.high_level_policy.reset()
-            reply = self.high_level_policy.advance()
-            self.rb.amend_latest(
-                self.network.to_stored_subtask(reply.activations),
-                reply.age,
-                self.network.tokenize(reply.text),
-            )
-            panels, high_level_texts = render_high_level(reply)
-            texts.update(high_level_texts)
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
             self.prev_action = action
@@ -293,7 +270,6 @@ class StreamingAgent(Agent):
                 rnn_state=self.rnn_state,
                 system_token_ids_seq=latest_data.system_token_ids,
                 turn_token_ids_seq=latest_data.turn_token_ids,
-                reply_token_ids_seq=latest_data.reply_token_ids,
                 velocity_x_seq=latest_data.velocity_x,
                 velocity_y_seq=latest_data.velocity_y,
                 velocity_z_seq=latest_data.velocity_z,
@@ -303,8 +279,6 @@ class StreamingAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
-                subtask_activations_seq=latest_data.subtask_activations,
-                subtask_age_seq=latest_data.subtask_age,
             )
         )
         self.rnn_state = infer_result.rnn_state
@@ -396,8 +370,7 @@ class StreamingAgent(Agent):
             health_obs,
         ) = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
-        # the observation. The chain reads the same conversation on the steps it
-        # writes, and writes its own turn back into it.
+        # the observation.
         self.prompt_builder.observe(obs, reward, info, image)
         prompt = self.prompt_builder.task_text()
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
@@ -407,8 +380,6 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            torch.zeros(self.action_dim, device=self.device),
-            0.0,
             self.network.tokenize(prompt),
             self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
@@ -421,23 +392,8 @@ class StreamingAgent(Agent):
             episode_step_obs,
             health_obs,
         )
-        # 高レベル方策を進め、その返答でこのステップの行を埋める。エピソードの最初の
-        # ステップでは、前のエピソードの返答を捨ててそのフレームで書き直す
         panels = {}
         texts = {"prompt": prompt}
-        if self.high_level_policy is None:
-            self.rb.amend_latest(torch.zeros(self.network.subtask_shape), 0, [])
-        else:
-            if episode_started:
-                self.high_level_policy.reset()
-            reply = self.high_level_policy.advance()
-            self.rb.amend_latest(
-                self.network.to_stored_subtask(reply.activations),
-                reply.age,
-                self.network.tokenize(reply.text),
-            )
-            panels, high_level_texts = render_high_level(reply)
-            texts.update(high_level_texts)
 
         if self.action_chunk is not None and self.chunk_step < self.horizon:
             action = self._to_env_action(self.action_chunk[self.chunk_step])
