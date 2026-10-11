@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - vlm_off_policy
+  - _self_
+
+vla:
+  select_margin: .inf
+learning_starts: 1000000000
