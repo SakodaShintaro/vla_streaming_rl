@@ -106,11 +106,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
         self.max_new_tokens = vla_config.max_new_tokens
         self.temperature = vla_config.temperature
-        self.generation_template_kwargs = (
-            {"enable_thinking": False}
-            if vla_config.reasoning_effort == "none"
-            else {"enable_thinking": True, "reasoning_effort": vla_config.reasoning_effort}
-        )
         # 返答の行動と頭の行動を行動価値で選ぶときの余裕。頭の行動の価値が返答の行動を
         # これより大きく上回るときだけ、頭の行動を実行する
         self.select_margin = vla_config.select_margin
@@ -129,6 +124,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             device=device,
         )
         self.device = device
+        # 返答を書かせるときにテンプレートへ渡す引数。思考の量の段階（reasoning_effort）を
+        # 持たないテンプレートには、思考の有無だけを渡す
+        self.generation_template_kwargs = {"enable_thinking": vla_config.reasoning_effort != "none"}
+        if vla_config.reasoning_effort != "none" and (
+            "reasoning_effort" in self.processor.chat_template
+        ):
+            self.generation_template_kwargs["reasoning_effort"] = vla_config.reasoning_effort
 
         # VLM config
         vlm_cfg = self.vlm_model.config.text_config
@@ -337,7 +339,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 value_report=self.value_head.value_report(terms.next_critic_out.output),
                 rnn_state=self._dummy_state.clone(),
                 features=terms.next_state,
-                text="",
+                text=None,
             ),
             loss_result=LossResult(loss=terms.total_loss, info=terms.info),
             et_info=EligibilityTraceInfo(

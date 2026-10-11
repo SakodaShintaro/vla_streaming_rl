@@ -251,7 +251,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_report=value_report,
             rnn_state=rnn_state,
             features=x,
-            text="",
+            text=None,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -354,7 +354,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_report=self.value_head.value_report(next_q_out.output),
             rnn_state=next_rnn_state,
             features=next_state,
-            text="",
+            text=None,
         )
 
         info_dict = {

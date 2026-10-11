@@ -23,11 +23,17 @@ import numpy as np
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import Agent, StepResult
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.base import (
+    CONVERSATION_PANEL_HEIGHT,
+    CONVERSATION_PANEL_WIDTH,
+    Agent,
+    StepResult,
+)
+from vla_streaming_rl.agents.prompt import PromptBuilder, assistant_turn
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
+from vla_streaming_rl.utils import render_conversation_panel
 
 
 class OffPolicyAgent(Agent):
@@ -107,8 +113,10 @@ class OffPolicyAgent(Agent):
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
-        # ネットワークが最後に書いた文。書かないネットワークでは空のまま
+        # ネットワークが最後に書いた文と、それを会話とともに描いたパネル。文を書かない
+        # ネットワークでは空のまま
         self.last_reply = ""
+        self.reply_panels = {}
         # the first observation of a run starts an episode
         self._previous_done = True
         # Shared representation fed to policy/value/prediction heads on the
@@ -250,7 +258,7 @@ class OffPolicyAgent(Agent):
             return StepResult(
                 action=action,
                 metrics=metrics,
-                panels={},
+                panels=self.reply_panels,
                 texts={"prompt": prompt, "reply": self.last_reply},
             )
 
@@ -282,9 +290,17 @@ class OffPolicyAgent(Agent):
         metrics.update(infer_result.value_report)
         # ネットワークがこのステップに書いた文を、その行に残す。次のステップの会話は
         # それを含めて組まれる
-        self.last_reply = infer_result.text
-        self.rb.set_latest_reply(self.network.tokenize(self.last_reply))
-        if len(self.last_reply) > 0:
+        if infer_result.text is not None:
+            self.last_reply = infer_result.text
+            self.rb.set_latest_reply(self.network.tokenize(self.last_reply))
+            self.reply_panels = {
+                "conversation": render_conversation_panel(
+                    self.prompt_builder.conversation() + [assistant_turn(self.last_reply)],
+                    f"step {global_step}",
+                    CONVERSATION_PANEL_WIDTH,
+                    CONVERSATION_PANEL_HEIGHT,
+                )
+            }
             self.prompt_builder.add_reply(self.last_reply)
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
@@ -295,7 +311,7 @@ class OffPolicyAgent(Agent):
         return StepResult(
             action=action,
             metrics=metrics,
-            panels={},
+            panels=self.reply_panels,
             texts={"prompt": prompt, "reply": self.last_reply},
         )
 
