@@ -305,7 +305,5 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
-    # 返答は毎ステップ書くので、会話の窓 vla.seq_len には今のステップとその前の
-    # seq_len - 1 回のやり取りが収まる
-    history_turns = args.vla.seq_len - 1
-    return PROMPT_BUILDERS[args.env_id](env, history_turns)
+    # 会話の履歴は VLM の KV キャッシュが持つので、builder 側には残さない
+    return PROMPT_BUILDERS[args.env_id](env, 0)

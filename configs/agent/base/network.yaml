@@ -38,9 +38,9 @@ policy_head:
   detach_state: true
 
 vla:
-  # 会話に残すステップ数。今のステップと、その前の seq_len - 1 回のやり取り。
-  # 会話はリプレイバッファのこの数の行から組み直す
-  seq_len: 8
+  # 会話は VLM の KV キャッシュに積む。システムプロンプトは常に残し、その後ろのターン
+  # （フレーム・数値・返答）は直近この数のトークンまでを先入れ先出しで持つ
+  window_tokens: 32768
   model_id: Qwen/Qwen3.5-9B
   load_in_4bit: false
   use_lora: false

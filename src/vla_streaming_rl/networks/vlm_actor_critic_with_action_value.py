@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: MIT
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -19,10 +18,12 @@ from .interface import (
     LossResult,
     NetworkInterface,
 )
+from .modules.chain_generator import ChainGenerator
 from .modules.head_output import HeadOutput
 from .modules.value_head import DistributionalValueHead
-from .modules.vlm_backbone import load_model
-from .modules.vlm_inputs import build_vlm_inputs, render_conversation
+
+# 表示用に残す直近の会話のメッセージ数
+EXCHANGE_MESSAGES = 8
 
 
 @dataclass
@@ -43,10 +44,8 @@ def _rows(data: ReplayBufferData) -> tuple[torch.Tensor, ...]:
     """What a replay batch holds of each tick's prompt, in the order
     ``_act`` reads them."""
     return (
-        data.observations,
         data.system_token_ids,
         data.turn_token_ids,
-        data.reply_token_ids,
         data.episode_step,
     )
 
@@ -54,10 +53,13 @@ def _rows(data: ReplayBufferData) -> tuple[torch.Tensor, ...]:
 class VLMActorCriticWithActionValue(NetworkInterface):
     """VLM backbone + DiffusionPolicy + Action Value critic.
 
-    Every tick the VLM first writes the reply the zero-shot controller would --
-    its action -- to the conversation of the episode so far.
-    The state is then read off the same VLM run over that conversation with the
-    reply in it, so the heads see what the VLM saw, thought and proposed. The
+    Every tick the VLM reads the tick's frame and text on top of the episode's
+    conversation so far and writes the reply the zero-shot controller would --
+    its action. The conversation lives in the VLM's KV cache: the system prompt
+    stays, the turns behind it are kept first-in first-out up to
+    ``window_tokens``, and a tick only runs the tokens it adds. The state is
+    read off that same run -- the activations of what the tick added, its reply
+    included -- so the heads see what the VLM saw, thought and proposed. The
     VLM is frozen, so what it gives a tick is computed once, when the tick is
     acted on, and kept in the replay buffer: learning reads it back and never
     runs the VLM. Two
@@ -70,8 +72,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     Architecture:
     - VLM (Qwen3.5/Qwen-VL, frozen): processes images + text.
     - Stored representation: the mean across every VLM hidden state (embedding
-      + each transformer layer output), AdaptiveAvgPool1d over the tokens to
-      ``num_state_queries`` of them.
+      + each transformer layer output) at the positions the tick added,
+      AdaptiveAvgPool1d over them to ``num_state_queries``.
     - State extractor: a per-token Linear projection of that representation.
     - DiffusionPolicy: denoises actions conditioned on extracted state.
     - Critic: Q(state, action) with dueling architecture.
@@ -94,26 +96,16 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         decision_fps: float,
     ) -> None:
         super().__init__()
-        self.seq_len = vla_config.seq_len
+        # 会話は VLM の KV キャッシュが持つので、バッファから読む窓は今のステップだけでよい
+        self.seq_len = 1
         # 状態の元になる表現は、行動を決めたステップでだけ計算して保存する。チャンクの途中の
         # ステップには保存されないので、毎ステップ行動を決める設定でだけ使える
         assert horizon == 1, f"the VLM network stores a state on every tick; got horizon {horizon}"
         self.horizon = horizon
         self.action_dim = action_space_shape[0]
-        self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
-        # The prompt of a tick is a conversation of the last ``seq_len`` buffer
-        # rows ending on the tick, each a frame under its own text answered by
-        # the reply written on it. A reply is written on every tick.
-        # 返答の生成。思考の量は "none" なら思考を閉じた形、それ以外はテンプレートの
-        # reasoning_effort に渡す
-        assert vla_config.max_new_tokens >= 1, vla_config.max_new_tokens
-        assert vla_config.temperature >= 0.0, vla_config.temperature
-        assert vla_config.reasoning_effort in ("none", "low", "medium", "xhigh"), (
-            vla_config.reasoning_effort
-        )
-        self.max_new_tokens = vla_config.max_new_tokens
-        self.temperature = vla_config.temperature
+        # VLM は凍結して使う。状態は保存した表現から作るので、VLM には勾配が届かない
+        assert not vla_config.use_lora, "the VLM is frozen in this network"
         # 返答の行動と頭の行動を行動価値で選ぶときの余裕。頭の行動の価値が返答の行動を
         # これより大きく上回るときだけ、頭の行動を実行する
         self.select_margin = vla_config.select_margin
@@ -122,27 +114,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_high = action_high
         self.decision_fps = decision_fps
 
-        # Load VLM
+        # 返答を書く VLM。会話は KV キャッシュに積み、システムプロンプトを残して、その後ろを
+        # 直近 window_tokens トークンまで FIFO で持つ
         device = "cuda"
-        self.use_lora = bool(vla_config.use_lora)
-        self.vlm_model, self.processor = load_model(
-            vla_config.model_id,
-            use_lora=self.use_lora,
-            load_in_4bit=vla_config.load_in_4bit,
-            device=device,
-        )
+        self.generator = ChainGenerator(vla_config, torch.device(device))
+        self.processor = self.generator.processor
         self.device = device
-        # 返答を書かせるときにテンプレートへ渡す引数。思考の量の段階（reasoning_effort）を
-        # 持たないテンプレートには、思考の有無だけを渡す
-        self.generation_template_kwargs = {"enable_thinking": vla_config.reasoning_effort != "none"}
-        if vla_config.reasoning_effort != "none" and (
-            "reasoning_effort" in self.processor.chat_template
-        ):
-            self.generation_template_kwargs["reasoning_effort"] = vla_config.reasoning_effort
-
-        # VLM config
-        vlm_cfg = self.vlm_model.config.text_config
-        self.vlm_hidden_size = vlm_cfg.hidden_size
+        self.vlm_hidden_size = self.generator.hidden_size
         self.pad_token_id = pad_token_id
 
         self.num_state_queries = vla_config.num_state_queries
@@ -158,16 +136,21 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.value_head = value_head_factory(state_dim, self.action_dim)
 
         self._dummy_state = torch.zeros(1, 1, 1)
+        # このステップのフレーム（会話に積むために覚えておく）と、表示用に残す直近の会話
+        self._frame = None
+        self._exchange = None
 
     def init_state(self) -> torch.Tensor:
         return self._dummy_state.clone()
 
     def stored_image_shape(self) -> tuple[int, ...]:
-        """The image itself: the VLM reads the frames in its prompt."""
-        return tuple(self.observation_space_shape)
+        """何も保存しない。フレームは会話に積んだ時点で KV キャッシュに入る。"""
+        return (0,)
 
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
-        return image
+        """バッファには何も置かず、このステップの会話に積むフレームとして覚えておく。"""
+        self._frame = image
+        return torch.zeros(0)
 
     def stored_state_shape(self) -> tuple[int, ...]:
         """VLM の表現を ``num_state_queries`` トークンに均したもの。射影は学習するので、
@@ -200,62 +183,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             results.append(self.processor.tokenizer.decode(valid_ids, skip_special_tokens=True))
         return results
 
-    def _conversation(
-        self,
-        observations: torch.Tensor,
-        system_token_ids: torch.Tensor,
-        turn_token_ids: torch.Tensor,
-        reply_token_ids: torch.Tensor,
-        episode_step: torch.Tensor,
-    ) -> list[dict]:
-        """The conversation of the window's last tick, up to the tick's own turn.
-
-        Its turns are the window's rows, each a frame under its timestamp and
-        text, the earlier ones answered by the reply their tick wrote. Only the
-        last tick's own episode is kept, as the zero-shot controller starts
-        every episode on an empty conversation.
-        """
-        rows = list(range(observations.shape[0]))[-self.seq_len :]
-        # エピソードの中ではステップ数が増えていく。増えていない所より前は別のエピソード
-        steps = [float(episode_step[row, 0]) for row in rows]
-        first = len(rows) - 1
-        while first > 0 and steps[first - 1] < steps[first]:
-            first -= 1
-        rows, steps = rows[first:], steps[first:]
-        turn_texts = self._decode(turn_token_ids[rows])
-        reply_texts = self._decode(reply_token_ids[rows])
-        system_text = self._decode(system_token_ids[rows[-1:]])[0]
-        conversation = [{"role": "system", "content": [{"type": "text", "text": system_text}]}]
-        for i, row in enumerate(rows):
-            conversation.append(
-                user_turn(steps[i] / self.decision_fps, observations[row], turn_texts[i])
-            )
-            if i < len(rows) - 1 and reply_texts[i]:
-                conversation.append(assistant_turn(reply_texts[i]))
-        return conversation
-
-    def _generate(self, conversation: list[dict]) -> tuple[str, int, int, float]:
-        """``conversation`` への返答を書く。ゼロショットの制御器が書くものと同じ。返答と、
-        読んだトークン数、書いたトークン数、かかった時間（ミリ秒）を返す。"""
-        start = time.perf_counter()
-        text, frames = render_conversation(
-            self.processor, conversation, True, self.generation_template_kwargs
-        )
-        inputs = self.processor(
-            text=[text], images=[frames], do_rescale=False, return_tensors="pt"
-        ).to(self.device)
-        inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
-        sampling = (
-            {"do_sample": True, "temperature": self.temperature}
-            if self.temperature > 0.0
-            else {"do_sample": False}
-        )
-        output = self.vlm_model.generate(**inputs, max_new_tokens=self.max_new_tokens, **sampling)
-        prompt_tokens = int(inputs["input_ids"].shape[1])
-        written = output[0, prompt_tokens:]
-        reply = self.processor.tokenizer.decode(written, skip_special_tokens=True).strip()
-        return reply, prompt_tokens, len(written), (time.perf_counter() - start) * 1000.0
-
     def _text_actions(self, replies: list[str], like: torch.Tensor) -> tuple[torch.Tensor, list]:
         """各返答の <action> が指す行動を、方策の正規化した行動空間のチャンク
         (B, horizon, action_dim) にしたものと、読めたかどうか。"""
@@ -274,10 +201,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         return self._act(
-            data.s_seq,
             data.system_token_ids_seq,
             data.turn_token_ids_seq,
-            data.reply_token_ids_seq,
             data.episode_step_seq,
             data.warmup,
         )
@@ -316,26 +241,37 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     def _act(
         self,
-        observations: torch.Tensor,
         system_token_ids: torch.Tensor,
         turn_token_ids: torch.Tensor,
-        reply_token_ids: torch.Tensor,
         episode_step: torch.Tensor,
         warmup: bool,
     ) -> InferResult:
-        """最後のステップの行動を決める。会話に返答を書き、その返答まで含めた会話の表現から
-        状態を作り、返答の行動と頭の行動を行動価値で選ぶ。"""
-        assert observations.shape[0] == 1, "Batch size must be 1 for inference"
-        conversation = self._conversation(
-            observations[0],
-            system_token_ids[0],
-            turn_token_ids[0],
-            reply_token_ids[0],
-            episode_step[0],
+        """最後のステップの行動を決める。そのステップのフレームと数値のターンを会話に積んで
+        返答を書かせ、その計算の活性から状態を作り、返答の行動と頭の行動を行動価値で選ぶ。"""
+        assert system_token_ids.shape[0] == 1, "Batch size must be 1 for inference"
+        step = float(episode_step[0, -1, 0])
+        if step == 0.0 or self._exchange is None:
+            # エピソードの最初のステップ。前のエピソードの会話を捨てて、システムプロンプトから
+            # 積み直す
+            self.generator.reset_cache()
+            system_text = self._decode(system_token_ids[0, -1:])[0]
+            self._exchange = [
+                {"role": "system", "content": [{"type": "text", "text": system_text}]}
+            ]
+        turn_text = self._decode(turn_token_ids[0, -1:])[0]
+        self._exchange.append(user_turn(step / self.decision_fps, self._frame, turn_text))
+        chain = self.generator.generate(self._exchange)
+        reply = chain.text
+        self._exchange.append(assistant_turn(reply))
+        # モデルの文脈はキャッシュが持つので、リストには差分の計算と表示に要る直近だけを残す
+        self._exchange = self._exchange[-EXCHANGE_MESSAGES:]
+        exchange = list(self._exchange)
+        prompt_tokens, completion_tokens, msec = chain.prompt_tokens, len(chain.tokens), chain.msec
+        # このステップで積んだ位置の活性を num_state_queries トークンに均す
+        pooled = F.adaptive_avg_pool1d(
+            chain.states.to(torch.float32).T.unsqueeze(0), self.num_state_queries
         )
-        reply, prompt_tokens, completion_tokens, msec = self._generate(conversation)
-        exchange = conversation + [assistant_turn(reply)]
-        representation = self._representation(exchange)
+        representation = pooled[0].T.to(torch.bfloat16)
         state = self._state(representation.unsqueeze(0))
         head_action, _ = self.policy_head.get_action(state)
         critic_out = self.value_head(state, head_action)
@@ -412,66 +348,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             next_critic_out=next_critic_out,
         )
 
-    def _get_vlm_model_inner(self) -> nn.Module:
-        """Get the inner Qwen3_5Model (handles PEFT wrapping)."""
-        if self.use_lora:
-            return self.vlm_model.model.model
-        return self.vlm_model.model
-
     def _state(self, representation: torch.Tensor) -> torch.Tensor:
         """保存した表現 (B, num_state_queries, hidden_size) を射影して、頭が読む状態にする。"""
         projected = self.state_out_proj(representation.to(torch.float32))
         return projected.flatten(start_dim=1)
-
-    @torch.no_grad()
-    def _representation(self, exchange: list[dict]) -> torch.Tensor:
-        """返答まで含めた会話を VLM に通し、全層（埋め込みと各層の出力）の隠れ状態の平均を
-        ``num_state_queries`` トークンに均したもの、(num_state_queries, hidden_size)。"""
-        text, frames = render_conversation(self.processor, exchange, False, {})
-        inputs = build_vlm_inputs(self.processor, [text], [frames], self.device)
-        vlm_inner = self._get_vlm_model_inner()
-
-        # The vision tower's tokens are scattered into the placeholder positions
-        # of the text embeddings, so the language model is fed embeddings only.
-        inputs_embeds = vlm_inner.get_input_embeddings()(inputs["input_ids"])
-        visual = vlm_inner.visual
-        pixel_values = inputs["vision_pixel_values"].type(visual.dtype)
-        vision_output = visual(pixel_values, grid_thw=inputs["vision_grid_thw"])
-        vision_embeds = vision_output.pooler_output.to(inputs_embeds.device, inputs_embeds.dtype)
-        vision_mask = (
-            (inputs["input_ids"] == inputs["vision_token_id"])
-            .unsqueeze(-1)
-            .expand_as(inputs_embeds)
-        )
-        inputs_embeds = inputs_embeds.masked_scatter(vision_mask, vision_embeds)
-
-        # 3D position_ids are what m-rope reads the image token positions off.
-        position_ids = vlm_inner.compute_3d_position_ids(
-            input_ids=inputs["input_ids"],
-            image_grid_thw=inputs["image_grid_thw"],
-            video_grid_thw=inputs["video_grid_thw"],
-            inputs_embeds=inputs_embeds,
-            attention_mask=inputs["attention_mask"],
-            past_key_values=None,
-            mm_token_type_ids=inputs["mm_token_type_ids"],
-        )
-        # The outer model, not the language model, so lm_head and the cache
-        # wrapping are handled for us.
-        outputs = self.vlm_model.forward(
-            input_ids=None,
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attention_mask=inputs["attention_mask"],
-            output_hidden_states=True,
-            use_cache=False,
-            return_dict=True,
-            logits_to_keep=1,
-        )
-        # 全層を一度に積まず、足し込みながら平均する
-        mean = None
-        for hidden_state in outputs.hidden_states:
-            term = hidden_state[0].to(torch.float32)
-            mean = term if mean is None else mean + term
-        mean = mean / len(outputs.hidden_states)  # (T, hidden_size)
-        pooled = F.adaptive_avg_pool1d(mean.T.unsqueeze(0), self.num_state_queries)
-        return pooled[0].T.to(torch.bfloat16)
