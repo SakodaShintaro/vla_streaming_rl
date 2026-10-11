@@ -105,6 +105,10 @@ class ActorCriticWithActionValue(NetworkInterface):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         return self.image_processor.encode(image.unsqueeze(0)).squeeze(0)
 
+    def stored_state_shape(self) -> tuple[int, ...]:
+        """状態は毎回バッファの窓から作るので、保存しない。"""
+        return (0,)
+
     def _token_keep(self, batch_size: int, steps: int, device: torch.device) -> torch.Tensor:
         """Which tokens of a batch's windows the encoder gets to read, the rest
         being the share ``token_dropout`` takes away: every token alike, whatever
@@ -251,6 +255,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_report=value_report,
             rnn_state=rnn_state,
             features=x,
+            stored_state=None,
             text=None,
             text_status=None,
             exchange=None,
@@ -356,6 +361,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_report=self.value_head.value_report(next_q_out.output),
             rnn_state=next_rnn_state,
             features=next_state,
+            stored_state=None,
             text=None,
             text_status=None,
             exchange=None,

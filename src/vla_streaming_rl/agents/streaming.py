@@ -23,7 +23,7 @@ from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder
-from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.networks.interface import InferInput, InferResult
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
@@ -107,6 +107,7 @@ class StreamingAgent(Agent):
             obs_shape=self.network.stored_image_shape(),
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
+            state_shape=self.network.stored_state_shape(),
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             max_prompt_tokens=max_prompt_tokens,
@@ -225,6 +226,7 @@ class StreamingAgent(Agent):
         infer_result = result.infer_result
         self.rnn_state = infer_result.rnn_state
         metrics.update(infer_result.value_report)
+        self._keep_network_outputs(infer_result)
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
         self.chunk_step = 1
@@ -286,6 +288,7 @@ class StreamingAgent(Agent):
         self.rnn_state = infer_result.rnn_state
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
+        self._keep_network_outputs(infer_result)
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
         self.chunk_step = 1
@@ -298,6 +301,14 @@ class StreamingAgent(Agent):
             panels=panels,
             texts=texts,
         )
+
+    def _keep_network_outputs(self, infer_result: InferResult) -> None:
+        """ネットワークがこのステップに作った状態の元と書いた文を、その行に残す。"""
+        if infer_result.stored_state is not None:
+            self.rb.set_latest_state(infer_result.stored_state)
+        if infer_result.text is not None:
+            self.rb.set_latest_reply(self.network.tokenize(infer_result.text))
+            self.prompt_builder.add_reply(infer_result.text)
 
     def on_episode_end(self, score: float) -> dict:
         del score

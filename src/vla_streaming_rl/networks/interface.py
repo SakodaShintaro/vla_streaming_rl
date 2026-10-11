@@ -66,6 +66,9 @@ class InferResult:
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
     rnn_state: torch.Tensor  # (B, ...)
     features: torch.Tensor
+    # このステップの行に保存しておく状態の元（``stored_state_shape`` の形）。学習はこれを
+    # 読み戻して状態を作る。保存しないネットワークでは None
+    stored_state: torch.Tensor | None
     # このステップにネットワークが書いた文と、それに添える1行（読んだ・書いたトークン数、
     # かかった時間など）。文を書かないネットワークではどちらも None
     text: str | None
@@ -129,6 +132,11 @@ class NetworkInterface(nn.Module, abc.ABC):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         """The stored form of one raw observation image, matching
         ``stored_image_shape``."""
+
+    @abc.abstractmethod
+    def stored_state_shape(self) -> tuple[int, ...]:
+        """行動を決めたステップの行に保存する状態の元の形。保存しないネットワークでは
+        大きさ 0 の形。"""
 
     @abc.abstractmethod
     def observe_scalar_obs(

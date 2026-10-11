@@ -106,6 +106,7 @@ class OffPolicyAgent(Agent):
             obs_shape=self.network.stored_image_shape(),
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
+            state_shape=self.network.stored_state_shape(),
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             max_prompt_tokens=max_prompt_tokens,
@@ -290,6 +291,8 @@ class OffPolicyAgent(Agent):
         metrics.update(infer_result.value_report)
         # ネットワークがこのステップに書いた文を、その行に残す。次のステップの会話は
         # それを含めて組まれる
+        if infer_result.stored_state is not None:
+            self.rb.set_latest_state(infer_result.stored_state)
         if infer_result.text is not None:
             self.last_reply = infer_result.text
             self.rb.set_latest_reply(self.network.tokenize(self.last_reply))

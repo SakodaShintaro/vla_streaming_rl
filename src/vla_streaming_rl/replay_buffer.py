@@ -22,6 +22,7 @@ class ReplayBufferData:
     dones: torch.Tensor  # (B, T)
     rnn_state: torch.Tensor  # (B, T, space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
+    states: torch.Tensor  # (B, T, *state_shape)
     system_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     turn_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     reply_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
@@ -45,6 +46,7 @@ class ReplayBuffer:
         obs_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
+        state_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
         max_prompt_tokens: int,
@@ -74,6 +76,11 @@ class ReplayBuffer:
         self.dones = init_tensor((size, 1))
         self.rnn_states = init_tensor((size, *rnn_state_shape))
         self.actions = init_tensor((size, *action_shape))
+        # ネットワークが行動を決めたステップで保存する状態の元。VLM の表現のように
+        # 大きいので半精度で持つ
+        self.states = torch.zeros(
+            (size, *state_shape), dtype=torch.bfloat16, device=self.storage_device
+        )
         self.velocity_x = init_tensor((size, 1))
         self.velocity_y = init_tensor((size, 1))
         self.velocity_z = init_tensor((size, 1))
@@ -147,9 +154,14 @@ class ReplayBuffer:
         self._store_token_ids(self.system_token_ids, self.idx, system_token_ids)
         self._store_token_ids(self.turn_token_ids, self.idx, turn_token_ids)
         self._store_token_ids(self.reply_token_ids, self.idx, [])
+        self.states[self.idx].zero_()
 
         self.idx = (self.idx + 1) % self.size
         self.full = self.full or self.idx == 0
+
+    def set_latest_state(self, state: torch.Tensor) -> None:
+        """最新の行に、そのステップでネットワークが作った状態の元を入れる。"""
+        self.states[(self.idx - 1) % self.size].copy_(state)
 
     def set_latest_reply(self, reply_token_ids: list[int]) -> None:
         """最新の行に、そのステップでネットワークが書いた文を入れる。"""
@@ -196,6 +208,7 @@ class ReplayBuffer:
             self._gather("dones", self.dones, indices),
             self._gather("rnn_states", self.rnn_states, indices),
             self._gather("actions", self.actions, indices),
+            self._gather("states", self.states, indices),
             self._gather("system_token_ids", self.system_token_ids, indices),
             self._gather("turn_token_ids", self.turn_token_ids, indices),
             self._gather("reply_token_ids", self.reply_token_ids, indices),

@@ -41,8 +41,8 @@ vla:
   # 会話に残すステップ数。今のステップと、その前の seq_len - 1 回のやり取り。
   # 会話はリプレイバッファのこの数の行から組み直す
   seq_len: 8
-  model_id: Qwen/Qwen3.8-27B
-  load_in_4bit: true
+  model_id: Qwen/Qwen3.5-9B
+  load_in_4bit: false
   use_lora: false
   num_state_queries: 100
   state_out_dim: 4
