@@ -48,9 +48,7 @@ vla:
   state_out_dim: 4
   # 毎ステップ書く返答（行動）の生成
   max_new_tokens: 512
-  # 思考の量。none なら思考を閉じて返答だけを書く。low / medium / xhigh はテンプレートの
-  # reasoning_effort で、思考を書いてから返答する（max_new_tokens も思考込み）
-  reasoning_effort: low
+  reasoning_effort: none  # [none, low, medium, high, xhigh]
   temperature: 0.5
   # 返答の行動と頭の行動を行動価値で選ぶときの余裕。頭の行動の価値が返答の行動を
   # これより大きく上回るときだけ頭の行動を実行する。.inf なら常に返答の行動、
