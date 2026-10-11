@@ -7,17 +7,12 @@ import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
-TEXT_ACTION_PROTOCOL = (
-    "Reply with <subtask>one short sentence on what the agent should get done by your next "
-    "reply</subtask> then <action>the action only</action>."
-)
+TEXT_ACTION_PROTOCOL = "Reply with <action>the action only</action>."
 
 # The LAST <action> is the one that counts: a model's reasoning sometimes quotes
 # the tag before writing the real section, and reading the first one then takes
 # the whole reasoning as the action.
 ACTION_RE = re.compile(r"<action>(?!.*<action>)(.*?)</action>", re.DOTALL)
-
-SUBTASK_RE = re.compile(r"<subtask>(?!.*<subtask>)(.*?)</subtask>", re.DOTALL)
 
 
 def read_action_reply(

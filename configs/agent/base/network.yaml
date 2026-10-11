@@ -46,7 +46,7 @@ vla:
   use_lora: false
   num_state_queries: 100
   state_out_dim: 4
-  # 毎ステップ書く返答（サブタスク・行動）の生成
+  # 毎ステップ書く返答（行動）の生成
   max_new_tokens: 512
   # 思考の量。none なら思考を閉じて返答だけを書く。low / medium / xhigh はテンプレートの
   # reasoning_effort で、思考を書いてから返答する（max_new_tokens も思考込み）
