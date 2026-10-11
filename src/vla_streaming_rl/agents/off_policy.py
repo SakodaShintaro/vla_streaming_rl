@@ -349,12 +349,13 @@ class OffPolicyAgent(Agent):
             )
 
         latest_data = self.rb.get_latest(self.seq_len)
+        # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
         infer_result = self.network.infer(
             InferInput(
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
-                rnn_state=self.rnn_state,
+                rnn_state=latest_data.rnn_state[:, 0],
                 system_token_ids_seq=latest_data.system_token_ids,
                 turn_token_ids_seq=latest_data.turn_token_ids,
                 reply_token_ids_seq=latest_data.reply_token_ids,

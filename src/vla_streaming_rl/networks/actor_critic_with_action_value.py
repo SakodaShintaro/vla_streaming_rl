@@ -61,6 +61,12 @@ class ActorCriticWithActionValue(NetworkInterface):
             high_level_config.subtask_tokens_num > 0
         ), "observation_dropout leaves only the subtask, so it needs subtask_tokens_num > 0"
         self.observation_dropout = actor_critic_config.observation_dropout
+        # 系列ごとに 0 からこの数までの一様なステップ数を引き、最新の方からその数のステップの
+        # 観測（画像・報酬・スカラー）を落とす。観測が遅れて届く状況でも行動と価値を学ばせる
+        assert actor_critic_config.observation_drop_steps_max >= 0, (
+            actor_critic_config.observation_drop_steps_max
+        )
+        self.observation_drop_steps_max = actor_critic_config.observation_drop_steps_max
         self.bc_loss_weight = actor_critic_config.bc_loss_weight
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
@@ -112,6 +118,17 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.detach_predictor = actor_critic_config.detach_predictor
         self.disable_state_predictor = actor_critic_config.disable_state_predictor
 
+        # 1ステップのトークンのうち観測にあたる位置。行動・register・サブタスクは含めない
+        observation_token = torch.cat(
+            [
+                torch.ones(self.encoder.image_tokens_num, dtype=torch.bool),  # 画像
+                torch.zeros(self.action_dim, dtype=torch.bool),  # 前の行動
+                torch.ones(1 + self.scalar_obs_dim, dtype=torch.bool),  # 報酬とスカラー
+                torch.zeros(1 + self.subtask_shape[0], dtype=torch.bool),  # register とサブタスク
+            ]
+        )
+        self.register_buffer("observation_token", observation_token, persistent=False)
+
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
 
@@ -158,10 +175,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         shape = (batch_size, steps, self.encoder.space_len)
         return torch.rand(shape, device=device) >= self.token_dropout
 
-    def _window(self, data: ReplayBufferData, start, stop) -> tuple:
+    def _window(self, data: ReplayBufferData, start, stop, drop_steps_max: int) -> tuple:
         """The ``(image, action, reward, rnn_state, scalar_obs, subtask, subtask_age,
         subtask_keep, token_keep)`` the encoder reads, sliced out of a replay batch
-        over ``[start, stop)`` steps."""
+        over ``[start, stop)`` steps. 最新の方から 0 から ``drop_steps_max`` までの
+        一様なステップ数の観測を落とす。"""
         observations = data.observations[:, start:stop]
         batch_size = observations.shape[0]
         subtask_keep = self._subtask_keep(batch_size, observations.device)
@@ -171,6 +189,12 @@ class ActorCriticWithActionValue(NetworkInterface):
             torch.rand(batch_size, device=observations.device) < self.observation_dropout
         )
         token_keep[subtask_only, :, : -self.subtask_shape[0]] = False
+        steps = observations.shape[1]
+        drop_steps = torch.randint(
+            0, drop_steps_max + 1, (batch_size, 1), device=observations.device
+        )
+        dropped = torch.arange(steps, device=observations.device) >= steps - drop_steps
+        token_keep &= ~(dropped.unsqueeze(-1) & self.observation_token)
         return (
             observations,
             data.actions[:, start:stop],
@@ -300,8 +324,9 @@ class ActorCriticWithActionValue(NetworkInterface):
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
+        # ターゲットは観測を落とさない次状態から作る
         with torch.inference_mode():
-            next_state, _ = self.encoder(*self._window(data, self.horizon, None))
+            next_state, _ = self.encoder(*self._window(data, self.horizon, None, 0))
             next_action, _ = self.policy_head.get_action(next_state)
             next_output = self.value_head(next_state, next_action).output
         chunk_rewards = data.rewards[:, -self.horizon :]
@@ -309,7 +334,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         target_value = self.value_head.compute_target_value(next_output, chunk_rewards, chunk_dones)
 
         # Use seq_len frames (excluding last horizon frames)
-        curr_state, _ = self.encoder(*self._window(data, 0, -self.horizon))
+        curr_state, _ = self.encoder(
+            *self._window(data, 0, -self.horizon, self.observation_drop_steps_max)
+        )
 
         # Action chunk: (B, horizon, action_dim)
         action_chunk = data.actions[:, -self.horizon :]
@@ -360,7 +387,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         """Combined inference and loss computation."""
         # Next-step inference (no grad): the action the agent will take and its Q.
         with torch.inference_mode():
-            next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None))
+            next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None, 0))
             next_action, _ = self.policy_head.get_action(next_state)
             next_q_out = self.value_head(next_state, next_action)
         chunk_rewards = data.rewards[:, -self.horizon :]
@@ -369,7 +396,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             next_q_out.output, chunk_rewards, chunk_dones
         )
 
-        prev_state, _ = self.encoder(*self._window(data, 0, -self.horizon))
+        prev_state, _ = self.encoder(
+            *self._window(data, 0, -self.horizon, self.observation_drop_steps_max)
+        )
 
         action_chunk = data.actions[:, -self.horizon :]
 
