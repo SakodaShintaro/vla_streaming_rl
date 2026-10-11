@@ -43,7 +43,9 @@ high_level:
   max_new_tokens: 512
   # 思考の量。none なら思考を閉じて返答だけを書く。low / medium / xhigh は Qwen3.8 の
   # テンプレートの reasoning_effort で、思考を書いてから返答する（max_new_tokens も思考込み）
-  reasoning_effort: low
+  reasoning_effort: none
+  # 思考に使えるトークン数の上限。越えたら思考を閉じて、残りで返答の本体を書かせる
+  max_thinking_tokens: 384
   temperature: 0.5
   # 全注意層の KV を「先頭の sink ＋直近この数のトークン」まで間引く
   window_tokens: 32768

@@ -83,9 +83,17 @@ class PromptBuilder(ABC):
     """
 
     def __init__(
-        self, env: Env, history_turns: int, steps_per_reply: int, steps_per_observation: int
+        self,
+        env: Env,
+        history_turns: int,
+        steps_per_reply: int,
+        steps_per_observation: int,
+        thinking_words: int,
     ) -> None:
         assert history_turns >= 0, history_turns
+        assert thinking_words >= 0, thinking_words
+        # 思考の長さの目安（語数）。思考を書かせない設定では 0
+        self.thinking_words = thinking_words
         assert steps_per_reply >= 1, steps_per_reply
         assert steps_per_observation >= 1, steps_per_observation
         self.history_turns = history_turns
@@ -154,6 +162,16 @@ class PromptBuilder(ABC):
         reads what the ones before it did and what came of them."""
         self._turns = self._turns + [{"role": "user", "content": [{"type": "text", "text": text}]}]
         self._current = {}
+
+    def _protocol(self) -> str:
+        """返答の書式。思考を書かせるときは、その長さの目安を先に伝える。生成の側は
+        これより少し先で思考を打ち切るので、その前に自分で結論まで畳ませるため。"""
+        if self.thinking_words == 0:
+            return REPLY_PROTOCOL
+        return (
+            f"Keep your thinking within about {self.thinking_words} words and reach your "
+            f"conclusion within that; longer thinking is cut off mid-sentence. {REPLY_PROTOCOL}"
+        )
 
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -236,9 +254,14 @@ class AnimalAIPromptBuilder(PromptBuilder):
     task -- the prompt carries no per-task knowledge."""
 
     def __init__(
-        self, env: Env, history_turns: int, steps_per_reply: int, steps_per_observation: int
+        self,
+        env: Env,
+        history_turns: int,
+        steps_per_reply: int,
+        steps_per_observation: int,
+        thinking_words: int,
     ) -> None:
-        super().__init__(env, history_turns, steps_per_reply, steps_per_observation)
+        super().__init__(env, history_turns, steps_per_reply, steps_per_observation, thinking_words)
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
@@ -263,7 +286,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{ANIMALAI_FRAMING} {self._cadence()} {REPLY_PROTOCOL}"
+        return f"{ANIMALAI_FRAMING} {self._cadence()} {self._protocol()}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del info
@@ -298,7 +321,7 @@ class CarlaPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CARLA_FRAMING} {REPLY_PROTOCOL}"
+        return f"{CARLA_FRAMING} {self._protocol()}"
 
     def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
         del obs, reward
@@ -317,6 +340,16 @@ def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
     # 高レベル方策の窓 high_level.seq_len に、チェーンの周期で収まるやり取りの数
     history_turns = (args.high_level.seq_len - 1) // args.high_level.steps_per_reply
+    # 思考の長さの目安は、生成が思考を打ち切る上限（トークン数）より少し短い語数にする
+    thinking_words = (
+        0
+        if args.high_level.reasoning_effort == "none"
+        else args.high_level.max_thinking_tokens // 2
+    )
     return PROMPT_BUILDERS[args.env_id](
-        env, history_turns, args.high_level.steps_per_reply, args.high_level.steps_per_observation
+        env,
+        history_turns,
+        args.high_level.steps_per_reply,
+        args.high_level.steps_per_observation,
+        thinking_words,
     )

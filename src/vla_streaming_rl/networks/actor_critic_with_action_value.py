@@ -70,12 +70,9 @@ class ActorCriticWithActionValue(NetworkInterface):
         subtask_tokens_num = high_level_config.subtask_tokens_num
         text_config = AutoConfig.from_pretrained(high_level_config.model_id).text_config
         subtask_dim = text_config.hidden_size
-        # The embedding plus every layer's output.
-        subtask_layers = text_config.num_hidden_layers + 1
         self.pool_subtask = actor_critic_config.subtask_pool == "mean" and subtask_tokens_num > 0
         self.subtask_shape = (
             1 if self.pool_subtask else subtask_tokens_num,
-            subtask_layers,
             subtask_dim,
         )
 
@@ -89,7 +86,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             scalar_obs_dim=self.scalar_obs_dim,
             temporal_model_type=actor_critic_config.temporal_model_type,
             subtask_tokens_num=subtask_tokens_num,
-            subtask_layers=subtask_layers,
             subtask_dim=subtask_dim,
             subtask_pool=actor_critic_config.subtask_pool,
             steps_per_reply=high_level_config.steps_per_reply,

@@ -35,7 +35,7 @@ def _history_text(turn: dict, system_prefix: str) -> str:
 @dataclass(frozen=True)
 class Chain:
     """書いた1つの返答。トークン、そのテキスト、各トークンを選んだ位置の活性
-    (chain_len, layers_num, hidden_size)、読んだプロンプトのトークン数、かかった時間。"""
+    （最終層、(chain_len, hidden_size)）、読んだプロンプトのトークン数、かかった時間。"""
 
     tokens: list[int]
     text: str
@@ -104,8 +104,6 @@ class ChainGenerator:
         )
         self.device = device
         self.hidden_size = text_config.hidden_size
-        # The embedding plus every layer's output.
-        self.layers_num = text_config.num_hidden_layers + 1
         # テンプレートが会話の末尾に付ける生成プロンプトのトークン列。
         # 会話の中身に依らない定数なので、ここで一度だけ測る。
         probe = [{"role": "user", "content": [{"type": "text", "text": "x"}]}]
@@ -133,6 +131,15 @@ class ChainGenerator:
         # 終端の判定で、返答の先頭に置く書き出し。思考を書かせる形では、空の思考を閉じてから
         # タグを置く（テンプレートが思考なしの返答に付けるのと同じ形）
         self._judge_prefix = "\n</think>\n\n" if self.enable_thinking else ""
+        # 思考に使えるトークン数の上限。越えたら思考を閉じるトークン列を強制して、残りの
+        # 予算で返答の本体を書かせる。思考が長引いても返答の形が必ず揃う
+        tokenizer = self.processor.tokenizer
+        self.max_thinking_tokens = high_level_config.max_thinking_tokens
+        assert 1 <= self.max_thinking_tokens < max_len, (self.max_thinking_tokens, max_len)
+        think_close = tokenizer.encode("</think>", add_special_tokens=False)
+        assert len(think_close) == 1, think_close
+        self._think_close_id = think_close[0]
+        self._think_close_ids = tokenizer.encode("\n</think>\n\n", add_special_tokens=False)
         # 返答を閉じるトークン。生成はこの <|im_end|> で止まる
         assert self.processor.tokenizer.eos_token == IM_END, self.processor.tokenizer.eos_token
         self._newline_ids = self.processor.tokenizer.encode("\n", add_special_tokens=False)
@@ -183,11 +190,19 @@ class ChainGenerator:
         # まだキャッシュに入っていない
         tokens = []
         positions = []
+        # 強制して書かせる残りのトークン。思考が上限に達したら、思考を閉じる列を入れる
+        forced = []
+        thinking = self.enable_thinking
         while True:
             positions.append(position)
+            if thinking and len(tokens) >= self.max_thinking_tokens:
+                forced = list(self._think_close_ids)
+                thinking = False
             # 温度 0 なら貪欲。それ以外はモデルの生成設定に従い、温度を掛け、上位 top_k に絞り、
             # そのうち確率の和が top_p に届く最少のものから引く
-            if self.temperature == 0.0:
+            if len(forced) > 0:
+                token = forced.pop(0)
+            elif self.temperature == 0.0:
                 token = int(logits.argmax().item())
             else:
                 top = torch.topk(logits.float() / self.temperature, self.top_k)
@@ -195,6 +210,8 @@ class ChainGenerator:
                 kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
                 token = int(top.indices[torch.multinomial(kept, 1)].item())
             tokens.append(token)
+            if token == self._think_close_id:
+                thinking = False
             if token == self.eos_token_id or len(tokens) >= self.max_len:
                 break
             # 位置はモデル任せにせず、キャッシュの長さと 3D 位置の起点から渡す
@@ -273,7 +290,7 @@ class ChainGenerator:
         最後のものを読むのは、思考の中で同じ文字列に触れていても、返答の本体の採点を
         読むため。
 
-        その位置の活性の最終層に lm_head を掛けると、そのトークンを選んだときの
+        その位置の活性は最終層のものなので、lm_head を掛けると、そのトークンを選んだときの
         ロジットになる。"""
         tokenizer = self.processor.tokenizer
         found = None
@@ -284,7 +301,7 @@ class ChainGenerator:
         if found is None:
             return None
         head = self.model.lm_head
-        return self._expected_score(head(chain.positions[found, -1].to(head.weight.dtype)))
+        return self._expected_score(head(chain.positions[found].to(head.weight.dtype)))
 
     @torch.inference_mode()
     def score_after(self, conversation: list[dict], tag: str) -> float:
@@ -436,6 +453,5 @@ class ChainGenerator:
         return (torch.arange(length, device=self.device) + start).view(1, 1, -1).expand(3, 1, -1)
 
     def _last_position(self, hidden_states) -> torch.Tensor:
-        """The activation at the newest position at every depth, (layers_num,
-        hidden_size)."""
-        return torch.stack([depth[0, -1] for depth in hidden_states]).to(torch.bfloat16)
+        """いちばん新しい位置の最終層の活性、(hidden_size,)。"""
+        return hidden_states[-1][0, -1].to(torch.bfloat16)

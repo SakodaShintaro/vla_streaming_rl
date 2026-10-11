@@ -16,7 +16,7 @@ class HighLevelPolicyOutput:
     """高レベル方策がいま持っている返答。返答を書いたステップから次を書くまで同じ
     ものを返し、``age`` だけが進む。"""
 
-    # (tokens_per_step, layers_num, hidden_size)。返答の <subtask> 区間の活性を、
+    # (tokens_per_step, hidden_size)。返答の <subtask> 区間の最終層の活性を、
     # 1ステップに読む幅へ均したもの
     activations: torch.Tensor
     # 何ステップ前に書いたか。書いたステップで 0
@@ -102,14 +102,14 @@ class HighLevelPolicy:
                     start = end
             if len(rows) == 0:
                 activations = torch.zeros(
-                    (self.tokens_per_step, self.generator.layers_num, self.generator.hidden_size),
+                    (self.tokens_per_step, self.generator.hidden_size),
                     dtype=torch.bfloat16,
                     device=self.device,
                 )
             else:
-                span = chain.positions[rows].to(torch.float32).permute(1, 2, 0)
+                span = chain.positions[rows].to(torch.float32).T
                 pooled = F.adaptive_avg_pool1d(span, self.tokens_per_step)
-                activations = pooled.permute(2, 0, 1).to(torch.bfloat16)
+                activations = pooled.T.to(torch.bfloat16)
 
             self._reply = HighLevelPolicyOutput(
                 activations=activations,
