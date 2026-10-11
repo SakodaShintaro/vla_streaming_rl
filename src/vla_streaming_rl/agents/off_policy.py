@@ -3,10 +3,11 @@
 
 Every tick is stored; once ``learning_starts`` ticks have gone by, one gradient
 step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
-before the action of that tick is chosen. Below ``learning_starts`` the env is
-driven by uniform random actions, so the buffer fills with something other than
-an untrained policy's output while the network's recurrent state still follows
-the episode.
+before the action of that tick is chosen. Below ``learning_starts`` the network
+is told it is warming up and decides what drives the env -- uniform random
+actions for the plain actor-critic, the action its own reply names for the VLM
+one -- so the buffer fills with something other than an untrained policy's
+output while the network's recurrent state still follows the episode.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
@@ -106,6 +107,8 @@ class OffPolicyAgent(Agent):
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
+        # ネットワークが最後に書いた文。書かないネットワークでは空のまま
+        self.last_reply = ""
         # the first observation of a run starts an episode
         self._previous_done = True
         # Shared representation fed to policy/value/prediction heads on the
@@ -237,8 +240,6 @@ class OffPolicyAgent(Agent):
             episode_step_obs,
             health_obs,
         )
-        texts = {"prompt": prompt}
-
         warmup = global_step < self.learning_starts
 
         if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
@@ -250,7 +251,7 @@ class OffPolicyAgent(Agent):
                 action=action,
                 metrics=metrics,
                 panels={},
-                texts=texts,
+                texts={"prompt": prompt, "reply": self.last_reply},
             )
 
         latest_data = self.rb.get_latest(self.seq_len)
@@ -263,6 +264,7 @@ class OffPolicyAgent(Agent):
                 rnn_state=latest_data.rnn_state[:, 0],
                 system_token_ids_seq=latest_data.system_token_ids,
                 turn_token_ids_seq=latest_data.turn_token_ids,
+                reply_token_ids_seq=latest_data.reply_token_ids,
                 velocity_x_seq=latest_data.velocity_x,
                 velocity_y_seq=latest_data.velocity_y,
                 velocity_z_seq=latest_data.velocity_z,
@@ -272,18 +274,19 @@ class OffPolicyAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
+                warmup=warmup,
             )
         )
         self.rnn_state = infer_result.rnn_state
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
+        # ネットワークがこのステップに書いた文を、その行に残す。次のステップの会話は
+        # それを含めて組まれる
+        self.last_reply = infer_result.text
+        self.rb.set_latest_reply(self.network.tokenize(self.last_reply))
+        if len(self.last_reply) > 0:
+            self.prompt_builder.add_reply(self.last_reply)
         action_chunk = infer_result.action[0].cpu().numpy()
-        if warmup:
-            # The network was queried anyway so its recurrent state keeps
-            # following the episode; only the action it chose is dropped.
-            action_chunk = np.repeat(
-                self._to_net_action(self.action_space.sample())[None], self.horizon, axis=0
-            )
         self.action_chunk = action_chunk
         self.chunk_step = 1
         action = self._to_env_action(action_chunk[0])
@@ -293,7 +296,7 @@ class OffPolicyAgent(Agent):
             action=action,
             metrics=metrics,
             panels={},
-            texts=texts,
+            texts={"prompt": prompt, "reply": self.last_reply},
         )
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:

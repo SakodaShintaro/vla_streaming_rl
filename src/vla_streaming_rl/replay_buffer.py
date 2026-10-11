@@ -24,6 +24,7 @@ class ReplayBufferData:
     actions: torch.Tensor  # (B, T, action_shape)
     system_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     turn_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
+    reply_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
     velocity_x: torch.Tensor  # (B, T, 1)
     velocity_y: torch.Tensor  # (B, T, 1)
     velocity_z: torch.Tensor  # (B, T, 1)
@@ -82,12 +83,13 @@ class ReplayBuffer:
         self.global_step = init_tensor((size, 1))
         self.episode_step = init_tensor((size, 1))
         self.health = init_tensor((size, 1))
-        # What the tick said, tokenized: the standing task and the text under
-        # the frame. A conversation is rebuilt from rows a fixed stride apart,
-        # each a frame under its text, so the rows hold the parts and never the
-        # whole.
+        # What the tick said, tokenized: the standing task, the text under the
+        # frame, and what the network wrote on the tick. A conversation is
+        # rebuilt from rows a fixed stride apart, each a frame under its text
+        # answered by its reply, so the rows hold the parts and never the whole.
         self.system_token_ids = self._init_token_ids()
         self.turn_token_ids = self._init_token_ids()
+        self.reply_token_ids = self._init_token_ids()
 
         self.pin_memory = self.storage_device.type == "cpu" and self.output_device.type == "cuda"
         self._staging = {}
@@ -125,7 +127,8 @@ class ReplayBuffer:
         episode_step: float,
         health: float,
     ) -> None:
-        """Store the tick."""
+        """Store the tick. What the network then writes on it comes after,
+        through :meth:`set_latest_reply`."""
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
         self.rewards[self.idx].fill_(reward)
@@ -143,9 +146,14 @@ class ReplayBuffer:
         self.health[self.idx].fill_(health)
         self._store_token_ids(self.system_token_ids, self.idx, system_token_ids)
         self._store_token_ids(self.turn_token_ids, self.idx, turn_token_ids)
+        self._store_token_ids(self.reply_token_ids, self.idx, [])
 
         self.idx = (self.idx + 1) % self.size
         self.full = self.full or self.idx == 0
+
+    def set_latest_reply(self, reply_token_ids: list[int]) -> None:
+        """最新の行に、そのステップでネットワークが書いた文を入れる。"""
+        self._store_token_ids(self.reply_token_ids, (self.idx - 1) % self.size, reply_token_ids)
 
     def _store_token_ids(self, storage: torch.Tensor, row: int, token_ids: list[int]) -> None:
         assert len(token_ids) <= self.max_prompt_tokens, (
@@ -190,6 +198,7 @@ class ReplayBuffer:
             self._gather("actions", self.actions, indices),
             self._gather("system_token_ids", self.system_token_ids, indices),
             self._gather("turn_token_ids", self.turn_token_ids, indices),
+            self._gather("reply_token_ids", self.reply_token_ids, indices),
             self._gather("velocity_x", self.velocity_x, indices),
             self._gather("velocity_y", self.velocity_y, indices),
             self._gather("velocity_z", self.velocity_z, indices),

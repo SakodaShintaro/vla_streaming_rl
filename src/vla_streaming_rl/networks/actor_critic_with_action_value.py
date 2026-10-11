@@ -241,11 +241,17 @@ class ActorCriticWithActionValue(NetworkInterface):
         q_out = self.value_head(x, action)
         value_report = self.value_head.value_report(q_out.output)
 
+        if data.warmup:
+            # バッファを貯めている間は一様乱数の行動を返す。再帰状態はエピソードを
+            # 追い続けるので、ネットワーク自体は通しておく
+            action = torch.rand_like(action) * 2.0 - 1.0
+
         return InferResult(
             action=action,
             value_report=value_report,
             rnn_state=rnn_state,
             features=x,
+            text="",
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -348,6 +354,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_report=self.value_head.value_report(next_q_out.output),
             rnn_state=next_rnn_state,
             features=next_state,
+            text="",
         )
 
         info_dict = {

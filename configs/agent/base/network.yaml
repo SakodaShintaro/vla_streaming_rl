@@ -37,35 +37,25 @@ policy_head:
   temperature_lr: 3e-3
   detach_state: true
 
-high_level:
-  model_id: Qwen/Qwen3.8-27B
-  load_in_4bit: true
-  max_new_tokens: 512
-  # 思考の量。none なら思考を閉じて返答だけを書く。low / medium / xhigh は Qwen3.8 の
-  # テンプレートの reasoning_effort で、思考を書いてから返答する（max_new_tokens も思考込み）
-  reasoning_effort: low
-  temperature: 0.5
-  # 全注意層の KV を「先頭の sink ＋直近この数のトークン」まで間引く
-  window_tokens: 32768
-  subtask_tokens_num: 0
-  # チェーンを書いて確定し、行動を読む間隔
-  steps_per_reply: 32
-  # 返答を書かないステップでも、この間隔で観測（画像とテキスト）を会話に残す。
-  # steps_per_reply はこの倍数にする
-  steps_per_observation: 8
-  # 高レベル方策が会話として読む窓のステップ数。steps_per_reply ステップごとに1回の
-  # やり取りなので、履歴は (seq_len - 1) // steps_per_reply 回分になる。
-  # また、実際に読める長さは window_tokens で頭打ちになる
-  seq_len: 8193
-
 vla:
-  # リプレイバッファから読む時間窓のステップ数
-  seq_len: 1
+  # 会話に残すステップ数。今のステップと、その前の seq_len - 1 回のやり取り。
+  # 会話はリプレイバッファのこの数の行から組み直す
+  seq_len: 8
   model_id: Qwen/Qwen3.5-0.8B
   load_in_4bit: true
   use_lora: false
   num_state_queries: 100
   state_out_dim: 4
+  # 毎ステップ書く返答（採点・サブタスク・行動）の生成
+  max_new_tokens: 512
+  # 思考の量。none なら思考を閉じて返答だけを書く。low / medium / xhigh はテンプレートの
+  # reasoning_effort で、思考を書いてから返答する（max_new_tokens も思考込み）
+  reasoning_effort: low
+  temperature: 0.5
+  # 返答の行動と頭の行動を行動価値で選ぶときの余裕。頭の行動の価値が返答の行動を
+  # これより大きく上回るときだけ頭の行動を実行する。.inf なら常に返答の行動、
+  # -.inf なら常に頭の行動（バッファを貯めている間は常に返答の行動）
+  select_margin: 0.0
 
 actor_critic:
   seq_len: 1

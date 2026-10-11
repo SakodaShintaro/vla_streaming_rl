@@ -2,11 +2,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from omegaconf import DictConfig
 from torch import nn
 from torch.nn import functional as F
 
+from ..agents.prompt import assistant_turn, read_action_reply, user_turn
 from ..replay_buffer import ReplayBufferData
 from .interface import (
     EligibilityTraceInfo,
@@ -36,25 +38,30 @@ class LossTerms:
     next_critic_out: HeadOutput
 
 
-def _user_turn(image: torch.Tensor, text: str) -> dict:
-    return {
-        "role": "user",
-        "content": [{"type": "image", "image": image}, {"type": "text", "text": text}],
-    }
-
-
 def _rows(data: ReplayBufferData) -> tuple[torch.Tensor, ...]:
     """What a replay batch holds of each tick's prompt, in the order
-    ``_prompts_at`` reads them."""
+    ``_conversations`` reads them."""
     return (
         data.observations,
         data.system_token_ids,
         data.turn_token_ids,
+        data.reply_token_ids,
+        data.episode_step,
     )
 
 
 class VLMActorCriticWithActionValue(NetworkInterface):
     """VLM backbone + DiffusionPolicy + Action Value critic.
+
+    Every tick the VLM first writes the reply the zero-shot controller would --
+    its score, subtask and action -- to the conversation of the episode so far.
+    The state is then read off the same VLM run over that conversation with the
+    reply in it, so the heads see what the VLM saw, thought and proposed. Two
+    candidate actions come out of a tick, the one the reply names and the policy
+    head's, and the critic picks: the head's runs only where it is valued above
+    the reply's by more than ``select_margin``. ``.inf`` there leaves the
+    zero-shot controller alone at the wheel and ``-.inf`` the head; while the
+    buffer fills it is always the reply's.
 
     Architecture:
     - VLM (Qwen3.5/Qwen-VL, frozen unless LoRA): processes images + text.
@@ -76,7 +83,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         policy_head_factory,
         vla_config: DictConfig,
         pad_token_id: int,
-        steps_per_reply: int,
+        parse_action_text,
+        action_low: np.ndarray,
+        action_high: np.ndarray,
+        decision_fps: float,
     ) -> None:
         super().__init__()
         self.seq_len = vla_config.seq_len
@@ -84,11 +94,30 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_dim = action_space_shape[0]
         self.observation_space_shape = observation_space_shape
         self.critic_loss_weight = critic_loss_weight
-        # The prompt of a tick is a conversation of the buffer rows
-        # ``steps_per_reply`` apart ending on the tick, as many as ``seq_len``
-        # ticks hold, each a frame under its own text.
-        assert steps_per_reply >= 1, steps_per_reply
-        self.steps_per_reply = steps_per_reply
+        # The prompt of a tick is a conversation of the last ``seq_len`` buffer
+        # rows ending on the tick, each a frame under its own text answered by
+        # the reply written on it. A reply is written on every tick.
+        # 返答の生成。思考の量は "none" なら思考を閉じた形、それ以外はテンプレートの
+        # reasoning_effort に渡す
+        assert vla_config.max_new_tokens >= 1, vla_config.max_new_tokens
+        assert vla_config.temperature >= 0.0, vla_config.temperature
+        assert vla_config.reasoning_effort in ("none", "low", "medium", "xhigh"), (
+            vla_config.reasoning_effort
+        )
+        self.max_new_tokens = vla_config.max_new_tokens
+        self.temperature = vla_config.temperature
+        self.generation_template_kwargs = (
+            {"enable_thinking": False}
+            if vla_config.reasoning_effort == "none"
+            else {"enable_thinking": True, "reasoning_effort": vla_config.reasoning_effort}
+        )
+        # 返答の行動と頭の行動を行動価値で選ぶときの余裕。頭の行動の価値が返答の行動を
+        # これより大きく上回るときだけ、頭の行動を実行する
+        self.select_margin = vla_config.select_margin
+        self.parse_action_text = parse_action_text
+        self.action_low = action_low
+        self.action_high = action_high
+        self.decision_fps = decision_fps
 
         # Load VLM
         device = "cuda"
@@ -160,56 +189,136 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             results.append(self.processor.tokenizer.decode(valid_ids, skip_special_tokens=True))
         return results
 
-    def _prompts_at(
+    def _conversations(
         self,
         observations: torch.Tensor,
         system_token_ids: torch.Tensor,
         turn_token_ids: torch.Tensor,
+        reply_token_ids: torch.Tensor,
+        episode_step: torch.Tensor,
         slot: int,
-    ) -> tuple[list[str], list[list[torch.Tensor]]]:
-        """The conversation of each batch element's ``slot`` tick, rendered.
+    ) -> tuple[list[list[dict]], list[str]]:
+        """The conversation of each batch element's ``slot`` tick up to the
+        tick's own turn, and the reply stored on that tick ("" if none).
 
-        Its turns are the rows ``steps_per_reply`` apart ending on the slot,
-        each a frame under its own text, as many as ``seq_len`` ticks hold; an
-        episode boundary does not cut them, so what the episodes before did
-        stays in view.
+        Its turns are the last rows ending on the slot, each a frame under its timestamp and text, the earlier ones answered by
+        the reply their tick wrote, as many as ``seq_len`` ticks hold. Only the
+        slot's own episode is kept, as the zero-shot controller starts every
+        episode on an empty conversation.
         """
         cursor = slot % observations.shape[1]
-        stride = self.steps_per_reply
         system_texts = self._decode(system_token_ids[:, cursor])
-        texts, images = [], []
+        conversations, last_replies = [], []
         for b in range(observations.shape[0]):
             # Capped by the state window rather than the rows behind the slot,
             # so the next state's prompt holds no turn the current's could not.
-            turns_num = min((self.seq_len - 1) // stride, cursor // stride)
-            rows = [cursor - stride * k for k in range(turns_num, -1, -1)]
+            turns_num = min(self.seq_len - 1, cursor)
+            rows = list(range(cursor - turns_num, cursor + 1))
+            # エピソードの中ではステップ数が増えていく。増えていない所より前は別のエピソード
+            steps = [float(episode_step[b, row, 0]) for row in rows]
+            first = len(rows) - 1
+            while first > 0 and steps[first - 1] < steps[first]:
+                first -= 1
+            rows, steps = rows[first:], steps[first:]
             turn_texts = self._decode(turn_token_ids[b, rows])
+            reply_texts = self._decode(reply_token_ids[b, rows])
             conversation = [
                 {"role": "system", "content": [{"type": "text", "text": system_texts[b]}]}
             ]
-            for row, turn_text in zip(rows, turn_texts, strict=True):
-                conversation.append(_user_turn(observations[b, row], turn_text))
-            # モデル自身の思考は閉じる
-            text, frames = render_conversation(self.processor, conversation, False)
+            for i, row in enumerate(rows):
+                conversation.append(
+                    user_turn(steps[i] / self.decision_fps, observations[b, row], turn_texts[i])
+                )
+                if i < len(rows) - 1 and reply_texts[i]:
+                    conversation.append(assistant_turn(reply_texts[i]))
+            conversations.append(conversation)
+            last_replies.append(reply_texts[-1])
+        return conversations, last_replies
+
+    def _state_prompts(
+        self, conversations: list[list[dict]], replies: list[str]
+    ) -> tuple[list[str], list[list[torch.Tensor]]]:
+        """状態を読むプロンプト。各会話に、そのステップの返答まで含めて描く。返答のない
+        ステップは、モデル自身の思考を閉じた生成プロンプトで終える。"""
+        texts, images = [], []
+        for conversation, reply in zip(conversations, replies, strict=True):
+            if reply:
+                text, frames = render_conversation(
+                    self.processor, conversation + [assistant_turn(reply)], False, {}
+                )
+            else:
+                text, frames = render_conversation(
+                    self.processor, conversation, True, {"enable_thinking": False}
+                )
             texts.append(text)
             images.append(frames)
         return texts, images
 
+    def _generate(self, conversation: list[dict]) -> str:
+        """``conversation`` への返答を書く。ゼロショットの制御器が書くものと同じ。"""
+        text, frames = render_conversation(
+            self.processor, conversation, True, self.generation_template_kwargs
+        )
+        inputs = self.processor(
+            text=[text], images=[frames], do_rescale=False, return_tensors="pt"
+        ).to(self.device)
+        inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
+        sampling = (
+            {"do_sample": True, "temperature": self.temperature}
+            if self.temperature > 0.0
+            else {"do_sample": False}
+        )
+        output = self.vlm_model.generate(**inputs, max_new_tokens=self.max_new_tokens, **sampling)
+        written = output[0, inputs["input_ids"].shape[1] :]
+        return self.processor.tokenizer.decode(written, skip_special_tokens=True).strip()
+
+    def _text_actions(self, replies: list[str], like: torch.Tensor) -> tuple[torch.Tensor, list]:
+        """各返答の <action> が指す行動を、方策の正規化した行動空間のチャンク
+        (B, horizon, action_dim) にしたものと、読めたかどうか。"""
+        scale = (self.action_high - self.action_low) / 2.0
+        bias = (self.action_high + self.action_low) / 2.0
+        actions, parsed = [], []
+        for reply in replies:
+            _, action, _, parse_ok = read_action_reply(
+                reply, self.parse_action_text, self.action_low, self.action_high, 1
+            )
+            actions.append((action - bias) / scale)
+            parsed.append(parse_ok)
+        chunk = torch.from_numpy(np.stack(actions)).to(like.device, like.dtype)
+        return chunk.unsqueeze(1).expand(-1, self.horizon, -1), parsed
+
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        texts, images = self._prompts_at(
+        conversations, _ = self._conversations(
             data.s_seq,
             data.system_token_ids_seq,
             data.turn_token_ids_seq,
+            data.reply_token_ids_seq,
+            data.episode_step_seq,
             -1,
         )
-        state, action, critic_out = self._infer(texts, images)
+        reply = self._generate(conversations[0])
+        state = self._forward_prompt(*self._state_prompts(conversations, [reply]))
+        head_action, _ = self.policy_head.get_action(state)
+        critic_out = self.value_head(state, head_action)
+        text_action, parsed = self._text_actions([reply], head_action)
+        q_head = self.value_head.scalar_value(state, head_action).item()
+        q_text = self.value_head.scalar_value(state, text_action).item()
+        # バッファを貯めている間は返答の行動だけで動く
+        text_chosen = data.warmup or q_head - q_text <= self.select_margin
 
         return InferResult(
-            action=action,
-            value_report=self.value_head.value_report(critic_out.output),
+            action=text_action if text_chosen else head_action,
+            value_report={
+                **self.value_head.value_report(critic_out.output),
+                "select/q_head": q_head,
+                "select/q_text": q_text,
+                "select/text_chosen": float(text_chosen),
+                "text/parse_failed": float(not parsed[0]),
+            },
             rnn_state=data.rnn_state,
             features=state,
+            text=reply,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -228,6 +337,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 value_report=self.value_head.value_report(terms.next_critic_out.output),
                 rnn_state=self._dummy_state.clone(),
                 features=terms.next_state,
+                text="",
             ),
             loss_result=LossResult(loss=terms.total_loss, info=terms.info),
             et_info=EligibilityTraceInfo(
@@ -245,14 +355,28 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def _loss_terms(self, data: ReplayBufferData) -> LossTerms:
         """リプレイバッチの損失。各状態のプロンプトはその状態のステップに保存されたもので、
         次の状態は最後のステップ、現在の状態はチャンクの手前のステップのもの。"""
-        next_state, next_action, next_critic_out = self._infer(*self._prompts_at(*_rows(data), -1))
+        # 次の状態で実行される行動は、推論のときと同じく、そのステップの返答の行動と頭の
+        # 行動から行動価値で選んだもの。返答のないステップでは頭の行動
+        with torch.inference_mode():
+            conversations, replies = self._conversations(*_rows(data), -1)
+            next_state = self._forward_prompt(*self._state_prompts(conversations, replies))
+            next_action, _ = self.policy_head.get_action(next_state)
+            text_action, _ = self._text_actions(replies, next_action)
+            q_head = self.value_head.scalar_value(next_state, next_action)
+            q_text = self.value_head.scalar_value(next_state, text_action)
+            has_reply = torch.tensor([bool(reply) for reply in replies], device=q_head.device)
+            text_chosen = has_reply & (q_head - q_text <= self.select_margin)
+            next_action = torch.where(text_chosen.view(-1, 1, 1), text_action, next_action)
+            next_critic_out = self.value_head(next_state, next_action)
         target_value = self.value_head.compute_target_value(
             next_critic_out.output,
             data.rewards[:, -self.horizon :],
             data.dones[:, -self.horizon :],
         )
 
-        state = self._forward_prompt(*self._prompts_at(*_rows(data), -self.horizon - 1))
+        state = self._forward_prompt(
+            *self._state_prompts(*self._conversations(*_rows(data), -self.horizon - 1))
+        )
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
         critic_loss, critic_info = self.value_head.compute_critic_loss(
             state, action_chunk, target_value
@@ -349,13 +473,3 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 logits_to_keep=1,
             )
         return self._state_from_hidden_states(outputs.hidden_states)
-
-    @torch.inference_mode()
-    def _infer(
-        self, texts: list[str], images: list[list[torch.Tensor]]
-    ) -> tuple[torch.Tensor, torch.Tensor, HeadOutput]:
-        state = self._forward_prompt(texts, images)
-        action, _ = self.policy_head.get_action(state)
-
-        critic_out = self.value_head(state, action)
-        return state, action, critic_out

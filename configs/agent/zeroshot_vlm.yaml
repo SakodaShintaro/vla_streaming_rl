@@ -1,9 +1,0 @@
-# @package _global_
-defaults:
-  - base/network
-  - _self_
-
-agent_type: zeroshot_vlm
-high_level:
-  # 高レベル方策が渡すサブタスクの活性の幅。行動には使わないが1以上が要る
-  subtask_tokens_num: 1

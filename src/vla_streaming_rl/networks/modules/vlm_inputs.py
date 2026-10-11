@@ -7,13 +7,18 @@ from transformers import AutoProcessor
 
 
 def render_conversation(
-    processor: AutoProcessor, conversation: list[dict], enable_thinking: bool
+    processor: AutoProcessor,
+    conversation: list[dict],
+    add_generation_prompt: bool,
+    template_kwargs: dict,
 ) -> tuple[str, list[torch.Tensor]]:
     """The conversation as the processor takes it: the chat template's text
     with a placeholder where each frame goes, and the frames in that order.
 
-    ``enable_thinking`` is what the template renders at the generation prompt:
-    off closes the model's own think block before it starts.
+    ``add_generation_prompt`` is off for a conversation that already ends on
+    its reply. ``template_kwargs`` is what the template renders the generation
+    prompt with: ``enable_thinking`` off closes the model's own think block
+    before it starts.
     """
     images = [
         part["image"]
@@ -32,7 +37,7 @@ def render_conversation(
         for turn in conversation
     ]
     text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking
+        messages, tokenize=False, add_generation_prompt=add_generation_prompt, **template_kwargs
     )
     return text, images
 

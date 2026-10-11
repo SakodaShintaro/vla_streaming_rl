@@ -270,6 +270,7 @@ class StreamingAgent(Agent):
                 rnn_state=self.rnn_state,
                 system_token_ids_seq=latest_data.system_token_ids,
                 turn_token_ids_seq=latest_data.turn_token_ids,
+                reply_token_ids_seq=latest_data.reply_token_ids,
                 velocity_x_seq=latest_data.velocity_x,
                 velocity_y_seq=latest_data.velocity_y,
                 velocity_z_seq=latest_data.velocity_z,
@@ -279,6 +280,7 @@ class StreamingAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
+                warmup=False,
             )
         )
         self.rnn_state = infer_result.rnn_state

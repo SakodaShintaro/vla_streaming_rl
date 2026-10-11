@@ -37,6 +37,7 @@ class InferInput:
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
     system_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
     turn_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
+    reply_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
     velocity_x_seq: torch.Tensor  # (B, T, 1)
     velocity_y_seq: torch.Tensor  # (B, T, 1)
     velocity_z_seq: torch.Tensor  # (B, T, 1)
@@ -46,6 +47,9 @@ class InferInput:
     global_step_seq: torch.Tensor  # (B, T, 1)
     episode_step_seq: torch.Tensor  # (B, T, 1)
     health_seq: torch.Tensor  # (B, T, 1)
+    # バッファを貯めている間のステップか。このあいだの行動（一様乱数や、返答に書いた行動）は
+    # ネットワークが決める
+    warmup: bool
 
 
 @dataclass
@@ -62,6 +66,8 @@ class InferResult:
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
     rnn_state: torch.Tensor  # (B, ...)
     features: torch.Tensor
+    # このステップにネットワークが書いた文。書かないネットワークでは空文字列
+    text: str
 
 
 @dataclass

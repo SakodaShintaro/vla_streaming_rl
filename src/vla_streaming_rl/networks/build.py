@@ -2,6 +2,7 @@
 
 import hydra
 import torch
+from gymnasium import Env
 from omegaconf import DictConfig
 from torch import nn
 
@@ -67,12 +68,9 @@ def _build_value_head(
     raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
 
 
-def build_network(
-    args: DictConfig,
-    observation_space_shape: tuple[int, ...],
-    action_space_shape: tuple[int, ...],
-    device: torch.device,
-) -> nn.Module:
+def build_network(args: DictConfig, env: Env, device: torch.device) -> nn.Module:
+    observation_space_shape = env.observation_space["image"].shape
+    action_space_shape = env.action_space.shape
     # The PPO network has its own value head baked in and reads no critic
     # config, so it is settled before the shared value-head factory is built.
     if args.network_class == "animal_ppo":
@@ -109,11 +107,6 @@ def build_network(
         ).to(device)
 
     elif args.network_class == "vlm_actor_critic_with_action_value":
-        # このネットワークは会話をリプレイバッファの seq_len 行から組み直すので、
-        # 高レベル方策の窓も同じ長さでなければならない
-        assert args.high_level.seq_len == args.vla.seq_len, (
-            f"high_level.seq_len {args.high_level.seq_len} must equal vla.seq_len {args.vla.seq_len}"
-        )
         from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
             VLMActorCriticWithActionValue,
         )
@@ -127,7 +120,10 @@ def build_network(
             policy_head_factory=policy_head_factory,
             vla_config=args.vla,
             pad_token_id=args.replay_buffer.pad_token_id,
-            steps_per_reply=args.high_level.steps_per_reply,
+            parse_action_text=env.unwrapped.parse_action_text,
+            action_low=env.action_space.low,
+            action_high=env.action_space.high,
+            decision_fps=env.metadata["decision_fps"],
         ).to(device)
 
     else:

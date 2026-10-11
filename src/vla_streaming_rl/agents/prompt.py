@@ -366,8 +366,7 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
-    # 高レベル方策の窓 high_level.seq_len に、チェーンの周期で収まるやり取りの数
-    history_turns = (args.high_level.seq_len - 1) // args.high_level.steps_per_reply
-    return PROMPT_BUILDERS[args.env_id](
-        env, history_turns, args.high_level.steps_per_reply, args.high_level.steps_per_observation
-    )
+    # 返答は毎ステップ書くので、会話の窓 vla.seq_len には今のステップとその前の
+    # seq_len - 1 回のやり取りが収まる
+    history_turns = args.vla.seq_len - 1
+    return PROMPT_BUILDERS[args.env_id](env, history_turns, 1, 1)
