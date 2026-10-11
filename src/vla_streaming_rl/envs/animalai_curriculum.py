@@ -675,9 +675,13 @@ class RandomSelector(ArenaSelector):
 
     def status(self, global_step: int) -> str:
         del global_step
-        untried = sum(attempts == 0 for attempts in self._attempts.values())
+        # 1エピソードが1回の試行なので、試行の総数から何周目かが決まる
+        lap = sum(self._attempts.values()) // len(self.arenas) + 1
+        rate = self._round_successes / max(self._round_attempts, 1)
         return (
-            f"random  cleared:{self.cleared_count()}/{len(self._arena_by_name)}  untried:{untried}"
+            f"random  lap:{lap}"
+            f"  {self._round_successes}/{self._round_attempts}/{len(self.arenas)}"
+            f"  success rate:{rate:.2f}"
         )
 
 
