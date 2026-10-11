@@ -20,19 +20,18 @@ def read_action_reply(
     parse_action_text,
     action_low: np.ndarray,
     action_high: np.ndarray,
-    hold_cap: int,
-) -> tuple[str, np.ndarray, int, bool]:
-    """The action a reply's ``<action>`` block names, clipped to the action
-    bounds, with how many steps it asks to hold it, capped at ``hold_cap``.
-    A reply that named no runnable action yields standing still, one row."""
+) -> tuple[str, np.ndarray, bool]:
+    """The one-step action a reply's ``<action>`` block names, clipped to the
+    action bounds. A reply that named no runnable action yields standing
+    still."""
     answer_match = ACTION_RE.search(reply_text)
     answer_text = answer_match.group(1).strip() if answer_match is not None else ""
-    action_array, parse_ok = parse_action_text(answer_text)
+    action, parse_ok = parse_action_text(answer_text)
     if parse_ok:
-        action = np.clip(action_array[0].astype(np.float32), action_low, action_high)
+        action = np.clip(action.astype(np.float32), action_low, action_high)
     else:
         action = np.zeros(action_low.shape, dtype=np.float32)
-    return answer_text, action, min(len(action_array), hold_cap), parse_ok
+    return answer_text, action, parse_ok
 
 
 def assistant_turn(text: str) -> dict:
@@ -57,14 +56,10 @@ def user_turn(seconds: float, image, text: str) -> dict:
 class PromptBuilder(ABC):
     """The conversation this run's VLMs read, carried across environment steps.
 
-    Every tick ``observe`` records what the agent is looking at. A chain reads
-    that through ``conversation`` on the steps it actually writes -- one step in
-    ``steps_per_reply`` -- and hands back what it wrote through
-    ``add_reply``, which is what puts the turn it answered into the conversation
-    for good. Between replies, every ``steps_per_observation`` ticks the turn is
-    kept as a user turn with no reply (``add_observation``); the other ticks are
-    overwritten rather than accumulated, so the conversation holds the turns a
-    chain saw and not every step of the run.
+    Every tick ``observe`` records what the agent is looking at, and what was
+    written about it comes back through ``add_reply``, which is what puts the
+    turn into the conversation for good. A tick nothing was written on is
+    overwritten rather than accumulated.
 
     ``history_turns`` is how many of those exchanges it keeps. Every turn still
     held is re-read on every step that follows, so a conversation left to grow
@@ -72,16 +67,9 @@ class PromptBuilder(ABC):
     dropped instead.
     """
 
-    def __init__(
-        self, env: Env, history_turns: int, steps_per_action: int, steps_per_observation: int
-    ) -> None:
+    def __init__(self, env: Env, history_turns: int) -> None:
         assert history_turns >= 0, history_turns
-        assert steps_per_action >= 1, steps_per_action
-        assert steps_per_observation >= 1, steps_per_observation
         self.history_turns = history_turns
-        self.steps_per_action = steps_per_action
-        # 返答を書かないステップでも、この間隔で観測を会話に残す
-        self.steps_per_observation = steps_per_observation
         self.decision_fps = env.metadata["decision_fps"]
         self._turns = []
         self._current = {}
@@ -120,12 +108,6 @@ class PromptBuilder(ABC):
         conversation, dropping the oldest exchange once ``history_turns`` are
         held."""
         turns = self._turns + [self._current, assistant_turn(text)]
-        self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
-
-    def add_observation(self) -> None:
-        """返答を書かないステップの観測を、返答のない user のターンとして会話に残す。
-        次に返答を書くとき、その間の観測をまとめて読めるようにするため。"""
-        turns = self._turns + [self._current]
         self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
 
     def task_text(self) -> str:
@@ -241,10 +223,8 @@ class AnimalAIPromptBuilder(PromptBuilder):
     """Animal-AI: the framing and the live scalars, the same words on every
     task -- the prompt carries no per-task knowledge."""
 
-    def __init__(
-        self, env: Env, history_turns: int, steps_per_action: int, steps_per_observation: int
-    ) -> None:
-        super().__init__(env, history_turns, steps_per_action, steps_per_observation)
+    def __init__(self, env: Env, history_turns: int) -> None:
+        super().__init__(env, history_turns)
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
@@ -262,14 +242,10 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
     def _action_format(self) -> str:
         return (
-            f"Write the action as `<name>(<n>)`, for example `move_forward(4)`: "
-            f"<name> is one of {ANIMALAI_ACTION_NAMES}, and <n> is how many steps "
-            f"in a row it is taken, an integer from 1 to {self.steps_per_action}. One turn "
-            f"step rotates 10 degrees; one forward step moves about 1.5 units, the arena "
-            f"being 40 units across. You are shown a new frame every "
-            f"{self.steps_per_observation} steps, but asked for a new action only every "
-            f"{self.steps_per_action} steps, and the steps left over after <n> are spent "
-            f"standing still."
+            f"Write the action as one of {ANIMALAI_ACTION_NAMES}. It is taken for one "
+            f"step, and you are then shown the next frame and asked again. One turn step "
+            f"rotates 10 degrees; one forward step moves about 1.5 units, the arena being "
+            f"40 units across."
         )
 
     def _rejection_text(self, answer: str) -> str:
@@ -332,4 +308,4 @@ def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     # 返答は毎ステップ書くので、会話の窓 vla.seq_len には今のステップとその前の
     # seq_len - 1 回のやり取りが収まる
     history_turns = args.vla.seq_len - 1
-    return PROMPT_BUILDERS[args.env_id](env, history_turns, 1, 1)
+    return PROMPT_BUILDERS[args.env_id](env, history_turns)

@@ -8,40 +8,37 @@ import numpy as np
 
 
 def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    pattern = r"(?:t\d+:\s*)?steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)"
-    matches = re.findall(pattern, action_text)
-    action_array = np.zeros((len(matches), 2), dtype=np.float32)
-    for i in range(len(matches)):
-        action_array[i, 0] = np.clip(float(matches[i][0]), -1.0, 1.0)
-        action_array[i, 1] = np.clip(float(matches[i][1]), -1.0, 1.0)
-    return action_array, len(matches) > 0
+    """Decode `steer=<value>, accel=<value>` into the one action it names."""
+    match = re.search(r"steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)", action_text)
+    if match is None:
+        return np.zeros(2, dtype=np.float32), False
+    action = np.array([float(match.group(1)), float(match.group(2))], dtype=np.float32)
+    return np.clip(action, -1.0, 1.0), True
 
 
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
 # Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
 # named action maps onto the extreme Box value that survives that dead-zone.
-# An action is written as a call, `<name>(<n>)`: one of four names, each a move
-# or a rotation alone, and how many steps in a row it is taken.
+# An action is written as one of four names, each a move or a rotation alone,
+# taken for one step.
 _ANIMALAI_ACTIONS = {
     "move_forward": (1.0, 0.0),
     "move_backward": (-1.0, 0.0),
     "turn_right": (0.0, 1.0),
     "turn_left": (0.0, -1.0),
 }
-# Anything that is not one call with a count of 1-99 stays a format violation,
-# reported as such rather than repaired here.
-_ANIMALAI_ACTION_RE = re.compile(f"({'|'.join(_ANIMALAI_ACTIONS)})\\(([1-9]\\d?)\\)", re.IGNORECASE)
 
 
 def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    """Decode the `<name>(<n>)` call into n rows of the Box action that the env
-    discretizes back into Animal-AI's native MultiDiscrete([3, 3]) pair."""
-    match = _ANIMALAI_ACTION_RE.fullmatch(action_text.strip())
-    if match is None:
-        return np.zeros((0, 2), dtype=np.float32), False
-    action = np.array(_ANIMALAI_ACTIONS[match.group(1).lower()], dtype=np.float32)
-    return np.tile(action, (int(match.group(2)), 1)), True
+    """Decode the action's name into the Box action that the env discretizes
+    back into Animal-AI's native MultiDiscrete([3, 3]) pair. Anything that is
+    not exactly one of the names stays a format violation, reported as such
+    rather than repaired here."""
+    name = action_text.strip().lower()
+    if name not in _ANIMALAI_ACTIONS:
+        return np.zeros(2, dtype=np.float32), False
+    return np.array(_ANIMALAI_ACTIONS[name], dtype=np.float32), True
 
 
 def make_animalai_env(

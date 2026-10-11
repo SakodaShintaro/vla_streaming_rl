@@ -279,8 +279,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         bias = (self.action_high + self.action_low) / 2.0
         actions, parsed = [], []
         for reply in replies:
-            _, action, _, parse_ok = read_action_reply(
-                reply, self.parse_action_text, self.action_low, self.action_high, 1
+            _, action, parse_ok = read_action_reply(
+                reply, self.parse_action_text, self.action_low, self.action_high
             )
             actions.append((action - bias) / scale)
             parsed.append(parse_ok)
