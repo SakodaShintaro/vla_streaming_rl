@@ -54,7 +54,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     """VLM backbone + DiffusionPolicy + Action Value critic.
 
     Every tick the VLM first writes the reply the zero-shot controller would --
-    its score, subtask and action -- to the conversation of the episode so far.
+    its subtask and action -- to the conversation of the episode so far.
     The state is then read off the same VLM run over that conversation with the
     reply in it, so the heads see what the VLM saw, thought and proposed. Two
     candidate actions come out of a tick, the one the reply names and the policy

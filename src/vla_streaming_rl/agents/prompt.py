@@ -1,28 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""Language input composed on the agent side.
-
-The environment reports state; the agent decides what to say about it. Every
-string a policy reads as language is built here out of the structured
-observation the env already publishes, so the prompt belongs to the run's agent
-config rather than to the simulator: two agents can drive the same env with
-different framing, and the env carries no text of its own.
-
-There is one builder per environment, and it always writes the prompt of an
-agent about to act: what the env asks, the action vocabulary it is asked in, the
-arena's own instruction, and the three sections the answer is read out of. Whether
-the action then comes from the reply or from a policy head is the reader's
-business, not the prompt's -- a run that reads the language as conditioning is
-reading the same words a run that acts on it would, so the two are comparable
-without a second wording to keep in step.
-
-A builder is called once per environment step with the observation, the reward
-and the info the agent itself received, and returns the conversation as it then
-stands: the standing task, every turn a chain has already answered, and this
-tick's own turn. Holding the conversation here is what keeps the VLM modules
-free of any environment's vocabulary -- they run a model over what they are
-handed and compose no text of their own beyond how a chain is continued.
-"""
-
 import re
 from abc import ABC, abstractmethod
 from typing import Any
@@ -31,16 +7,8 @@ import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
-# 返答の先頭の採点の区間。前の返答からの行動が、そのサブタスクの実現に向けてどれだけ
-# 適切だったかを 0〜9 の1桁で書かせ、その位置で各数字を選ぶ確率の期待値から点数を読む
-SCORE_TAG = "<score>"
-
 TEXT_ACTION_PROTOCOL = (
-    "Before anything else, compare the frames since your previous reply with the subtask of "
-    "that reply and judge how far the agent's actions moved toward it. "
-    f"Reply with {SCORE_TAG}an integer from 0 to 9 for that judgment: 0 if the actions "
-    "worked against the subtask, 9 if they got it done</score> "
-    "then <subtask>one short sentence on what the agent should get done by your next "
+    "Reply with <subtask>one short sentence on what the agent should get done by your next "
     "reply</subtask> then <action>the action only</action>."
 )
 
