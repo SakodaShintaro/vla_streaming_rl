@@ -107,6 +107,8 @@ class SpatialTemporalEncoder(nn.Module):
             layer_scale_init=layer_scale_init,
         )
 
+        # 残差の大きさはトークンの種類ごとに大きく違うので、ヘッドに渡す前にトークンごとに揃える
+        self.output_norm = nn.LayerNorm(self.hidden_image_dim)
         self.output_dim = self.hidden_image_dim * self.space_len
 
     def init_state(self) -> torch.Tensor:
@@ -179,4 +181,5 @@ class SpatialTemporalEncoder(nn.Module):
         rnn_state = rnn_state_internal.reshape(B, self.space_len, -1, self.n_layer)
 
         # The last step's whole space axis is the state.
-        return spatial_temporal_output[:, -1, :, :].flatten(start_dim=1), rnn_state
+        state = self.output_norm(spatial_temporal_output[:, -1, :, :])
+        return state.flatten(start_dim=1), rnn_state
