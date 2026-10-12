@@ -4,7 +4,7 @@ set -ux
 # Usage: ./compare_animalai.sh <seed> [hydra overrides...]
 # 主比較の2手法を同じシードで順に実行する。
 #   std_off_policy : VLM なしの actor-critic
-#   vlm_off_policy : VLM の返答の行動と頭の行動を行動価値で選ぶ
+#   vlm_off_policy : VLM の表現からヘッドが行動を出す
 # 比較の指標は Testbed なので終了時評価は常に入れる。
 # 追加の引数は2手法すべてに渡り、後ろにあるので上の指定も上書きできる
 # （例: env_factory.train_levels=[01,02]）。

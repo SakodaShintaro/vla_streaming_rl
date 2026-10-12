@@ -106,8 +106,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.critic_loss_weight = critic_loss_weight
         # VLM は凍結して使う。状態は保存した表現から作るので、VLM には勾配が届かない
         assert not vla_config.use_lora, "the VLM is frozen in this network"
-        # 返答の行動と頭の行動を行動価値で選ぶときの余裕。頭の行動の価値が返答の行動を
-        # これより大きく上回るときだけ、頭の行動を実行する
+        # 返答の行動とヘッドの行動を行動価値で選ぶときの余裕。ヘッドの行動の価値が返答の行動を
+        # これより大きく上回るときだけ、ヘッドの行動を実行する
         self.select_margin = vla_config.select_margin
         self.parse_action_text = parse_action_text
         self.action_low = action_low
@@ -139,6 +139,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # このステップのフレーム（会話に積むために覚えておく）と、表示用に残す直近の会話
         self._frame = None
         self._exchange = None
+        # このエピソードで行動を選んだ回数と、そのうち返答の行動を選んだ回数。表示用
+        self._decisions_num = 0
+        self._vlm_chosen_num = 0
 
     def init_state(self) -> torch.Tensor:
         return self._dummy_state.clone()
@@ -183,20 +186,30 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             results.append(self.processor.tokenizer.decode(valid_ids, skip_special_tokens=True))
         return results
 
-    def _text_actions(self, replies: list[str], like: torch.Tensor) -> tuple[torch.Tensor, list]:
+    def _text_actions(
+        self, replies: list[str], like: torch.Tensor
+    ) -> tuple[torch.Tensor, list[bool], list[str]]:
         """各返答の <action> が指す行動を、方策の正規化した行動空間のチャンク
-        (B, horizon, action_dim) にしたものと、読めたかどうか。"""
+        (B, horizon, action_dim) にしたものと、読めたかどうか、<action> に書かれていた文。"""
         scale = (self.action_high - self.action_low) / 2.0
         bias = (self.action_high + self.action_low) / 2.0
-        actions, parsed = [], []
+        actions, parsed, answers = [], [], []
         for reply in replies:
-            _, action, parse_ok = read_action_reply(
+            answer, action, parse_ok = read_action_reply(
                 reply, self.parse_action_text, self.action_low, self.action_high
             )
             actions.append((action - bias) / scale)
             parsed.append(parse_ok)
+            answers.append(answer)
         chunk = torch.from_numpy(np.stack(actions)).to(like.device, like.dtype)
-        return chunk.unsqueeze(1).expand(-1, self.horizon, -1), parsed
+        return chunk.unsqueeze(1).expand(-1, self.horizon, -1), parsed, answers
+
+    def _format_action(self, net_action: torch.Tensor) -> str:
+        """正規化した1ステップの行動を、環境の行動空間の数値で書いたもの。"""
+        scale = (self.action_high - self.action_low) / 2.0
+        bias = (self.action_high + self.action_low) / 2.0
+        env_action = net_action.float().cpu().numpy() * scale + bias
+        return "[" + ", ".join(f"{value:+.2f}" for value in env_action) + "]"
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
@@ -247,7 +260,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         warmup: bool,
     ) -> InferResult:
         """最後のステップの行動を決める。そのステップのフレームと数値のターンを会話に積んで
-        返答を書かせ、その計算の活性から状態を作り、返答の行動と頭の行動を行動価値で選ぶ。"""
+        返答を書かせ、その計算の活性から状態を作り、返答の行動とヘッドの行動を行動価値で選ぶ。"""
         assert system_token_ids.shape[0] == 1, "Batch size must be 1 for inference"
         step = float(episode_step[0, -1, 0])
         if step == 0.0 or self._exchange is None:
@@ -258,6 +271,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             self._exchange = [
                 {"role": "system", "content": [{"type": "text", "text": system_text}]}
             ]
+            self._decisions_num = 0
+            self._vlm_chosen_num = 0
         turn_text = self._decode(turn_token_ids[0, -1:])[0]
         self._exchange.append(user_turn(step / self.decision_fps, self._frame, turn_text))
         chain = self.generator.generate(self._exchange)
@@ -275,19 +290,22 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state = self._state(representation.unsqueeze(0))
         head_action, _ = self.policy_head.get_action(state)
         critic_out = self.value_head(state, head_action)
-        text_action, parsed = self._text_actions([reply], head_action)
+        vlm_action, parsed, answers = self._text_actions([reply], head_action)
         q_head = self.value_head.scalar_value(state, head_action).item()
-        q_text = self.value_head.scalar_value(state, text_action).item()
+        q_vlm = self.value_head.scalar_value(state, vlm_action).item()
         # バッファを貯めている間は返答の行動だけで動く
-        text_chosen = warmup or q_head - q_text <= self.select_margin
+        vlm_chosen = warmup or q_head - q_vlm <= self.select_margin
+        self._decisions_num += 1
+        self._vlm_chosen_num += int(vlm_chosen)
+        answer = answers[0] if parsed[0] else f"(unparsed: {answers[0]})"
 
         return InferResult(
-            action=text_action if text_chosen else head_action,
+            action=vlm_action if vlm_chosen else head_action,
             value_report={
                 **self.value_head.value_report(critic_out.output),
+                "select/q_vlm": q_vlm,
                 "select/q_head": q_head,
-                "select/q_text": q_text,
-                "select/text_chosen": float(text_chosen),
+                "select/vlm_chosen": float(vlm_chosen),
                 "vlm/parse_failed": float(not parsed[0]),
                 "vlm/prompt_tokens": float(prompt_tokens),
                 "vlm/completion_tokens": float(completion_tokens),
@@ -299,10 +317,17 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             text=reply,
             text_status=(
                 f"in {prompt_tokens} tok   out {completion_tokens} tok   {msec:.0f} ms   "
-                f"parse {'ok' if parsed[0] else 'failed'}   "
-                f"{'reply' if text_chosen else 'head'} action runs"
+                f"parse {'ok' if parsed[0] else 'failed'}"
             ),
             exchange=exchange,
+            selection_status=(
+                f"{'warmup: VLM only' if warmup else 'chosen by Q'}. "
+                f"VLM chosen {self._vlm_chosen_num}/{self._decisions_num} this episode."
+            ),
+            selection_rows=[
+                ("VLM", f"{answer}  {self._format_action(vlm_action[0, 0])}", q_vlm, vlm_chosen),
+                ("head", self._format_action(head_action[0, 0]), q_head, not vlm_chosen),
+            ],
         )
 
     def _loss_terms(
@@ -311,16 +336,16 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         """リプレイバッチの損失。状態は、行動を決めたステップで保存した VLM の表現から作る。
         現在の状態はチャンクの手前のステップのもので、次の状態は ``next_representation``
         （最後のステップのもの）から作る。"""
-        # 次の状態で実行される行動は、推論のときと同じく、そのステップの返答の行動と頭の
+        # 次の状態で実行される行動は、推論のときと同じく、そのステップの返答の行動とヘッドの
         # 行動から行動価値で選んだもの
         with torch.inference_mode():
             next_state = self._state(next_representation)
             next_action, _ = self.policy_head.get_action(next_state)
-            text_action, _ = self._text_actions(next_replies, next_action)
+            vlm_action, _, _ = self._text_actions(next_replies, next_action)
             q_head = self.value_head.scalar_value(next_state, next_action)
-            q_text = self.value_head.scalar_value(next_state, text_action)
-            text_chosen = q_head - q_text <= self.select_margin
-            next_action = torch.where(text_chosen.view(-1, 1, 1), text_action, next_action)
+            q_vlm = self.value_head.scalar_value(next_state, vlm_action)
+            vlm_chosen = q_head - q_vlm <= self.select_margin
+            next_action = torch.where(vlm_chosen.view(-1, 1, 1), vlm_action, next_action)
             next_critic_out = self.value_head(next_state, next_action)
         target_value = self.value_head.compute_target_value(
             next_critic_out.output,
@@ -349,6 +374,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
     def _state(self, representation: torch.Tensor) -> torch.Tensor:
-        """保存した表現 (B, num_state_queries, hidden_size) を射影して、頭が読む状態にする。"""
+        """保存した表現 (B, num_state_queries, hidden_size) を射影して、ヘッドが読む状態にする。"""
         projected = self.state_out_proj(representation.to(torch.float32))
         return projected.flatten(start_dim=1)

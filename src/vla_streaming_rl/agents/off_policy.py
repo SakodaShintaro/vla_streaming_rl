@@ -33,10 +33,13 @@ from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
-from vla_streaming_rl.utils import render_conversation_panel
+from vla_streaming_rl.utils import render_conversation_panel, render_selection_panel
 
 
 class OffPolicyAgent(Agent):
+    SELECTION_PANEL_WIDTH = 320
+    SELECTION_PANEL_HEIGHT = 560
+
     def __init__(
         self,
         *,
@@ -305,6 +308,14 @@ class OffPolicyAgent(Agent):
                 )
             }
             self.prompt_builder.add_reply(self.last_reply)
+        if infer_result.selection_rows is not None:
+            # 2つの候補とその行動価値、どちらが選ばれたか
+            self.reply_panels["selection"] = render_selection_panel(
+                f"step {global_step}, {infer_result.selection_status}",
+                infer_result.selection_rows,
+                self.SELECTION_PANEL_WIDTH,
+                self.SELECTION_PANEL_HEIGHT,
+            )
         action_chunk = infer_result.action[0].cpu().numpy()
         self.action_chunk = action_chunk
         self.chunk_step = 1

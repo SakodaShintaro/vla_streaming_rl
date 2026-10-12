@@ -75,6 +75,10 @@ class InferResult:
     text_status: str | None
     # その文を書いたときに実際に読んだ会話と、その文。描画用。文を書かないネットワークでは None
     exchange: list[dict] | None
+    # 行動の候補を比べて選んだときの、その経緯の1行と、候補ごとの
+    # （名前、行動の説明、行動価値、選ばれたか）。描画用。候補を比べないネットワークでは None
+    selection_status: str | None
+    selection_rows: list[tuple[str, str, float, bool]] | None
 
 
 @dataclass

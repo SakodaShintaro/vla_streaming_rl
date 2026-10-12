@@ -259,6 +259,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             text=None,
             text_status=None,
             exchange=None,
+            selection_status=None,
+            selection_rows=None,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -365,6 +367,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             text=None,
             text_status=None,
             exchange=None,
+            selection_status=None,
+            selection_rows=None,
         )
 
         info_dict = {
