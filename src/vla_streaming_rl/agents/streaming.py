@@ -174,7 +174,7 @@ class StreamingAgent(Agent):
         ) = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
         # the observation.
-        self.prompt_builder.observe(obs, reward, info, image)
+        self.prompt_builder.observe(obs, reward, info, image, self.prev_action)
         prompt = self.prompt_builder.task_text()
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
@@ -384,7 +384,7 @@ class StreamingAgent(Agent):
         ) = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
         # the observation.
-        self.prompt_builder.observe(obs, reward, info, image)
+        self.prompt_builder.observe(obs, reward, info, image, self.prev_action)
         prompt = self.prompt_builder.task_text()
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(

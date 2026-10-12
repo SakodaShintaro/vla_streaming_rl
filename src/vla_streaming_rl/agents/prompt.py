@@ -63,9 +63,12 @@ class PromptBuilder(ABC):
     dropped instead.
     """
 
-    def __init__(self, env: Env, history_turns: int) -> None:
+    def __init__(self, env: Env, history_turns: int, thinking_interval: int) -> None:
         assert history_turns >= 0, history_turns
+        assert thinking_interval >= 0, thinking_interval
         self.history_turns = history_turns
+        # 思考を書かせる間隔（ステップ数）。思考を書かせない設定では 0
+        self.thinking_interval = thinking_interval
         self.decision_fps = env.metadata["decision_fps"]
         self._turns = []
         self._current = {}
@@ -78,13 +81,19 @@ class PromptBuilder(ABC):
         self._current = {}
         self._tick = 0
 
-    def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
+    def observe(
+        self, obs: dict[str, Any], reward: float, info: dict, image, previous_action: np.ndarray
+    ) -> None:
         """What the agent is looking at this tick: the turn a chain would read if
         it wrote one now. Overwritten every step until one does. Its timestamp
-        is the episode's clock at the rate the env takes decisions."""
+        is the episode's clock at the rate the env takes decisions.
+        ``previous_action`` is the action the env was actually given on the step
+        before, whoever chose it."""
         self._task_text = self._task(obs, info)
         self._current = user_turn(
-            self._tick / self.decision_fps, image, self._turn(obs, reward, info)
+            self._tick / self.decision_fps,
+            image,
+            self._turn(obs, reward, info, previous_action),
         )
         self._tick += 1
 
@@ -135,12 +144,27 @@ class PromptBuilder(ABC):
     def _rejection_text(self, answer: str) -> str:
         return f"({answer!r} is not an action -- nothing ran.)"
 
+    def _protocol(self) -> str:
+        """返答の書式。思考を書かせるときは、その間隔と、思考を何に使うかを先に伝える。
+        思考のあとに書くのは1ステップの行動だけなので、それまでの振り返りと、次に考える
+        までの方針は、ここで求めておく。"""
+        if self.thinking_interval == 0:
+            return TEXT_ACTION_PROTOCOL
+        return (
+            f"On the first step and every {self.thinking_interval} steps after it you think "
+            f"before you reply: use that to review the frames and the actions taken since you "
+            f"last thought, and to decide what to do until you next think. On the other steps "
+            f"you reply at once, carrying on with what you last decided. {TEXT_ACTION_PROTOCOL}"
+        )
+
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         """The standing task: what the env asks, unchanged through an episode."""
 
     @abstractmethod
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _turn(
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
+    ) -> str:
         """What this tick alone says: the live numbers under the frame."""
 
 
@@ -161,8 +185,10 @@ class CarRacingPromptBuilder(PromptBuilder):
         del obs, info
         return f"{CAR_RACING_TEXT_ACTION_PROMPT}"
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward, info
+    def _turn(
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
+    ) -> str:
+        del obs, reward, info, previous_action
         return ""
 
 
@@ -219,8 +245,8 @@ class AnimalAIPromptBuilder(PromptBuilder):
     """Animal-AI: the framing and the live scalars, the same words on every
     task -- the prompt carries no per-task knowledge."""
 
-    def __init__(self, env: Env, history_turns: int) -> None:
-        super().__init__(env, history_turns)
+    def __init__(self, env: Env, history_turns: int, thinking_interval: int) -> None:
+        super().__init__(env, history_turns, thinking_interval)
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
@@ -241,7 +267,9 @@ class AnimalAIPromptBuilder(PromptBuilder):
             f"Write the action as one of {ANIMALAI_ACTION_NAMES}. It is taken for one "
             f"step, and you are then shown the next frame and asked again. One turn step "
             f"rotates 10 degrees; one forward step moves about 1.5 units, the arena being "
-            f"40 units across."
+            f"40 units across. Each frame comes with the action that was actually taken on "
+            f"the step before it, as two numbers: move (+1 forward, -1 backward) and turn "
+            f"(+1 right, -1 left). It can differ from the action you named."
         )
 
     def _rejection_text(self, answer: str) -> str:
@@ -249,13 +277,22 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{ANIMALAI_FRAMING} {self._action_format()} {TEXT_ACTION_PROTOCOL}"
+        return f"{ANIMALAI_FRAMING} {self._action_format()} {self._protocol()}"
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _turn(
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
+    ) -> str:
         del info
         self._forward_speed_sum += float(obs["velocity"][2])
         self._forward_speed_steps += 1
-        return _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)
+        scalars = _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)
+        if self._tick == 0:
+            # エピソードの最初のステップには、その前に取られた行動がない
+            return scalars
+        return (
+            f"Action taken: move {previous_action[0]:+.2f}, turn {previous_action[1]:+.2f}. "
+            f"{scalars}"
+        )
 
 
 # --- CARLA -------------------------------------------------------------------
@@ -284,10 +321,12 @@ class CarlaPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CARLA_TEXT_ACTION_FRAMING} {TEXT_ACTION_PROTOCOL}"
+        return f"{CARLA_TEXT_ACTION_FRAMING} {self._protocol()}"
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward
+    def _turn(
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
+    ) -> str:
+        del obs, reward, previous_action
         return CARLA_TEXT_ACTION_MANEUVER[info["maneuver_command"]]
 
 
@@ -302,4 +341,6 @@ PROMPT_BUILDERS = {
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
     # 会話の履歴は VLM の KV キャッシュが持つので、builder 側には残さない
-    return PROMPT_BUILDERS[args.env_id](env, 0)
+    # 思考を書かせない設定では、思考の間隔もプロンプトに書かない
+    thinking_interval = 0 if args.vla.reasoning_effort == "none" else args.vla.thinking_interval
+    return PROMPT_BUILDERS[args.env_id](env, 0, thinking_interval)

@@ -55,9 +55,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     Every tick the VLM reads the tick's frame and text on top of the episode's
     conversation so far and writes the reply the zero-shot controller would --
-    its action. The conversation lives in the VLM's KV cache: the system prompt
-    stays, the turns behind it are kept first-in first-out up to
-    ``window_tokens``, and a tick only runs the tokens it adds. The state is
+    its action, after thinking on every ``thinking_interval``-th tick. The
+    conversation lives in the VLM's KV cache: the system prompt stays, the
+    turns behind it are kept first-in first-out up to ``window_tokens``, and a
+    tick only runs the tokens it adds. The state is
     read off that same run -- the activations of what the tick added, its reply
     included -- so the heads see what the VLM saw, thought and proposed. The
     VLM is frozen, so what it gives a tick is computed once, when the tick is
@@ -114,6 +115,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_low = action_low
         self.action_high = action_high
         self.decision_fps = decision_fps
+        # 思考を書かせる間隔（ステップ数）。エピソードの最初のステップから、この間隔ごと
+        assert vla_config.thinking_interval >= 1, vla_config.thinking_interval
+        self.thinking_interval = vla_config.thinking_interval
 
         # 返答を書く VLM。会話は KV キャッシュに積み、システムプロンプトを残して、その後ろを
         # 直近 window_tokens トークンまで FIFO で持つ
@@ -276,7 +280,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             self._vlm_chosen_num = 0
         turn_text = self._decode(turn_token_ids[0, -1:])[0]
         self._exchange.append(user_turn(step / self.decision_fps, self._frame, turn_text))
-        chain = self.generator.generate(self._exchange)
+        # 一定の間隔のステップで、思考を書いてから返答させる。そのあいだは行動だけを書かせる
+        thinking = self.generator.thinking_enabled and int(step) % self.thinking_interval == 0
+        chain = self.generator.generate(self._exchange, thinking)
         reply = chain.text
         self._exchange.append(assistant_turn(reply))
         # モデルの文脈はキャッシュが持つので、リストには差分の計算と表示に要る直近だけを残す

@@ -57,9 +57,9 @@ class ChainGenerator:
     比例するので、そこを「先頭の sink ＋直近 ``window_tokens`` トークン」まで間引く。
     線形注意層には中間の情報も残る。
 
-    思考は会話の最初の返答でだけ書かせる。その最初のやり取り（最初のターンと、思考込みの
-    返答）はシステムプロンプトと一緒に sink に入れ、会話が続くあいだプロンプトの一部として
-    残す。以降の返答は思考を閉じた形で書かせる。
+    思考を書かせるかどうかは、返答ごとに呼び出し側が決める。思考を書いた返答も、ほかの
+    ターンと同じく直近 ``window_tokens`` トークンの中に残り、古くなれば押し出される。
+    sink に入るのはシステムプロンプトだけ。
 
     ``candidates`` を渡すと、返答の本体（思考の後ろ）はその候補のどれか1つになる。次に
     選べるトークンを、候補のどれかの続きになるものだけに絞って書かせるので、書式の崩れた
@@ -101,22 +101,21 @@ class ChainGenerator:
             else text_config.vocab_size
         )
         self.top_p = generation_config.top_p if generation_config.top_p is not None else 1.0
-        # 会話の最初の返答で書かせる思考の量。"none" なら思考は書かせない。それ以外は、最初の
-        # 返答でだけ思考を書いてから返答させる。思考の量の段階（reasoning_effort: low /
-        # medium / xhigh）を持つテンプレートには、それも渡す
+        # 思考を書かせる返答での思考の量。"none" なら思考は書かせられない。思考の量の段階
+        # （reasoning_effort: low / medium / xhigh）を持つテンプレートには、それも渡す
         reasoning_effort = vla_config.reasoning_effort
         assert reasoning_effort in ("none", "low", "medium", "xhigh"), reasoning_effort
-        self.opening_thinking = reasoning_effort != "none"
-        template_kwargs = {"enable_thinking": self.opening_thinking}
-        if self.opening_thinking and "reasoning_effort" in self.processor.chat_template:
+        self.thinking_enabled = reasoning_effort != "none"
+        template_kwargs = {"enable_thinking": self.thinking_enabled}
+        if self.thinking_enabled and "reasoning_effort" in self.processor.chat_template:
             template_kwargs["reasoning_effort"] = reasoning_effort
         self.device = device
         self.hidden_size = text_config.hidden_size
         # テンプレートが会話の末尾に付ける生成プロンプトのトークン列。会話の中身に依らない
-        # 定数なので、ここで一度だけ測る。最初の返答に付けるもの（思考を書かせる形）と、
-        # それ以降に付けるもの（思考を閉じた形）
+        # 定数なので、ここで一度だけ測る。思考を書かせる返答に付けるものと、思考を閉じた形で
+        # 書かせる返答に付けるもの
         probe = [{"role": "user", "content": [{"type": "text", "text": "x"}]}]
-        self._opening_tail_ids = self._generation_prompt_ids(probe, template_kwargs)
+        self._thinking_tail_ids = self._generation_prompt_ids(probe, template_kwargs)
         self._tail_ids = self._generation_prompt_ids(probe, {"enable_thinking": False})
         # テンプレートがシステムプロンプトの先頭に足す文言。思考の量の指示があればそれが入る
         marker = "SYSTEM_PROMPT_BODY"
@@ -178,22 +177,23 @@ class ChainGenerator:
         self._kv_len = 0
         # 次のトークンに割り当てる 3D 位置の起点
         self._next_pos = 0
-        # sink として永久に残す先頭のトークン数。システムプロンプトと、思考を書かせたときは
-        # 最初のやり取り
+        # sink として永久に残す先頭（システムプロンプト）のトークン数
         self._sink_len = 0
         # 前回の返答を書いた会話の最後のメッセージと、そこへ確定した返答の文字列
         self._last_consumed = None
         self._committed_reply = ""
 
     @torch.inference_mode()
-    def generate(self, conversation: list[dict]) -> Chain:
+    def generate(self, conversation: list[dict], thinking: bool) -> Chain:
         """``conversation`` への返答を最大 ``max_len`` トークン書き、確定してキャッシュに
-        残す。会話の画像は、エージェントが builder に渡したもの（8 ビットの画像か、
-        [0, 1] の (C, H, W) float テンソル）で、processor には後者として渡る。"""
+        残す。``thinking`` なら、思考を書いてから返答させる。会話の画像は、エージェントが
+        builder に渡したもの（8 ビットの画像か、[0, 1] の (C, H, W) float テンソル）で、
+        processor には後者として渡る。"""
+        assert self.thinking_enabled or not thinking, "reasoning_effort is none"
         start = time.perf_counter()
-        # 会話の最初の返答か。最初の返答でだけ思考を書かせる
+        # 会話の最初の返答か
         opening = self._cache is None
-        tail_ids = self._opening_tail_ids if opening else self._tail_ids
+        tail_ids = self._thinking_tail_ids if thinking else self._tail_ids
         # 会話の差分と生成プロンプトを1回の forward で積む
         ids, pos, pixel_values, image_grid_thw = self._encode(self._new_messages(conversation))
         tail_pos = self._linear_positions(len(tail_ids), int(pos.max().item()) + 1)
@@ -213,8 +213,6 @@ class ChainGenerator:
         # まだキャッシュに入っていない
         tokens = []
         constrained = len(self._candidate_ids) > 0
-        # 思考を書いている最中か。思考を書かせるのは最初の返答だけ
-        thinking = opening and self.opening_thinking
         # 決められた通りに書かせる残りのトークン（思考を閉じる書式）と、本体として書いた分
         forced = []
         body = []
@@ -294,10 +292,7 @@ class ChainGenerator:
             None,
             hidden=False,
         )
-        if opening and self.opening_thinking:
-            # 最初のやり取り（最初のターンと、思考込みの返答）まで、プロンプトの一部として残す
-            self._sink_len = self._kv_len
-        elif opening:
+        if opening:
             self._sink_len = len(
                 self.processor.tokenizer.encode(
                     _history_text(conversation[0], self._system_prefix), add_special_tokens=False

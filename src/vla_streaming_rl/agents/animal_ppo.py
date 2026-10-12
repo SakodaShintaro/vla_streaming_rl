@@ -194,6 +194,8 @@ class AnimalPPOAgent(Agent):
         self.rnn_state = self.network.init_state(1, self.device)
         self.buffer = RolloutBuffer()
         self.pending: Pending | None = None
+        # 直前に環境へ渡した行動。プロンプトの組み立てに渡す
+        self.prev_action = np.zeros(action_space.shape, dtype=np.float32)
         # the first observation of a run starts an episode
         self._previous_done = True
 
@@ -210,7 +212,7 @@ class AnimalPPOAgent(Agent):
     ) -> StepResult:
         del global_step
         visual, vels = self._preprocess(obs, info)
-        self.prompt_builder.observe(obs, reward, info, visual)
+        self.prompt_builder.observe(obs, reward, info, visual, self.prev_action)
         prompt = self.prompt_builder.task_text()
         shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
@@ -253,7 +255,7 @@ class AnimalPPOAgent(Agent):
         dropped simply by never being buffered."""
         del global_step
         visual, vels = self._preprocess(obs, info)
-        self.prompt_builder.observe(obs, reward, info, visual)
+        self.prompt_builder.observe(obs, reward, info, visual, self.prev_action)
         prompt = self.prompt_builder.task_text()
         fresh = self._episode_boundary(terminated, truncated)
         return StepResult(
@@ -312,7 +314,8 @@ class AnimalPPOAgent(Agent):
             value=float(value.squeeze().item()),
             neglogpac=float(neglogpac.item()),
         )
-        return self._to_env_action(self.pending.action)
+        self.prev_action = self._to_env_action(self.pending.action)
+        return self.prev_action
 
     def _preprocess(self, obs: dict[str, Any], info: dict) -> tuple:
         """The image as the wrappers already produce it, and the velocity/clock
