@@ -48,7 +48,9 @@ vla:
   state_out_dim: 4
   # 毎ステップ書く返答（行動）の生成
   max_new_tokens: 512
-  reasoning_effort: none  # [none, low, medium, high, xhigh]
+  # エピソードの最初の返答でだけ書かせる思考の量。none なら思考は書かせない。その思考は
+  # 最初のやり取りごとプロンプトの一部として残り、以降の返答は思考なしで書く
+  reasoning_effort: low  # [none, low, medium, high, xhigh]
   temperature: 0.5
   # 返答の行動とヘッドの行動を行動価値で選ぶときの余裕。ヘッドの行動の価値が返答の行動を
   # これより大きく上回るときだけヘッドの行動を実行する。.inf なら常に返答の行動、

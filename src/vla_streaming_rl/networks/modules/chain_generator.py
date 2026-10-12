@@ -54,8 +54,12 @@ class ChainGenerator:
     表示用になる。
 
     キャッシュは実トークン数分だけ使う DynamicCache。全注意層の KV だけが会話長に
-    比例するので、そこを「先頭の sink（システムプロンプト）＋直近
-    ``window_tokens`` トークン」まで間引く。線形注意層には中間の情報も残る。
+    比例するので、そこを「先頭の sink ＋直近 ``window_tokens`` トークン」まで間引く。
+    線形注意層には中間の情報も残る。
+
+    思考は会話の最初の返答でだけ書かせる。その最初のやり取り（最初のターンと、思考込みの
+    返答）はシステムプロンプトと一緒に sink に入れ、会話が続くあいだプロンプトの一部として
+    残す。以降の返答は思考を閉じた形で書かせる。
     """
 
     def __init__(
@@ -91,29 +95,23 @@ class ChainGenerator:
             else text_config.vocab_size
         )
         self.top_p = generation_config.top_p if generation_config.top_p is not None else 1.0
-        # 思考の量。"none" なら思考を閉じた形で返答を書かせ、それ以外は思考を書いてから
-        # 返答させる。思考の量の段階（reasoning_effort: low / medium / xhigh）を持つ
-        # テンプレートには、それも渡す
+        # 会話の最初の返答で書かせる思考の量。"none" なら思考は書かせない。それ以外は、最初の
+        # 返答でだけ思考を書いてから返答させる。思考の量の段階（reasoning_effort: low /
+        # medium / xhigh）を持つテンプレートには、それも渡す
         reasoning_effort = vla_config.reasoning_effort
         assert reasoning_effort in ("none", "low", "medium", "xhigh"), reasoning_effort
-        template_kwargs = {"enable_thinking": reasoning_effort != "none"}
-        if reasoning_effort != "none" and "reasoning_effort" in self.processor.chat_template:
+        self.opening_thinking = reasoning_effort != "none"
+        template_kwargs = {"enable_thinking": self.opening_thinking}
+        if self.opening_thinking and "reasoning_effort" in self.processor.chat_template:
             template_kwargs["reasoning_effort"] = reasoning_effort
         self.device = device
         self.hidden_size = text_config.hidden_size
-        # テンプレートが会話の末尾に付ける生成プロンプトのトークン列。
-        # 会話の中身に依らない定数なので、ここで一度だけ測る。
+        # テンプレートが会話の末尾に付ける生成プロンプトのトークン列。会話の中身に依らない
+        # 定数なので、ここで一度だけ測る。最初の返答に付けるもの（思考を書かせる形）と、
+        # それ以降に付けるもの（思考を閉じた形）
         probe = [{"role": "user", "content": [{"type": "text", "text": "x"}]}]
-        with_tail = self.processor.apply_chat_template(
-            probe, tokenize=False, add_generation_prompt=True, **template_kwargs
-        )
-        without_tail = self.processor.apply_chat_template(
-            probe, tokenize=False, add_generation_prompt=False, **template_kwargs
-        )
-        assert with_tail.startswith(without_tail), (with_tail, without_tail)
-        self._tail_ids = self.processor.tokenizer.encode(
-            with_tail[len(without_tail) :], add_special_tokens=False
-        )
+        self._opening_tail_ids = self._generation_prompt_ids(probe, template_kwargs)
+        self._tail_ids = self._generation_prompt_ids(probe, {"enable_thinking": False})
         # テンプレートがシステムプロンプトの先頭に足す文言。思考の量の指示があればそれが入る
         marker = "SYSTEM_PROMPT_BODY"
         rendered = self.processor.apply_chat_template(
@@ -130,6 +128,19 @@ class ChainGenerator:
         self._newline_ids = self.processor.tokenizer.encode("\n", add_special_tokens=False)
         self.reset_cache()
 
+    def _generation_prompt_ids(self, probe: list[dict], template_kwargs: dict) -> list[int]:
+        """テンプレートが ``template_kwargs`` のもとで会話の末尾に付ける生成プロンプト。"""
+        with_tail = self.processor.apply_chat_template(
+            probe, tokenize=False, add_generation_prompt=True, **template_kwargs
+        )
+        without_tail = self.processor.apply_chat_template(
+            probe, tokenize=False, add_generation_prompt=False, **template_kwargs
+        )
+        assert with_tail.startswith(without_tail), (with_tail, without_tail)
+        return self.processor.tokenizer.encode(
+            with_tail[len(without_tail) :], add_special_tokens=False
+        )
+
     def reset_cache(self) -> None:
         """会話が仕切り直されるときに呼ぶ。次の生成は会話全体を積み直す。"""
         self._cache = None
@@ -138,7 +149,8 @@ class ChainGenerator:
         self._kv_len = 0
         # 次のトークンに割り当てる 3D 位置の起点
         self._next_pos = 0
-        # sink として永久に残す先頭（システムプロンプト）のトークン数
+        # sink として永久に残す先頭のトークン数。システムプロンプトと、思考を書かせたときは
+        # 最初のやり取り
         self._sink_len = 0
         # 前回の返答を書いた会話の最後のメッセージと、そこへ確定した返答の文字列
         self._last_consumed = None
@@ -150,11 +162,14 @@ class ChainGenerator:
         残す。会話の画像は、エージェントが builder に渡したもの（8 ビットの画像か、
         [0, 1] の (C, H, W) float テンソル）で、processor には後者として渡る。"""
         start = time.perf_counter()
+        # 会話の最初の返答か。最初の返答でだけ思考を書かせる
+        opening = self._cache is None
+        tail_ids = self._opening_tail_ids if opening else self._tail_ids
         # 会話の差分と生成プロンプトを1回の forward で積む
         ids, pos, pixel_values, image_grid_thw = self._encode(self._new_messages(conversation))
-        tail_pos = self._linear_positions(len(self._tail_ids), int(pos.max().item()) + 1)
+        tail_pos = self._linear_positions(len(tail_ids), int(pos.max().item()) + 1)
         outputs = self._prefill(
-            torch.cat([ids, torch.tensor([self._tail_ids], device=self.device)], dim=1),
+            torch.cat([ids, torch.tensor([tail_ids], device=self.device)], dim=1),
             torch.cat([pos, tail_pos], dim=2),
             pixel_values,
             image_grid_thw,
@@ -218,7 +233,10 @@ class ChainGenerator:
             None,
             hidden=False,
         )
-        if self._sink_len == 0:
+        if opening and self.opening_thinking:
+            # 最初のやり取り（最初のターンと、思考込みの返答）まで、プロンプトの一部として残す
+            self._sink_len = self._kv_len
+        elif opening:
             self._sink_len = len(
                 self.processor.tokenizer.encode(
                     _history_text(conversation[0], self._system_prefix), add_special_tokens=False
