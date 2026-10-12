@@ -91,6 +91,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         vla_config: DictConfig,
         pad_token_id: int,
         parse_action_text,
+        text_action_names: list[str],
         action_low: np.ndarray,
         action_high: np.ndarray,
         decision_fps: float,
@@ -117,7 +118,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # 返答を書く VLM。会話は KV キャッシュに積み、システムプロンプトを残して、その後ろを
         # 直近 window_tokens トークンまで FIFO で持つ
         device = "cuda"
-        self.generator = ChainGenerator(vla_config, torch.device(device))
+        self.generator = ChainGenerator(vla_config, text_action_names, torch.device(device))
         self.processor = self.generator.processor
         self.device = device
         self.vlm_hidden_size = self.generator.hidden_size
@@ -189,8 +190,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def _text_actions(
         self, replies: list[str], like: torch.Tensor
     ) -> tuple[torch.Tensor, list[bool], list[str]]:
-        """各返答の <action> が指す行動を、方策の正規化した行動空間のチャンク
-        (B, horizon, action_dim) にしたものと、読めたかどうか、<action> に書かれていた文。"""
+        """各返答が指す行動を、方策の正規化した行動空間のチャンク
+        (B, horizon, action_dim) にしたものと、読めたかどうか、行動として書かれていた文。"""
         scale = (self.action_high - self.action_low) / 2.0
         bias = (self.action_high + self.action_low) / 2.0
         actions, parsed, answers = [], [], []

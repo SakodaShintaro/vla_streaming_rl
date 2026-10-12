@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: MIT
-import re
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -7,12 +6,10 @@ import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
-TEXT_ACTION_PROTOCOL = "Reply with <action>the action only</action>."
+TEXT_ACTION_PROTOCOL = "Reply with the action only."
 
-# The LAST <action> is the one that counts: a model's reasoning sometimes quotes
-# the tag before writing the real section, and reading the first one then takes
-# the whole reasoning as the action.
-ACTION_RE = re.compile(r"<action>(?!.*<action>)(.*?)</action>", re.DOTALL)
+# 思考を閉じるタグ。返答のうち、これより後ろが行動
+THINK_CLOSE = "</think>"
 
 
 def read_action_reply(
@@ -21,11 +18,10 @@ def read_action_reply(
     action_low: np.ndarray,
     action_high: np.ndarray,
 ) -> tuple[str, np.ndarray, bool]:
-    """The one-step action a reply's ``<action>`` block names, clipped to the
-    action bounds. A reply that named no runnable action yields standing
-    still."""
-    answer_match = ACTION_RE.search(reply_text)
-    answer_text = answer_match.group(1).strip() if answer_match is not None else ""
+    """The one-step action a reply names, clipped to the action bounds: the
+    reply itself, or what follows its thinking if it wrote any. A reply that
+    named no runnable action yields standing still."""
+    answer_text = reply_text.rsplit(THINK_CLOSE, 1)[-1].strip()
     action, parse_ok = parse_action_text(answer_text)
     if parse_ok:
         action = np.clip(action.astype(np.float32), action_low, action_high)

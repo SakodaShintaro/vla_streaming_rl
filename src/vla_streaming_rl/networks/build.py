@@ -121,6 +121,7 @@ def build_network(args: DictConfig, env: Env, device: torch.device) -> nn.Module
             vla_config=args.vla,
             pad_token_id=args.replay_buffer.pad_token_id,
             parse_action_text=env.unwrapped.parse_action_text,
+            text_action_names=env.unwrapped.text_action_names,
             action_low=env.action_space.low,
             action_high=env.action_space.high,
             decision_fps=env.metadata["decision_fps"],

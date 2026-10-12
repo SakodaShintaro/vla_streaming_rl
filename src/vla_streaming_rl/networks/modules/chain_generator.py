@@ -60,11 +60,17 @@ class ChainGenerator:
     思考は会話の最初の返答でだけ書かせる。その最初のやり取り（最初のターンと、思考込みの
     返答）はシステムプロンプトと一緒に sink に入れ、会話が続くあいだプロンプトの一部として
     残す。以降の返答は思考を閉じた形で書かせる。
+
+    ``candidates`` を渡すと、返答の本体（思考の後ろ）はその候補のどれか1つになる。次に
+    選べるトークンを、候補のどれかの続きになるものだけに絞って書かせるので、書式の崩れた
+    返答は出ない。思考が長引いたら、候補を書き切れるうちに思考を閉じさせる。候補が空なら
+    本体も自由に書かせる。
     """
 
     def __init__(
         self,
         vla_config: DictConfig,
+        candidates: list[str],
         device: torch.device,
     ) -> None:
         max_len = vla_config.max_new_tokens
@@ -126,6 +132,29 @@ class ChainGenerator:
         # 返答を閉じるトークン。生成はこの <|im_end|> で止まる
         assert self.processor.tokenizer.eos_token == IM_END, self.processor.tokenizer.eos_token
         self._newline_ids = self.processor.tokenizer.encode("\n", add_special_tokens=False)
+        # 返答の本体として書ける候補のトークン列
+        tokenizer = self.processor.tokenizer
+        self._candidate_ids = [
+            tokenizer.encode(candidate, add_special_tokens=False) for candidate in candidates
+        ]
+        assert all(len(ids) > 0 for ids in self._candidate_ids), candidates
+        # 思考を閉じるトークンと、テンプレートが思考と本体のあいだに置く書式
+        think_close = tokenizer.encode("</think>", add_special_tokens=False)
+        assert len(think_close) == 1, think_close
+        self._think_close_id = think_close[0]
+        self._think_close_ids = tokenizer.encode("\n</think>\n\n", add_special_tokens=False)
+        self._after_think_ids = tokenizer.encode("\n\n", add_special_tokens=False)
+        # 候補に絞るときに思考へ使えるトークン数。思考を閉じる書式と、いちばん長い候補と、
+        # 返答を閉じるトークンの分を残す
+        self._thinking_budget = (
+            max_len
+            - len(self._think_close_ids)
+            - max([len(ids) for ids in self._candidate_ids] + [0])
+            - 1
+        )
+        assert len(self._candidate_ids) == 0 or self._thinking_budget >= 1, (
+            f"max_new_tokens {max_len} leaves no room to think before a candidate"
+        )
         self.reset_cache()
 
     def _generation_prompt_ids(self, probe: list[dict], template_kwargs: dict) -> list[int]:
@@ -183,17 +212,49 @@ class ChainGenerator:
         # 1トークンずつ書く。選んだトークンは次のステップで積むので、最後に選んだものは
         # まだキャッシュに入っていない
         tokens = []
+        constrained = len(self._candidate_ids) > 0
+        # 思考を書いている最中か。思考を書かせるのは最初の返答だけ
+        thinking = opening and self.opening_thinking
+        # 決められた通りに書かせる残りのトークン（思考を閉じる書式）と、本体として書いた分
+        forced = []
+        body = []
         while True:
-            # 温度 0 なら貪欲。それ以外はモデルの生成設定に従い、温度を掛け、上位 top_k に絞り、
-            # そのうち確率の和が top_p に届く最少のものから引く
-            if self.temperature == 0.0:
-                token = int(logits.argmax().item())
+            if constrained and thinking and len(tokens) >= self._thinking_budget:
+                # 思考が長引いたので、候補を書き切れるうちに閉じさせる
+                forced = list(self._think_close_ids)
+                thinking = False
+            if len(forced) > 0:
+                token = forced.pop(0)
             else:
-                top = torch.topk(logits.float() / self.temperature, self.top_k)
-                probs = torch.softmax(top.values, dim=-1)
-                kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
-                token = int(top.indices[torch.multinomial(kept, 1)].item())
+                if constrained and not thinking:
+                    # 次に選べるのは、書いた本体に続けて候補のどれかになるトークンだけ。
+                    # 候補を書き切ったら返答を閉じる
+                    allowed = sorted(
+                        {
+                            ids[len(body)] if len(ids) > len(body) else self.eos_token_id
+                            for ids in self._candidate_ids
+                            if ids[: len(body)] == body
+                        }
+                    )
+                    masked = torch.full_like(logits, float("-inf"))
+                    masked[allowed] = logits[allowed]
+                    logits = masked
+                # 温度 0 なら貪欲。それ以外はモデルの生成設定に従い、温度を掛け、上位 top_k に
+                # 絞り、そのうち確率の和が top_p に届く最少のものから引く
+                if self.temperature == 0.0:
+                    token = int(logits.argmax().item())
+                else:
+                    top = torch.topk(logits.float() / self.temperature, self.top_k)
+                    probs = torch.softmax(top.values, dim=-1)
+                    kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
+                    token = int(top.indices[torch.multinomial(kept, 1)].item())
+                if constrained and not thinking:
+                    body.append(token)
             tokens.append(token)
+            if thinking and token == self._think_close_id:
+                # モデルが自分で思考を閉じた。テンプレートの書式どおり空行を置いてから本体へ
+                thinking = False
+                forced = list(self._after_think_ids) if constrained else []
             if token == self.eos_token_id or len(tokens) >= self.max_len:
                 break
             # 位置はモデル任せにせず、キャッシュの長さと 3D 位置の起点から渡す

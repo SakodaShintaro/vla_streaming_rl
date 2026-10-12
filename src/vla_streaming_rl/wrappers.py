@@ -161,6 +161,8 @@ def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _car_racing_parse_action
+        # 行動は数値で書かせるので、決まった候補はない
+        env.unwrapped.text_action_names = []
         return env
 
     elif env_id == "CARLA-Leaderboard-v0":
@@ -191,6 +193,7 @@ def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
         env = RemainingReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
         env.unwrapped.parse_action_text = _animalai_parse_action
+        env.unwrapped.text_action_names = list(_ANIMALAI_ACTIONS)
         return env
 
     else:

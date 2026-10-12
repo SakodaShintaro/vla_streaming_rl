@@ -41,8 +41,8 @@ vla:
   # 会話は VLM の KV キャッシュに積む。システムプロンプトは常に残し、その後ろのターン
   # （フレーム・数値・返答）は直近この数のトークンまでを先入れ先出しで持つ
   window_tokens: 32768
-  model_id: Qwen/Qwen3.5-9B
-  load_in_4bit: false
+  model_id: Qwen/Qwen3.8-27B
+  load_in_4bit: true
   use_lora: false
   num_state_queries: 100
   state_out_dim: 4
