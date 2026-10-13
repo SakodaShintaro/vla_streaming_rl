@@ -161,30 +161,29 @@ class GatedDeltaNetLayer(nn.Module):
 
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()
-        expand_v = 2
-        n_head = 8
-        qk_dim = int(0.75 * hidden_dim)
-        assert qk_dim % n_head == 0
-        head_dim = qk_dim // n_head
-        head_v_dim = int(head_dim * expand_v)
-        value_dim = n_head * head_v_dim
+        # 幅が小さいので、ヘッドは1つにして幅をそのままヘッドの次元にする。
+        # カーネルはヘッドの次元が小さすぎると効率が悪い
+        head_dim = hidden_dim
+        head_v_dim = 2 * head_dim
+        # layer_idx を渡さないと、fla はキャッシュを読み書きしない
         self.gdn = GatedDeltaNet(
             hidden_size=hidden_dim,
+            expand_v=2,
             head_dim=head_dim,
-            num_heads=n_head,
+            num_heads=1,
             mode="chunk",
+            layer_idx=0,
         )
 
-        # recurrent_state: [B, num_heads, head_dim, head_v_dim]
-        self.recurrent_state_shape = (n_head, head_dim, head_v_dim)
+        # recurrent_state: [B, num_heads, head_v_dim, head_dim]（fla は v を先に置く）
+        self.recurrent_state_shape = (1, head_v_dim, head_dim)
         self.recurrent_state_size = math.prod(self.recurrent_state_shape)
-
-        # conv_state: 3 ShortConvolution states (q, k, v)
-        self.conv_size = 4
+        # conv_state: q, k, v の ShortConvolution の状態 [B, dim, conv_size]
+        conv_size = 4
         self.conv_state_shapes = [
-            (qk_dim, self.conv_size),  # q_conv1d
-            (qk_dim, self.conv_size),  # k_conv1d
-            (value_dim, self.conv_size),  # v_conv1d
+            (head_dim, conv_size),
+            (head_dim, conv_size),
+            (head_v_dim, conv_size),
         ]
         self.conv_state_sizes = [math.prod(shape) for shape in self.conv_state_shapes]
         self.cache_size = self.recurrent_state_size + sum(self.conv_state_sizes)
@@ -193,115 +192,36 @@ class GatedDeltaNetLayer(nn.Module):
         """Return GatedDeltaNet cache size"""
         return self.cache_size
 
-    def _flatten_cache(self, cache_dict: dict | None) -> torch.Tensor | None:
-        """Flatten dictionary from FLACache to 1D tensor"""
-        if cache_dict is None:
-            return None
+    def _flatten_cache(self, cache: FLACache) -> torch.Tensor:
+        """FLACache を [1, B, cache_size] にまとめる"""
+        state = cache[0]
+        batch_size = state["recurrent_state"].shape[0]
+        parts = [state["recurrent_state"], *state["conv_state"]]
+        flat = torch.cat([part.reshape(batch_size, -1).float() for part in parts], dim=-1)
+        return flat.unsqueeze(0)
 
-        recurrent_state = cache_dict["recurrent_state"]  # [B, num_heads, head_dim, head_v_dim]
-        conv_state = cache_dict["conv_state"]  # tuple of 3 tensors
-        batch_size = recurrent_state.shape[0]
-
-        # Flatten recurrent_state/conv_state per batch
-        recurrent_flat = recurrent_state.reshape(batch_size, -1).to(torch.float32)
-        conv_flat = torch.cat(
-            [c.reshape(batch_size, -1).to(torch.float32) for c in conv_state], dim=-1
-        )
-
-        cache_flat = torch.cat([recurrent_flat, conv_flat], dim=-1)  # [B, cache_size]
-        return cache_flat.unsqueeze(0)  # [1, B, cache_size]
-
-    def _unflatten_cache(
-        self,
-        cache_flat: torch.Tensor | None,
-        batch_size: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> FLACache | None:
-        """Restore 1D tensor to dictionary for FLACache"""
-        if cache_flat is None:
-            return None
-
-        # cache_flat: [1, B, cache_size]
-        cache_flat = cache_flat.squeeze(0)  # [B, cache_size]
-
-        current_batch = cache_flat.size(0)
-        if current_batch != batch_size:
-            if current_batch == 1:
-                cache_flat = cache_flat.expand(batch_size, -1)
-            elif current_batch > batch_size:
-                cache_flat = cache_flat[:batch_size]
-            else:
-                repeat = math.ceil(batch_size / current_batch)
-                cache_flat = cache_flat.repeat(repeat, 1)[:batch_size]
-
-        # Check if zero tensor (initial state)
-        if torch.all(cache_flat == 0):
-            return None
-
-        # Restore recurrent_state
-        recurrent_flat = cache_flat[:, : self.recurrent_state_size]
-        recurrent_state = recurrent_flat.view(batch_size, *self.recurrent_state_shape).to(dtype)
-
-        # Restore conv_state
-        conv_flat = cache_flat[:, self.recurrent_state_size :]
-        conv_tensors = []
-        offset = 0
-        for i, (size, shape) in enumerate(zip(self.conv_state_sizes, self.conv_state_shapes)):
-            conv_tensor = conv_flat[:, offset : offset + size].view(batch_size, *shape).to(dtype)
-            conv_tensors.append(conv_tensor)
-            offset += size
-
-        cache_dict = {
-            "recurrent_state": recurrent_state,
-            "attn_state": (),
-            "conv_state": tuple(conv_tensors),
-            "ffn_state": (),
-        }
-
-        # Create FLACache
-        fla_cache = FLACache()
-        fla_cache.update(cache_dict)
-
-        return fla_cache
+    def _unflatten_cache(self, cache_flat: torch.Tensor, dtype: torch.dtype) -> FLACache:
+        """[1, B, cache_size] を FLACache に戻す。0 の状態はキャッシュのない状態と同じ計算になる"""
+        cache_flat = cache_flat.squeeze(0)
+        batch_size = cache_flat.shape[0]
+        sizes = [self.recurrent_state_size, *self.conv_state_sizes]
+        shapes = [self.recurrent_state_shape, *self.conv_state_shapes]
+        recurrent_state, *conv_state = [
+            part.reshape(batch_size, *shape).to(dtype)
+            for part, shape in zip(cache_flat.split(sizes, dim=-1), shapes)
+        ]
+        cache = FLACache()
+        cache.update(recurrent_state=recurrent_state, conv_state=tuple(conv_state), layer_idx=0)
+        return cache
 
     def forward(
         self,
         x: torch.Tensor,  # [B, T, C]
-        rnn_state: torch.Tensor,  # [1, B, C]
+        rnn_state: torch.Tensor,  # [1, B, cache_size]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        B, T, C = x.shape
-
-        # GatedDeltaNet throws error when seq_len <= 64 during training,
-        # so pad to 65 or more if needed
-        if T <= 64:
-            padding = torch.zeros(B, 65 - T, C, device=x.device, dtype=x.dtype)
-            x_padded = torch.cat([x, padding], dim=1)
-            need_unpad = True
-        else:
-            x_padded = x
-            need_unpad = False
-
-        # Unflatten rnn_state to create FLACache
-        past_key_values = self._unflatten_cache(rnn_state, B, x.device, x.dtype)
-
-        # Run GatedDeltaNet
-        gdn_output, _, new_cache = self.gdn(
-            x_padded, past_key_values=past_key_values, use_cache=True
-        )
-
-        # Remove padding
-        if need_unpad:
-            gdn_output = gdn_output[:, :T, :]
-
-        # Flatten new cache
-        if new_cache is not None and len(new_cache) > 0:
-            new_cache_dict = new_cache[0]
-            new_rnn_state = self._flatten_cache(new_cache_dict)
-        else:
-            new_rnn_state = rnn_state
-
-        return gdn_output, new_rnn_state
+        cache = self._unflatten_cache(rnn_state, x.dtype)
+        output, _, cache = self.gdn(x, past_key_values=cache, use_cache=True)
+        return output, self._flatten_cache(cache)
 
 
 class IdentityLayer(nn.Module):
