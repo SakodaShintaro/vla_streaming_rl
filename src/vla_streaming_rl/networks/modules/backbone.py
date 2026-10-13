@@ -106,6 +106,7 @@ class SpatialTemporalEncoder(nn.Module):
             temporal_model_type=temporal_model_type,
             layer_scale_init=layer_scale_init,
         )
+        self.spatial_temporal.compile(mode="reduce-overhead")
 
         # 残差の大きさはトークンの種類ごとに大きく違うので、ヘッドに渡す前にトークンごとに揃える
         self.output_norm = nn.LayerNorm(self.hidden_image_dim)
@@ -178,7 +179,8 @@ class SpatialTemporalEncoder(nn.Module):
         spatial_temporal_output, rnn_state_internal = self.spatial_temporal(
             all_embed, rnn_state_internal
         )
-        rnn_state = rnn_state_internal.reshape(B, self.space_len, -1, self.n_layer)
+        # CUDA グラフの出力は次の再生で上書きされるので、持ち越す状態は複製しておく
+        rnn_state = rnn_state_internal.reshape(B, self.space_len, -1, self.n_layer).clone()
 
         # The last step's whole space axis is the state.
         state = self.output_norm(spatial_temporal_output[:, -1, :, :])

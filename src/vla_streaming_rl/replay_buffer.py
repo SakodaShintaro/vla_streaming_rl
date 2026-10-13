@@ -20,7 +20,7 @@ class ReplayBufferData:
     observations: torch.Tensor  # (B, T, obs_shape) image only
     rewards: torch.Tensor  # (B, T)
     dones: torch.Tensor  # (B, T)
-    rnn_state: torch.Tensor  # (B, T, space_len, state_size, n_layer)
+    rnn_state: torch.Tensor  # (B, min(T, horizon + 1), space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
     vlm_actions: torch.Tensor  # (B, T, action_shape)
     vlm_holds: torch.Tensor  # (B, T, 1)
@@ -223,7 +223,9 @@ class ReplayBuffer:
             self._gather("observations", self.observations, indices),
             self._gather("rewards", self.rewards, indices),
             self._gather("dones", self.dones, indices),
-            self._gather("rnn_states", self.rnn_states, indices),
+            # 状態は窓の先頭（現在状態の窓）と horizon 先（次状態の窓）でしか読まないので、
+            # その範囲だけ集める。状態が大きい時間モデルでは、全ステップ分の転送が重い
+            self._gather("rnn_states", self.rnn_states, indices[:, : self.horizon + 1]),
             self._gather("actions", self.actions, indices),
             self._gather("vlm_actions", self.vlm_actions, indices),
             self._gather("vlm_holds", self.vlm_holds, indices),

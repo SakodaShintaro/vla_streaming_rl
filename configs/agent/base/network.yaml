@@ -68,13 +68,13 @@ vla:
   state_out_dim: 4
 
 actor_critic:
-  seq_len: 1
+  seq_len: 50
   image_encoder_type: qwen  # [taesd, dinov2, siglip2, vjepa2, qwen]
   image_encoder_output_dim: 16
   detach_predictor: false
   disable_state_predictor: false
   encoder_block_num: 8
-  temporal_model_type: gru
+  temporal_model_type: gdn
   layer_scale_init: 0.0001
   subtask_dropout: 0.1
   token_dropout: 0.0

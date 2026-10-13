@@ -277,7 +277,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
         return self.scalar_obs_normalizer.normalize(raw)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
 
@@ -325,7 +325,7 @@ class ActorCriticWithActionValue(NetworkInterface):
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
         # ターゲットは観測を落とさない次状態から作る
-        with torch.inference_mode():
+        with torch.no_grad():
             next_state, _ = self.encoder(*self._window(data, self.horizon, None, 0))
             next_action, _ = self.policy_head.get_action(next_state)
             next_output = self.value_head(next_state, next_action).output
@@ -386,7 +386,7 @@ class ActorCriticWithActionValue(NetworkInterface):
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         """Combined inference and loss computation."""
         # Next-step inference (no grad): the action the agent will take and its Q.
-        with torch.inference_mode():
+        with torch.no_grad():
             next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None, 0))
             next_action, _ = self.policy_head.get_action(next_state)
             next_q_out = self.value_head(next_state, next_action)
