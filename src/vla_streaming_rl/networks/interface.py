@@ -138,6 +138,11 @@ class NetworkInterface(nn.Module, abc.ABC):
         ``stored_image_shape``."""
 
     @abc.abstractmethod
+    def answer(self, request: str) -> str:
+        """エピソードの会話の続きに ``request`` を足して、自由な文の返答を書かせたもの。
+        文を書かないネットワークでは空文字列。"""
+
+    @abc.abstractmethod
     def stored_state_shape(self) -> tuple[int, ...]:
         """行動を決めたステップの行に保存する状態の元の形。保存しないネットワークでは
         大きさ 0 の形。"""

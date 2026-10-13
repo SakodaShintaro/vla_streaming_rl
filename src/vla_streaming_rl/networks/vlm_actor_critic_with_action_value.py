@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 from torch import nn
 from torch.nn import functional as F
 
-from ..agents.prompt import assistant_turn, read_action_reply, user_turn
+from ..agents.prompt import THINK_CLOSE, assistant_turn, read_action_reply, user_turn
 from ..replay_buffer import ReplayBufferData
 from .interface import (
     EligibilityTraceInfo,
@@ -123,6 +123,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # 直近 window_tokens トークンまで FIFO で持つ
         device = "cuda"
         self.generator = ChainGenerator(vla_config, text_action_names, torch.device(device))
+        # 行動の候補が決まっている環境では、返答をその候補のどれかに絞って書かせる
+        self.constrained = len(text_action_names) > 0
         self.processor = self.generator.processor
         self.device = device
         self.vlm_hidden_size = self.generator.hidden_size
@@ -225,6 +227,16 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             data.warmup,
         )
 
+    @torch.inference_mode()
+    def answer(self, request: str) -> str:
+        """いまの会話の続きに ``request`` を user の発言として足し、自由な文で返答を
+        書かせる。返答のうち、思考より後ろを返す。"""
+        assert self._exchange is not None, "there is no conversation to answer on yet"
+        self._exchange.append({"role": "user", "content": [{"type": "text", "text": request}]})
+        chain = self.generator.generate(self._exchange, self.generator.thinking_enabled, False)
+        self._exchange.append(assistant_turn(chain.text))
+        return chain.text.rsplit(THINK_CLOSE, 1)[-1].strip()
+
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # 次の状態は最後のステップに保存された表現と返答から作る
         replies = self._decode(data.reply_token_ids[:, -1])
@@ -282,7 +294,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self._exchange.append(user_turn(step / self.decision_fps, self._frame, turn_text))
         # 一定の間隔のステップで、思考を書いてから返答させる。そのあいだは行動だけを書かせる
         thinking = self.generator.thinking_enabled and int(step) % self.thinking_interval == 0
-        chain = self.generator.generate(self._exchange, thinking)
+        chain = self.generator.generate(self._exchange, thinking, self.constrained)
         reply = chain.text
         self._exchange.append(assistant_turn(reply))
         # モデルの文脈はキャッシュが持つので、リストには差分の計算と表示に要る直近だけを残す

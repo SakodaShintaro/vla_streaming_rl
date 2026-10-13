@@ -12,6 +12,8 @@ from .vlm_backbone import load_model
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
+# 本体を自由に書かせる返答で、思考の後ろに残しておくトークン数
+FREE_BODY_TOKENS = 160
 
 
 def _history_text(turn: dict, system_prefix: str) -> str:
@@ -154,6 +156,11 @@ class ChainGenerator:
         assert len(self._candidate_ids) == 0 or self._thinking_budget >= 1, (
             f"max_new_tokens {max_len} leaves no room to think before a candidate"
         )
+        # 本体を自由に書かせるときに思考へ使えるトークン数。本体に FREE_BODY_TOKENS を残す
+        self._free_thinking_budget = max_len - len(self._think_close_ids) - FREE_BODY_TOKENS
+        assert self._free_thinking_budget >= 1, (
+            f"max_new_tokens {max_len} leaves no room to think before a free reply"
+        )
         self.reset_cache()
 
     def _generation_prompt_ids(self, probe: list[dict], template_kwargs: dict) -> list[int]:
@@ -184,12 +191,16 @@ class ChainGenerator:
         self._committed_reply = ""
 
     @torch.inference_mode()
-    def generate(self, conversation: list[dict], thinking: bool) -> Chain:
+    def generate(self, conversation: list[dict], thinking: bool, constrained: bool) -> Chain:
         """``conversation`` への返答を最大 ``max_len`` トークン書き、確定してキャッシュに
-        残す。``thinking`` なら、思考を書いてから返答させる。会話の画像は、エージェントが
+        残す。``thinking`` なら、思考を書いてから返答させる。``constrained`` なら返答の
+        本体を候補のどれかに絞り、そうでなければ自由に書かせる。会話の画像は、エージェントが
         builder に渡したもの（8 ビットの画像か、[0, 1] の (C, H, W) float テンソル）で、
         processor には後者として渡る。"""
         assert self.thinking_enabled or not thinking, "reasoning_effort is none"
+        assert len(self._candidate_ids) > 0 or not constrained, "no candidates to choose among"
+        # 思考に使えるトークン数。越えたら思考を閉じさせて、残りで本体を書かせる
+        thinking_budget = self._thinking_budget if constrained else self._free_thinking_budget
         start = time.perf_counter()
         # 会話の最初の返答か
         opening = self._cache is None
@@ -212,13 +223,12 @@ class ChainGenerator:
         # 1トークンずつ書く。選んだトークンは次のステップで積むので、最後に選んだものは
         # まだキャッシュに入っていない
         tokens = []
-        constrained = len(self._candidate_ids) > 0
         # 決められた通りに書かせる残りのトークン（思考を閉じる書式）と、本体として書いた分
         forced = []
         body = []
         while True:
-            if constrained and thinking and len(tokens) >= self._thinking_budget:
-                # 思考が長引いたので、候補を書き切れるうちに閉じさせる
+            if thinking and len(tokens) >= thinking_budget:
+                # 思考が長引いたので、本体を書き切れるうちに閉じさせる
                 forced = list(self._think_close_ids)
                 thinking = False
             if len(forced) > 0:

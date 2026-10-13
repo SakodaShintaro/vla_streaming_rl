@@ -163,8 +163,9 @@ class OffPolicyAgent(Agent):
         return step_result
 
     def on_episode_end(self, score: float) -> dict:
-        del score
-        return {}
+        # 終わったエピソードを振り返らせて、そのタスクの次回のプロンプトを書き直す
+        rewritten = self.prompt_builder.reflect(score, self.network.answer)
+        return {"reflection/rewritten": float(rewritten)}
 
     def optimizer_state_dict(self) -> dict:
         return {

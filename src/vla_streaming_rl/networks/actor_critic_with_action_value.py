@@ -105,6 +105,11 @@ class ActorCriticWithActionValue(NetworkInterface):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         return self.image_processor.encode(image.unsqueeze(0)).squeeze(0)
 
+    def answer(self, request: str) -> str:
+        """文を書かないネットワークなので、何も答えない。"""
+        del request
+        return ""
+
     def stored_state_shape(self) -> tuple[int, ...]:
         """状態は毎回バッファの窓から作るので、保存しない。"""
         return (0,)

@@ -157,6 +157,15 @@ class PromptBuilder(ABC):
             f"you reply at once, carrying on with what you last decided. {TEXT_ACTION_PROTOCOL}"
         )
 
+    def reflect(self, score: float, answer) -> bool:
+        """Rewrite the ended episode's task instruction off a reflection the
+        model writes, when the builder holds a per-task instruction to rewrite.
+        ``answer`` puts a request to the model on top of the episode's
+        conversation and returns its reply text. The base builder holds none,
+        so this is a no-op."""
+        del score, answer
+        return False
+
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         """The standing task: what the env asks, unchanged through an episode."""
@@ -213,6 +222,16 @@ ANIMALAI_FRAMING = (
 )
 ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
 
+ANIMALAI_REFLECTION_REQUEST = (
+    "The episode just ended in {outcome}: return {score:+.3f} against pass mark "
+    '{pass_mark:+.3f}. Your standing instruction for this task so far: "{task}" '
+    "Write the instruction to follow on the next attempt at this task, keeping "
+    "what worked and fixing what did not. Reply with the "
+    "instruction only, at most three sentences."
+)
+# これより長い指示は、常設のプロンプトを膨らませるので採らない
+ANIMALAI_INSTRUCTION_CHARS_MAX = 500
+
 
 def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: float) -> str:
     """Animal-AI's live scalars: the numbers the frame cannot show.
@@ -242,11 +261,20 @@ def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: fl
 
 
 class AnimalAIPromptBuilder(PromptBuilder):
-    """Animal-AI: the framing and the live scalars, the same words on every
-    task -- the prompt carries no per-task knowledge."""
+    """Animal-AI: the framing, this arena's own instruction, and the live
+    scalars.
+
+    Every task's instruction starts empty and is written by
+    :meth:`reflect`, so what the prompt says about a task is only what the
+    run's own episodes taught it, keyed by the "XX-YY" prefix of the episode's
+    arena name.
+    """
 
     def __init__(self, env: Env, history_turns: int, thinking_interval: int) -> None:
         super().__init__(env, history_turns, thinking_interval)
+        self.tasks = {arena.name.rsplit("-", 1)[0]: "" for arena in env.unwrapped.selector.arenas}
+        self._task_key = ""
+        self._pass_mark = 0.0
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
@@ -276,13 +304,38 @@ class AnimalAIPromptBuilder(PromptBuilder):
         return f"(`{answer}` is not an action -- the agent stood still. {self._action_format()})"
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
-        return f"{ANIMALAI_FRAMING} {self._action_format()} {self._protocol()}"
+        del obs
+        self._task_key = info["arena_name"].rsplit("-", 1)[0]
+        task = self.tasks[self._task_key]
+        task_sentence = f"Task: {task} " if task != "" else ""
+        return f"{ANIMALAI_FRAMING} {self._action_format()} {task_sentence}{self._protocol()}"
+
+    def reflect(self, score: float, answer) -> bool:
+        """The Animal-AI rewrite: on every ended episode, ask the model, over
+        the episode's own conversation, to rewrite this task's instruction, and
+        keep the rewrite for every later episode of the task. A failure
+        distills what to change, a success what to hold on to. A reply that is
+        empty or would bloat the standing prompt leaves the instruction as it
+        was."""
+        if self._task_key == "":
+            return False
+        request = ANIMALAI_REFLECTION_REQUEST.format(
+            outcome="success" if score >= self._pass_mark else "failure",
+            score=score,
+            pass_mark=self._pass_mark,
+            task=self.tasks[self._task_key],
+        )
+        reply = answer(request)
+        if reply == "" or len(reply) > ANIMALAI_INSTRUCTION_CHARS_MAX:
+            return False
+        self.tasks[self._task_key] = reply
+        return True
 
     def _turn(
         self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
     ) -> str:
         del info
+        self._pass_mark = float(obs["pass_mark"][0])
         self._forward_speed_sum += float(obs["velocity"][2])
         self._forward_speed_steps += 1
         scalars = _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)
