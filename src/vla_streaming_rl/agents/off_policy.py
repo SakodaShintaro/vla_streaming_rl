@@ -57,6 +57,7 @@ class OffPolicyAgent(Agent):
         weight_decay: float,
         buffer_size: int,
         buffer_device: str,
+        use_reflection: bool,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
     ) -> None:
@@ -81,6 +82,7 @@ class OffPolicyAgent(Agent):
         self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
         self.use_done = use_done
+        self.use_reflection = use_reflection
 
         # Sequence observation management
         self.seq_len = seq_len
@@ -160,7 +162,7 @@ class OffPolicyAgent(Agent):
 
     def on_episode_end(self, score: float) -> dict:
         # 終わったエピソードを振り返らせて、そのタスクの次回のプロンプトを書き直す
-        rewritten = self.prompt_builder.reflect(score, self.network.answer)
+        rewritten = self.use_reflection and self.prompt_builder.reflect(score, self.network.answer)
         return {"reflection/rewritten": float(rewritten)}
 
     def optimizer_state_dict(self) -> dict:

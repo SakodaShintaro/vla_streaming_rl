@@ -85,6 +85,7 @@ def build_agent(
         weight_decay=args.weight_decay,
         buffer_size=args.replay_buffer.size,
         buffer_device=args.replay_buffer.device,
+        use_reflection=args.vla.use_reflection,
         reset_on_episode_end=args.reset_on_episode_end,
         prompt_builder=prompt_builder,
     )
