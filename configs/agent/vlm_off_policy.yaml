@@ -11,3 +11,7 @@ critic_lr: 1e-5
 vla:
   # 学習が始まったら、常にヘッドの行動を実行する（バッファを貯めている間は返答の行動）
   select_margin: -.inf
+  model_id: Qwen/Qwen3.5-0.8B
+  load_in_4bit: false
+  reasoning_effort: none  # [none, low, medium, high, xhigh]
+  use_reflection: false
