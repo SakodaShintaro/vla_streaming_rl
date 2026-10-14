@@ -7,8 +7,9 @@ import hydra
 import numpy as np
 
 
-def _car_racing_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    """Decode `steer=<value>, accel=<value>` into the one action it names."""
+def _steer_accel_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
+    """Decode `steer=<value>, accel=<value>` into the one action it names.
+    CarRacing と CARLA はどちらも行動が (steer, gas_or_brake) なので、同じ書式で読む。"""
     match = re.search(r"steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)", action_text)
     if match is None:
         return np.zeros(2, dtype=np.float32), False
@@ -160,7 +161,7 @@ def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
         env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
-        env.unwrapped.parse_action_text = _car_racing_parse_action
+        env.unwrapped.parse_action_text = _steer_accel_parse_action
         # 行動は数値で書かせるので、決まった候補はない
         env.unwrapped.text_action_names = []
         return env
@@ -177,6 +178,9 @@ def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
         env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 220
+        env.unwrapped.parse_action_text = _steer_accel_parse_action
+        # 行動は数値で書かせるので、決まった候補はない
+        env.unwrapped.text_action_names = []
         return env
 
     elif env_id == "AnimalAI-v0":

@@ -549,8 +549,7 @@ def hydra_main(cfg: DictConfig) -> None:
 
     if cfg.debug:
         cfg.off_wandb = True
-        window = max(cfg.actor_critic.seq_len, cfg.vla.seq_len)
-        cfg.learning_starts = max(10, window + cfg.horizon + 5)
+        cfg.learning_starts = max(10, cfg.actor_critic.seq_len + cfg.horizon + 5)
         cfg.render = False
         cfg.step_limit = 100
         cfg.replay_buffer.size = int(2e4)

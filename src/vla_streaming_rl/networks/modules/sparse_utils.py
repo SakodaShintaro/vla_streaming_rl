@@ -111,20 +111,3 @@ def apply_one_shot_pruning(
             )
 
     return masks
-
-
-def apply_masks_during_training(module: nn.Module) -> None:
-    """
-    Apply masks to ensure pruned weights stay zero during training
-    This should be called after each optimizer step
-
-    Args:
-        module: Neural network module
-    """
-    if not hasattr(module, "sparse_mask") or module.sparse_mask is None:
-        return
-
-    masks = module.sparse_mask
-    for name, param in module.named_parameters():
-        if name in masks:
-            param.data *= masks[name].to(param.device)

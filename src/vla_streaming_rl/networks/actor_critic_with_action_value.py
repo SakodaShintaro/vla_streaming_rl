@@ -75,14 +75,19 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
 
         self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)
-        self.prediction_head = prediction_head_factory(
-            image_latent_shape=(hidden_image_dim, self.encoder.hidden_h, self.encoder.hidden_w),
-            reward_processor=self.reward_processor,
-            action_dim=self.action_dim,
-        )
-
         self.detach_predictor = actor_critic_config.detach_predictor
         self.disable_state_predictor = actor_critic_config.disable_state_predictor
+        # 次状態の予測を切るときは予測器そのものを作らない。作ると使わない重みが
+        # optimizer に入り、weight decay だけを受け続ける
+        self.prediction_head = (
+            None
+            if self.disable_state_predictor
+            else prediction_head_factory(
+                image_latent_shape=(hidden_image_dim, self.encoder.hidden_h, self.encoder.hidden_w),
+                reward_processor=self.reward_processor,
+                action_dim=self.action_dim,
+            )
+        )
 
         # 1ステップのトークンのうち観測にあたる位置。行動と register は含めない
         observation_token = torch.cat(
@@ -265,6 +270,22 @@ class ActorCriticWithActionValue(NetworkInterface):
             selection_rows=None,
         )
 
+    def _prediction_loss(
+        self, state: torch.Tensor, data: ReplayBufferData
+    ) -> tuple[torch.Tensor, dict]:
+        """次状態の予測の損失。予測を切っているときは予測器がないので 0。"""
+        if self.disable_state_predictor:
+            return torch.zeros((), device=state.device), {"seq_loss": 0.0}
+        with torch.no_grad():
+            next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
+        return self.prediction_head.compute_loss(
+            state,
+            data.actions[:, -self.horizon],
+            next_image_latent,
+            data.rewards[:, -self.horizon],
+            self.detach_predictor,
+        )
+
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
         # ターゲットは観測を落とさない次状態から作る
@@ -292,16 +313,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             action_chunk,
             value_head=self.value_head,
         )
-        with torch.no_grad():
-            next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
-        seq_loss, seq_info = self.prediction_head.compute_loss(
-            curr_state,
-            data.actions[:, -self.horizon],
-            next_image_latent,
-            data.rewards[:, -self.horizon],
-            self.detach_predictor,
-            self.disable_state_predictor,
-        )
+        seq_loss, seq_info = self._prediction_loss(curr_state, data)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
@@ -342,16 +354,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             action_chunk,
             value_head=self.value_head,
         )
-        with torch.no_grad():
-            next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
-        seq_loss, seq_info = self.prediction_head.compute_loss(
-            prev_state,
-            data.actions[:, -self.horizon],
-            next_image_latent,
-            data.rewards[:, -self.horizon],
-            self.detach_predictor,
-            self.disable_state_predictor,
-        )
+        seq_loss, seq_info = self._prediction_loss(prev_state, data)
 
         total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 

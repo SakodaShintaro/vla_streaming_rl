@@ -129,21 +129,15 @@ class StatePredictionHead(nn.Module):
         next_image_latent: torch.Tensor,
         next_reward: torch.Tensor,
         detach_predictor: bool,
-        disable_state_predictor: bool,
     ) -> tuple[torch.Tensor, dict]:
         """Flow-matching transition loss: train the predictor so that
         ``(predictor_state, action)`` maps to the encoded next ``(image, reward)``.
 
         Mirrors ``PolicyHead.compute_actor_loss`` / ``ValueHead.compute_critic_loss``
         — the head owns its loss and logging. ``detach_predictor`` stops the
-        gradient into the encoder; ``disable_state_predictor`` skips the
-        predictor entirely and returns a zero loss. The caller supplies the
-        already-prepared ``predictor_state`` (its layout is network-specific).
+        gradient into the encoder. The caller supplies the already-prepared
+        ``predictor_state`` (its layout is network-specific).
         """
-        if disable_state_predictor:
-            dummy_loss = torch.tensor(0.0, device=predictor_state.device, requires_grad=True)
-            return dummy_loss, {"seq_loss": 0.0}
-
         if detach_predictor:
             predictor_state = predictor_state.detach()
 

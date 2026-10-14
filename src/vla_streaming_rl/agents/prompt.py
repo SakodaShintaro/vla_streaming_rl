@@ -179,11 +179,16 @@ class PromptBuilder(ABC):
 
 # --- CarRacing ---------------------------------------------------------------
 
+# CarRacing と CARLA の行動の書式。どちらも行動は (steer, gas_or_brake) で、
+# wrappers の _steer_accel_parse_action がこれを読む
+STEER_ACCEL_ACTION_FORMAT = (
+    "Write the action as `steer=<value>, accel=<value>`, where each <value> is a float in [-1, 1]."
+)
+
 CAR_RACING_TEXT_ACTION_PROMPT = (
     "You control the red car in CarRacing-v3 (top-down). Stay on the gray road "
     "and avoid going onto the green grass; hug the road center when possible. "
-    "Write the action as `steer=<value>, accel=<value>`, where each <value> is a "
-    "float in [-1, 1]."
+    f"{STEER_ACCEL_ACTION_FORMAT}"
 )
 
 
@@ -374,7 +379,7 @@ class CarlaPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CARLA_TEXT_ACTION_FRAMING} {self._protocol()}"
+        return f"{CARLA_TEXT_ACTION_FRAMING} {STEER_ACCEL_ACTION_FORMAT} {self._protocol()}"
 
     def _turn(
         self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray

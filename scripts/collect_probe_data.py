@@ -26,6 +26,7 @@ import imageio
 import numpy as np
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
+from test_trained_agent import load_global_step
 
 from vla_streaming_rl.agents.build import build_all
 from vla_streaming_rl.checkpoint import load_checkpoint_weights
@@ -50,10 +51,14 @@ def collect_arena(
     episode_list: list,
     video_path: Path,
     prev_action: np.ndarray,
+    global_step: int,
 ) -> np.ndarray:
-    """エージェントが最後に返した行動を返す。次のリセットでエージェントが読む行動になる。"""
+    """エージェントが最後に返した行動を返す。次のリセットでエージェントが読む行動になる。
+
+    ``global_step`` はチェックポイントを書いたときの学習ステップ。0 を渡すとエージェントは
+    バッファを貯めている間とみなし、学習した方策で行動を決めない。"""
     obs, reset_info = env.reset(seed=seed, options={"arena_stem": arena_stem})
-    result = agent.select_action(0, obs, 0.0, False, False, reset_info)
+    result = agent.select_action(global_step, obs, 0.0, False, False, reset_info)
     feature_list.append(agent.last_features.squeeze(0).cpu().numpy())
     xyz_list.append(reset_info["agent_xyz"])
     arena_list.append(arena_stem)
@@ -64,7 +69,7 @@ def collect_arena(
 
     while True:
         obs, reward, terminated, truncated, env_info = env.step(action)
-        result = agent.select_action(0, obs, reward, terminated, truncated, env_info)
+        result = agent.select_action(global_step, obs, reward, terminated, truncated, env_info)
         feature_list.append(agent.last_features.squeeze(0).cpu().numpy())
         xyz_list.append(env_info["agent_xyz"])
         arena_list.append(arena_stem)
@@ -90,6 +95,11 @@ def main(args: DictConfig, result_dir: Path) -> None:
 
     env = make_env(args.env_id, args.env_factory, result_dir=None, seed=seed)
     env.action_space.seed(seed)
+
+    global_step = load_global_step(Path(args.resume_dir))
+    # ネットワークは学習ステップを観測として読むので、新しい env の 0 のままでは
+    # チェックポイントが学習した範囲から大きく外れる
+    env.unwrapped.set_global_step(global_step)
 
     network, agent = build_all(env, args)
     load_checkpoint_weights(Path(args.resume_dir) / "checkpoint.pt", network)
@@ -117,6 +127,7 @@ def main(args: DictConfig, result_dir: Path) -> None:
             episode_list,
             video_path,
             prev_action,
+            global_step,
         )
         print(f"[{i + 1}/{NUM_REPEATS}] {ARENA_STEM}\tsamples so far={len(feature_list)}")
 
