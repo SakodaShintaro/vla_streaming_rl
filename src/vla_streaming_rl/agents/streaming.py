@@ -27,6 +27,7 @@ from vla_streaming_rl.networks.interface import InferInput, InferResult
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
+from vla_streaming_rl.scalar_obs import read_scalar_obs
 
 
 class StreamingAgent(Agent):
@@ -156,18 +157,7 @@ class StreamingAgent(Agent):
         metrics["processed_reward"] = self.reward_processor.normalize(
             torch.tensor(shaped_reward)
         ).item()
-        (
-            image,
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
-        ) = self._preprocess(obs)
+        image, scalar_obs = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
         # the observation.
         self.prompt_builder.observe(obs, reward, info, image, self.prev_action)
@@ -179,15 +169,7 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
+            scalar_obs,
         )
         panels = {}
         texts = {"prompt": prompt}
@@ -264,15 +246,7 @@ class StreamingAgent(Agent):
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
-                velocity_x_seq=latest_data.velocity_x,
-                velocity_y_seq=latest_data.velocity_y,
-                velocity_z_seq=latest_data.velocity_z,
-                episode_return_seq=latest_data.episode_return,
-                pass_mark_seq=latest_data.pass_mark,
-                remaining_return_seq=latest_data.remaining_return,
-                global_step_seq=latest_data.global_step,
-                episode_step_seq=latest_data.episode_step,
-                health_seq=latest_data.health,
+                scalar_obs_seq=latest_data.scalar_obs,
                 system_text=prompt,
                 turn_text=self.prompt_builder.turn_text(),
                 warmup=False,
@@ -363,18 +337,7 @@ class StreamingAgent(Agent):
         metrics["processed_reward"] = self.reward_processor.normalize(
             torch.tensor(shaped_reward)
         ).item()
-        (
-            image,
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
-        ) = self._preprocess(obs)
+        image, scalar_obs = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
         # the observation.
         self.prompt_builder.observe(obs, reward, info, image, self.prev_action)
@@ -386,15 +349,7 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
+            scalar_obs,
         )
         panels = {}
         texts = {"prompt": prompt}
@@ -413,43 +368,14 @@ class StreamingAgent(Agent):
 
         return self._act(metrics, panels, texts, prompt)
 
-    def _preprocess(self, obs: dict[str, Any]) -> tuple:
+    def _preprocess(self, obs: dict[str, Any]) -> tuple[torch.Tensor, np.ndarray]:
         """Turn the raw observation into what the replay buffer stores this tick:
-        the image tensor, the raw scalar observations (velocity_x, velocity_y,
-        velocity_z, episode_return, pass_mark, remaining_return, global_step,
-        episode_step,
-        health; the network updates its running normalizer stats here)."""
+        the image tensor and the raw scalar observations (the network updates
+        its running normalizer stats here)."""
         image = torch.from_numpy(obs["image"]).to(self.device)
-        velocity_x, velocity_y, velocity_z = obs["velocity"].astype(np.float32)
-        episode_return = np.float32(obs["episode_return"][0])
-        pass_mark = np.float32(obs["pass_mark"][0])
-        remaining_return = np.float32(obs["remaining_return"][0])
-        global_step_obs = np.float32(obs["global_step"][0])
-        episode_step_obs = np.float32(obs["episode_step"][0])
-        health_obs = np.float32(obs["health"][0])
-        self.network.observe_scalar_obs(
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
-        )
-        return (
-            image,
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
-        )
+        scalar_obs = read_scalar_obs(obs)
+        self.network.observe_scalar_obs(scalar_obs)
+        return image, scalar_obs
 
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         """Map a single normalized policy action into the env's action space."""

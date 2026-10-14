@@ -19,6 +19,7 @@ from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.reward_processor import RunningNormalizer
+from vla_streaming_rl.scalar_obs import SCALAR_OBS_DIM
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -54,7 +55,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             actor_critic_config.observation_drop_steps_max
         )
         self.observation_drop_steps_max = actor_critic_config.observation_drop_steps_max
-        self.scalar_obs_dim = 9
+        self.scalar_obs_dim = SCALAR_OBS_DIM
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
 
         self.encoder = SpatialTemporalEncoder(
@@ -146,97 +147,23 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.actions[:, start:stop],
             data.rewards[:, start:stop],
             data.rnn_state[:, start],
-            self._scalar_obs(
-                data.velocity_x[:, start:stop],
-                data.velocity_y[:, start:stop],
-                data.velocity_z[:, start:stop],
-                data.episode_return[:, start:stop],
-                data.pass_mark[:, start:stop],
-                data.remaining_return[:, start:stop],
-                data.global_step[:, start:stop],
-                data.episode_step[:, start:stop],
-                data.health[:, start:stop],
-            ),
+            self.scalar_obs_normalizer.normalize(data.scalar_obs[:, start:stop]),
             token_keep,
         )
 
-    def observe_scalar_obs(
-        self,
-        velocity_x: float,
-        velocity_y: float,
-        velocity_z: float,
-        episode_return: float,
-        pass_mark: float,
-        remaining_return: float,
-        global_step: float,
-        episode_step: float,
-        health: float,
-    ) -> None:
-        scalar_obs = np.array(
-            [
-                velocity_x,
-                velocity_y,
-                velocity_z,
-                episode_return,
-                pass_mark,
-                remaining_return,
-                global_step,
-                episode_step,
-                health,
-            ],
-            dtype=np.float32,
-        )
+    def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
         self.scalar_obs_normalizer.update(scalar_obs)
-
-    def _scalar_obs(
-        self,
-        velocity_x: torch.Tensor,
-        velocity_y: torch.Tensor,
-        velocity_z: torch.Tensor,
-        episode_return: torch.Tensor,
-        pass_mark: torch.Tensor,
-        remaining_return: torch.Tensor,
-        global_step: torch.Tensor,
-        episode_step: torch.Tensor,
-        health: torch.Tensor,
-    ) -> torch.Tensor:
-        raw = torch.cat(
-            [
-                velocity_x,
-                velocity_y,
-                velocity_z,
-                episode_return,
-                pass_mark,
-                remaining_return,
-                global_step,
-                episode_step,
-                health,
-            ],
-            dim=-1,
-        )
-        return self.scalar_obs_normalizer.normalize(raw)
 
     @torch.no_grad()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
 
-        scalar_obs = self._scalar_obs(
-            data.velocity_x_seq,
-            data.velocity_y_seq,
-            data.velocity_z_seq,
-            data.episode_return_seq,
-            data.pass_mark_seq,
-            data.remaining_return_seq,
-            data.global_step_seq,
-            data.episode_step_seq,
-            data.health_seq,
-        )
         x, rnn_state = self.encoder(
             data.s_seq,
             data.a_seq,
             data.r_seq,
             data.rnn_state,
-            scalar_obs,
+            self.scalar_obs_normalizer.normalize(data.scalar_obs_seq),
             torch.ones(
                 (1, data.s_seq.shape[1], self.encoder.space_len),
                 dtype=torch.bool,

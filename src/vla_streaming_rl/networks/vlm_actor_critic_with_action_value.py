@@ -10,6 +10,7 @@ from torch.nn import functional as F
 
 from ..agents.prompt import THINK_CLOSE, assistant_turn, read_action_reply, user_turn
 from ..replay_buffer import ReplayBufferData
+from ..scalar_obs import EPISODE_STEP_INDEX
 from .interface import (
     EligibilityTraceInfo,
     InferInput,
@@ -156,20 +157,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         その手前を保存する。"""
         return (self.num_state_queries, self.vlm_hidden_size)
 
-    def observe_scalar_obs(
-        self,
-        velocity_x: float,
-        velocity_y: float,
-        velocity_z: float,
-        episode_return: float,
-        pass_mark: float,
-        remaining_return: float,
-        global_step: float,
-        episode_step: float,
-        health: float,
-    ) -> None:
-        del velocity_x, velocity_y, velocity_z, episode_return, pass_mark
-        del remaining_return, global_step, episode_step, health
+    def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
+        del scalar_obs
 
     def _text_action(self, reply: str, like: torch.Tensor) -> tuple[torch.Tensor, bool, str]:
         """返答が指す行動を、方策の正規化した行動空間のチャンク (1, horizon, action_dim) に
@@ -191,7 +180,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        return self._act(data.system_text, data.turn_text, data.episode_step_seq, data.warmup)
+        return self._act(data.system_text, data.turn_text, data.scalar_obs_seq, data.warmup)
 
     @torch.inference_mode()
     def answer(self, request: str) -> str:
@@ -213,7 +202,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     ) -> InferLossResult:
         # 最後のステップはまだ行動を決めていないので、ここで返答を書いて表現を作る
         with torch.inference_mode():
-            infer_result = self._act(system_text, turn_text, data.episode_step, False)
+            infer_result = self._act(system_text, turn_text, data.scalar_obs, False)
         terms = self._loss_terms(
             data,
             infer_result.stored_state.unsqueeze(0).clone(),
@@ -242,13 +231,13 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self,
         system_text: str,
         turn_text: str,
-        episode_step: torch.Tensor,
+        scalar_obs: torch.Tensor,
         warmup: bool,
     ) -> InferResult:
         """最後のステップの行動を決める。そのステップのフレームと数値のターンを会話に積んで
         返答を書かせ、その計算の活性から状態を作り、返答の行動とヘッドの行動を行動価値で選ぶ。"""
-        assert episode_step.shape[0] == 1, "Batch size must be 1 for inference"
-        step = float(episode_step[0, -1, 0])
+        assert scalar_obs.shape[0] == 1, "Batch size must be 1 for inference"
+        step = float(scalar_obs[0, -1, EPISODE_STEP_INDEX])
         if step == 0.0 or self._exchange is None:
             # エピソードの最初のステップ。前のエピソードの会話を捨てて、システムプロンプトから
             # 積み直す

@@ -14,6 +14,7 @@ part of the public surface.
 import abc
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -35,15 +36,7 @@ class InferInput:
     a_seq: torch.Tensor  # (B, T, action_dim)
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
-    velocity_x_seq: torch.Tensor  # (B, T, 1)
-    velocity_y_seq: torch.Tensor  # (B, T, 1)
-    velocity_z_seq: torch.Tensor  # (B, T, 1)
-    episode_return_seq: torch.Tensor  # (B, T, 1)
-    pass_mark_seq: torch.Tensor  # (B, T, 1)
-    remaining_return_seq: torch.Tensor  # (B, T, 1)
-    global_step_seq: torch.Tensor  # (B, T, 1)
-    episode_step_seq: torch.Tensor  # (B, T, 1)
-    health_seq: torch.Tensor  # (B, T, 1)
+    scalar_obs_seq: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
     # このステップのタスクのプロンプトと、フレームに添える数値のターン
     system_text: str
     turn_text: str
@@ -151,20 +144,10 @@ class NetworkInterface(nn.Module, abc.ABC):
         大きさ 0 の形。"""
 
     @abc.abstractmethod
-    def observe_scalar_obs(
-        self,
-        velocity_x: float,
-        velocity_y: float,
-        velocity_z: float,
-        episode_return: float,
-        pass_mark: float,
-        remaining_return: float,
-        global_step: float,
-        episode_step: float,
-        health: float,
-    ) -> None:
-        """This tick's raw scalar observations, handed over before ``infer``
-        so a network can track their running statistics."""
+    def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
+        """This tick's raw scalar observations (``SCALAR_OBS_NAMES`` order),
+        handed over before ``infer`` so a network can track their running
+        statistics."""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:

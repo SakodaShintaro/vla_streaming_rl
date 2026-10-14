@@ -33,6 +33,7 @@ from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_processor import RewardProcessor
+from vla_streaming_rl.scalar_obs import read_scalar_obs
 from vla_streaming_rl.utils import render_conversation_panel, render_selection_panel
 
 
@@ -216,18 +217,7 @@ class OffPolicyAgent(Agent):
         metrics["processed_reward"] = self.reward_processor.normalize(
             torch.tensor(shaped_reward)
         ).item()
-        (
-            image,
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
-        ) = self._preprocess(obs)
+        image, scalar_obs = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
         # the observation.
         self.prompt_builder.observe(obs, reward, info, image, self.prev_action)
@@ -239,15 +229,7 @@ class OffPolicyAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
+            scalar_obs,
         )
         warmup = global_step < self.learning_starts
 
@@ -271,15 +253,7 @@ class OffPolicyAgent(Agent):
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=latest_data.rnn_state[:, 0],
-                velocity_x_seq=latest_data.velocity_x,
-                velocity_y_seq=latest_data.velocity_y,
-                velocity_z_seq=latest_data.velocity_z,
-                episode_return_seq=latest_data.episode_return,
-                pass_mark_seq=latest_data.pass_mark,
-                remaining_return_seq=latest_data.remaining_return,
-                global_step_seq=latest_data.global_step,
-                episode_step_seq=latest_data.episode_step,
-                health_seq=latest_data.health,
+                scalar_obs_seq=latest_data.scalar_obs,
                 system_text=prompt,
                 turn_text=self.prompt_builder.turn_text(),
                 warmup=warmup,
@@ -325,43 +299,14 @@ class OffPolicyAgent(Agent):
             texts={"prompt": prompt, "reply": self.last_reply},
         )
 
-    def _preprocess(self, obs: dict[str, Any]) -> tuple:
+    def _preprocess(self, obs: dict[str, Any]) -> tuple[torch.Tensor, np.ndarray]:
         """Turn the raw observation into what the replay buffer stores this tick:
-        the image tensor, the raw scalar observations (velocity_x, velocity_y,
-        velocity_z, episode_return, pass_mark, remaining_return, global_step,
-        episode_step,
-        health; the network updates its running normalizer stats here)."""
+        the image tensor and the raw scalar observations (the network updates
+        its running normalizer stats here)."""
         image = torch.from_numpy(obs["image"]).to(self.device)
-        velocity_x, velocity_y, velocity_z = obs["velocity"].astype(np.float32)
-        episode_return = np.float32(obs["episode_return"][0])
-        pass_mark = np.float32(obs["pass_mark"][0])
-        remaining_return = np.float32(obs["remaining_return"][0])
-        global_step_obs = np.float32(obs["global_step"][0])
-        episode_step_obs = np.float32(obs["episode_step"][0])
-        health_obs = np.float32(obs["health"][0])
-        self.network.observe_scalar_obs(
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
-        )
-        return (
-            image,
-            velocity_x,
-            velocity_y,
-            velocity_z,
-            episode_return,
-            pass_mark,
-            remaining_return,
-            global_step_obs,
-            episode_step_obs,
-            health_obs,
-        )
+        scalar_obs = read_scalar_obs(obs)
+        self.network.observe_scalar_obs(scalar_obs)
+        return image, scalar_obs
 
     def _to_net_action(self, env_action: np.ndarray) -> np.ndarray:
         """Map a single env action into the policy's normalized action space."""

@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: MIT
 from dataclasses import dataclass
 
+import numpy as np
 import torch
+
+from vla_streaming_rl.scalar_obs import SCALAR_OBS_DIM
 
 """ Note
 Recording the convention for what data is stored at replay buffer index t,
@@ -24,15 +27,7 @@ class ReplayBufferData:
     actions: torch.Tensor  # (B, T, action_shape)
     states: torch.Tensor  # (B, T, *state_shape)
     reply_actions: torch.Tensor  # (B, T, action_shape)
-    velocity_x: torch.Tensor  # (B, T, 1)
-    velocity_y: torch.Tensor  # (B, T, 1)
-    velocity_z: torch.Tensor  # (B, T, 1)
-    episode_return: torch.Tensor  # (B, T, 1)
-    pass_mark: torch.Tensor  # (B, T, 1)
-    remaining_return: torch.Tensor  # (B, T, 1)
-    global_step: torch.Tensor  # (B, T, 1)
-    episode_step: torch.Tensor  # (B, T, 1)
-    health: torch.Tensor  # (B, T, 1)
+    scalar_obs: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
 
 
 class ReplayBuffer:
@@ -75,15 +70,7 @@ class ReplayBuffer:
         self.states = torch.zeros(
             (size, *state_shape), dtype=torch.bfloat16, device=self.storage_device
         )
-        self.velocity_x = init_tensor((size, 1))
-        self.velocity_y = init_tensor((size, 1))
-        self.velocity_z = init_tensor((size, 1))
-        self.episode_return = init_tensor((size, 1))
-        self.pass_mark = init_tensor((size, 1))
-        self.remaining_return = init_tensor((size, 1))
-        self.global_step = init_tensor((size, 1))
-        self.episode_step = init_tensor((size, 1))
-        self.health = init_tensor((size, 1))
+        self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM))
         # ネットワークがそのステップに書いた返答が指す行動（正規化した行動空間）。返答を
         # 書かないネットワークでは 0 のまま
         self.reply_actions = init_tensor((size, *action_shape))
@@ -104,15 +91,7 @@ class ReplayBuffer:
         done: bool,
         rnn_state: torch.Tensor,
         action: torch.Tensor,
-        velocity_x: float,
-        velocity_y: float,
-        velocity_z: float,
-        episode_return: float,
-        pass_mark: float,
-        remaining_return: float,
-        global_step: float,
-        episode_step: float,
-        health: float,
+        scalar_obs: np.ndarray,
     ) -> None:
         """Store the tick. What the network then makes of it comes after,
         through :meth:`set_latest_state` and :meth:`set_latest_reply_action`."""
@@ -122,15 +101,7 @@ class ReplayBuffer:
         self.dones[self.idx].fill_(done)
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
-        self.velocity_x[self.idx].fill_(velocity_x)
-        self.velocity_y[self.idx].fill_(velocity_y)
-        self.velocity_z[self.idx].fill_(velocity_z)
-        self.episode_return[self.idx].fill_(episode_return)
-        self.pass_mark[self.idx].fill_(pass_mark)
-        self.remaining_return[self.idx].fill_(remaining_return)
-        self.global_step[self.idx].fill_(global_step)
-        self.episode_step[self.idx].fill_(episode_step)
-        self.health[self.idx].fill_(health)
+        self.scalar_obs[self.idx].copy_(torch.from_numpy(scalar_obs))
         self.reply_actions[self.idx].zero_()
         self.states[self.idx].zero_()
 
@@ -182,15 +153,7 @@ class ReplayBuffer:
             self._gather("actions", self.actions, indices),
             self._gather("states", self.states, indices),
             self._gather("reply_actions", self.reply_actions, indices),
-            self._gather("velocity_x", self.velocity_x, indices),
-            self._gather("velocity_y", self.velocity_y, indices),
-            self._gather("velocity_z", self.velocity_z, indices),
-            self._gather("episode_return", self.episode_return, indices),
-            self._gather("pass_mark", self.pass_mark, indices),
-            self._gather("remaining_return", self.remaining_return, indices),
-            self._gather("global_step", self.global_step, indices),
-            self._gather("episode_step", self.episode_step, indices),
-            self._gather("health", self.health, indices),
+            self._gather("scalar_obs", self.scalar_obs, indices),
         )
 
     def valid_start_indices(self) -> torch.Tensor:
