@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -8,112 +9,46 @@ from omegaconf import DictConfig
 
 TEXT_ACTION_PROTOCOL = "Reply with the action only."
 
-# 思考を閉じるタグ。返答のうち、これより後ろが行動
-THINK_CLOSE = "</think>"
-
-
-def read_action_reply(
-    reply_text: str,
-    parse_action_text,
-    action_low: np.ndarray,
-    action_high: np.ndarray,
-) -> tuple[str, np.ndarray, bool]:
-    """The one-step action a reply names, clipped to the action bounds: the
-    reply itself, or what follows its thinking if it wrote any. A reply that
-    named no runnable action yields standing still."""
-    answer_text = reply_text.rsplit(THINK_CLOSE, 1)[-1].strip()
-    action, parse_ok = parse_action_text(answer_text)
-    if parse_ok:
-        action = np.clip(action.astype(np.float32), action_low, action_high)
-    else:
-        action = np.zeros(action_low.shape, dtype=np.float32)
-    return answer_text, action, parse_ok
-
-
-def assistant_turn(text: str) -> dict:
-    """A reply as the message the conversation holds it as."""
-    return {"role": "assistant", "content": [{"type": "text", "text": text}]}
-
-
-def user_turn(seconds: float, image, text: str) -> dict:
-    """A turn the env puts to the agent: the frame under its timestamp, then the
-    turn's text. The timestamp comes first and is written the way the model's
-    video frames carry theirs, which is the order it learned them in."""
-    return {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": f"<{seconds:.1f} seconds>"},
-            {"type": "image", "image": image},
-            {"type": "text", "text": text},
-        ],
-    }
-
 
 class PromptBuilder(ABC):
-    """The conversation this run's VLMs read, carried across environment steps.
+    """環境ごとの、VLM に読ませる言葉と、返答に書かせる行動の決まり。
 
-    Every tick ``observe`` records what the agent is looking at, and what was
-    written about it comes back through ``add_reply``, which is what puts the
-    turn into the conversation for good. A tick nothing was written on is
-    overwritten rather than accumulated.
-
-    ``history_turns`` is how many of those exchanges it keeps. Every turn still
-    held is re-read on every step that follows, so a conversation left to grow
-    charges the whole episode for its own beginning; the oldest exchange is
-    dropped instead.
+    毎ステップ ``observe`` で、エピソードを通して変わらないタスクの文と、そのステップの
+    フレームに添える数値の文を作る。会話そのものは VLM の KV キャッシュが持つので、ここには
+    残さない。返答に書かせる行動の名前と、返答の文から行動を読む関数もここが持つ。
     """
 
-    def __init__(self, env: Env, history_turns: int, thinking_interval: int) -> None:
-        assert history_turns >= 0, history_turns
+    def __init__(self, env: Env, thinking_interval: int) -> None:
+        # env から読むものは環境ごとに違う（Animal-AI はアリーナの一覧）
+        del env
         assert thinking_interval >= 0, thinking_interval
-        self.history_turns = history_turns
         # 思考を書かせる間隔（ステップ数）。思考を書かせない設定では 0
         self.thinking_interval = thinking_interval
-        self.decision_fps = env.metadata["decision_fps"]
-        self._turns = []
-        self._current = {}
         self._task_text = ""
+        self._turn_text = ""
+        # エピソードの中で何ステップ目か
         self._tick = 0
 
     def reset(self) -> None:
         """A finished episode ends the conversation; the next one opens its own."""
-        self._turns = []
-        self._current = {}
         self._tick = 0
 
     def observe(
-        self, obs: dict[str, Any], reward: float, info: dict, image, previous_action: np.ndarray
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
     ) -> None:
-        """What the agent is looking at this tick: the turn a chain would read if
-        it wrote one now. Overwritten every step until one does. Its timestamp
-        is the episode's clock at the rate the env takes decisions.
-        ``previous_action`` is the action the env was actually given on the step
-        before, whoever chose it."""
+        """このステップのタスクの文と数値の文を作る。``previous_action`` は前のステップに
+        実際に環境へ渡された行動（誰が選んだかによらない）。"""
         self._task_text = self._task(obs, info)
-        self._current = user_turn(
-            self._tick / self.decision_fps,
-            image,
-            self._turn(obs, reward, info, previous_action),
-        )
+        self._turn_text = self._turn(obs, reward, info, previous_action)
         self._tick += 1
 
-    def conversation(self) -> list[dict]:
-        """What a chain about to write reads: the standing task, the turns it has
-        already answered, and the turn it is being asked about now."""
-        opening = {"role": "system", "content": [{"type": "text", "text": self._task_text}]}
-        return [opening] + self._turns + [self._current]
-
     def turn_text(self) -> str:
-        """This tick's own text, the live numbers under the frame. What a learner
-        stores beside the frame, so the turn can be rebuilt from its row later."""
-        return self._current["content"][2]["text"]
+        """This tick's own text, the live numbers under the frame."""
+        return self._turn_text
 
-    def add_reply(self, text: str) -> None:
-        """What the chain wrote about that turn, which settles the pair into the
-        conversation, dropping the oldest exchange once ``history_turns`` are
-        held."""
-        turns = self._turns + [self._current, assistant_turn(text)]
-        self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
+    def on_reply(self) -> None:
+        """ネットワークがこのステップに返答を書いたことを知らせる。返答をまたいで数値を
+        まとめる環境だけが使う。"""
 
     def task_text(self) -> str:
         """The standing task: what the policy reads, and what it tokenizes.
@@ -124,25 +59,6 @@ class PromptBuilder(ABC):
         the turns.
         """
         return self._task_text
-
-    def close_episode(self, text: str) -> None:
-        """End the episode inside the conversation instead of dropping it: the
-        turns stay and ``text`` says how it went, so the attempt that follows
-        reads what the ones before it did and what came of them."""
-        self._turns = self._turns + [{"role": "user", "content": [{"type": "text", "text": text}]}]
-        self._current = {}
-
-    def reject(self, answer: str) -> None:
-        """Say, as the env and not as the agent, that the last reply named no
-        action it could run. A complaint folded into the assistant's own turn
-        reads back as something the agent chose to say; this is what it was
-        told."""
-        self._turns = self._turns + [
-            {"role": "user", "content": [{"type": "text", "text": self._rejection_text(answer)}]}
-        ]
-
-    def _rejection_text(self, answer: str) -> str:
-        return f"({answer!r} is not an action -- nothing ran.)"
 
     def _protocol(self) -> str:
         """返答の書式。思考を書かせるときは、その間隔と、思考を何に使うかを先に伝える。
@@ -167,6 +83,14 @@ class PromptBuilder(ABC):
         return False
 
     @abstractmethod
+    def text_action_names(self) -> list[str]:
+        """返答に書かせる行動の名前。数値で書かせる環境では空で、返答を名前に絞らない。"""
+
+    @abstractmethod
+    def parse_action_text(self, action_text: str) -> tuple[np.ndarray, bool]:
+        """返答の行動の文を環境の行動にしたものと、読めたかどうか。"""
+
+    @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         """The standing task: what the env asks, unchanged through an episode."""
 
@@ -177,13 +101,32 @@ class PromptBuilder(ABC):
         """What this tick alone says: the live numbers under the frame."""
 
 
-# --- CarRacing ---------------------------------------------------------------
+# --- CarRacing / CARLA -------------------------------------------------------
 
 # CarRacing と CARLA の行動の書式。どちらも行動は (steer, gas_or_brake) で、
-# wrappers の _steer_accel_parse_action がこれを読む
+# SteerAccelPromptBuilder.parse_action_text がこれを読む
 STEER_ACCEL_ACTION_FORMAT = (
     "Write the action as `steer=<value>, accel=<value>`, where each <value> is a float in [-1, 1]."
 )
+
+
+class SteerAccelPromptBuilder(PromptBuilder):
+    """行動を ``steer=<value>, accel=<value>`` の数値で書かせる環境（CarRacing と CARLA）。"""
+
+    def text_action_names(self) -> list[str]:
+        # 行動は数値で書かせるので、決まった候補はない
+        return []
+
+    def parse_action_text(self, action_text: str) -> tuple[np.ndarray, bool]:
+        """Decode `steer=<value>, accel=<value>` into the one action it names."""
+        match = re.search(r"steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)", action_text)
+        if match is None:
+            return np.zeros(2, dtype=np.float32), False
+        action = np.array([float(match.group(1)), float(match.group(2))], dtype=np.float32)
+        return np.clip(action, -1.0, 1.0), True
+
+
+# --- CarRacing ---------------------------------------------------------------
 
 CAR_RACING_TEXT_ACTION_PROMPT = (
     "You control the red car in CarRacing-v3 (top-down). Stay on the gray road "
@@ -192,7 +135,7 @@ CAR_RACING_TEXT_ACTION_PROMPT = (
 )
 
 
-class CarRacingPromptBuilder(PromptBuilder):
+class CarRacingPromptBuilder(SteerAccelPromptBuilder):
     """CarRacing."""
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -225,7 +168,18 @@ ANIMALAI_FRAMING = (
     "behind you: turn back to that same target rather than switching to "
     "another. Move to a new spot only if a full turn shows nothing. "
 )
-ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
+# Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
+# / back) and one rotation (noop / right / left) per tick. The env exposes it as
+# Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
+# named action maps onto the extreme Box value that survives that dead-zone.
+# An action is written as one of four names, each a move or a rotation alone,
+# taken for one step.
+ANIMALAI_ACTIONS = {
+    "move_forward": (1.0, 0.0),
+    "move_backward": (-1.0, 0.0),
+    "turn_right": (0.0, 1.0),
+    "turn_left": (0.0, -1.0),
+}
 
 ANIMALAI_REFLECTION_REQUEST = (
     "The episode just ended in {outcome}: return {score:+.3f} against pass mark "
@@ -275,8 +229,8 @@ class AnimalAIPromptBuilder(PromptBuilder):
     arena name.
     """
 
-    def __init__(self, env: Env, history_turns: int, thinking_interval: int) -> None:
-        super().__init__(env, history_turns, thinking_interval)
+    def __init__(self, env: Env, thinking_interval: int) -> None:
+        super().__init__(env, thinking_interval)
         self.tasks = {arena.name.rsplit("-", 1)[0]: "" for arena in env.unwrapped.selector.arenas}
         self._task_key = ""
         self._pass_mark = 0.0
@@ -288,25 +242,34 @@ class AnimalAIPromptBuilder(PromptBuilder):
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
-    def add_reply(self, text: str) -> None:
-        """Settle the reply and start the forward speed's average afresh, so the
-        next turn reports what came of this answer."""
-        super().add_reply(text)
+    def on_reply(self) -> None:
+        """Start the forward speed's average afresh, so the next turn reports
+        what came of this answer."""
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
+    def text_action_names(self) -> list[str]:
+        return list(ANIMALAI_ACTIONS)
+
+    def parse_action_text(self, action_text: str) -> tuple[np.ndarray, bool]:
+        """Decode the action's name into the Box action that the env discretizes
+        back into Animal-AI's native MultiDiscrete([3, 3]) pair. Anything that is
+        not exactly one of the names stays a format violation, reported as such
+        rather than repaired here."""
+        name = action_text.strip().lower()
+        if name not in ANIMALAI_ACTIONS:
+            return np.zeros(2, dtype=np.float32), False
+        return np.array(ANIMALAI_ACTIONS[name], dtype=np.float32), True
+
     def _action_format(self) -> str:
         return (
-            f"Write the action as one of {ANIMALAI_ACTION_NAMES}. It is taken for one "
+            f"Write the action as one of {' / '.join(ANIMALAI_ACTIONS)}. It is taken for one "
             f"step, and you are then shown the next frame and asked again. One turn step "
             f"rotates 10 degrees; one forward step moves about 1.5 units, the arena being "
             f"40 units across. Each frame comes with the action that was actually taken on "
             f"the step before it, as two numbers: move (+1 forward, -1 backward) and turn "
             f"(+1 right, -1 left). It can differ from the action you named."
         )
-
-    def _rejection_text(self, answer: str) -> str:
-        return f"(`{answer}` is not an action -- the agent stood still. {self._action_format()})"
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs
@@ -374,7 +337,7 @@ CARLA_TEXT_ACTION_MANEUVER = {
 }
 
 
-class CarlaPromptBuilder(PromptBuilder):
+class CarlaPromptBuilder(SteerAccelPromptBuilder):
     """CARLA."""
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -398,7 +361,6 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
-    # 会話の履歴は VLM の KV キャッシュが持つので、builder 側には残さない
     # 思考を書かせない設定では、思考の間隔もプロンプトに書かない
     thinking_interval = 0 if args.vla.reasoning_effort == "none" else args.vla.thinking_interval
-    return PROMPT_BUILDERS[args.env_id](env, 0, thinking_interval)
+    return PROMPT_BUILDERS[args.env_id](env, thinking_interval)

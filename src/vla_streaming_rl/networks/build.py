@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: MIT
 
+from collections.abc import Callable
+
 import hydra
+import numpy as np
 import torch
 from gymnasium import Env
 from omegaconf import DictConfig
@@ -68,7 +71,15 @@ def _build_value_head(
     raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
 
 
-def build_network(args: DictConfig, env: Env, device: torch.device) -> nn.Module:
+def build_network(
+    args: DictConfig,
+    env: Env,
+    parse_action_text: Callable[[str], tuple[np.ndarray, bool]],
+    text_action_names: list[str],
+    device: torch.device,
+) -> nn.Module:
+    """``parse_action_text`` と ``text_action_names`` は返答に書かせる行動の決まりで、
+    環境ごとのプロンプトの builder が持つ。返答を書くネットワークだけが使う。"""
     observation_space_shape = env.observation_space["image"].shape
     action_space_shape = env.action_space.shape
     # The PPO network has its own value head baked in and reads no critic
@@ -119,8 +130,8 @@ def build_network(args: DictConfig, env: Env, device: torch.device) -> nn.Module
             critic_loss_weight=args.critic_loss_weight,
             policy_head_factory=policy_head_factory,
             vla_config=args.vla,
-            parse_action_text=env.unwrapped.parse_action_text,
-            text_action_names=env.unwrapped.text_action_names,
+            parse_action_text=parse_action_text,
+            text_action_names=text_action_names,
             action_low=env.action_space.low,
             action_high=env.action_space.high,
             decision_fps=env.metadata["decision_fps"],

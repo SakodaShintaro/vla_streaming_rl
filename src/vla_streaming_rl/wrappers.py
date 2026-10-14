@@ -1,45 +1,9 @@
 # SPDX-License-Identifier: MIT
-import re
 from pathlib import Path
 
 import gymnasium as gym
 import hydra
 import numpy as np
-
-
-def _steer_accel_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    """Decode `steer=<value>, accel=<value>` into the one action it names.
-    CarRacing と CARLA はどちらも行動が (steer, gas_or_brake) なので、同じ書式で読む。"""
-    match = re.search(r"steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)", action_text)
-    if match is None:
-        return np.zeros(2, dtype=np.float32), False
-    action = np.array([float(match.group(1)), float(match.group(2))], dtype=np.float32)
-    return np.clip(action, -1.0, 1.0), True
-
-
-# Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
-# / back) and one rotation (noop / right / left) per tick. The env exposes it as
-# Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
-# named action maps onto the extreme Box value that survives that dead-zone.
-# An action is written as one of four names, each a move or a rotation alone,
-# taken for one step.
-_ANIMALAI_ACTIONS = {
-    "move_forward": (1.0, 0.0),
-    "move_backward": (-1.0, 0.0),
-    "turn_right": (0.0, 1.0),
-    "turn_left": (0.0, -1.0),
-}
-
-
-def _animalai_parse_action(action_text: str) -> tuple[np.ndarray, bool]:
-    """Decode the action's name into the Box action that the env discretizes
-    back into Animal-AI's native MultiDiscrete([3, 3]) pair. Anything that is
-    not exactly one of the names stays a format violation, reported as such
-    rather than repaired here."""
-    name = action_text.strip().lower()
-    if name not in _ANIMALAI_ACTIONS:
-        return np.zeros(2, dtype=np.float32), False
-    return np.array(_ANIMALAI_ACTIONS[name], dtype=np.float32), True
 
 
 def make_animalai_env(
@@ -161,9 +125,6 @@ def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
         env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
-        env.unwrapped.parse_action_text = _steer_accel_parse_action
-        # 行動は数値で書かせるので、決まった候補はない
-        env.unwrapped.text_action_names = []
         return env
 
     elif env_id == "CARLA-Leaderboard-v0":
@@ -178,9 +139,6 @@ def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
         env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
         env = EpisodeReturnObsWrapper(env)
         env.unwrapped.eval_range = 220
-        env.unwrapped.parse_action_text = _steer_accel_parse_action
-        # 行動は数値で書かせるので、決まった候補はない
-        env.unwrapped.text_action_names = []
         return env
 
     elif env_id == "AnimalAI-v0":
@@ -196,8 +154,6 @@ def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
         env = EpisodeReturnObsWrapper(env)
         env = RemainingReturnObsWrapper(env)
         env.unwrapped.eval_range = 20
-        env.unwrapped.parse_action_text = _animalai_parse_action
-        env.unwrapped.text_action_names = list(_ANIMALAI_ACTIONS)
         return env
 
     else:

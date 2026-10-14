@@ -160,7 +160,7 @@ class StreamingAgent(Agent):
         image, scalar_obs = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
         # the observation.
-        self.prompt_builder.observe(obs, reward, info, image, self.prev_action)
+        self.prompt_builder.observe(obs, reward, info, self.prev_action)
         prompt = self.prompt_builder.task_text()
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
@@ -275,7 +275,7 @@ class StreamingAgent(Agent):
             self.rb.set_latest_state(infer_result.stored_state)
         if infer_result.text is not None:
             self.rb.set_latest_reply_action(infer_result.reply_action)
-            self.prompt_builder.add_reply(infer_result.text)
+            self.prompt_builder.on_reply()
 
     def on_episode_end(self, score: float) -> dict:
         del score
@@ -340,7 +340,7 @@ class StreamingAgent(Agent):
         image, scalar_obs = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
         # the observation.
-        self.prompt_builder.observe(obs, reward, info, image, self.prev_action)
+        self.prompt_builder.observe(obs, reward, info, self.prev_action)
         prompt = self.prompt_builder.task_text()
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(

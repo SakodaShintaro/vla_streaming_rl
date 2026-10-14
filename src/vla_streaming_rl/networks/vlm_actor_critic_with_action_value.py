@@ -8,7 +8,6 @@ from omegaconf import DictConfig
 from torch import nn
 from torch.nn import functional as F
 
-from ..agents.prompt import THINK_CLOSE, assistant_turn, read_action_reply, user_turn
 from ..replay_buffer import ReplayBufferData
 from ..scalar_obs import EPISODE_STEP_INDEX
 from .interface import (
@@ -20,6 +19,7 @@ from .interface import (
     NetworkInterface,
 )
 from .modules.chain_generator import ChainGenerator
+from .modules.chat_format import THINK_CLOSE, assistant_turn, read_action_reply, user_turn
 from .modules.head_output import HeadOutput
 from .modules.value_head import DistributionalValueHead
 

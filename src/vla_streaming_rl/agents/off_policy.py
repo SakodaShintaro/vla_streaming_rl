@@ -220,7 +220,7 @@ class OffPolicyAgent(Agent):
         image, scalar_obs = self._preprocess(obs)
         # The language this tick, composed from the env's state and never read off
         # the observation.
-        self.prompt_builder.observe(obs, reward, info, image, self.prev_action)
+        self.prompt_builder.observe(obs, reward, info, self.prev_action)
         prompt = self.prompt_builder.task_text()
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
@@ -277,7 +277,7 @@ class OffPolicyAgent(Agent):
                     CONVERSATION_PANEL_HEIGHT,
                 )
             }
-            self.prompt_builder.add_reply(self.last_reply)
+            self.prompt_builder.on_reply()
         if infer_result.selection_rows is not None:
             # 2つの候補とその行動価値、どちらが選ばれたか
             self.reply_panels["selection"] = render_selection_panel(

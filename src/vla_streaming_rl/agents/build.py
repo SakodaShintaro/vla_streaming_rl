@@ -12,7 +12,13 @@ def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module, object]:
     from vla_streaming_rl.networks.build import build_network
 
     prompt_builder = build_prompt_builder(env, args)
-    network = build_network(args, env, torch.device("cuda"))
+    network = build_network(
+        args,
+        env,
+        prompt_builder.parse_action_text,
+        prompt_builder.text_action_names(),
+        torch.device("cuda"),
+    )
     return network, build_agent(env, network, prompt_builder, args)
 
 

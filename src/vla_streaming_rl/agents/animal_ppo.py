@@ -212,7 +212,7 @@ class AnimalPPOAgent(Agent):
     ) -> StepResult:
         del global_step
         visual, vels = self._preprocess(obs, info)
-        self.prompt_builder.observe(obs, reward, info, visual, self.prev_action)
+        self.prompt_builder.observe(obs, reward, info, self.prev_action)
         prompt = self.prompt_builder.task_text()
         shaped = info["shaped_reward"]
         # this observation is the outcome of the action chosen on the previous
@@ -255,7 +255,7 @@ class AnimalPPOAgent(Agent):
         dropped simply by never being buffered."""
         del global_step
         visual, vels = self._preprocess(obs, info)
-        self.prompt_builder.observe(obs, reward, info, visual, self.prev_action)
+        self.prompt_builder.observe(obs, reward, info, self.prev_action)
         prompt = self.prompt_builder.task_text()
         fresh = self._episode_boundary(terminated, truncated)
         return StepResult(
