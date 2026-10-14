@@ -559,7 +559,7 @@ def hydra_main(cfg: DictConfig) -> None:
 
     cfg.render = disable_render_if_headless(cfg.render)
 
-    exp_name = f"{cfg.agent_type.upper()}_{cfg.exp_name}"
+    exp_name = f"{HydraConfig.get().runtime.choices['agent']}_{cfg.exp_name}"
     seed = resolve_seed(cfg.seed)
 
     for i in range(cfg.trial_num):

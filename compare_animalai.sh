@@ -18,7 +18,7 @@ result_dir=results/compare_${stamp}_seed${seed}
 # 1手法が落ちても残りは走らせ、最後に失敗したものを報告する
 failed=()
 for agent in std_off_policy vlm_off_policy; do
-  ./train_animalai.sh normal ${agent} ${agent} \
+  ./train_animalai.sh normal ${agent} seed${seed} \
     seed=${seed} \
     final_evaluation=true \
     result_dir=${result_dir} \

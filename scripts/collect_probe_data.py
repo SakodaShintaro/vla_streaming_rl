@@ -1,19 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""Collect (representation, agent position) pairs for an offline linear probe.
-
-Runs a frozen, trained policy through the same Animal-AI arena (``ARENA_STEM``)
-``NUM_REPEATS`` times, recording at every step the representation the network
-hands to its policy/value/prediction heads (``last_features``)
-together with the agent's true arena position (``info["agent_xyz"]``). Also
-renders the same panel video train.py writes, for visual sanity-checking.
-Saves everything to ``probe_data.npz``; run scripts/visualize_linear_probe.py
-on that file to fit the probe and render it.
-
-``ARENA_STEM`` names a competition arena, so run this with
-``env=animalai env_factory.mode=eval`` (the env resolves a pinned arena
-against the arenas its selector serves).
-"""
-
 from vla_streaming_rl.script_setup import setup_runtime
 
 setup_runtime()

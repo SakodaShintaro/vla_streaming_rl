@@ -5,12 +5,12 @@ defaults:
 
 hydra:
   run:
-    dir: ${result_dir}/${now:%Y%m%d_%H%M%S}_${agent_type}_${exp_name}
+    dir: ${result_dir}/${now:%Y%m%d_%H%M%S}_${hydra:runtime.choices.agent}_${exp_name}
   sweep:
     dir: ${result_dir}
-    subdir: ${now:%Y%m%d_%H%M%S}_${agent_type}_${exp_name}
+    subdir: ${now:%Y%m%d_%H%M%S}_${hydra:runtime.choices.agent}_${exp_name}
 
-exp_name: ${hydra:runtime.choices.agent}_${seed}
+exp_name: ???
 result_dir: results
 # Previous run directory to resume from (checkpoint.pt / optimizer.pt /
 # train_state.json / arena_stats.tsv are read; outputs go to a new run dir).
