@@ -40,16 +40,6 @@ class LossTerms:
     next_critic_out: HeadOutput
 
 
-def _rows(data: ReplayBufferData) -> tuple[torch.Tensor, ...]:
-    """What a replay batch holds of each tick's prompt, in the order
-    ``_act`` reads them."""
-    return (
-        data.system_token_ids,
-        data.turn_token_ids,
-        data.episode_step,
-    )
-
-
 class VLMActorCriticWithActionValue(NetworkInterface):
     """VLM backbone + DiffusionPolicy + Action Value critic.
 
@@ -61,9 +51,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     tick only runs the tokens it adds. The state is
     read off that same run -- the activations of what the tick added, its reply
     included -- so the heads see what the VLM saw, thought and proposed. The
-    VLM is frozen, so what it gives a tick is computed once, when the tick is
-    acted on, and kept in the replay buffer: learning reads it back and never
-    runs the VLM. Two
+    VLM is frozen, so what it gives a tick -- the representation and the
+    action its reply names -- is computed once, when the tick is acted on, and
+    kept in the replay buffer: learning reads it back and never runs the VLM
+    nor reads any text. Two
     candidate actions come out of a tick, the one the reply names and the policy
     head's, and the critic picks: the head's runs only where it is valued above
     the reply's by more than ``select_margin``. ``.inf`` there leaves the
@@ -90,7 +81,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         critic_loss_weight: float,
         policy_head_factory,
         vla_config: DictConfig,
-        pad_token_id: int,
         parse_action_text,
         text_action_names: list[str],
         action_low: np.ndarray,
@@ -128,7 +118,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.processor = self.generator.processor
         self.device = device
         self.vlm_hidden_size = self.generator.hidden_size
-        self.pad_token_id = pad_token_id
 
         self.num_state_queries = vla_config.num_state_queries
 
@@ -182,34 +171,16 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         del velocity_x, velocity_y, velocity_z, episode_return, pass_mark
         del remaining_return, global_step, episode_step, health
 
-    def tokenize(self, text: str) -> list[int]:
-        return self.processor.tokenizer.encode(text, add_special_tokens=False)
-
-    def _decode(self, token_ids: torch.Tensor) -> list[str]:
-        """Strings back from their stored token IDs, (N, max_prompt_tokens)."""
-        results = []
-        for ids in token_ids:
-            valid_ids = ids[ids != self.pad_token_id].tolist()
-            results.append(self.processor.tokenizer.decode(valid_ids, skip_special_tokens=True))
-        return results
-
-    def _text_actions(
-        self, replies: list[str], like: torch.Tensor
-    ) -> tuple[torch.Tensor, list[bool], list[str]]:
-        """各返答が指す行動を、方策の正規化した行動空間のチャンク
-        (B, horizon, action_dim) にしたものと、読めたかどうか、行動として書かれていた文。"""
+    def _text_action(self, reply: str, like: torch.Tensor) -> tuple[torch.Tensor, bool, str]:
+        """返答が指す行動を、方策の正規化した行動空間のチャンク (1, horizon, action_dim) に
+        したものと、読めたかどうか、行動として書かれていた文。"""
         scale = (self.action_high - self.action_low) / 2.0
         bias = (self.action_high + self.action_low) / 2.0
-        actions, parsed, answers = [], [], []
-        for reply in replies:
-            answer, action, parse_ok = read_action_reply(
-                reply, self.parse_action_text, self.action_low, self.action_high
-            )
-            actions.append((action - bias) / scale)
-            parsed.append(parse_ok)
-            answers.append(answer)
-        chunk = torch.from_numpy(np.stack(actions)).to(like.device, like.dtype)
-        return chunk.unsqueeze(1).expand(-1, self.horizon, -1), parsed, answers
+        answer, action, parse_ok = read_action_reply(
+            reply, self.parse_action_text, self.action_low, self.action_high
+        )
+        chunk = torch.from_numpy((action - bias) / scale).to(like.device, like.dtype)
+        return chunk.view(1, 1, -1).expand(-1, self.horizon, -1), parse_ok, answer
 
     def _format_action(self, net_action: torch.Tensor) -> str:
         """正規化した1ステップの行動を、環境の行動空間の数値で書いたもの。"""
@@ -220,12 +191,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        return self._act(
-            data.system_token_ids_seq,
-            data.turn_token_ids_seq,
-            data.episode_step_seq,
-            data.warmup,
-        )
+        return self._act(data.system_text, data.turn_text, data.episode_step_seq, data.warmup)
 
     @torch.inference_mode()
     def answer(self, request: str) -> str:
@@ -238,17 +204,20 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return chain.text.rsplit(THINK_CLOSE, 1)[-1].strip()
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
-        # 次の状態は最後のステップに保存された表現と返答から作る
-        replies = self._decode(data.reply_token_ids[:, -1])
-        terms = self._loss_terms(data, data.states[:, -1], replies)
+        # 次の状態は最後のステップに保存された表現と返答の行動から作る
+        terms = self._loss_terms(data, data.states[:, -1], data.reply_actions[:, -1])
         return LossResult(loss=terms.total_loss, info=terms.info)
 
-    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
+    def infer_and_compute_loss(
+        self, data: ReplayBufferData, system_text: str, turn_text: str
+    ) -> InferLossResult:
         # 最後のステップはまだ行動を決めていないので、ここで返答を書いて表現を作る
         with torch.inference_mode():
-            infer_result = self._act(*_rows(data), False)
+            infer_result = self._act(system_text, turn_text, data.episode_step, False)
         terms = self._loss_terms(
-            data, infer_result.stored_state.unsqueeze(0).clone(), [infer_result.text]
+            data,
+            infer_result.stored_state.unsqueeze(0).clone(),
+            infer_result.reply_action.unsqueeze(0).clone(),
         )
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
@@ -271,26 +240,24 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     def _act(
         self,
-        system_token_ids: torch.Tensor,
-        turn_token_ids: torch.Tensor,
+        system_text: str,
+        turn_text: str,
         episode_step: torch.Tensor,
         warmup: bool,
     ) -> InferResult:
         """最後のステップの行動を決める。そのステップのフレームと数値のターンを会話に積んで
         返答を書かせ、その計算の活性から状態を作り、返答の行動とヘッドの行動を行動価値で選ぶ。"""
-        assert system_token_ids.shape[0] == 1, "Batch size must be 1 for inference"
+        assert episode_step.shape[0] == 1, "Batch size must be 1 for inference"
         step = float(episode_step[0, -1, 0])
         if step == 0.0 or self._exchange is None:
             # エピソードの最初のステップ。前のエピソードの会話を捨てて、システムプロンプトから
             # 積み直す
             self.generator.reset_cache()
-            system_text = self._decode(system_token_ids[0, -1:])[0]
             self._exchange = [
                 {"role": "system", "content": [{"type": "text", "text": system_text}]}
             ]
             self._decisions_num = 0
             self._vlm_chosen_num = 0
-        turn_text = self._decode(turn_token_ids[0, -1:])[0]
         self._exchange.append(user_turn(step / self.decision_fps, self._frame, turn_text))
         # 一定の間隔のステップで、思考を書いてから返答させる。そのあいだは行動だけを書かせる
         thinking = self.generator.thinking_enabled and int(step) % self.thinking_interval == 0
@@ -309,14 +276,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         state = self._state(representation.unsqueeze(0))
         head_action, _ = self.policy_head.get_action(state)
         critic_out = self.value_head(state, head_action)
-        vlm_action, parsed, answers = self._text_actions([reply], head_action)
+        vlm_action, parsed, answer = self._text_action(reply, head_action)
         q_head = self.value_head.scalar_value(state, head_action).item()
         q_vlm = self.value_head.scalar_value(state, vlm_action).item()
         # バッファを貯めている間は返答の行動だけで動く
         vlm_chosen = warmup or q_head - q_vlm <= self.select_margin
         self._decisions_num += 1
         self._vlm_chosen_num += int(vlm_chosen)
-        answer = answers[0] if parsed[0] else f"(unparsed: {answers[0]})"
+        answer = answer if parsed else f"(unparsed: {answer})"
 
         return InferResult(
             action=vlm_action if vlm_chosen else head_action,
@@ -325,7 +292,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 "select/q_vlm": q_vlm,
                 "select/q_head": q_head,
                 "select/vlm_chosen": float(vlm_chosen),
-                "vlm/parse_failed": float(not parsed[0]),
+                "vlm/parse_failed": float(not parsed),
                 "vlm/prompt_tokens": float(prompt_tokens),
                 "vlm/completion_tokens": float(completion_tokens),
                 "vlm/msec": msec,
@@ -334,9 +301,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             features=state,
             stored_state=representation,
             text=reply,
+            reply_action=vlm_action[0, 0],
             text_status=(
                 f"in {prompt_tokens} tok   out {completion_tokens} tok   {msec:.0f} ms   "
-                f"parse {'ok' if parsed[0] else 'failed'}"
+                f"parse {'ok' if parsed else 'failed'}"
             ),
             exchange=exchange,
             selection_status=(
@@ -350,17 +318,21 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
     def _loss_terms(
-        self, data: ReplayBufferData, next_representation: torch.Tensor, next_replies: list[str]
+        self,
+        data: ReplayBufferData,
+        next_representation: torch.Tensor,
+        next_reply_actions: torch.Tensor,
     ) -> LossTerms:
         """リプレイバッチの損失。状態は、行動を決めたステップで保存した VLM の表現から作る。
         現在の状態はチャンクの手前のステップのもので、次の状態は ``next_representation``
-        （最後のステップのもの）から作る。"""
+        （最後のステップのもの）から作る。``next_reply_actions`` (B, action_dim) は最後の
+        ステップの返答が指す行動。"""
         # 次の状態で実行される行動は、推論のときと同じく、そのステップの返答の行動とヘッドの
         # 行動から行動価値で選んだもの
         with torch.inference_mode():
             next_state = self._state(next_representation)
             next_action, _ = self.policy_head.get_action(next_state)
-            vlm_action, _, _ = self._text_actions(next_replies, next_action)
+            vlm_action = next_reply_actions.unsqueeze(1).expand(-1, self.horizon, -1)
             q_head = self.value_head.scalar_value(next_state, next_action)
             q_vlm = self.value_head.scalar_value(next_state, vlm_action)
             vlm_chosen = q_head - q_vlm <= self.select_margin

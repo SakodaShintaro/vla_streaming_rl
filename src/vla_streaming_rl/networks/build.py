@@ -119,7 +119,6 @@ def build_network(args: DictConfig, env: Env, device: torch.device) -> nn.Module
             critic_loss_weight=args.critic_loss_weight,
             policy_head_factory=policy_head_factory,
             vla_config=args.vla,
-            pad_token_id=args.replay_buffer.pad_token_id,
             parse_action_text=env.unwrapped.parse_action_text,
             text_action_names=env.unwrapped.text_action_names,
             action_low=env.action_space.low,

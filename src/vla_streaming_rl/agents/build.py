@@ -63,8 +63,6 @@ def build_agent(
             gamma=args.gamma,
             et_lambda=args.et_lambda,
             buffer_device=args.replay_buffer.device,
-            max_prompt_tokens=args.replay_buffer.max_prompt_tokens,
-            pad_token_id=args.replay_buffer.pad_token_id,
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
         )
@@ -87,8 +85,6 @@ def build_agent(
         weight_decay=args.weight_decay,
         buffer_size=args.replay_buffer.size,
         buffer_device=args.replay_buffer.device,
-        max_prompt_tokens=args.replay_buffer.max_prompt_tokens,
-        pad_token_id=args.replay_buffer.pad_token_id,
         reset_on_episode_end=args.reset_on_episode_end,
         prompt_builder=prompt_builder,
     )

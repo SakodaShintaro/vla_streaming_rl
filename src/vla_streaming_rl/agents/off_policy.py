@@ -57,8 +57,6 @@ class OffPolicyAgent(Agent):
         weight_decay: float,
         buffer_size: int,
         buffer_device: str,
-        max_prompt_tokens: int,
-        pad_token_id: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
     ) -> None:
@@ -112,8 +110,6 @@ class OffPolicyAgent(Agent):
             state_shape=self.network.stored_state_shape(),
             output_device=self.device,
             storage_device=torch.device(buffer_device),
-            max_prompt_tokens=max_prompt_tokens,
-            pad_token_id=pad_token_id,
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
@@ -241,8 +237,6 @@ class OffPolicyAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            self.network.tokenize(prompt),
-            self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
             velocity_y,
             velocity_z,
@@ -275,9 +269,6 @@ class OffPolicyAgent(Agent):
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=latest_data.rnn_state[:, 0],
-                system_token_ids_seq=latest_data.system_token_ids,
-                turn_token_ids_seq=latest_data.turn_token_ids,
-                reply_token_ids_seq=latest_data.reply_token_ids,
                 velocity_x_seq=latest_data.velocity_x,
                 velocity_y_seq=latest_data.velocity_y,
                 velocity_z_seq=latest_data.velocity_z,
@@ -287,19 +278,21 @@ class OffPolicyAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
+                system_text=prompt,
+                turn_text=self.prompt_builder.turn_text(),
                 warmup=warmup,
             )
         )
         self.rnn_state = infer_result.rnn_state
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
-        # ネットワークがこのステップに書いた文を、その行に残す。次のステップの会話は
-        # それを含めて組まれる
+        # ネットワークがこのステップに作った状態の元と返答が指す行動を、その行に残す。
+        # 書いた文は次のステップの会話に含める
         if infer_result.stored_state is not None:
             self.rb.set_latest_state(infer_result.stored_state)
         if infer_result.text is not None:
             self.last_reply = infer_result.text
-            self.rb.set_latest_reply(self.network.tokenize(self.last_reply))
+            self.rb.set_latest_reply_action(infer_result.reply_action)
             self.reply_panels = {
                 "conversation": render_conversation_panel(
                     infer_result.exchange,

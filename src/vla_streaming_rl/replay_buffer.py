@@ -23,9 +23,7 @@ class ReplayBufferData:
     rnn_state: torch.Tensor  # (B, min(T, horizon + 1), space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
     states: torch.Tensor  # (B, T, *state_shape)
-    system_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
-    turn_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
-    reply_token_ids: torch.Tensor  # (B, T, max_prompt_tokens)
+    reply_actions: torch.Tensor  # (B, T, action_shape)
     velocity_x: torch.Tensor  # (B, T, 1)
     velocity_y: torch.Tensor  # (B, T, 1)
     velocity_z: torch.Tensor  # (B, T, 1)
@@ -49,8 +47,6 @@ class ReplayBuffer:
         state_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
-        max_prompt_tokens: int,
-        pad_token_id: int,
     ) -> None:
         self.size = size
         self.seq_len = seq_len
@@ -58,8 +54,6 @@ class ReplayBuffer:
         self.action_shape = action_shape
         self.output_device = output_device
         self.storage_device = storage_device
-        self.max_prompt_tokens = max_prompt_tokens
-        self.pad_token_id = pad_token_id
 
         assert self.seq_len <= self.size, "Replay buffer size must be >= sequence length."
         assert self.horizon < self.seq_len, "The window needs a state slot before the chunk."
@@ -90,27 +84,15 @@ class ReplayBuffer:
         self.global_step = init_tensor((size, 1))
         self.episode_step = init_tensor((size, 1))
         self.health = init_tensor((size, 1))
-        # What the tick said, tokenized: the standing task, the text under the
-        # frame, and what the network wrote on the tick. A conversation is
-        # rebuilt from rows a fixed stride apart, each a frame under its text
-        # answered by its reply, so the rows hold the parts and never the whole.
-        self.system_token_ids = self._init_token_ids()
-        self.turn_token_ids = self._init_token_ids()
-        self.reply_token_ids = self._init_token_ids()
+        # ネットワークがそのステップに書いた返答が指す行動（正規化した行動空間）。返答を
+        # 書かないネットワークでは 0 のまま
+        self.reply_actions = init_tensor((size, *action_shape))
 
         self.pin_memory = self.storage_device.type == "cpu" and self.output_device.type == "cuda"
         self._staging = {}
 
         self.idx = 0
         self.full = False
-
-    def _init_token_ids(self) -> torch.Tensor:
-        return torch.full(
-            (self.size, self.max_prompt_tokens),
-            self.pad_token_id,
-            dtype=torch.long,
-            device=self.storage_device,
-        )
 
     def num_stored(self) -> int:
         return self.size if self.full else self.idx
@@ -122,8 +104,6 @@ class ReplayBuffer:
         done: bool,
         rnn_state: torch.Tensor,
         action: torch.Tensor,
-        system_token_ids: list[int],
-        turn_token_ids: list[int],
         velocity_x: float,
         velocity_y: float,
         velocity_z: float,
@@ -134,8 +114,8 @@ class ReplayBuffer:
         episode_step: float,
         health: float,
     ) -> None:
-        """Store the tick. What the network then writes on it comes after,
-        through :meth:`set_latest_reply`."""
+        """Store the tick. What the network then makes of it comes after,
+        through :meth:`set_latest_state` and :meth:`set_latest_reply_action`."""
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
         self.rewards[self.idx].fill_(reward)
@@ -151,9 +131,7 @@ class ReplayBuffer:
         self.global_step[self.idx].fill_(global_step)
         self.episode_step[self.idx].fill_(episode_step)
         self.health[self.idx].fill_(health)
-        self._store_token_ids(self.system_token_ids, self.idx, system_token_ids)
-        self._store_token_ids(self.turn_token_ids, self.idx, turn_token_ids)
-        self._store_token_ids(self.reply_token_ids, self.idx, [])
+        self.reply_actions[self.idx].zero_()
         self.states[self.idx].zero_()
 
         self.idx = (self.idx + 1) % self.size
@@ -163,18 +141,10 @@ class ReplayBuffer:
         """最新の行に、そのステップでネットワークが作った状態の元を入れる。"""
         self.states[(self.idx - 1) % self.size].copy_(state)
 
-    def set_latest_reply(self, reply_token_ids: list[int]) -> None:
-        """最新の行に、そのステップでネットワークが書いた文を入れる。"""
-        self._store_token_ids(self.reply_token_ids, (self.idx - 1) % self.size, reply_token_ids)
-
-    def _store_token_ids(self, storage: torch.Tensor, row: int, token_ids: list[int]) -> None:
-        assert len(token_ids) <= self.max_prompt_tokens, (
-            f"text of {len(token_ids)} tokens exceeds max_prompt_tokens="
-            f"{self.max_prompt_tokens}; raise it"
-        )
-        storage[row].fill_(self.pad_token_id)
-        storage[row, : len(token_ids)] = torch.tensor(
-            token_ids, dtype=torch.long, device=self.storage_device
+    def set_latest_reply_action(self, reply_action: torch.Tensor) -> None:
+        """最新の行に、そのステップでネットワークが書いた返答が指す行動を入れる。"""
+        self.reply_actions[(self.idx - 1) % self.size].copy_(
+            reply_action.reshape(self.reply_actions.shape[1:])
         )
 
     def _gather(self, name: str, storage: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
@@ -211,9 +181,7 @@ class ReplayBuffer:
             self._gather("rnn_states", self.rnn_states, indices[:, : self.horizon + 1]),
             self._gather("actions", self.actions, indices),
             self._gather("states", self.states, indices),
-            self._gather("system_token_ids", self.system_token_ids, indices),
-            self._gather("turn_token_ids", self.turn_token_ids, indices),
-            self._gather("reply_token_ids", self.reply_token_ids, indices),
+            self._gather("reply_actions", self.reply_actions, indices),
             self._gather("velocity_x", self.velocity_x, indices),
             self._gather("velocity_y", self.velocity_y, indices),
             self._gather("velocity_z", self.velocity_z, indices),

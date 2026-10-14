@@ -35,9 +35,6 @@ class InferInput:
     a_seq: torch.Tensor  # (B, T, action_dim)
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
-    system_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
-    turn_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
-    reply_token_ids_seq: torch.Tensor  # (B, T, max_prompt_tokens)
     velocity_x_seq: torch.Tensor  # (B, T, 1)
     velocity_y_seq: torch.Tensor  # (B, T, 1)
     velocity_z_seq: torch.Tensor  # (B, T, 1)
@@ -47,6 +44,9 @@ class InferInput:
     global_step_seq: torch.Tensor  # (B, T, 1)
     episode_step_seq: torch.Tensor  # (B, T, 1)
     health_seq: torch.Tensor  # (B, T, 1)
+    # このステップのタスクのプロンプトと、フレームに添える数値のターン
+    system_text: str
+    turn_text: str
     # バッファを貯めている間のステップか。このあいだの行動（一様乱数や、返答に書いた行動）は
     # ネットワークが決める
     warmup: bool
@@ -73,6 +73,9 @@ class InferResult:
     # かかった時間など）。文を書かないネットワークではどちらも None
     text: str | None
     text_status: str | None
+    # その文が指す行動（正規化した行動空間、(action_dim,)）。学習はこれを読み戻して使う。
+    # 文を書かないネットワークでは None
+    reply_action: torch.Tensor | None
     # その文を書いたときに実際に読んだ会話と、その文。描画用。文を書かないネットワークでは None
     exchange: list[dict] | None
     # 行動の候補を比べて選んだときの、その経緯の1行と、候補ごとの
@@ -164,11 +167,6 @@ class NetworkInterface(nn.Module, abc.ABC):
         so a network can track their running statistics."""
 
     @abc.abstractmethod
-    def tokenize(self, text: str) -> list[int]:
-        """Token ids of a prompt string for the replay buffer (empty for
-        non-VLM networks)."""
-
-    @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:
         """Single-step inference: the action to take, its value report, the
         carried RNN state and predicted next state. Batch size is 1."""
@@ -178,5 +176,9 @@ class NetworkInterface(nn.Module, abc.ABC):
         """Training loss over a replay batch."""
 
     @abc.abstractmethod
-    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
-        """Combined inference + loss in one forward, sharing the encoder pass."""
+    def infer_and_compute_loss(
+        self, data: ReplayBufferData, system_text: str, turn_text: str
+    ) -> InferLossResult:
+        """Combined inference + loss in one forward, sharing the encoder pass.
+        ``system_text`` and ``turn_text`` are the newest tick's, as in
+        :class:`InferInput`."""

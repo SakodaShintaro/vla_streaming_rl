@@ -155,10 +155,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             token_keep,
         )
 
-    def tokenize(self, text: str) -> list[int]:
-        del text
-        return []
-
     def observe_scalar_obs(
         self,
         velocity_x: float,
@@ -263,6 +259,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             stored_state=None,
             text=None,
             text_status=None,
+            reply_action=None,
             exchange=None,
             selection_status=None,
             selection_rows=None,
@@ -315,8 +312,11 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         return LossResult(loss=total_loss, info=info_dict)
 
-    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
+    def infer_and_compute_loss(
+        self, data: ReplayBufferData, system_text: str, turn_text: str
+    ) -> InferLossResult:
         """Combined inference and loss computation."""
+        del system_text, turn_text
         # Next-step inference (no grad): the action the agent will take and its Q.
         with torch.no_grad():
             next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None, 0))
@@ -371,6 +371,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             stored_state=None,
             text=None,
             text_status=None,
+            reply_action=None,
             exchange=None,
             selection_status=None,
             selection_rows=None,

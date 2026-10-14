@@ -47,8 +47,6 @@ class StreamingAgent(Agent):
         gamma: float,
         et_lambda: float,
         buffer_device: str,
-        max_prompt_tokens: int,
-        pad_token_id: int,
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
     ) -> None:
@@ -110,8 +108,6 @@ class StreamingAgent(Agent):
             state_shape=self.network.stored_state_shape(),
             output_device=self.device,
             storage_device=torch.device(buffer_device),
-            max_prompt_tokens=max_prompt_tokens,
-            pad_token_id=pad_token_id,
         )
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
@@ -183,8 +179,6 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            self.network.tokenize(prompt),
-            self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
             velocity_y,
             velocity_z,
@@ -215,13 +209,13 @@ class StreamingAgent(Agent):
         # it, but a chunk still has to be started, so the tick acts without a
         # learning step.
         if not self.rb.latest_window_is_clean(self.seq_len + self.horizon):
-            return self._act(metrics, panels, texts)
+            return self._act(metrics, panels, texts, prompt)
 
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_processor.normalize(data.rewards)
-        result = self.network.infer_and_compute_loss(data)
+        result = self.network.infer_and_compute_loss(data, prompt, self.prompt_builder.turn_text())
 
         infer_result = result.infer_result
         self.rnn_state = infer_result.rnn_state
@@ -260,7 +254,7 @@ class StreamingAgent(Agent):
         )
 
     def _act(
-        self, metrics: dict, panels: dict[str, np.ndarray], texts: dict[str, str]
+        self, metrics: dict, panels: dict[str, np.ndarray], texts: dict[str, str], prompt: str
     ) -> StepResult:
         """Start a chunk from the newest state window, with no learning step."""
         latest_data = self.rb.get_latest(self.seq_len)
@@ -270,9 +264,6 @@ class StreamingAgent(Agent):
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
-                system_token_ids_seq=latest_data.system_token_ids,
-                turn_token_ids_seq=latest_data.turn_token_ids,
-                reply_token_ids_seq=latest_data.reply_token_ids,
                 velocity_x_seq=latest_data.velocity_x,
                 velocity_y_seq=latest_data.velocity_y,
                 velocity_z_seq=latest_data.velocity_z,
@@ -282,6 +273,8 @@ class StreamingAgent(Agent):
                 global_step_seq=latest_data.global_step,
                 episode_step_seq=latest_data.episode_step,
                 health_seq=latest_data.health,
+                system_text=prompt,
+                turn_text=self.prompt_builder.turn_text(),
                 warmup=False,
             )
         )
@@ -303,11 +296,11 @@ class StreamingAgent(Agent):
         )
 
     def _keep_network_outputs(self, infer_result: InferResult) -> None:
-        """ネットワークがこのステップに作った状態の元と書いた文を、その行に残す。"""
+        """ネットワークがこのステップに作った状態の元と返答が指す行動を、その行に残す。"""
         if infer_result.stored_state is not None:
             self.rb.set_latest_state(infer_result.stored_state)
         if infer_result.text is not None:
-            self.rb.set_latest_reply(self.network.tokenize(infer_result.text))
+            self.rb.set_latest_reply_action(infer_result.reply_action)
             self.prompt_builder.add_reply(infer_result.text)
 
     def on_episode_end(self, score: float) -> dict:
@@ -393,8 +386,6 @@ class StreamingAgent(Agent):
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
-            self.network.tokenize(prompt),
-            self.network.tokenize(self.prompt_builder.turn_text()),
             velocity_x,
             velocity_y,
             velocity_z,
@@ -420,7 +411,7 @@ class StreamingAgent(Agent):
                 texts=texts,
             )
 
-        return self._act(metrics, panels, texts)
+        return self._act(metrics, panels, texts, prompt)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple:
         """Turn the raw observation into what the replay buffer stores this tick:

@@ -11,6 +11,3 @@ critic_lr: 1e-5
 vla:
   # 学習が始まったら、常にヘッドの行動を実行する（バッファを貯めている間は返答の行動）
   select_margin: -.inf
-replay_buffer:
-  # 返答（思考込みで vla.max_new_tokens まで）を1行に収める
-  max_prompt_tokens: 1024
