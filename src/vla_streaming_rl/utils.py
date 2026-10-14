@@ -139,7 +139,8 @@ def render_conversation_panel(
 
     The newest turn sits at the bottom and older ones are laid above it until the
     panel is full, so the latest exchange is always visible however long the
-    conversation has grown. User turns are left-aligned, the chain's own replies
+    conversation has grown; a newest turn taller than the panel keeps its last
+    lines. User turns are left-aligned, the chain's own replies
     right-aligned, each on its own colour. ``status`` is drawn as a strip along
     the top, where it stays put as the turns scroll under it.
     """
@@ -171,6 +172,11 @@ def render_conversation_panel(
             part["text"] for part in turn["content"] if part["type"] == "text" and part["text"]
         )
         lines = wrap_text(text if text else "(frame only)", bubble_width, font_scale, thickness)
+        # いちばん新しいターンがパネルに収まらないときは、その末尾の行だけを残す。長い思考の
+        # 後ろに書かれる結論が見えるようにするため
+        lines_max = (bottom - status_height - gap - padding * 2) // line_height
+        if turn is said[-1] and len(lines) > lines_max:
+            lines = lines[len(lines) - lines_max :]
         bubble_height = line_height * len(lines) + padding * 2
         top = bottom - bubble_height
         if top < status_height + gap:

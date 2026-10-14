@@ -6,41 +6,19 @@ from omegaconf import DictConfig
 from vla_streaming_rl.agents.prompt import PromptBuilder, build_prompt_builder
 
 
-def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module | None, object]:
+def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module, object]:
     """The prompt builder, network and agent a config describes, wired
-    together the way every entry script needs them; the zero-shot VLM baseline
-    carries no network."""
-    prompt_builder = build_prompt_builder(env, args)
-    network = None
-    if args.agent_type != "zeroshot_vlm":
-        from vla_streaming_rl.networks.build import build_network
+    together the way every entry script needs them."""
+    from vla_streaming_rl.networks.build import build_network
 
-        network = build_network(
-            args,
-            observation_space_shape=env.observation_space["image"].shape,
-            action_space_shape=env.action_space.shape,
-            device=torch.device("cuda"),
-        )
+    prompt_builder = build_prompt_builder(env, args)
+    network = build_network(args, env, torch.device("cuda"))
     return network, build_agent(env, network, prompt_builder, args)
 
 
 def build_agent(
     env: Env, network: torch.nn.Module, prompt_builder: PromptBuilder, args: DictConfig
 ):
-    if args.agent_type == "zeroshot_vlm":
-        from vla_streaming_rl.agents.zeroshot_vlm import ZeroShotVLMAgent
-        from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
-
-        # 提案手法と同じチェーンのモジュールが返答を書き、確定した返答から行動を読む
-        return ZeroShotVLMAgent(
-            action_space=env.action_space,
-            parse_action_text=env.unwrapped.parse_action_text,
-            chain=HighLevelPolicy(args.high_level, prompt_builder, torch.device("cuda")),
-            reset_on_episode_end=args.reset_on_episode_end,
-            prompt_builder=prompt_builder,
-            steps_per_action=args.high_level.steps_per_reply,
-        )
-
     if args.agent_type == "animal_ppo":
         from vla_streaming_rl.agents.animal_ppo import AnimalPPOAgent
 
@@ -67,13 +45,6 @@ def build_agent(
             prompt_builder=prompt_builder,
         )
 
-    # 高レベル方策。サブタスクの活性を低レベル方策に渡す学習でだけ持つ
-    from vla_streaming_rl.networks.modules.high_level_policy import HighLevelPolicy
-
-    high_level_policy = None
-    if args.high_level.subtask_tokens_num > 0:
-        high_level_policy = HighLevelPolicy(args.high_level, prompt_builder, torch.device("cuda"))
-
     if args.agent_type == "streaming":
         from vla_streaming_rl.agents.streaming import StreamingAgent
 
@@ -96,13 +67,11 @@ def build_agent(
             pad_token_id=args.replay_buffer.pad_token_id,
             reset_on_episode_end=args.reset_on_episode_end,
             prompt_builder=prompt_builder,
-            high_level_policy=high_level_policy,
         )
 
     assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
     from vla_streaming_rl.agents.off_policy import OffPolicyAgent
 
-    parse_action_text = env.unwrapped.parse_action_text if args.text_action else None
     return OffPolicyAgent(
         action_space=env.action_space,
         network=network,
@@ -122,10 +91,4 @@ def build_agent(
         pad_token_id=args.replay_buffer.pad_token_id,
         reset_on_episode_end=args.reset_on_episode_end,
         prompt_builder=prompt_builder,
-        text_action=args.text_action,
-        select_margin=args.select_margin,
-        score_reward_weight=args.score_reward_weight,
-        steps_per_reply=args.high_level.steps_per_reply,
-        parse_action_text=parse_action_text,
-        high_level_policy=high_level_policy,
     )

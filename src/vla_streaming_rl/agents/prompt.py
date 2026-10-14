@@ -1,29 +1,4 @@
 # SPDX-License-Identifier: MIT
-"""Language input composed on the agent side.
-
-The environment reports state; the agent decides what to say about it. Every
-string a policy reads as language is built here out of the structured
-observation the env already publishes, so the prompt belongs to the run's agent
-config rather than to the simulator: two agents can drive the same env with
-different framing, and the env carries no text of its own.
-
-There is one builder per environment, and it always writes the prompt of an
-agent about to act: what the env asks, the action vocabulary it is asked in, the
-arena's own instruction, and the three sections the answer is read out of. Whether
-the action then comes from the reply or from a policy head is the reader's
-business, not the prompt's -- a run that reads the language as conditioning is
-reading the same words a run that acts on it would, so the two are comparable
-without a second wording to keep in step.
-
-A builder is called once per environment step with the observation, the reward
-and the info the agent itself received, and returns the conversation as it then
-stands: the standing task, every turn a chain has already answered, and this
-tick's own turn. Holding the conversation here is what keeps the VLM modules
-free of any environment's vocabulary -- they run a model over what they are
-handed and compose no text of their own beyond how a chain is continued.
-"""
-
-import re
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -31,25 +6,10 @@ import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
-# 返答の先頭の採点の区間。前の返答からの行動が、そのサブタスクの実現に向けてどれだけ
-# 適切だったかを 0〜9 の1桁で書かせ、その位置で各数字を選ぶ確率の期待値から点数を読む
-SCORE_TAG = "<score>"
+TEXT_ACTION_PROTOCOL = "Reply with the action only."
 
-TEXT_ACTION_PROTOCOL = (
-    "Before anything else, compare the frames since your previous reply with the subtask of "
-    "that reply and judge how far the agent's actions moved toward it. "
-    f"Reply with {SCORE_TAG}an integer from 0 to 9 for that judgment: 0 if the actions "
-    "worked against the subtask, 9 if they got it done</score> "
-    "then <subtask>one short sentence on what the agent should get done by your next "
-    "reply</subtask> then <action>the action only</action>."
-)
-
-# The LAST <action> is the one that counts: a model's reasoning sometimes quotes
-# the tag before writing the real section, and reading the first one then takes
-# the whole reasoning as the action.
-ACTION_RE = re.compile(r"<action>(?!.*<action>)(.*?)</action>", re.DOTALL)
-
-SUBTASK_RE = re.compile(r"<subtask>(?!.*<subtask>)(.*?)</subtask>", re.DOTALL)
+# 思考を閉じるタグ。返答のうち、これより後ろが行動
+THINK_CLOSE = "</think>"
 
 
 def read_action_reply(
@@ -57,19 +17,17 @@ def read_action_reply(
     parse_action_text,
     action_low: np.ndarray,
     action_high: np.ndarray,
-    hold_cap: int,
-) -> tuple[str, np.ndarray, int, bool]:
-    """The action a reply's ``<action>`` block names, clipped to the action
-    bounds, with how many steps it asks to hold it, capped at ``hold_cap``.
-    A reply that named no runnable action yields standing still, one row."""
-    answer_match = ACTION_RE.search(reply_text)
-    answer_text = answer_match.group(1).strip() if answer_match is not None else ""
-    action_array, parse_ok = parse_action_text(answer_text)
+) -> tuple[str, np.ndarray, bool]:
+    """The one-step action a reply names, clipped to the action bounds: the
+    reply itself, or what follows its thinking if it wrote any. A reply that
+    named no runnable action yields standing still."""
+    answer_text = reply_text.rsplit(THINK_CLOSE, 1)[-1].strip()
+    action, parse_ok = parse_action_text(answer_text)
     if parse_ok:
-        action = np.clip(action_array[0].astype(np.float32), action_low, action_high)
+        action = np.clip(action.astype(np.float32), action_low, action_high)
     else:
         action = np.zeros(action_low.shape, dtype=np.float32)
-    return answer_text, action, min(len(action_array), hold_cap), parse_ok
+    return answer_text, action, parse_ok
 
 
 def assistant_turn(text: str) -> dict:
@@ -94,14 +52,10 @@ def user_turn(seconds: float, image, text: str) -> dict:
 class PromptBuilder(ABC):
     """The conversation this run's VLMs read, carried across environment steps.
 
-    Every tick ``observe`` records what the agent is looking at. A chain reads
-    that through ``conversation`` on the steps it actually writes -- one step in
-    ``steps_per_reply`` -- and hands back what it wrote through
-    ``add_reply``, which is what puts the turn it answered into the conversation
-    for good. Between replies, every ``steps_per_observation`` ticks the turn is
-    kept as a user turn with no reply (``add_observation``); the other ticks are
-    overwritten rather than accumulated, so the conversation holds the turns a
-    chain saw and not every step of the run.
+    Every tick ``observe`` records what the agent is looking at, and what was
+    written about it comes back through ``add_reply``, which is what puts the
+    turn into the conversation for good. A tick nothing was written on is
+    overwritten rather than accumulated.
 
     ``history_turns`` is how many of those exchanges it keeps. Every turn still
     held is re-read on every step that follows, so a conversation left to grow
@@ -109,16 +63,12 @@ class PromptBuilder(ABC):
     dropped instead.
     """
 
-    def __init__(
-        self, env: Env, history_turns: int, steps_per_action: int, steps_per_observation: int
-    ) -> None:
+    def __init__(self, env: Env, history_turns: int, thinking_interval: int) -> None:
         assert history_turns >= 0, history_turns
-        assert steps_per_action >= 1, steps_per_action
-        assert steps_per_observation >= 1, steps_per_observation
+        assert thinking_interval >= 0, thinking_interval
         self.history_turns = history_turns
-        self.steps_per_action = steps_per_action
-        # 返答を書かないステップでも、この間隔で観測を会話に残す
-        self.steps_per_observation = steps_per_observation
+        # 思考を書かせる間隔（ステップ数）。思考を書かせない設定では 0
+        self.thinking_interval = thinking_interval
         self.decision_fps = env.metadata["decision_fps"]
         self._turns = []
         self._current = {}
@@ -131,13 +81,19 @@ class PromptBuilder(ABC):
         self._current = {}
         self._tick = 0
 
-    def observe(self, obs: dict[str, Any], reward: float, info: dict, image) -> None:
+    def observe(
+        self, obs: dict[str, Any], reward: float, info: dict, image, previous_action: np.ndarray
+    ) -> None:
         """What the agent is looking at this tick: the turn a chain would read if
         it wrote one now. Overwritten every step until one does. Its timestamp
-        is the episode's clock at the rate the env takes decisions."""
+        is the episode's clock at the rate the env takes decisions.
+        ``previous_action`` is the action the env was actually given on the step
+        before, whoever chose it."""
         self._task_text = self._task(obs, info)
         self._current = user_turn(
-            self._tick / self.decision_fps, image, self._turn(obs, reward, info)
+            self._tick / self.decision_fps,
+            image,
+            self._turn(obs, reward, info, previous_action),
         )
         self._tick += 1
 
@@ -157,12 +113,6 @@ class PromptBuilder(ABC):
         conversation, dropping the oldest exchange once ``history_turns`` are
         held."""
         turns = self._turns + [self._current, assistant_turn(text)]
-        self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
-
-    def add_observation(self) -> None:
-        """返答を書かないステップの観測を、返答のない user のターンとして会話に残す。
-        次に返答を書くとき、その間の観測をまとめて読めるようにするため。"""
-        turns = self._turns + [self._current]
         self._turns = turns[max(0, len(turns) - 2 * self.history_turns) :]
 
     def task_text(self) -> str:
@@ -194,12 +144,36 @@ class PromptBuilder(ABC):
     def _rejection_text(self, answer: str) -> str:
         return f"({answer!r} is not an action -- nothing ran.)"
 
+    def _protocol(self) -> str:
+        """返答の書式。思考を書かせるときは、その間隔と、思考を何に使うかを先に伝える。
+        思考のあとに書くのは1ステップの行動だけなので、それまでの振り返りと、次に考える
+        までの方針は、ここで求めておく。"""
+        if self.thinking_interval == 0:
+            return TEXT_ACTION_PROTOCOL
+        return (
+            f"On the first step and every {self.thinking_interval} steps after it you think "
+            f"before you reply: use that to review the frames and the actions taken since you "
+            f"last thought, and to decide what to do until you next think. On the other steps "
+            f"you reply at once, carrying on with what you last decided. {TEXT_ACTION_PROTOCOL}"
+        )
+
+    def reflect(self, score: float, answer) -> bool:
+        """Rewrite the ended episode's task instruction off a reflection the
+        model writes, when the builder holds a per-task instruction to rewrite.
+        ``answer`` puts a request to the model on top of the episode's
+        conversation and returns its reply text. The base builder holds none,
+        so this is a no-op."""
+        del score, answer
+        return False
+
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         """The standing task: what the env asks, unchanged through an episode."""
 
     @abstractmethod
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def _turn(
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
+    ) -> str:
         """What this tick alone says: the live numbers under the frame."""
 
 
@@ -220,8 +194,10 @@ class CarRacingPromptBuilder(PromptBuilder):
         del obs, info
         return f"{CAR_RACING_TEXT_ACTION_PROMPT}"
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward, info
+    def _turn(
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
+    ) -> str:
+        del obs, reward, info, previous_action
         return ""
 
 
@@ -245,6 +221,16 @@ ANIMALAI_FRAMING = (
     "another. Move to a new spot only if a full turn shows nothing. "
 )
 ANIMALAI_ACTION_NAMES = "move_forward / move_backward / turn_right / turn_left"
+
+ANIMALAI_REFLECTION_REQUEST = (
+    "The episode just ended in {outcome}: return {score:+.3f} against pass mark "
+    '{pass_mark:+.3f}. Your standing instruction for this task so far: "{task}" '
+    "Write the instruction to follow on the next attempt at this task, keeping "
+    "what worked and fixing what did not. Reply with the "
+    "instruction only, at most three sentences."
+)
+# これより長い指示は、常設のプロンプトを膨らませるので採らない
+ANIMALAI_INSTRUCTION_CHARS_MAX = 500
 
 
 def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: float) -> str:
@@ -275,13 +261,20 @@ def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: fl
 
 
 class AnimalAIPromptBuilder(PromptBuilder):
-    """Animal-AI: the framing and the live scalars, the same words on every
-    task -- the prompt carries no per-task knowledge."""
+    """Animal-AI: the framing, this arena's own instruction, and the live
+    scalars.
 
-    def __init__(
-        self, env: Env, history_turns: int, steps_per_action: int, steps_per_observation: int
-    ) -> None:
-        super().__init__(env, history_turns, steps_per_action, steps_per_observation)
+    Every task's instruction starts empty and is written by
+    :meth:`reflect`, so what the prompt says about a task is only what the
+    run's own episodes taught it, keyed by the "XX-YY" prefix of the episode's
+    arena name.
+    """
+
+    def __init__(self, env: Env, history_turns: int, thinking_interval: int) -> None:
+        super().__init__(env, history_turns, thinking_interval)
+        self.tasks = {arena.name.rsplit("-", 1)[0]: "" for arena in env.unwrapped.selector.arenas}
+        self._task_key = ""
+        self._pass_mark = 0.0
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
 
@@ -299,28 +292,60 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
     def _action_format(self) -> str:
         return (
-            f"Write the action as `<name>(<n>)`, for example `move_forward(4)`: "
-            f"<name> is one of {ANIMALAI_ACTION_NAMES}, and <n> is how many steps "
-            f"in a row it is taken, an integer from 1 to {self.steps_per_action}. One turn "
-            f"step rotates 10 degrees; one forward step moves about 1.5 units, the arena "
-            f"being 40 units across. You are shown a new frame every "
-            f"{self.steps_per_observation} steps, but asked for a new action only every "
-            f"{self.steps_per_action} steps, and the steps left over after <n> are spent "
-            f"standing still."
+            f"Write the action as one of {ANIMALAI_ACTION_NAMES}. It is taken for one "
+            f"step, and you are then shown the next frame and asked again. One turn step "
+            f"rotates 10 degrees; one forward step moves about 1.5 units, the arena being "
+            f"40 units across. Each frame comes with the action that was actually taken on "
+            f"the step before it, as two numbers: move (+1 forward, -1 backward) and turn "
+            f"(+1 right, -1 left). It can differ from the action you named."
         )
 
     def _rejection_text(self, answer: str) -> str:
         return f"(`{answer}` is not an action -- the agent stood still. {self._action_format()})"
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
-        del obs, info
-        return f"{ANIMALAI_FRAMING} {self._action_format()} {TEXT_ACTION_PROTOCOL}"
+        del obs
+        self._task_key = info["arena_name"].rsplit("-", 1)[0]
+        task = self.tasks[self._task_key]
+        task_sentence = f"Task: {task} " if task != "" else ""
+        return f"{ANIMALAI_FRAMING} {self._action_format()} {task_sentence}{self._protocol()}"
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
+    def reflect(self, score: float, answer) -> bool:
+        """The Animal-AI rewrite: on every ended episode, ask the model, over
+        the episode's own conversation, to rewrite this task's instruction, and
+        keep the rewrite for every later episode of the task. A failure
+        distills what to change, a success what to hold on to. A reply that is
+        empty or would bloat the standing prompt leaves the instruction as it
+        was."""
+        if self._task_key == "":
+            return False
+        request = ANIMALAI_REFLECTION_REQUEST.format(
+            outcome="success" if score >= self._pass_mark else "failure",
+            score=score,
+            pass_mark=self._pass_mark,
+            task=self.tasks[self._task_key],
+        )
+        reply = answer(request)
+        if reply == "" or len(reply) > ANIMALAI_INSTRUCTION_CHARS_MAX:
+            return False
+        self.tasks[self._task_key] = reply
+        return True
+
+    def _turn(
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
+    ) -> str:
         del info
+        self._pass_mark = float(obs["pass_mark"][0])
         self._forward_speed_sum += float(obs["velocity"][2])
         self._forward_speed_steps += 1
-        return _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)
+        scalars = _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)
+        if self._tick == 0:
+            # エピソードの最初のステップには、その前に取られた行動がない
+            return scalars
+        return (
+            f"Action taken: move {previous_action[0]:+.2f}, turn {previous_action[1]:+.2f}. "
+            f"{scalars}"
+        )
 
 
 # --- CARLA -------------------------------------------------------------------
@@ -349,10 +374,12 @@ class CarlaPromptBuilder(PromptBuilder):
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
         del obs, info
-        return f"{CARLA_TEXT_ACTION_FRAMING} {TEXT_ACTION_PROTOCOL}"
+        return f"{CARLA_TEXT_ACTION_FRAMING} {self._protocol()}"
 
-    def _turn(self, obs: dict[str, Any], reward: float, info: dict) -> str:
-        del obs, reward
+    def _turn(
+        self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
+    ) -> str:
+        del obs, reward, previous_action
         return CARLA_TEXT_ACTION_MANEUVER[info["maneuver_command"]]
 
 
@@ -366,8 +393,7 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
-    # 高レベル方策の窓 high_level.seq_len に、チェーンの周期で収まるやり取りの数
-    history_turns = (args.high_level.seq_len - 1) // args.high_level.steps_per_reply
-    return PROMPT_BUILDERS[args.env_id](
-        env, history_turns, args.high_level.steps_per_reply, args.high_level.steps_per_observation
-    )
+    # 会話の履歴は VLM の KV キャッシュが持つので、builder 側には残さない
+    # 思考を書かせない設定では、思考の間隔もプロンプトに書かない
+    thinking_interval = 0 if args.vla.reasoning_effort == "none" else args.vla.thinking_interval
+    return PROMPT_BUILDERS[args.env_id](env, 0, thinking_interval)

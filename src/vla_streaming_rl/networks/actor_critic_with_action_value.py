@@ -4,7 +4,6 @@ from collections.abc import Callable
 import numpy as np
 import torch
 from omegaconf import DictConfig
-from transformers import AutoConfig
 
 from vla_streaming_rl.networks.interface import (
     EligibilityTraceInfo,
@@ -34,7 +33,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         actor_critic_config: DictConfig,
         horizon: int,
         policy_head_factory,
-        high_level_config: DictConfig,
     ) -> None:
         super().__init__()
         self.seq_len = actor_critic_config.seq_len
@@ -48,43 +46,16 @@ class ActorCriticWithActionValue(NetworkInterface):
         hidden_image_dim = actor_critic_config.image_encoder_output_dim
         self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
-        assert 0.0 <= actor_critic_config.subtask_dropout < 1.0, actor_critic_config.subtask_dropout
-        self.subtask_dropout = actor_critic_config.subtask_dropout
         assert 0.0 <= actor_critic_config.token_dropout < 1.0, actor_critic_config.token_dropout
         self.token_dropout = actor_critic_config.token_dropout
-        # サブタスクを残した系列のうち、この割合でサブタスク以外の入力をすべて落とし、
-        # テキストの指示だけから行動と価値を学ばせる
-        assert 0.0 <= actor_critic_config.observation_dropout < 1.0, (
-            actor_critic_config.observation_dropout
-        )
-        assert actor_critic_config.observation_dropout == 0.0 or (
-            high_level_config.subtask_tokens_num > 0
-        ), "observation_dropout leaves only the subtask, so it needs subtask_tokens_num > 0"
-        self.observation_dropout = actor_critic_config.observation_dropout
         # 系列ごとに 0 からこの数までの一様なステップ数を引き、最新の方からその数のステップの
         # 観測（画像・報酬・スカラー）を落とす。観測が遅れて届く状況でも行動と価値を学ばせる
         assert actor_critic_config.observation_drop_steps_max >= 0, (
             actor_critic_config.observation_drop_steps_max
         )
         self.observation_drop_steps_max = actor_critic_config.observation_drop_steps_max
-        self.bc_loss_weight = actor_critic_config.bc_loss_weight
         self.scalar_obs_dim = 9
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
-        # ``subtask_tokens_num = 0`` is the ablation: the same body, the same heads
-        # and the same loss with the chain's tokens taken out of the space axis,
-        # which is what isolates what the chain contributes. No chain means no
-        # VLM to load, so the width comes from the config, not a loaded model.
-        subtask_tokens_num = high_level_config.subtask_tokens_num
-        text_config = AutoConfig.from_pretrained(high_level_config.model_id).text_config
-        subtask_dim = text_config.hidden_size
-        # The embedding plus every layer's output.
-        subtask_layers = text_config.num_hidden_layers + 1
-        self.pool_subtask = actor_critic_config.subtask_pool == "mean" and subtask_tokens_num > 0
-        self.subtask_shape = (
-            1 if self.pool_subtask else subtask_tokens_num,
-            subtask_layers,
-            subtask_dim,
-        )
 
         self.encoder = SpatialTemporalEncoder(
             image_features_shape=tuple(self.image_processor.output_shape),
@@ -95,11 +66,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             action_dim=self.action_dim,
             scalar_obs_dim=self.scalar_obs_dim,
             temporal_model_type=actor_critic_config.temporal_model_type,
-            subtask_tokens_num=subtask_tokens_num,
-            subtask_layers=subtask_layers,
-            subtask_dim=subtask_dim,
-            subtask_pool=actor_critic_config.subtask_pool,
-            steps_per_reply=high_level_config.steps_per_reply,
             layer_scale_init=actor_critic_config.layer_scale_init,
         )
 
@@ -118,25 +84,19 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.detach_predictor = actor_critic_config.detach_predictor
         self.disable_state_predictor = actor_critic_config.disable_state_predictor
 
-        # 1ステップのトークンのうち観測にあたる位置。行動・register・サブタスクは含めない
+        # 1ステップのトークンのうち観測にあたる位置。行動と register は含めない
         observation_token = torch.cat(
             [
                 torch.ones(self.encoder.image_tokens_num, dtype=torch.bool),  # 画像
                 torch.zeros(self.action_dim, dtype=torch.bool),  # 前の行動
                 torch.ones(1 + self.scalar_obs_dim, dtype=torch.bool),  # 報酬とスカラー
-                torch.zeros(1 + self.subtask_shape[0], dtype=torch.bool),  # register とサブタスク
+                torch.zeros(1, dtype=torch.bool),  # register
             ]
         )
         self.register_buffer("observation_token", observation_token, persistent=False)
 
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_state()
-
-    def action_value(self, features: torch.Tensor, action_chunk: np.ndarray) -> float:
-        """Q(s, a) the critic gives one ``(horizon, action_dim)`` chunk at the
-        state ``infer`` handed back as ``features``."""
-        chunk = torch.from_numpy(action_chunk).to(features.device, features.dtype).unsqueeze(0)
-        return self.value_head.scalar_value(features, chunk).item()
 
     def stored_image_shape(self) -> tuple[int, ...]:
         """The frozen encoder's output for the frame, not the frame."""
@@ -145,50 +105,31 @@ class ActorCriticWithActionValue(NetworkInterface):
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
         return self.image_processor.encode(image.unsqueeze(0)).squeeze(0)
 
-    def to_stored_subtask(self, activations: torch.Tensor) -> torch.Tensor:
-        """平均でまとめる設定なら、ステップのトークンを1つに均してから保存する。"""
-        if self.pool_subtask:
-            return activations.float().mean(dim=0, keepdim=True).to(activations.dtype)
-        return activations
+    def answer(self, request: str) -> str:
+        """文を書かないネットワークなので、何も答えない。"""
+        del request
+        return ""
 
-    def _subtask_keep(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """Which sequences of a batch keep their chain, the rest being the share
-        ``subtask_dropout`` it is taken away from. Handed to the encoder as a mask
-        rather than applied to the activations here, which would copy them.
-
-        Only on the learning path. Without it the critic has never scored a
-        state whose chain is missing, so asking it what an action is worth
-        without one is asking about an input it was never trained on -- which is
-        exactly what the chain's own contribution has to be measured against.
-        Dropping whole sequences rather than single steps keeps a sampled window
-        internally consistent.
-        """
-        if self.subtask_dropout == 0.0:
-            return torch.ones(batch_size, dtype=torch.bool, device=device)
-        return torch.rand(batch_size, device=device) >= self.subtask_dropout
+    def stored_state_shape(self) -> tuple[int, ...]:
+        """状態は毎回バッファの窓から作るので、保存しない。"""
+        return (0,)
 
     def _token_keep(self, batch_size: int, steps: int, device: torch.device) -> torch.Tensor:
         """Which tokens of a batch's windows the encoder gets to read, the rest
         being the share ``token_dropout`` takes away: every token alike, whatever
         it carries, so no one kind of input can be leaned on alone. Only on the
-        learning path, as the chain's own dropout is."""
+        learning path."""
         shape = (batch_size, steps, self.encoder.space_len)
         return torch.rand(shape, device=device) >= self.token_dropout
 
     def _window(self, data: ReplayBufferData, start, stop, drop_steps_max: int) -> tuple:
-        """The ``(image, action, reward, rnn_state, scalar_obs, subtask, subtask_age,
-        subtask_keep, token_keep)`` the encoder reads, sliced out of a replay batch
+        """The ``(image, action, reward, rnn_state, scalar_obs, token_keep)`` the
+        encoder reads, sliced out of a replay batch
         over ``[start, stop)`` steps. 最新の方から 0 から ``drop_steps_max`` までの
         一様なステップ数の観測を落とす。"""
         observations = data.observations[:, start:stop]
         batch_size = observations.shape[0]
-        subtask_keep = self._subtask_keep(batch_size, observations.device)
         token_keep = self._token_keep(batch_size, observations.shape[1], observations.device)
-        # サブタスクのトークンは1ステップのトークンの最後に並ぶので、それより前をすべて落とす
-        subtask_only = subtask_keep & (
-            torch.rand(batch_size, device=observations.device) < self.observation_dropout
-        )
-        token_keep[subtask_only, :, : -self.subtask_shape[0]] = False
         steps = observations.shape[1]
         drop_steps = torch.randint(
             0, drop_steps_max + 1, (batch_size, 1), device=observations.device
@@ -211,9 +152,6 @@ class ActorCriticWithActionValue(NetworkInterface):
                 data.episode_step[:, start:stop],
                 data.health[:, start:stop],
             ),
-            data.subtask_activations[:, start:stop],
-            data.subtask_age[:, start:stop],
-            subtask_keep,
             token_keep,
         )
 
@@ -298,9 +236,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.r_seq,
             data.rnn_state,
             scalar_obs,
-            data.subtask_activations_seq,
-            data.subtask_age_seq,
-            torch.ones(1, dtype=torch.bool, device=data.subtask_activations_seq.device),
             torch.ones(
                 (1, data.s_seq.shape[1], self.encoder.space_len),
                 dtype=torch.bool,
@@ -315,11 +250,22 @@ class ActorCriticWithActionValue(NetworkInterface):
         q_out = self.value_head(x, action)
         value_report = self.value_head.value_report(q_out.output)
 
+        if data.warmup:
+            # バッファを貯めている間は一様乱数の行動を返す。再帰状態はエピソードを
+            # 追い続けるので、ネットワーク自体は通しておく
+            action = torch.rand_like(action) * 2.0 - 1.0
+
         return InferResult(
             action=action,
             value_report=value_report,
             rnn_state=rnn_state,
             features=x,
+            stored_state=None,
+            text=None,
+            text_status=None,
+            exchange=None,
+            selection_status=None,
+            selection_rows=None,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -349,10 +295,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             action_chunk,
             value_head=self.value_head,
         )
-        head_action, _ = self.policy_head.get_action(curr_state)
-        bc_gap = (head_action - data.vlm_actions[:, -self.horizon :]).pow(2).mean(dim=-1)
-        bc_holds = data.vlm_holds[:, -self.horizon :, 0]
-        bc_loss = (bc_gap * bc_holds).sum() / bc_holds.sum().clamp(min=1.0)
         with torch.no_grad():
             next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
         seq_loss, seq_info = self.prediction_head.compute_loss(
@@ -364,21 +306,11 @@ class ActorCriticWithActionValue(NetworkInterface):
             self.disable_state_predictor,
         )
 
-        total_loss = (
-            self.critic_loss_weight * critic_loss
-            + actor_loss
-            + seq_loss
-            + self.bc_loss_weight * bc_loss
-        )
+        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
 
         info_dict = {
             f"losses/{key}": value
-            for key, value in {
-                **critic_info,
-                **actor_info,
-                **seq_info,
-                "bc_loss": bc_loss.item(),
-            }.items()
+            for key, value in {**critic_info, **actor_info, **seq_info}.items()
         }
 
         return LossResult(loss=total_loss, info=info_dict)
@@ -436,6 +368,12 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_report=self.value_head.value_report(next_q_out.output),
             rnn_state=next_rnn_state,
             features=next_state,
+            stored_state=None,
+            text=None,
+            text_status=None,
+            exchange=None,
+            selection_status=None,
+            selection_rows=None,
         )
 
         info_dict = {

@@ -37,35 +37,27 @@ policy_head:
   temperature_lr: 3e-3
   detach_state: true
 
-high_level:
-  model_id: Qwen/Qwen3.8-27B
-  load_in_4bit: true
-  max_new_tokens: 512
-  # 思考の量。none なら思考を閉じて返答だけを書く。low / medium / xhigh は Qwen3.8 の
-  # テンプレートの reasoning_effort で、思考を書いてから返答する（max_new_tokens も思考込み）
-  reasoning_effort: low
-  temperature: 0.5
-  # 全注意層の KV を「先頭の sink ＋直近この数のトークン」まで間引く
-  window_tokens: 32768
-  subtask_tokens_num: 0
-  # チェーンを書いて確定し、行動を読む間隔
-  steps_per_reply: 32
-  # 返答を書かないステップでも、この間隔で観測（画像とテキスト）を会話に残す。
-  # steps_per_reply はこの倍数にする
-  steps_per_observation: 8
-  # 高レベル方策が会話として読む窓のステップ数。steps_per_reply ステップごとに1回の
-  # やり取りなので、履歴は (seq_len - 1) // steps_per_reply 回分になる。
-  # また、実際に読める長さは window_tokens で頭打ちになる
-  seq_len: 8193
-
 vla:
-  # リプレイバッファから読む時間窓のステップ数
-  seq_len: 1
-  model_id: Qwen/Qwen3.5-0.8B
+  # 会話は VLM の KV キャッシュに積む。システムプロンプトは常に残し、その後ろのターン
+  # （フレーム・数値・返答）は直近この数のトークンまでを先入れ先出しで持つ
+  window_tokens: 32768
+  model_id: Qwen/Qwen3.8-27B
   load_in_4bit: true
   use_lora: false
   num_state_queries: 100
   state_out_dim: 4
+  # 毎ステップ書く返答（行動）の生成
+  max_new_tokens: 512
+  # 思考を書かせる返答での思考の量。none なら思考は書かせない。思考は、エピソードの最初の
+  # ステップから thinking_interval ステップごとの返答で書かせ、そのあいだの返答は行動だけを
+  # 書く。思考を書いた返答も、ほかのターンと同じく window_tokens の中で古くなれば押し出される
+  reasoning_effort: low  # [none, low, medium, high, xhigh]
+  thinking_interval: 32
+  temperature: 0.5
+  # 返答の行動とヘッドの行動を行動価値で選ぶときの余裕。ヘッドの行動の価値が返答の行動を
+  # これより大きく上回るときだけヘッドの行動を実行する。.inf なら常に返答の行動、
+  # -.inf なら常にヘッドの行動（バッファを貯めている間は常に返答の行動）
+  select_margin: 0.0
 
 actor_critic:
   seq_len: 50
@@ -76,12 +68,7 @@ actor_critic:
   encoder_block_num: 8
   temporal_model_type: gdn
   layer_scale_init: 0.0001
-  subtask_dropout: 0.1
   token_dropout: 0.0
-  # サブタスクだけを見て行動する系列の割合。サブタスク以外の入力をすべて落とす
-  observation_dropout: 0.0
   # 学習時に系列ごとに 0 からこの数までの一様なステップ数を引き、最新の方からその数の
   # ステップの観測（画像・報酬・スカラー）を落とす。行動は落とさない
   observation_drop_steps_max: 0
-  bc_loss_weight: 0.0
-  subtask_pool: none  # [mean, none]

@@ -47,8 +47,9 @@ class InferInput:
     global_step_seq: torch.Tensor  # (B, T, 1)
     episode_step_seq: torch.Tensor  # (B, T, 1)
     health_seq: torch.Tensor  # (B, T, 1)
-    subtask_activations_seq: torch.Tensor  # (B, T, *subtask_shape)
-    subtask_age_seq: torch.Tensor  # (B, T, 1)
+    # バッファを貯めている間のステップか。このあいだの行動（一様乱数や、返答に書いた行動）は
+    # ネットワークが決める
+    warmup: bool
 
 
 @dataclass
@@ -65,6 +66,19 @@ class InferResult:
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
     rnn_state: torch.Tensor  # (B, ...)
     features: torch.Tensor
+    # このステップの行に保存しておく状態の元（``stored_state_shape`` の形）。学習はこれを
+    # 読み戻して状態を作る。保存しないネットワークでは None
+    stored_state: torch.Tensor | None
+    # このステップにネットワークが書いた文と、それに添える1行（読んだ・書いたトークン数、
+    # かかった時間など）。文を書かないネットワークではどちらも None
+    text: str | None
+    text_status: str | None
+    # その文を書いたときに実際に読んだ会話と、その文。描画用。文を書かないネットワークでは None
+    exchange: list[dict] | None
+    # 行動の候補を比べて選んだときの、その経緯の1行と、候補ごとの
+    # （名前、行動の説明、行動価値、選ばれたか）。描画用。候補を比べないネットワークでは None
+    selection_status: str | None
+    selection_rows: list[tuple[str, str, float, bool]] | None
 
 
 @dataclass
@@ -108,11 +122,6 @@ class NetworkInterface(nn.Module, abc.ABC):
     metaclass conflict.
     """
 
-    # 高レベル方策のサブタスクの活性を読むネットワークは、1ステップ分を保存する形を宣言する。
-    # エージェントはこれでバッファの欄の大きさを決め、``to_stored_subtask`` を通した
-    # ものを入れる。読まないネットワークは何も持たない
-    subtask_shape: tuple[int, int] = (0, 0)
-
     @abc.abstractmethod
     def init_state(self) -> torch.Tensor:
         """Initial recurrent state the agent carries between steps."""
@@ -129,9 +138,14 @@ class NetworkInterface(nn.Module, abc.ABC):
         ``stored_image_shape``."""
 
     @abc.abstractmethod
-    def to_stored_subtask(self, activations: torch.Tensor) -> torch.Tensor:
-        """高レベル方策の1ステップ分のサブタスクの活性を、``subtask_shape`` の保存形に
-        したもの。"""
+    def answer(self, request: str) -> str:
+        """エピソードの会話の続きに ``request`` を足して、自由な文の返答を書かせたもの。
+        文を書かないネットワークでは空文字列。"""
+
+    @abc.abstractmethod
+    def stored_state_shape(self) -> tuple[int, ...]:
+        """行動を決めたステップの行に保存する状態の元の形。保存しないネットワークでは
+        大きさ 0 の形。"""
 
     @abc.abstractmethod
     def observe_scalar_obs(

@@ -12,8 +12,8 @@ from .vlm_backbone import load_model
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
-# 採点に使う数字。0〜9 はそれぞれ1トークンになる
-SCORE_MAX = 9
+# 本体を自由に書かせる返答で、思考の後ろに残しておくトークン数
+FREE_BODY_TOKENS = 160
 
 
 def _history_text(turn: dict, system_prefix: str) -> str:
@@ -34,12 +34,13 @@ def _history_text(turn: dict, system_prefix: str) -> str:
 
 @dataclass(frozen=True)
 class Chain:
-    """書いた1つの返答。トークン、そのテキスト、各トークンを選んだ位置の活性
-    (chain_len, layers_num, hidden_size)、読んだプロンプトのトークン数、かかった時間。"""
+    """書いた1つの返答。トークン、そのテキスト、このステップで新しく積んだ位置（増えた
+    メッセージ、生成プロンプト、書いた返答）の活性を全層で平均したもの
+    (positions_num, hidden_size)、読んだプロンプトのトークン数、かかった時間。"""
 
     tokens: list[int]
     text: str
-    positions: torch.Tensor
+    states: torch.Tensor
     prompt_tokens: int
     msec: float
 
@@ -51,29 +52,39 @@ class ChainGenerator:
     キャッシュの上に積む。確定した返答は、生成プロンプトの後ろに書いたトークンを
     <|im_end|> で閉じたものをそのまま履歴として残す。テンプレートが過去の思考を
     残す形（preserve_thinking）では、これが履歴の書式そのものになる。
-    モデルの文脈の実体はこのキャッシュで、builder の会話リストは差分生成と
-    表示・パース用になる。
+    モデルの文脈の実体はこのキャッシュで、呼び出し側の会話リストは差分生成と
+    表示用になる。
 
     キャッシュは実トークン数分だけ使う DynamicCache。全注意層の KV だけが会話長に
-    比例するので、そこを「先頭の sink（システムプロンプト）＋直近
-    ``window_tokens`` トークン」まで間引く。線形注意層には中間の情報も残る。
+    比例するので、そこを「先頭の sink ＋直近 ``window_tokens`` トークン」まで間引く。
+    線形注意層には中間の情報も残る。
+
+    思考を書かせるかどうかは、返答ごとに呼び出し側が決める。思考を書いた返答も、ほかの
+    ターンと同じく直近 ``window_tokens`` トークンの中に残り、古くなれば押し出される。
+    sink に入るのはシステムプロンプトだけ。
+
+    ``candidates`` を渡すと、返答の本体（思考の後ろ）はその候補のどれか1つになる。次に
+    選べるトークンを、候補のどれかの続きになるものだけに絞って書かせるので、書式の崩れた
+    返答は出ない。思考が長引いたら、候補を書き切れるうちに思考を閉じさせる。候補が空なら
+    本体も自由に書かせる。
     """
 
     def __init__(
         self,
-        high_level_config: DictConfig,
+        vla_config: DictConfig,
+        candidates: list[str],
         device: torch.device,
     ) -> None:
-        max_len = high_level_config.max_new_tokens
-        temperature = high_level_config.temperature
-        window_tokens = high_level_config.window_tokens
+        max_len = vla_config.max_new_tokens
+        temperature = vla_config.temperature
+        window_tokens = vla_config.window_tokens
         assert max_len >= 1, max_len
         assert temperature >= 0.0, temperature
         assert window_tokens >= 1, window_tokens
         self.model, self.processor = load_model(
-            model_id=high_level_config.model_id,
+            model_id=vla_config.model_id,
             use_lora=False,
-            load_in_4bit=high_level_config.load_in_4bit,
+            load_in_4bit=vla_config.load_in_4bit,
             device=device,
         )
         self.model.eval().requires_grad_(False)
@@ -92,33 +103,22 @@ class ChainGenerator:
             else text_config.vocab_size
         )
         self.top_p = generation_config.top_p if generation_config.top_p is not None else 1.0
-        # 思考の量。"none" なら思考を閉じた形で返答を書かせ、それ以外はテンプレートの
-        # reasoning_effort（low / medium / xhigh）に渡して、思考を書いてから返答させる
-        reasoning_effort = high_level_config.reasoning_effort
+        # 思考を書かせる返答での思考の量。"none" なら思考は書かせられない。思考の量の段階
+        # （reasoning_effort: low / medium / xhigh）を持つテンプレートには、それも渡す
+        reasoning_effort = vla_config.reasoning_effort
         assert reasoning_effort in ("none", "low", "medium", "xhigh"), reasoning_effort
-        self.enable_thinking = reasoning_effort != "none"
-        template_kwargs = (
-            {"enable_thinking": True, "reasoning_effort": reasoning_effort}
-            if self.enable_thinking
-            else {"enable_thinking": False}
-        )
+        self.thinking_enabled = reasoning_effort != "none"
+        template_kwargs = {"enable_thinking": self.thinking_enabled}
+        if self.thinking_enabled and "reasoning_effort" in self.processor.chat_template:
+            template_kwargs["reasoning_effort"] = reasoning_effort
         self.device = device
         self.hidden_size = text_config.hidden_size
-        # The embedding plus every layer's output.
-        self.layers_num = text_config.num_hidden_layers + 1
-        # テンプレートが会話の末尾に付ける生成プロンプトのトークン列。
-        # 会話の中身に依らない定数なので、ここで一度だけ測る。
+        # テンプレートが会話の末尾に付ける生成プロンプトのトークン列。会話の中身に依らない
+        # 定数なので、ここで一度だけ測る。思考を書かせる返答に付けるものと、思考を閉じた形で
+        # 書かせる返答に付けるもの
         probe = [{"role": "user", "content": [{"type": "text", "text": "x"}]}]
-        with_tail = self.processor.apply_chat_template(
-            probe, tokenize=False, add_generation_prompt=True, **template_kwargs
-        )
-        without_tail = self.processor.apply_chat_template(
-            probe, tokenize=False, add_generation_prompt=False, **template_kwargs
-        )
-        assert with_tail.startswith(without_tail), (with_tail, without_tail)
-        self._tail_ids = self.processor.tokenizer.encode(
-            with_tail[len(without_tail) :], add_special_tokens=False
-        )
+        self._thinking_tail_ids = self._generation_prompt_ids(probe, template_kwargs)
+        self._tail_ids = self._generation_prompt_ids(probe, {"enable_thinking": False})
         # テンプレートがシステムプロンプトの先頭に足す文言。思考の量の指示があればそれが入る
         marker = "SYSTEM_PROMPT_BODY"
         rendered = self.processor.apply_chat_template(
@@ -130,20 +130,51 @@ class ChainGenerator:
         system_start = f"{IM_START}system\n"
         assert rendered.startswith(system_start) and marker in rendered, rendered
         self._system_prefix = rendered[len(system_start) : rendered.index(marker)]
-        # 終端の判定で、返答の先頭に置く書き出し。思考を書かせる形では、空の思考を閉じてから
-        # タグを置く（テンプレートが思考なしの返答に付けるのと同じ形）
-        self._judge_prefix = "\n</think>\n\n" if self.enable_thinking else ""
         # 返答を閉じるトークン。生成はこの <|im_end|> で止まる
         assert self.processor.tokenizer.eos_token == IM_END, self.processor.tokenizer.eos_token
         self._newline_ids = self.processor.tokenizer.encode("\n", add_special_tokens=False)
-        # 0〜9 の数字のトークン。Qwen のトークナイザは数字を1文字ずつ1トークンにし、前の空白は
-        # 別のトークンになるので、数字そのものだけを並べる
+        # 返答の本体として書ける候補のトークン列
         tokenizer = self.processor.tokenizer
-        self._digit_ids = [
-            tokenizer.encode(str(digit), add_special_tokens=False) for digit in range(SCORE_MAX + 1)
+        self._candidate_ids = [
+            tokenizer.encode(candidate, add_special_tokens=False) for candidate in candidates
         ]
-        assert all(len(ids) == 1 for ids in self._digit_ids), self._digit_ids
+        assert all(len(ids) > 0 for ids in self._candidate_ids), candidates
+        # 思考を閉じるトークンと、テンプレートが思考と本体のあいだに置く書式
+        think_close = tokenizer.encode("</think>", add_special_tokens=False)
+        assert len(think_close) == 1, think_close
+        self._think_close_id = think_close[0]
+        self._think_close_ids = tokenizer.encode("\n</think>\n\n", add_special_tokens=False)
+        self._after_think_ids = tokenizer.encode("\n\n", add_special_tokens=False)
+        # 候補に絞るときに思考へ使えるトークン数。思考を閉じる書式と、いちばん長い候補と、
+        # 返答を閉じるトークンの分を残す
+        self._thinking_budget = (
+            max_len
+            - len(self._think_close_ids)
+            - max([len(ids) for ids in self._candidate_ids] + [0])
+            - 1
+        )
+        assert len(self._candidate_ids) == 0 or self._thinking_budget >= 1, (
+            f"max_new_tokens {max_len} leaves no room to think before a candidate"
+        )
+        # 本体を自由に書かせるときに思考へ使えるトークン数。本体に FREE_BODY_TOKENS を残す
+        self._free_thinking_budget = max_len - len(self._think_close_ids) - FREE_BODY_TOKENS
+        assert self._free_thinking_budget >= 1, (
+            f"max_new_tokens {max_len} leaves no room to think before a free reply"
+        )
         self.reset_cache()
+
+    def _generation_prompt_ids(self, probe: list[dict], template_kwargs: dict) -> list[int]:
+        """テンプレートが ``template_kwargs`` のもとで会話の末尾に付ける生成プロンプト。"""
+        with_tail = self.processor.apply_chat_template(
+            probe, tokenize=False, add_generation_prompt=True, **template_kwargs
+        )
+        without_tail = self.processor.apply_chat_template(
+            probe, tokenize=False, add_generation_prompt=False, **template_kwargs
+        )
+        assert with_tail.startswith(without_tail), (with_tail, without_tail)
+        return self.processor.tokenizer.encode(
+            with_tail[len(without_tail) :], add_special_tokens=False
+        )
 
     def reset_cache(self) -> None:
         """会話が仕切り直されるときに呼ぶ。次の生成は会話全体を積み直す。"""
@@ -160,41 +191,78 @@ class ChainGenerator:
         self._committed_reply = ""
 
     @torch.inference_mode()
-    def generate(self, conversation: list[dict]) -> Chain:
+    def generate(self, conversation: list[dict], thinking: bool, constrained: bool) -> Chain:
         """``conversation`` への返答を最大 ``max_len`` トークン書き、確定してキャッシュに
-        残す。会話の画像は、エージェントが builder に渡したもの（8 ビットの画像か、
-        [0, 1] の (C, H, W) float テンソル）で、processor には後者として渡る。"""
+        残す。``thinking`` なら、思考を書いてから返答させる。``constrained`` なら返答の
+        本体を候補のどれかに絞り、そうでなければ自由に書かせる。会話の画像は、エージェントが
+        builder に渡したもの（8 ビットの画像か、[0, 1] の (C, H, W) float テンソル）で、
+        processor には後者として渡る。"""
+        assert self.thinking_enabled or not thinking, "reasoning_effort is none"
+        assert len(self._candidate_ids) > 0 or not constrained, "no candidates to choose among"
+        # 思考に使えるトークン数。越えたら思考を閉じさせて、残りで本体を書かせる
+        thinking_budget = self._thinking_budget if constrained else self._free_thinking_budget
         start = time.perf_counter()
+        # 会話の最初の返答か
+        opening = self._cache is None
+        tail_ids = self._thinking_tail_ids if thinking else self._tail_ids
         # 会話の差分と生成プロンプトを1回の forward で積む
         ids, pos, pixel_values, image_grid_thw = self._encode(self._new_messages(conversation))
-        tail_pos = self._linear_positions(len(self._tail_ids), int(pos.max().item()) + 1)
+        tail_pos = self._linear_positions(len(tail_ids), int(pos.max().item()) + 1)
         outputs = self._prefill(
-            torch.cat([ids, torch.tensor([self._tail_ids], device=self.device)], dim=1),
+            torch.cat([ids, torch.tensor([tail_ids], device=self.device)], dim=1),
             torch.cat([pos, tail_pos], dim=2),
             pixel_values,
             image_grid_thw,
             hidden=True,
         )
         prompt_tokens = self._kv_len
-        position = self._last_position(outputs.hidden_states)
+        # このステップで新しく積んだ位置の活性。増えたメッセージと生成プロンプトの分
+        states = [self._layer_mean(outputs.hidden_states)]
         logits = outputs.logits[0, -1]
 
         # 1トークンずつ書く。選んだトークンは次のステップで積むので、最後に選んだものは
         # まだキャッシュに入っていない
         tokens = []
-        positions = []
+        # 決められた通りに書かせる残りのトークン（思考を閉じる書式）と、本体として書いた分
+        forced = []
+        body = []
         while True:
-            positions.append(position)
-            # 温度 0 なら貪欲。それ以外はモデルの生成設定に従い、温度を掛け、上位 top_k に絞り、
-            # そのうち確率の和が top_p に届く最少のものから引く
-            if self.temperature == 0.0:
-                token = int(logits.argmax().item())
+            if thinking and len(tokens) >= thinking_budget:
+                # 思考が長引いたので、本体を書き切れるうちに閉じさせる
+                forced = list(self._think_close_ids)
+                thinking = False
+            if len(forced) > 0:
+                token = forced.pop(0)
             else:
-                top = torch.topk(logits.float() / self.temperature, self.top_k)
-                probs = torch.softmax(top.values, dim=-1)
-                kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
-                token = int(top.indices[torch.multinomial(kept, 1)].item())
+                if constrained and not thinking:
+                    # 次に選べるのは、書いた本体に続けて候補のどれかになるトークンだけ。
+                    # 候補を書き切ったら返答を閉じる
+                    allowed = sorted(
+                        {
+                            ids[len(body)] if len(ids) > len(body) else self.eos_token_id
+                            for ids in self._candidate_ids
+                            if ids[: len(body)] == body
+                        }
+                    )
+                    masked = torch.full_like(logits, float("-inf"))
+                    masked[allowed] = logits[allowed]
+                    logits = masked
+                # 温度 0 なら貪欲。それ以外はモデルの生成設定に従い、温度を掛け、上位 top_k に
+                # 絞り、そのうち確率の和が top_p に届く最少のものから引く
+                if self.temperature == 0.0:
+                    token = int(logits.argmax().item())
+                else:
+                    top = torch.topk(logits.float() / self.temperature, self.top_k)
+                    probs = torch.softmax(top.values, dim=-1)
+                    kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
+                    token = int(top.indices[torch.multinomial(kept, 1)].item())
+                if constrained and not thinking:
+                    body.append(token)
             tokens.append(token)
+            if thinking and token == self._think_close_id:
+                # モデルが自分で思考を閉じた。テンプレートの書式どおり空行を置いてから本体へ
+                thinking = False
+                forced = list(self._after_think_ids) if constrained else []
             if token == self.eos_token_id or len(tokens) >= self.max_len:
                 break
             # 位置はモデル任せにせず、キャッシュの長さと 3D 位置の起点から渡す
@@ -211,12 +279,12 @@ class ChainGenerator:
             )
             self._kv_len += 1
             self._next_pos += 1
-            position = self._last_position(outputs.hidden_states)
+            states.append(self._layer_mean(outputs.hidden_states))
             logits = outputs.logits[0, -1]
         chain = Chain(
             tokens=tokens,
             text=self.processor.tokenizer.decode(tokens, skip_special_tokens=True).strip(),
-            positions=torch.stack(positions),
+            states=torch.cat(states),
             prompt_tokens=prompt_tokens,
             msec=(time.perf_counter() - start) * 1000.0,
         )
@@ -234,7 +302,7 @@ class ChainGenerator:
             None,
             hidden=False,
         )
-        if self._sink_len == 0:
+        if opening:
             self._sink_len = len(
                 self.processor.tokenizer.encode(
                     _history_text(conversation[0], self._system_prefix), add_special_tokens=False
@@ -266,79 +334,6 @@ class ChainGenerator:
         self._committed_reply = chain.text
         return chain
 
-    @torch.inference_mode()
-    def score_value(self, chain: Chain, tag: str) -> float | None:
-        """返答で最後の ``tag`` の直後に書いた最初のトークンの位置で、0〜9 の数字を選ぶ
-        確率から点数の期待値を出し、[0, 1] に縮めて返す。返答に ``tag`` がなければ None。
-        最後のものを読むのは、思考の中で同じ文字列に触れていても、返答の本体の採点を
-        読むため。
-
-        その位置の活性の最終層に lm_head を掛けると、そのトークンを選んだときの
-        ロジットになる。"""
-        tokenizer = self.processor.tokenizer
-        found = None
-        for i in range(len(chain.tokens)):
-            written = tokenizer.decode(chain.tokens[:i], skip_special_tokens=True)
-            if written.rstrip().endswith(tag):
-                found = i
-        if found is None:
-            return None
-        head = self.model.lm_head
-        return self._expected_score(head(chain.positions[found, -1].to(head.weight.dtype)))
-
-    @torch.inference_mode()
-    def score_after(self, conversation: list[dict], tag: str) -> float:
-        """最新のターンへの返答を ``tag`` まで書いたところで、次に書く数字の確率から点数の
-        期待値を出し、[0, 1] に縮めて返す。返答は書かず、キャッシュも呼ぶ前に戻す。"""
-        # 呼ぶ前のキャッシュを写し取る。全注意層は追記のたびに cat で新しいテンソルを作るが、
-        # 線形注意層は再帰状態を in-place に更新するので、参照ではなく複製で控える。層の
-        # 属性のうちモジュール以外（テンソル、テンソルの並び、長さなどの数値）を丸ごと控える
-        snapshot = [
-            {
-                name: self._copied_value(value)
-                for name, value in vars(layer).items()
-                if not isinstance(value, torch.nn.Module)
-            }
-            for layer in self._cache.layers
-        ]
-        kv_len = self._kv_len
-        next_pos = self._next_pos
-
-        ids, pos, pixel_values, image_grid_thw = self._encode(self._new_messages(conversation))
-        tail_ids = self._tail_ids + self.processor.tokenizer.encode(
-            self._judge_prefix + tag, add_special_tokens=False
-        )
-        outputs = self._prefill(
-            torch.cat([ids, torch.tensor([tail_ids], device=self.device)], dim=1),
-            torch.cat(
-                [pos, self._linear_positions(len(tail_ids), int(pos.max().item()) + 1)], dim=2
-            ),
-            pixel_values,
-            image_grid_thw,
-            hidden=False,
-        )
-        probability = self._expected_score(outputs.logits[0, -1])
-
-        for layer, saved in zip(self._cache.layers, snapshot, strict=True):
-            for name, value in saved.items():
-                setattr(layer, name, value)
-        self._kv_len = kv_len
-        self._next_pos = next_pos
-        return probability
-
-    @classmethod
-    def _copied_value(cls, value):
-        """テンソルは clone、テンソルを含む list / tuple / dict（線形注意層の
-        conv_states と recurrent_states は dict[int, Tensor]）は中身ごと複製した同型、
-        それ以外（数値、真偽値、None など）はそのまま返す。"""
-        if isinstance(value, torch.Tensor):
-            return value.clone()
-        if isinstance(value, (list, tuple)):
-            return type(value)(cls._copied_value(item) for item in value)
-        if isinstance(value, dict):
-            return {key: cls._copied_value(item) for key, item in value.items()}
-        return value
-
     def _new_messages(self, conversation: list[dict]) -> list[dict]:
         """前回の返答を書いた後に会話へ増えたメッセージ。前回確定した返答は書いた
         トークンのままキャッシュに入っているので除く。"""
@@ -356,13 +351,6 @@ class ChainGenerator:
         new_messages = list(conversation[indices[0] + 2 :])
         assert len(new_messages) > 0, "no new message since the last reply"
         return new_messages
-
-    def _expected_score(self, logits: torch.Tensor) -> float:
-        """数字の確率だけを取り出して正規化し、点数の期待値を [0, 1] に縮めたもの。"""
-        probs = torch.softmax(logits.float(), dim=-1)
-        digit_probs = probs[[ids[0] for ids in self._digit_ids]]
-        digits = torch.arange(SCORE_MAX + 1, device=digit_probs.device, dtype=digit_probs.dtype)
-        return float((digit_probs * digits).sum() / digit_probs.sum() / SCORE_MAX)
 
     def _encode(self, messages: list[dict]):
         """メッセージを履歴の書式でトークン列にし、これまでの位置の続きの 3D 位置と
@@ -435,7 +423,11 @@ class ChainGenerator:
         """テキストだけの区間の 3D 位置 (3, 1, length)。3軸とも同じ値で ``start`` から数える。"""
         return (torch.arange(length, device=self.device) + start).view(1, 1, -1).expand(3, 1, -1)
 
-    def _last_position(self, hidden_states) -> torch.Tensor:
-        """The activation at the newest position at every depth, (layers_num,
-        hidden_size)."""
-        return torch.stack([depth[0, -1] for depth in hidden_states]).to(torch.bfloat16)
+    def _layer_mean(self, hidden_states) -> torch.Tensor:
+        """積んだ各位置の活性を、全層（埋め込みと各層の出力）で平均したもの、
+        (positions_num, hidden_size)。全層を一度に積まず、足し込みながら平均する。"""
+        mean = None
+        for depth in hidden_states:
+            term = depth[0].to(torch.float32)
+            mean = term if mean is None else mean + term
+        return (mean / len(hidden_states)).to(torch.bfloat16)

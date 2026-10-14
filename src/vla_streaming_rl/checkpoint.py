@@ -19,13 +19,7 @@ def _persistent_buffer_names(module: torch.nn.Module) -> set[str]:
 
 def save_checkpoint(result_dir: Path, network, agent) -> None:
     """Save trainable weights and persistent buffers (checkpoint.pt) and
-    optimizer states (optimizer.pt).
-
-    A no-op for the zero-shot VLM baseline, which carries no network and so has
-    nothing to checkpoint."""
-    if network is None:
-        return
-
+    optimizer states (optimizer.pt)."""
     module = _unwrap_compiled(network)
     trainable_state = {
         name: param.detach().cpu()
