@@ -1,13 +1,23 @@
 # SPDX-License-Identifier: MIT
+import copy
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .flux_dit import FluxDiT
 from .reward_embed import embed_reward
 
 
 class StatePredictionHead(nn.Module):
+    """将来の (画像, 報酬) を予測する生成モデル。flow_matching では、割引率 ``gamma`` で
+    割り引いた将来の占有分布（successor representation）を TD^2-CFM (Farebrother et al.,
+    Temporal Difference Flows) で学習する。mean_flow は1ステップ先を予測する。"""
+
+    # 目標の予測器が予測器を指数移動平均で追う刻み
+    TARGET_EMA_RATE = 0.001
+    # ブートストラップの点を作るとき、目標の予測器の ODE を中点法で解くステップ数
+    ODE_STEPS = 10
+
     def __init__(
         self,
         image_latent_shape: tuple[int, int, int],
@@ -16,6 +26,7 @@ class StatePredictionHead(nn.Module):
         predictor_block_num: int,
         predictor_type: str,
         detach_predictor: bool,
+        gamma: float,
     ) -> None:
         super().__init__()
         # 予測の損失の勾配をエンコーダに流さない
@@ -38,22 +49,70 @@ class StatePredictionHead(nn.Module):
             qkv_bias=True,
             use_r_time=(predictor_type == "mean_flow"),
         )
+        self.gamma = gamma
+        # ブートストラップに使う目標の予測器。勾配では学習せず、予測器を指数移動平均で追う
+        self.target_predictor = copy.deepcopy(self.state_predictor).requires_grad_(False)
 
     def _loss_flow_matching(
         self,
         predictor_state: torch.Tensor,
         action: torch.Tensor,
         x1: torch.Tensor,
+        next_predictor_state: torch.Tensor,
+        next_action: torch.Tensor,
+        done: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, dict]:
-        x0 = torch.randn_like(x1)
-        shape_t = (x0.shape[0],) + (1,) * (len(x0.shape) - 1)
+        """1ステップ先の項と、目標の予測器から作るブートストラップの項を
+        ``1 - gamma`` 対 ``gamma`` で混ぜる。"""
+        shape_t = (x1.shape[0],) + (1,) * (len(x1.shape) - 1)
         t = torch.rand(shape_t, device=x1.device)
+
+        # 1ステップ先の項。ノイズから次の観測へ向かう直線の経路の速度を回帰する
+        x0 = torch.randn_like(x1)
         xt = (1.0 - t) * x0 + t * x1
         pred_dict = self.state_predictor.forward(xt, t, predictor_state, action, None)
-        pred_vt = pred_dict.output
-        vt = x1 - x0
-        loss = F.mse_loss(pred_vt, vt)
-        return loss, pred_dict.activation, {"seq_loss": loss.item()}
+        one_step_loss = (pred_dict.output - (x1 - x0)).pow(2).mean(dim=(1, 2))
+
+        # ブートストラップの項。次の状態と次の行動を条件に目標の予測器の ODE を時刻 t まで
+        # 解いた点で、目標の予測器がそこで出す速度を回帰する
+        with torch.no_grad():
+            boot_xt = self._solve_target(torch.randn_like(x1), t, next_predictor_state, next_action)
+            boot_vt = self.target_predictor.forward(
+                boot_xt, t, next_predictor_state, next_action, None
+            ).output
+        boot_pred = self.state_predictor.forward(boot_xt, t, predictor_state, action, None).output
+        bootstrap_loss = (boot_pred - boot_vt).pow(2).mean(dim=(1, 2))
+
+        # エピソードが終わった遷移には続く状態がないので、1ステップ先の項だけで学習する
+        boot_weight = self.gamma * (1.0 - done.view(-1))
+        loss = ((1.0 - boot_weight) * one_step_loss + boot_weight * bootstrap_loss).mean()
+        info = {
+            "seq_loss": loss.item(),
+            "seq_one_step_loss": one_step_loss.mean().item(),
+            "seq_bootstrap_loss": bootstrap_loss.mean().item(),
+        }
+        return loss, pred_dict.activation, info
+
+    def _solve_target(
+        self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor, action: torch.Tensor
+    ) -> torch.Tensor:
+        """目標の予測器の ODE を、時刻 0 の ``x`` から各サンプルの時刻 ``t`` まで中点法で解く。"""
+        dt = t / self.ODE_STEPS
+        for step in range(self.ODE_STEPS):
+            time = dt * step
+            v = self.target_predictor.forward(x, time, cond, action, None).output
+            v = self.target_predictor.forward(
+                x + 0.5 * dt * v, time + 0.5 * dt, cond, action, None
+            ).output
+            x = x + dt * v
+        return x
+
+    @torch.no_grad()
+    def _update_target(self) -> None:
+        for target, online in zip(
+            self.target_predictor.parameters(), self.state_predictor.parameters(), strict=True
+        ):
+            target.lerp_(online, self.TARGET_EMA_RATE)
 
     def _loss_mean_flow(
         self,
@@ -131,9 +190,14 @@ class StatePredictionHead(nn.Module):
         action: torch.Tensor,
         next_image_latent: torch.Tensor,
         next_reward: torch.Tensor,
+        next_predictor_state: torch.Tensor,
+        next_action: torch.Tensor,
+        done: torch.Tensor,
     ) -> tuple[torch.Tensor, dict]:
-        """Flow-matching transition loss: train the predictor so that
-        ``(predictor_state, action)`` maps to the encoded next ``(image, reward)``.
+        """Prediction loss: train the predictor so that ``(predictor_state, action)``
+        maps to the encoded future ``(image, reward)`` -- the successor
+        representation for flow_matching, bootstrapped off ``next_predictor_state``
+        and ``next_action`` unless ``done``; the next one for mean_flow.
 
         Mirrors ``PolicyHead.compute_actor_loss`` / ``ValueHead.compute_critic_loss``
         — the head owns its loss and logging. ``detach_predictor`` (set at
@@ -147,10 +211,14 @@ class StatePredictionHead(nn.Module):
         # (no-op for callers already in that shape).
         C = self.image_latent_shape[0]
         predictor_state = predictor_state.view(predictor_state.size(0), -1, C)
+        next_predictor_state = next_predictor_state.view(next_predictor_state.size(0), -1, C)
 
+        self._update_target()
         x1 = self.encode_target(next_image_latent, next_reward)
         if self.predictor_type == "flow_matching":
-            loss, _, info = self._loss_flow_matching(predictor_state, action, x1)
+            loss, _, info = self._loss_flow_matching(
+                predictor_state, action, x1, next_predictor_state, next_action, done
+            )
         elif self.predictor_type == "mean_flow":
             loss, _, info = self._loss_mean_flow(predictor_state, action, x1)
         else:

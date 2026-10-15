@@ -211,11 +211,18 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
 
     def _prediction_loss(
-        self, state: torch.Tensor, data: ReplayBufferData
+        self,
+        state: torch.Tensor,
+        data: ReplayBufferData,
+        next_state: torch.Tensor,
+        next_action: torch.Tensor,
     ) -> tuple[torch.Tensor, dict]:
-        """次状態の予測の損失。予測を切っているときは予測器がないので 0。"""
+        """将来の状態の予測の損失。予測を切っているときは予測器がないので 0。"""
         if self.disable_state_predictor:
             return torch.zeros((), device=state.device), {"seq_loss": 0.0}
+        # ブートストラップは次の状態から行うので、1ステップ先の観測と次の状態が揃う
+        # チャンク1ステップのときだけ使える
+        assert self.horizon == 1, f"the successor prediction needs horizon 1; got {self.horizon}"
         with torch.no_grad():
             next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
         return self.prediction_head.compute_loss(
@@ -223,6 +230,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.actions[:, -self.horizon],
             next_image_latent,
             data.rewards[:, -self.horizon],
+            next_state,
+            next_action[:, 0],
+            data.dones[:, -self.horizon],
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -287,14 +297,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state, action_chunk, value_head=self.value_head
         )
-        seq_loss, seq_info = self._prediction_loss(state, data)
+        seq_loss, seq_info = self._prediction_loss(state, data, next_state, next_action)
         info = {
             f"losses/{key}": value
             for key, value in {**critic_info, **actor_info, **seq_info}.items()
         }
         return LossTerms(
             total_loss=self.critic_loss_weight * critic_loss + actor_loss + seq_loss,
-            # 次状態の予測の損失は actor 側に入れる
+            # 将来の状態の予測の損失は actor 側に入れる
             actor_loss=actor_loss + seq_loss,
             info=info,
             state=state,
