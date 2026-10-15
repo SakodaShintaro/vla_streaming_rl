@@ -21,18 +21,6 @@ def build_network(
     環境ごとのプロンプトの builder が持つ。返答を書くネットワークだけが使う。"""
     observation_space_shape = env.observation_space["image"].shape
     action_space_shape = env.action_space.shape
-    # The PPO network has its own value head baked in and reads no critic
-    # config, so it is settled before the shared value-head factory is built.
-    if args.network_class == "animal_ppo":
-        from vla_streaming_rl.networks.animal_ppo import AnimalPPONetwork
-
-        # scaled velocity (vx, vy, vz) plus the health that stands in for the clock
-        return AnimalPPONetwork(
-            observation_space_shape=observation_space_shape,
-            vels_size=4,
-            temporal_model_type=args.actor_critic.temporal_model_type,
-        ).to(device)
-
     # 全ネットワーク共通のヘッド工場。どのクラスを使うかと設定は config の policy_head と
     # value_head（configs/policy_head, configs/value_head から選ぶ）が決め、ネットワークは
     # 自分しか知らない状態の幅と action_dim を呼び出し時に渡す

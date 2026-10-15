@@ -61,9 +61,9 @@ class Agent(ABC):
     """The contract the trainer drives: ``step`` on every tick while learning,
     ``select_action`` when acting without learning.
 
-    The agent grid is orthogonal: the learning rule (off-policy / on-policy /
-    streaming) is the class, which ``agent_type`` names, and the network it
-    optimizes is a constructor argument.
+    The agent grid is orthogonal: the learning rule (off-policy / streaming) is
+    the class, which ``agent_type`` names, and the network it optimizes is a
+    constructor argument.
 
     ``prompt_builder`` is the third axis: the env publishes state, the agent
     turns it into the language its policy reads."""

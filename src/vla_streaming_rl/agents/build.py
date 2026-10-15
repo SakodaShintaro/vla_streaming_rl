@@ -25,32 +25,6 @@ def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module, object]:
 def build_agent(
     env: Env, network: torch.nn.Module, prompt_builder: PromptBuilder, args: DictConfig
 ):
-    if args.agent_type == "animal_ppo":
-        from vla_streaming_rl.agents.animal_ppo import AnimalPPOAgent
-
-        return AnimalPPOAgent(
-            action_space=env.action_space,
-            network=network,
-            horizon=args.horizon,
-            steps_num=args.steps_num,
-            minibatch_size=args.minibatch_size,
-            mini_epochs=args.mini_epochs,
-            seq_len=args.seq_len,
-            gamma=args.gamma,
-            lam=args.lam,
-            learning_rate=args.learning_rate,
-            e_clip=args.e_clip,
-            entropy_coef=args.entropy_coef,
-            critic_coef=args.critic_coef,
-            clip_value=args.clip_value,
-            normalize_advantage=args.normalize_advantage,
-            max_grad_norm=args.max_grad_norm,
-            velocity_scale=list(args.velocity_scale),
-            health_scale=args.health_scale,
-            reset_on_episode_end=args.reset_on_episode_end,
-            prompt_builder=prompt_builder,
-        )
-
     if args.agent_type == "streaming":
         from vla_streaming_rl.agents.streaming import StreamingAgent
 
