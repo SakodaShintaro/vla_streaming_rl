@@ -114,11 +114,18 @@ class ChainGenerator:
         self.device = device
         self.hidden_size = text_config.hidden_size
         # テンプレートが会話の末尾に付ける生成プロンプトのトークン列。会話の中身に依らない
-        # 定数なので、ここで一度だけ測る。思考を書かせる返答に付けるものと、思考を閉じた形で
-        # 書かせる返答に付けるもの
+        # 定数なので、ここで一度だけ測る。思考を書かせる返答に付けるものと、思考を書かせない
+        # 返答に付けるもの。後者には空の思考ブロックを置かない。キャッシュに空の思考が積み
+        # 重なると、思考を書かせる返答でもモデルがそれを真似て即座に思考を閉じるため
         probe = [{"role": "user", "content": [{"type": "text", "text": "x"}]}]
         self._thinking_tail_ids = self._generation_prompt_ids(probe, template_kwargs)
-        self._tail_ids = self._generation_prompt_ids(probe, {"enable_thinking": False})
+        self._tail_ids = self.processor.tokenizer.encode(
+            f"{IM_START}assistant\n", add_special_tokens=False
+        )
+        assert self._thinking_tail_ids[: len(self._tail_ids)] == self._tail_ids, (
+            self._thinking_tail_ids,
+            self._tail_ids,
+        )
         # テンプレートがシステムプロンプトの先頭に足す文言。思考の量の指示があればそれが入る
         marker = "SYSTEM_PROMPT_BODY"
         rendered = self.processor.apply_chat_template(
