@@ -17,9 +17,9 @@ How Unity consumes it depends on `continuous_action`:
 
 Everything about talking to Unity lives in `AnimalAIEnv`. The only thing that
 differs between the ways we run Animal-AI is *which arena each episode loads*,
-so that lives in an `ArenaSelector` (see `animalai_curriculum.py`, whose
+so that lives in an `ArenaSelector` (see `envs/animalai/curriculum.py`, whose
 docstring describes the modes); the render-panel drawing lives in
-`animalai_render.py`.
+`render.py`.
 
 `end_at_pass_mark` ends an episode as soon as a collected reward carries the
 return to the arena's pass mark, which Unity itself never does (see `step`).
@@ -37,8 +37,8 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
     EnvironmentParametersChannel,
 )
 
-from vla_streaming_rl.envs.animalai_curriculum import Arena, ArenaSelector, parse_arena
-from vla_streaming_rl.envs.animalai_render import (
+from vla_streaming_rl.envs.animalai.curriculum import Arena, ArenaSelector, parse_arena
+from vla_streaming_rl.envs.animalai.render import (
     RENDER_SIZE_PX,
     draw_header,
     fit_square,
@@ -90,7 +90,7 @@ class AnimalAIEnv(gym.Env):
     """Animal-AI environment with continuous Box action space.
 
     `selector` decides which arena each episode loads; see
-    `animalai_curriculum.py`.
+    `envs/animalai/curriculum.py`.
     """
 
     _PHYSICS_STEP_SEC = 0.02

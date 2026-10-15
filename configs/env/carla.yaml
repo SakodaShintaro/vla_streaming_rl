@@ -4,7 +4,7 @@ step_limit: 500_000
 render_scale: 0.33
 
 env_factory:
-  _target_: vla_streaming_rl.wrappers.make_carla_env
+  _target_: vla_streaming_rl.envs.carla.make_carla_env
   # - route_id: optional, restrict to one specific route id from the XML.
   #   Only valid with sequence_mode='random'. null means "pick a random
   #   route from the XML each episode".

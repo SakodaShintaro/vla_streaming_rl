@@ -3,7 +3,7 @@
 
 Pure logic with no Unity dependency: which arenas exist, which of them a run
 trains on, and which one the next episode loads. `AnimalAIEnv` (see
-`animalai_env.py`) drives a selector built here, picked by the `mode` config
+`env.py`) drives a selector built here, picked by the `mode` config
 field (see `build_selector`):
 
   - "staged"  training with the paper's cumulative 11-stage curriculum, one
@@ -13,11 +13,11 @@ field (see `build_selector`):
               stage's whole pool (30 arenas at stage 1, 60 at stage 2, up to
               300) drawn without replacement, then the next stage if the
               round's success rate reached `advance_success_rate`
-              (`SuccessDrivenSelector`).
+              (`RoundSelector`).
   - "sequential" no curriculum: every training arena once, in label order,
               then the run ends (`SequentialSelector`, not cycling).
   - "random"  no curriculum: the whole training set in laps, each lap a fresh
-              shuffle drawn without replacement (`RandomSelector`).
+              shuffle drawn without replacement (`RoundSelector`).
   - "eval"    every configs/competition/ arena of `eval_levels` and
               `eval_variants` once, in order -- with every level and variant,
               the 900-arena Testbed sweep (the same `SequentialSelector`, not
@@ -111,10 +111,16 @@ def parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
 
 @dataclass(frozen=True)
 class Arena:
-    """One arena yaml plus the label it is reported under (info, logs, render)."""
+    """One arena yaml plus the label it is reported under (info, logs, render).
+
+    競技のアリーナはラベル "XX-YY-ZZ" がレベル、タスク、版を表すので、それぞれを
+    取り出したものも持つ。``task`` はタスクの系統 "XX-YY"。"""
 
     path: Path
     name: str
+    level: str
+    task: str
+    variant: str
 
 
 def _competition_arenas() -> list[Arena]:
@@ -128,7 +134,13 @@ def _competition_arenas() -> list[Arena]:
     """
     paths = sorted(COMPETITION_DIR.glob("*.yaml"))
     assert paths, f"no arena yamls under {COMPETITION_DIR}"
-    return [Arena(path, path.stem) for path in paths]
+    arenas = []
+    for path in paths:
+        level, task, variant = path.stem.split("-")
+        arenas.append(
+            Arena(path=path, name=path.stem, level=level, task=f"{level}-{task}", variant=variant)
+        )
+    return arenas
 
 
 def _eval_arenas(levels: list[str], variants: list[str]) -> list[Arena]:
@@ -136,7 +148,7 @@ def _eval_arenas(levels: list[str], variants: list[str]) -> list[Arena]:
     arenas = [
         arena
         for arena in _competition_arenas()
-        if arena.name.split("-")[0] in levels and arena.name.rsplit("-", 1)[1] in variants
+        if arena.level in levels and arena.variant in variants
     ]
     assert arenas, f"no competition arena has a level in {levels} and a variant in {variants}"
     return arenas
@@ -149,14 +161,14 @@ def _variant_arenas(variant: str) -> list[Arena]:
     per family -- 300 of the 900, which is the arena set the paper's
     curriculum trains on. The other variants are what eval scores.
     """
-    arenas = [arena for arena in _competition_arenas() if arena.name.rsplit("-", 1)[1] == variant]
+    arenas = [arena for arena in _competition_arenas() if arena.variant == variant]
     assert arenas, f"no competition arena has variant {variant!r}"
     return arenas
 
 
 def _all_levels(variant: str) -> list[str]:
     """Every Olympics level the `variant` copy has an arena at, in order."""
-    return sorted({arena.name.split("-")[0] for arena in _variant_arenas(variant)})
+    return sorted({arena.level for arena in _variant_arenas(variant)})
 
 
 def training_levels(mode: str, variant: str, train_levels: list[str]) -> list[str]:
@@ -186,7 +198,7 @@ def _training_arenas(variant: str, levels: list[str]) -> list[Arena]:
         f"available: {available}"
     )
     arenas = _variant_arenas(variant)
-    return [arena for level in levels for arena in arenas if arena.name.split("-")[0] == level]
+    return [arena for level in levels for arena in arenas if arena.level == level]
 
 
 def _training_stages(variant: str) -> list[list[Arena]]:
@@ -195,13 +207,10 @@ def _training_stages(variant: str) -> list[list[Arena]]:
     The Olympics levels are the paper's curriculum stages in order (01 food
     retrieval ... 10 causal reasoning), and every level holds 30 tasks, so
     each stage is 30 arenas. `StagedSelector` accumulates them; the rounds of
-    `SuccessDrivenSelector` are one stage each.
+    `RoundSelector` are one stage each.
     """
     arenas = _variant_arenas(variant)
-    return [
-        [arena for arena in arenas if arena.name.split("-")[0] == level]
-        for level in sorted({arena.name.split("-")[0] for arena in arenas})
-    ]
+    return [[arena for arena in arenas if arena.level == level] for level in _all_levels(variant)]
 
 
 def _cumulative_stages(variant: str) -> list[list[Arena]]:
@@ -294,7 +303,7 @@ class ArenaSelector:
 
     def is_cleared(self, arena: Arena) -> bool:
         """Whether one arena counts as solved: passed at least once, unless a
-        curriculum wants a stricter bar (see `SuccessDrivenSelector`)."""
+        curriculum wants a stricter bar (see `RoundSelector`)."""
         return self._successes[arena.name] > 0
 
     def cleared_count(self) -> int:
@@ -306,13 +315,12 @@ class ArenaSelector:
 
         Episodes rather than arenas, so the bar reads as the group's success
         rate over the whole run and not as whether each arena was ever passed
-        once. The group is the arena label's first "-" separated token, which
-        is the competition level ("01-01-01" -> "01") and so also the
+        once. The group is the arena's competition level, which is also the
         curriculum stage.
         """
         counts: dict[str, list[int]] = {}
         for arena in self._arena_by_name.values():
-            group = counts.setdefault(arena.name.split("-")[0], [0, 0])
+            group = counts.setdefault(arena.level, [0, 0])
             attempts, successes = self._attempts[arena.name], self._successes[arena.name]
             group[0] += successes
             group[1] += attempts - successes
@@ -387,22 +395,25 @@ class StagedSelector(ArenaSelector):
         return f"stage:{self._stage_index(global_step) + 1}/{len(self._stages)}"
 
 
-class SuccessDrivenSelector(ArenaSelector):
-    """One stage per Olympics level, advanced by clearing a round of it.
+class RoundSelector(ArenaSelector):
+    """Arenas in rounds: each round is the current stage's pool drawn without
+    replacement, so every arena of the pool is played exactly once before any is
+    played again, in an order that changes from round to round.
 
-    A round is the stage's whole pool drawn without replacement, so every arena
-    it has unlocked is played exactly once before any is played again. When the
-    round ends its success rate is compared with `advance_success_rate`: at or
-    above it the next stage opens, below it the same stage runs another round
-    with a fresh draw order.
+    With several stages (the "success" mode: one stage per Olympics level) the
+    round's success rate decides what follows when it ends: at or above
+    `advance_success_rate` the next stage opens, below it the same stage runs
+    another round. The pools are cumulative, so a round is 30 arenas at stage 1,
+    60 at stage 2 and so on up to 300, and nothing already learned is dropped.
+    At the default rate of 1.0 stage 2 therefore asks for 60 straight passes.
 
-    The pools are cumulative, so a round is 30 arenas at stage 1, 60 at stage
-    2 and so on up to 300, and nothing already learned is dropped. At the
-    default rate of 1.0 stage 2 therefore asks for 60 straight passes.
+    With a single stage (the "random" mode: the whole training set) there is
+    nothing to advance to, so the rounds are laps over the full set -- the
+    curriculum-free baseline the staged modes are compared against. Either way
+    the selector runs until train.py's step_limit ends the run.
     """
 
-    def __init__(self, variant: str, advance_success_rate: float, seed: int):
-        stages = _cumulative_stages(variant)
+    def __init__(self, stages: list[list[Arena]], advance_success_rate: float, seed: int):
         super().__init__(stages[-1])
         self._stages = stages
         self.advance_success_rate = advance_success_rate
@@ -414,15 +425,11 @@ class SuccessDrivenSelector(ArenaSelector):
         self._round_by_level: dict[str, list[int]] = {}
         self._last_round_rate = 0.0
         self._last_round_level_rate: dict[str, float] = {}
+        # info() は on_episode_end の後に読まれるので、周を閉じたエピソードかを覚えておく
         self._round_closed = False
         # 周を閉じた時点のラウンドの大きさ。閉じた直後に段階が進むとプールの大きさが変わるため
         self._round_size_closed = 0
         self._advanced = False
-
-    def _refill(self) -> None:
-        names = [arena.name for arena in self._stages[self._stage]]
-        order = self._rng.permutation(len(names))
-        self._queue = [names[int(i)] for i in order]
 
     def _round_rate(self) -> float:
         assert self._round_attempts > 0
@@ -432,14 +439,16 @@ class SuccessDrivenSelector(ArenaSelector):
         """Take the next draw of the round. Drawing is what consumes it, so an
         episode the caller abandons still moves the round along."""
         if not self._queue:
-            self._refill()
+            names = [arena.name for arena in self._stages[self._stage]]
+            order = self._rng.permutation(len(names))
+            self._queue = [names[int(i)] for i in order]
         return self._arena_by_name[self._queue.pop(0)]
 
     def on_episode_end(self, arena: Arena, success: bool) -> None:
         super().on_episode_end(arena, success)
         self._round_attempts += 1
         self._round_successes += int(success)
-        level = self._round_by_level.setdefault(arena.name.split("-")[0], [0, 0])
+        level = self._round_by_level.setdefault(arena.level, [0, 0])
         level[0] += int(success)
         level[1] += 1
         self._advanced = False
@@ -511,8 +520,6 @@ class SuccessDrivenSelector(ArenaSelector):
         round's tally so far all have to come back, since none of them can be
         recovered from the per-arena totals."""
         super().load_state(arena_attempts, arena_successes, progress)
-        if not progress:
-            return
         self._stage = int(progress["stage"])
         self._round_attempts = int(progress["round_attempts"])
         self._round_successes = int(progress["round_successes"])
@@ -526,8 +533,6 @@ class SuccessDrivenSelector(ArenaSelector):
         }
         known = set(self._attempts)
         self._queue = [name for name in progress["queue"] if name in known]
-        if not self._queue:
-            self._refill()
 
 
 class SequentialSelector(ArenaSelector):
@@ -579,112 +584,6 @@ class SequentialSelector(ArenaSelector):
         self._next_index = sum(self._attempts.values())
 
 
-class RandomSelector(ArenaSelector):
-    """`arenas` in laps, each lap a fresh shuffle drawn without replacement.
-
-    No curriculum: every arena is played exactly once per lap, in an order that
-    changes from lap to lap, and unlike `StagedSelector` nothing is withheld --
-    the full set is available from the first episode. The curriculum-free
-    baseline the staged modes are compared against. Runs forever, so train.py's
-    step_limit ends the run.
-    """
-
-    def __init__(self, arenas: list[Arena], seed: int):
-        super().__init__(arenas)
-        self._rng = np.random.default_rng(seed)
-        self._queue: list[str] = []
-        # 1周（全アリーナ1回ずつ）ごとの成功率。success モードのラウンドと同じ形で出す。
-        self._round_attempts = 0
-        self._round_successes = 0
-        self._round_by_level: dict[str, list[int]] = {}
-        self._last_round_rate = 0.0
-        self._last_round_level_rate: dict[str, float] = {}
-        # info() は on_episode_end の後に読まれるので、周を閉じたエピソードかを覚えておく
-        self._round_closed = False
-
-    def next_arena(self, global_step: int) -> Arena:
-        if not self._queue:
-            order = self._rng.permutation(len(self.arenas))
-            self._queue = [self.arenas[int(i)].name for i in order]
-        return self._arena_by_name[self._queue.pop(0)]
-
-    def on_episode_end(self, arena: Arena, success: bool) -> None:
-        super().on_episode_end(arena, success)
-        self._round_attempts += 1
-        self._round_successes += int(success)
-        level = self._round_by_level.setdefault(arena.name.split("-")[0], [0, 0])
-        level[0] += int(success)
-        level[1] += 1
-        self._round_closed = False
-        if self._round_attempts < len(self.arenas):
-            return
-        self._round_closed = True
-        self._last_round_rate = self._round_successes / self._round_attempts
-        self._last_round_level_rate = {
-            level: successes / attempts
-            for level, (successes, attempts) in sorted(self._round_by_level.items())
-        }
-        self._round_attempts = 0
-        self._round_successes = 0
-        self._round_by_level = {}
-
-    def progress_state(self) -> dict:
-        return {
-            "queue": list(self._queue),
-            "round_attempts": self._round_attempts,
-            "round_successes": self._round_successes,
-            "round_by_level": {
-                level: list(counts) for level, counts in self._round_by_level.items()
-            },
-            "last_round_rate": self._last_round_rate,
-            "last_round_level_rate": dict(self._last_round_level_rate),
-        }
-
-    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
-        """Resume mid-lap: what is left of the lap's draw order and its tally."""
-        super().load_state(arena_attempts, arena_successes, progress)
-        known = set(self._attempts)
-        self._queue = [name for name in progress["queue"] if name in known]
-        self._round_attempts = int(progress["round_attempts"])
-        self._round_successes = int(progress["round_successes"])
-        self._round_by_level = {
-            level: list(counts) for level, counts in progress["round_by_level"].items()
-        }
-        self._last_round_rate = float(progress["last_round_rate"])
-        self._last_round_level_rate = dict(progress["last_round_level_rate"])
-
-    def info(self, global_step: int) -> dict:
-        return {
-            "arena_total": len(self._arena_by_name),
-            "cleared_count": self.cleared_count(),
-            # 周を閉じたエピソードでは、リセット後の 0 ではなく閉じた周の値を出す
-            "round_index": len(self.arenas) if self._round_closed else self._round_attempts,
-            "round_success_rate": (
-                self._last_round_rate
-                if self._round_closed
-                else (
-                    self._round_successes / self._round_attempts
-                    if self._round_attempts > 0
-                    else 0.0
-                )
-            ),
-            "round_closed": self._round_closed,
-            "last_round_success_rate": self._last_round_rate,
-            "last_round_level_success_rate": dict(self._last_round_level_rate),
-        }
-
-    def status(self, global_step: int) -> str:
-        del global_step
-        # 1エピソードが1回の試行なので、試行の総数から何周目かが決まる
-        lap = sum(self._attempts.values()) // len(self.arenas) + 1
-        rate = self._round_successes / max(self._round_attempts, 1)
-        return (
-            f"random  lap:{lap}"
-            f"  {self._round_successes}/{self._round_attempts}/{len(self.arenas)}"
-            f"  success rate:{rate:.2f}"
-        )
-
-
 def build_selector(
     mode: str,
     train_variant: str,
@@ -709,8 +608,10 @@ def build_selector(
         "staged": lambda: StagedSelector(
             variant=train_variant, steps_per_stage=steps_per_stage, seed=seed
         ),
-        "success": lambda: SuccessDrivenSelector(
-            variant=train_variant, advance_success_rate=advance_success_rate, seed=seed
+        "success": lambda: RoundSelector(
+            stages=_cumulative_stages(train_variant),
+            advance_success_rate=advance_success_rate,
+            seed=seed,
         ),
         # One pass and done: the curriculum-free sweep is a measurement of the
         # training set, so a second lap over the same arenas would only mix
@@ -718,8 +619,11 @@ def build_selector(
         "sequential": lambda: SequentialSelector(
             arenas=_training_arenas(train_variant, train_levels), cycle=False
         ),
-        "random": lambda: RandomSelector(
-            arenas=_training_arenas(train_variant, train_levels), seed=seed
+        # 段階が1つしかないので、advance_success_rate によらず進むことはない
+        "random": lambda: RoundSelector(
+            stages=[_training_arenas(train_variant, train_levels)],
+            advance_success_rate=advance_success_rate,
+            seed=seed,
         ),
         "eval": lambda: SequentialSelector(
             arenas=_eval_arenas(eval_levels, eval_variants), cycle=False

@@ -2,7 +2,7 @@
 """Pure observation / action helpers for the CARLA leaderboard setup.
 
 This module is the single source of truth for the observation and action
-contracts used by both the training environment (``carla_leaderboard_env.py``)
+contracts used by both the training environment (``env.py``)
 and evaluation agents (e.g. the Bench2Drive team-code agent). Nothing here
 touches ``carla.Client`` — only ``carla.Location`` / ``carla.Transform`` are
 referenced as value types, so these helpers stay testable in isolation.

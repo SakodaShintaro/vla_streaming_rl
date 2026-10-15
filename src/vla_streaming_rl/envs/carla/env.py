@@ -10,9 +10,9 @@ import numpy as np
 import py_trees
 from leaderboard.utils.statistics_manager import PENALTY_PERC_DICT, PENALTY_VALUE_DICT
 
-from vla_streaming_rl.envs.bench2drive_scenario_runtime import Bench2DriveRuntime
-from vla_streaming_rl.envs.carla_bootstrap import get_client
-from vla_streaming_rl.envs.carla_obs import (
+from vla_streaming_rl.envs.carla.bootstrap import get_client
+from vla_streaming_rl.envs.carla.eval_writer import Bench2DriveEvalWriter
+from vla_streaming_rl.envs.carla.obs import (
     CARLAObsConfig,
     RouteTracker,
     action_to_vehicle_control,
@@ -20,8 +20,8 @@ from vla_streaming_rl.envs.carla_obs import (
     make_obs_space,
     paste_route_overlay,
 )
-from vla_streaming_rl.envs.eval_writer import Bench2DriveEvalWriter
-from vla_streaming_rl.envs.vehicle_graph import overlay_vehicle_graphs
+from vla_streaming_rl.envs.carla.runtime import Bench2DriveRuntime
+from vla_streaming_rl.envs.carla.vehicle_graph import overlay_vehicle_graphs
 
 DT = 0.05  # [s] (20 FPS)
 
@@ -218,7 +218,7 @@ class CARLALeaderboardEnv(gym.Env):
         # instance). A 2nd carla.Client in one process keeps the first's
         # streaming threads alive and corrupts the session, so constructing one
         # per env would break ``trial_num>1``; get_client() shares one client
-        # (and one server) across all trials. See envs/carla_bootstrap.py.
+        # (and one server) across all trials. See envs/carla/bootstrap.py.
         self.client = get_client()
 
         # Build the runtime first (parses the XML eagerly) so we can read the

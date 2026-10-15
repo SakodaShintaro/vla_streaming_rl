@@ -13,7 +13,7 @@ atexit kill).
 ``carla`` itself is pip-installed in this repo's venv, so only the three source
 directories above need to be added to ``sys.path``; do that via
 :func:`setup_carla_paths` *before* importing anything under
-``envs/carla_leaderboard_env`` (it imports ``leaderboard`` / ``srunner`` at
+``envs/carla/env`` (it imports ``leaderboard`` / ``srunner`` at
 module load). The env connects to
 ``localhost:2000`` (hard-coded in ``CARLALeaderboardEnv``), so that is the
 launch port here. CARLA_ROOT is taken from ``$CARLA_ROOT`` (else ~/CARLA_0.9.16)
@@ -35,8 +35,8 @@ _CARLA_HOST = "localhost"
 _CARLA_PORT = 2000
 _GPU_RANK = 0
 _READY_TIMEOUT_S = 180.0
-# Repo root is three levels up from src/vla_streaming_rl/envs/carla_bootstrap.py.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+# Repo root is four levels up from src/vla_streaming_rl/envs/carla/bootstrap.py.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 _B2D_ROOT = _REPO_ROOT / "external" / "Bench2Drive"
 
 
@@ -57,7 +57,7 @@ def setup_carla_paths() -> None:
     export ``CARLA_ROOT`` / ``SCENARIO_RUNNER_ROOT`` — the env that
     ``train_carla.sh`` sets up by hand. Idempotent.
 
-    Must be called *before* importing ``carla_leaderboard_env``, which imports
+    Must be called *before* importing ``envs.carla.env``, which imports
     ``leaderboard`` / ``srunner`` at module load.
     """
     root = resolve_carla_root()

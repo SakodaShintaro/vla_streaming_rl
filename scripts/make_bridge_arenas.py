@@ -11,7 +11,7 @@
 
 from dataclasses import dataclass
 
-from vla_streaming_rl.envs.animalai_curriculum import COMPETITION_DIR
+from vla_streaming_rl.envs.animalai.curriculum import COMPETITION_DIR
 
 # 橋のアリーナの寸法（アリーナは 40 x 40、x が右、z が前）。z = 0〜10 は全幅が安全な床で、
 # エージェントは中央から前を向いて始まる。z = 10〜32 は左右の橋以外がマグマ、z = 32〜40 は

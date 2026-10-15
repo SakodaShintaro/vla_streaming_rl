@@ -30,7 +30,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from vla_streaming_rl.agents.build import build_all
 from vla_streaming_rl.checkpoint import load_checkpoint_weights, load_global_step
-from vla_streaming_rl.envs.animalai_curriculum import training_levels
+from vla_streaming_rl.envs.animalai.curriculum import training_levels
 from vla_streaming_rl.script_setup import disable_render_if_headless, resolve_seed, seed_everything
 from vla_streaming_rl.testbed import run_testbed
 from vla_streaming_rl.wrappers import make_env
@@ -114,7 +114,7 @@ def load_eval_config(run_dir: Path) -> DictConfig:
     いまの configs/env/animalai.yaml に従う。"""
     cfg = load_wandb_config(run_dir)
     # Always evaluate on the eval sweep, regardless of which mode trained this
-    # checkpoint (see SequentialSelector in animalai_curriculum.py).
+    # checkpoint (see SequentialSelector in envs/animalai/curriculum.py).
     cfg.env_factory.mode = "eval"
     env_config = OmegaConf.load(Path(__file__).parents[1] / "configs" / "env" / "animalai.yaml")
     cfg.env_factory.eval_levels = env_config.env_factory.eval_levels

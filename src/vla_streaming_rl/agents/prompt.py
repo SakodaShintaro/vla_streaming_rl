@@ -232,7 +232,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
 
     def __init__(self, env: Env, thinking_interval: int) -> None:
         super().__init__(env, thinking_interval)
-        self.tasks = {arena.name.rsplit("-", 1)[0]: "" for arena in env.unwrapped.selector.arenas}
+        self.tasks = {arena.task: "" for arena in env.unwrapped.selector.arenas}
         self._task_key = ""
         self._pass_mark = 0.0
         self._forward_speed_sum = 0.0

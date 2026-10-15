@@ -1,98 +1,7 @@
 # SPDX-License-Identifier: MIT
-from pathlib import Path
 
 import gymnasium as gym
-import hydra
 import numpy as np
-
-
-def make_animalai_env(
-    resolution: int,
-    mode: str,
-    train_variant: str,
-    train_levels: list[str],
-    eval_levels: list[str],
-    eval_variants: list[str],
-    steps_per_stage: int,
-    advance_success_rate: float,
-    binary_path: str,
-    continuous_action: bool,
-    topdown_camera: bool,
-    topdown_resolution: int,
-    colored_walls: bool,
-    end_at_pass_mark: bool,
-    seed: int,
-) -> gym.Env:
-    from vla_streaming_rl.envs.animalai_curriculum import build_selector
-    from vla_streaming_rl.envs.animalai_env import AnimalAIEnv
-
-    selector = build_selector(
-        mode=mode,
-        train_variant=train_variant,
-        train_levels=list(train_levels),
-        eval_levels=list(eval_levels),
-        eval_variants=list(eval_variants),
-        steps_per_stage=steps_per_stage,
-        advance_success_rate=advance_success_rate,
-        seed=seed,
-    )
-    # アリーナの選択順と、Unity 側の乱数（位置 -1 の物体の配置など）の両方を
-    # トップレベルのシードに従わせる。
-    return AnimalAIEnv(
-        resolution=resolution,
-        seed=seed,
-        base_port=5005,
-        binary_path=binary_path,
-        continuous_action=continuous_action,
-        topdown_camera=topdown_camera,
-        topdown_resolution=topdown_resolution,
-        colored_walls=colored_walls,
-        end_at_pass_mark=end_at_pass_mark,
-        selector=selector,
-    )
-
-
-def make_carla_env(
-    route_id: str | None,
-    sequence_mode: str,
-    start_index: int,
-    loop: bool,
-    early_off_route_m: float | None,
-    early_blocked_steps: int | None,
-    eval_output_dir: str | None,
-) -> gym.Env:
-    """Hydra `_target_` factory for the raw CARLA env (no wrappers).
-
-    The route XML is fixed to ``CARLA_ROUTE_XML`` (bench2drive220) in code.
-    ``eval_output_dir`` is injected by ``make_env`` (not the user-facing
-    config) and points at the Hydra run dir / "eval". weather.xml is
-    auto-located next to the route XML.
-    """
-    # Wire up the CARLA / Bench2Drive sys.path (normally train_carla.sh's
-    # PYTHONPATH), so a run needs no bash wrapper. This must run before importing
-    # ``carla_leaderboard_env`` (it imports leaderboard / srunner at module
-    # load); the CARLA server itself is launched lazily by the env's shared
-    # ``get_client`` (carla_bootstrap.py), reused across all trials.
-    from vla_streaming_rl.envs.carla_bootstrap import setup_carla_paths
-
-    setup_carla_paths()
-
-    from vla_streaming_rl.envs.carla_leaderboard_env import CARLALeaderboardEnv
-
-    CARLA_ROUTE_XML = str(
-        Path(__file__).parents[2] / "external/Bench2Drive/leaderboard/data/bench2drive220.xml"
-    )
-
-    return CARLALeaderboardEnv(
-        route_xml=CARLA_ROUTE_XML,
-        route_id=route_id,
-        sequence_mode=sequence_mode,
-        start_index=start_index,
-        loop=loop,
-        early_off_route_m=early_off_route_m,
-        early_blocked_steps=early_blocked_steps,
-        eval_output_dir=eval_output_dir,
-    )
 
 
 def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
@@ -127,37 +36,15 @@ def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
         env.unwrapped.eval_range = 20
         return env
 
-    elif env_id == "CARLA-Leaderboard-v0":
-        # eval_output_dir is injected here (not via the user-facing
-        # env_factory config) so the user does not have to remember a
-        # path that is always result_dir/eval.
-        eval_output_dir = str(result_dir / "eval") if result_dir is not None else None
-        env = hydra.utils.instantiate(env_factory, eval_output_dir=eval_output_dir)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = ZeroScalarObsWrapper(env)
-        env = InfoToObsWrapper(env, key="global_step", shape=(1,), pop=False)
-        env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
-        env = EpisodeReturnObsWrapper(env)
-        env.unwrapped.eval_range = 220
-        return env
+    if env_id == "CARLA-Leaderboard-v0":
+        from vla_streaming_rl.envs.carla import make_env as make_carla_env
 
-    elif env_id == "AnimalAI-v0":
-        env = hydra.utils.instantiate(env_factory, seed=seed)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = DictObsWrapper(env)
-        env = TransposeAndNormalizeObs(env)
-        env = InfoToObsWrapper(env, key="velocity", shape=(3,), pop=True)
-        env = InfoToObsWrapper(env, key="pass_mark", shape=(1,), pop=False)
-        env = InfoToObsWrapper(env, key="health", shape=(1,), pop=False)
-        env = InfoToObsWrapper(env, key="global_step", shape=(1,), pop=False)
-        env = InfoToObsWrapper(env, key="episode_step", shape=(1,), pop=False)
-        env = EpisodeReturnObsWrapper(env)
-        env = RemainingReturnObsWrapper(env)
-        env.unwrapped.eval_range = 20
-        return env
+        return make_carla_env(env_factory, result_dir)
 
-    else:
-        raise ValueError(f"Unsupported environment: {env_id}")
+    assert env_id == "AnimalAI-v0", f"Unsupported environment: {env_id}"
+    from vla_streaming_rl.envs.animalai import make_env as make_animalai_env
+
+    return make_animalai_env(env_factory, seed)
 
 
 class UnshapedRewardWrapper(gym.Wrapper):
