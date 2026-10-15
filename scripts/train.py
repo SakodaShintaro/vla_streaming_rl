@@ -140,7 +140,7 @@ def save_train_state(
     result_dir: Path, state: TrainState, env, best_score_per_arena: dict[str, float]
 ) -> None:
     """Persist the light resume state (the heavy weights / optimizer files
-    follow the checkpoint_interval cadence instead)."""
+    are saved at every tenth of the run's progress instead)."""
     train_state = asdict(state)
     train_state["score_list"] = [float(s) for s in state.score_list]
     train_state["success_list"] = [float(s) for s in state.success_list]
@@ -381,10 +381,19 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     step_limit = args.step_limit
     episode_limit = args.episode_limit
     time_limit_sec = args.time_limit_hour * 3600
-    checkpoint_interval = max(1, step_limit // 10)
 
     def out_of_budget() -> bool:
         return state.global_step >= step_limit or time.time() - start_time >= time_limit_sec
+
+    def progress_tenths() -> int:
+        """学習がどこまで進んだかを10段階で。ステップ数・エピソード数・時間のうち、上限に
+        いちばん近いもので測る。環境によってどれで終わるかが違うため"""
+        fraction = max(
+            state.global_step / step_limit,
+            state.episode_id / episode_limit,
+            (time.time() - start_time) / time_limit_sec,
+        )
+        return int(fraction * 10)
 
     # Every agent composes its own language input; the env only publishes state.
     # The chain of thought writes into the same conversation, so the builder is
@@ -403,6 +412,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         set_global_step = getattr(env.unwrapped, "set_global_step", None)
         if set_global_step is not None:
             set_global_step(state.global_step)
+
+    # 最後に重みを保存した時点の進み具合
+    checkpoint_tenths = progress_tenths()
 
     # ネットワークが行動として読む、前のステップでエージェントが返した行動。エージェントは
     # エピソードをまたいで持ち越すので、ここでも持ち越す
@@ -469,9 +481,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 cv2.imshow(args.env_id, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
                 cv2.waitKey(1)
 
-            if state.global_step % checkpoint_interval == 0:
-                save_checkpoint(result_dir, network, agent)
-
             if terminated or truncated:
                 break
 
@@ -514,6 +523,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         state.episode_id += 1
         save_train_state(result_dir, state, env, best_score_per_arena)
+        # 重みは進み具合の 10 分の 1 ごとに、カウンタと同じエピソードの境目で保存する。
+        # 再開したときに重みとカウンタの時点がずれないように
+        if progress_tenths() > checkpoint_tenths:
+            checkpoint_tenths = progress_tenths()
+            save_checkpoint(result_dir, network, agent)
 
     save_checkpoint(result_dir, network, agent)
 
