@@ -1,0 +1,11 @@
+_target_: vla_streaming_rl.networks.modules.policy_head.CFGDiffusionPolicy
+_partial_: true
+hidden_dim: 512
+block_num: 1
+horizon: ${horizon}
+sparsity: ${sparsity}
+denoising_time: 0.9
+denoising_steps: 1
+cfgrl_beta: 1.5
+condition_drop_prob: 0.1
+detach_state: true

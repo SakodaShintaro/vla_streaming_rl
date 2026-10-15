@@ -1,0 +1,10 @@
+_target_: vla_streaming_rl.networks.modules.value_head.ActionValueHead
+_partial_: true
+horizon: ${horizon}
+gamma: ${gamma}
+multi_gammas: ${multi_gammas}
+hidden_dim: 1024
+block_num: 1
+num_bins: 1
+sparsity: ${sparsity}
+detach_state: false

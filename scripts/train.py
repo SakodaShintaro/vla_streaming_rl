@@ -24,9 +24,9 @@ from vla_streaming_rl.agents.build import build_all
 from vla_streaming_rl.checkpoint import load_checkpoint_weights, save_checkpoint
 from vla_streaming_rl.envs.animalai_curriculum import training_levels
 from vla_streaming_rl.episode_log import EpisodeRecord, save_episode_data
+from vla_streaming_rl.render import render_frame
 from vla_streaming_rl.script_setup import disable_render_if_headless, resolve_seed, seed_everything
 from vla_streaming_rl.testbed import run_testbed
-from vla_streaming_rl.utils import render_frame
 from vla_streaming_rl.wrappers import make_env
 
 
@@ -453,9 +453,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         # The trainer only owns the environment / observation panels; goal,
         # bev, ... arrive via result.panels. The initial render leads.
-        rgb_image = render_frame(env, obs, reset_info, action, result, args.render_scale)
         record = EpisodeRecord.start(
-            cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR), obs, result.texts, reset_info
+            render_frame(env, obs, reset_info, action, result, args.render_scale),
+            obs,
+            result.texts,
+            reset_info,
         )
         action = result.action
 
@@ -485,12 +487,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 }
             )
 
-            rgb_image = render_frame(env, obs, env_info, action, result, args.render_scale)
-            bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
-            record.add_step(action, reward, obs, env_info, bgr_image, result.texts)
+            frame = render_frame(env, obs, env_info, action, result, args.render_scale)
+            record.add_step(action, reward, obs, env_info, frame, result.texts)
             action = result.action
             if args.render:
-                cv2.imshow(args.env_id, bgr_image)
+                cv2.imshow(args.env_id, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
                 cv2.waitKey(1)
 
             if state.global_step % checkpoint_interval == 0:

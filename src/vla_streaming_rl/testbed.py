@@ -13,7 +13,7 @@ import numpy as np
 from vla_streaming_rl.agents.base import Agent
 from vla_streaming_rl.envs.animalai_curriculum import seen_in_training
 from vla_streaming_rl.episode_log import EpisodeRecord, save_episode_data
-from vla_streaming_rl.utils import render_frame
+from vla_streaming_rl.render import render_frame
 
 
 def run_arena(
@@ -39,10 +39,7 @@ def run_arena(
     arena_name = reset_info["arena_name"]
     result = agent.select_action(global_step, obs, 0.0, False, False, reset_info)
     record = EpisodeRecord.start(
-        cv2.cvtColor(
-            render_frame(env, obs, reset_info, prev_action, result, render_scale),
-            cv2.COLOR_RGB2BGR,
-        ),
+        render_frame(env, obs, reset_info, prev_action, result, render_scale),
         obs,
         result.texts,
         reset_info,
@@ -52,13 +49,11 @@ def run_arena(
     while True:
         obs, reward, terminated, truncated, env_info = env.step(action)
         result = agent.select_action(global_step, obs, reward, terminated, truncated, env_info)
-        bgr_image = cv2.cvtColor(
-            render_frame(env, obs, env_info, action, result, render_scale), cv2.COLOR_RGB2BGR
-        )
-        record.add_step(action, reward, obs, env_info, bgr_image, result.texts)
+        frame = render_frame(env, obs, env_info, action, result, render_scale)
+        record.add_step(action, reward, obs, env_info, frame, result.texts)
         action = result.action
         if render:
-            cv2.imshow(window_name, bgr_image)
+            cv2.imshow(window_name, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             cv2.waitKey(1)
 
         if terminated or truncated:

@@ -18,7 +18,7 @@ from .interface import (
     LossResult,
     NetworkInterface,
 )
-from .modules.chain_generator import ChainGenerator
+from .modules.chain_generator import Chain, ChainGenerator
 from .modules.chat_format import THINK_CLOSE, assistant_turn, read_action_reply, user_turn
 from .modules.head_output import HeadOutput
 from .modules.value_head import DistributionalValueHead
@@ -130,11 +130,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.policy_head = policy_head_factory(state_dim=state_dim, action_dim=self.action_dim)
 
         # Critic: Q(state, action)
-        self.value_head = value_head_factory(state_dim, self.action_dim)
+        self.value_head = value_head_factory(in_channels=state_dim, action_dim=self.action_dim)
 
         self._dummy_state = torch.zeros(1, 1, 1)
-        # このステップのフレーム（会話に積むために覚えておく）と、表示用に残す直近の会話
-        self._frame = None
+        # 表示用に残す直近の会話
         self._exchange = None
         # このエピソードで行動を選んだ回数と、そのうち返答の行動を選んだ回数。表示用
         self._decisions_num = 0
@@ -148,8 +147,8 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return (0,)
 
     def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
-        """バッファには何も置かず、このステップの会話に積むフレームとして覚えておく。"""
-        self._frame = image
+        """バッファには何も置かない。フレームは推論のときに ``InferInput.frame`` で受け取る。"""
+        del image
         return torch.zeros(0)
 
     def stored_state_shape(self) -> tuple[int, ...]:
@@ -180,7 +179,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        return self._act(data.system_text, data.turn_text, data.scalar_obs_seq, data.warmup)
+        return self._act(
+            data.frame, data.system_text, data.turn_text, data.scalar_obs_seq, data.warmup
+        )
 
     @torch.inference_mode()
     def answer(self, request: str) -> str:
@@ -198,11 +199,11 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return LossResult(loss=terms.total_loss, info=terms.info)
 
     def infer_and_compute_loss(
-        self, data: ReplayBufferData, system_text: str, turn_text: str
+        self, data: ReplayBufferData, frame: torch.Tensor, system_text: str, turn_text: str
     ) -> InferLossResult:
         # 最後のステップはまだ行動を決めていないので、ここで返答を書いて表現を作る
         with torch.inference_mode():
-            infer_result = self._act(system_text, turn_text, data.scalar_obs, False)
+            infer_result = self._act(frame, system_text, turn_text, data.scalar_obs, False)
         terms = self._loss_terms(
             data,
             infer_result.stored_state.unsqueeze(0).clone(),
@@ -229,6 +230,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     def _act(
         self,
+        frame: torch.Tensor,
         system_text: str,
         turn_text: str,
         scalar_obs: torch.Tensor,
@@ -238,34 +240,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         返答を書かせ、その計算の活性から状態を作り、返答の行動とヘッドの行動を行動価値で選ぶ。"""
         assert scalar_obs.shape[0] == 1, "Batch size must be 1 for inference"
         step = float(scalar_obs[0, -1, EPISODE_STEP_INDEX])
-        if step == 0.0 or self._exchange is None:
-            # エピソードの最初のステップ。前のエピソードの会話を捨てて、システムプロンプトから
-            # 積み直す
-            self.generator.reset_cache()
-            self._exchange = [
-                {"role": "system", "content": [{"type": "text", "text": system_text}]}
-            ]
-            self._decisions_num = 0
-            self._vlm_chosen_num = 0
-        self._exchange.append(user_turn(step / self.decision_fps, self._frame, turn_text))
-        # 一定の間隔のステップで、思考を書いてから返答させる。そのあいだは行動だけを書かせる
-        thinking = self.generator.thinking_enabled and int(step) % self.thinking_interval == 0
-        chain = self.generator.generate(self._exchange, thinking, self.constrained)
-        reply = chain.text
-        self._exchange.append(assistant_turn(reply))
-        # モデルの文脈はキャッシュが持つので、リストには差分の計算と表示に要る直近だけを残す
-        self._exchange = self._exchange[-EXCHANGE_MESSAGES:]
-        exchange = list(self._exchange)
-        prompt_tokens, completion_tokens, msec = chain.prompt_tokens, len(chain.tokens), chain.msec
-        # このステップで積んだ位置の活性を num_state_queries トークンに均す
-        pooled = F.adaptive_avg_pool1d(
-            chain.states.to(torch.float32).T.unsqueeze(0), self.num_state_queries
-        )
-        representation = pooled[0].T.to(torch.bfloat16)
+        chain, exchange = self._write_reply(frame, system_text, turn_text, step)
+        representation = self._pool_states(chain.states)
         state = self._state(representation.unsqueeze(0))
         head_action, _ = self.policy_head.get_action(state)
         critic_out = self.value_head(state, head_action)
-        vlm_action, parsed, answer = self._text_action(reply, head_action)
+        vlm_action, parsed, answer = self._text_action(chain.text, head_action)
         q_head = self.value_head.scalar_value(state, head_action).item()
         q_vlm = self.value_head.scalar_value(state, vlm_action).item()
         # バッファを貯めている間は返答の行動だけで動く
@@ -282,18 +262,18 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 "select/q_head": q_head,
                 "select/vlm_chosen": float(vlm_chosen),
                 "vlm/parse_failed": float(not parsed),
-                "vlm/prompt_tokens": float(prompt_tokens),
-                "vlm/completion_tokens": float(completion_tokens),
-                "vlm/msec": msec,
+                "vlm/prompt_tokens": float(chain.prompt_tokens),
+                "vlm/completion_tokens": float(len(chain.tokens)),
+                "vlm/msec": chain.msec,
             },
             rnn_state=self._dummy_state.clone(),
             features=state,
             stored_state=representation,
-            text=reply,
+            text=chain.text,
             reply_action=vlm_action[0, 0],
             text_status=(
-                f"in {prompt_tokens} tok   out {completion_tokens} tok   {msec:.0f} ms   "
-                f"parse {'ok' if parsed else 'failed'}"
+                f"in {chain.prompt_tokens} tok   out {len(chain.tokens)} tok   "
+                f"{chain.msec:.0f} ms   parse {'ok' if parsed else 'failed'}"
             ),
             exchange=exchange,
             selection_status=(
@@ -305,6 +285,36 @@ class VLMActorCriticWithActionValue(NetworkInterface):
                 ("head", self._format_action(head_action[0, 0]), q_head, not vlm_chosen),
             ],
         )
+
+    def _write_reply(
+        self, frame: torch.Tensor, system_text: str, turn_text: str, step: float
+    ) -> tuple[Chain, list[dict]]:
+        """このステップのフレームと数値のターンを会話に積んで返答を書かせる。書いた返答と、
+        表示用に残す直近の会話を返す。エピソードの最初のステップでは、前のエピソードの会話を
+        捨ててシステムプロンプトから積み直す。"""
+        if step == 0.0 or self._exchange is None:
+            self.generator.reset_cache()
+            self._exchange = [
+                {"role": "system", "content": [{"type": "text", "text": system_text}]}
+            ]
+            self._decisions_num = 0
+            self._vlm_chosen_num = 0
+        self._exchange.append(user_turn(step / self.decision_fps, frame, turn_text))
+        # 一定の間隔のステップで、思考を書いてから返答させる。そのあいだは行動だけを書かせる
+        thinking = self.generator.thinking_enabled and int(step) % self.thinking_interval == 0
+        chain = self.generator.generate(self._exchange, thinking, self.constrained)
+        self._exchange.append(assistant_turn(chain.text))
+        # モデルの文脈はキャッシュが持つので、リストには差分の計算と表示に要る直近だけを残す
+        self._exchange = self._exchange[-EXCHANGE_MESSAGES:]
+        return chain, list(self._exchange)
+
+    def _pool_states(self, states: torch.Tensor) -> torch.Tensor:
+        """このステップで積んだ位置の活性 (positions_num, hidden_size) を
+        ``num_state_queries`` トークンに均したもの。"""
+        pooled = F.adaptive_avg_pool1d(
+            states.to(torch.float32).T.unsqueeze(0), self.num_state_queries
+        )
+        return pooled[0].T.to(torch.bfloat16)
 
     def _loss_terms(
         self,

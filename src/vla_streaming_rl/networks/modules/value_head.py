@@ -40,6 +40,8 @@ class DistributionalValueHead(nn.Module):
     """
 
     def _init_value_dist(self, num_bins: int, gammas: list[float]) -> None:
+        """``gammas`` は補助の割引率（multi-gamma, AMAGO）を先に、主の割引率 ``gamma`` を
+        最後に並べたもの。補助がなければ主の1つだけ。"""
         self.num_bins = num_bins
         self.num_gammas = len(gammas)
         # ``gammas`` is the per-gamma discount list (auxiliary gammas first, the
@@ -243,11 +245,14 @@ class ActionValueHead(DistributionalValueHead):
         hidden_dim: int,
         block_num: int,
         num_bins: int,
-        gammas: list[float],
+        gamma: float,
+        multi_gammas: list[float],
         sparsity: float,
         detach_state: bool,
     ) -> None:
         super().__init__()
+        # 補助の割引率を先に、主の割引率を最後に並べる
+        gammas = list(multi_gammas) + [gamma]
         self.detach_state = detach_state
         self.horizon = horizon
         self.action_dim = action_dim
@@ -360,10 +365,13 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         hidden_dim: int,
         block_num: int,
         num_bins: int,
-        gammas: list[float],
+        gamma: float,
+        multi_gammas: list[float],
         detach_state: bool,
     ) -> None:
         super().__init__()
+        # 補助の割引率を先に、主の割引率を最後に並べる
+        gammas = list(multi_gammas) + [gamma]
         self.detach_state = detach_state
         self.horizon = horizon
         self.action_dim = action_dim

@@ -1,0 +1,10 @@
+_target_: vla_streaming_rl.networks.modules.policy_head.DiffusionPolicy
+_partial_: true
+hidden_dim: 512
+block_num: 1
+horizon: ${horizon}
+sparsity: ${sparsity}
+denoising_time: 0.9
+denoising_steps: 1
+dacer_loss_weight: 0.05
+detach_state: true

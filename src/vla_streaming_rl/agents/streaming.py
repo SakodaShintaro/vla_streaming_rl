@@ -26,7 +26,7 @@ from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput, InferResult
 from vla_streaming_rl.optimizers.adam_et import AdamET
 from vla_streaming_rl.replay_buffer import ReplayBuffer
-from vla_streaming_rl.reward_processor import RewardProcessor
+from vla_streaming_rl.reward_scaler import RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs
 
 
@@ -65,7 +65,7 @@ class StreamingAgent(Agent):
         self.action_high = action_space.high
         self.action_scale = (action_space.high - action_space.low) / 2.0
         self.action_bias = (action_space.high + action_space.low) / 2.0
-        self.reward_processor = RewardProcessor("scaling", 1.0)
+        self.reward_scaler = RewardScaler()
         self.normalizing_by_return = normalizing_by_return
 
         self.max_grad_norm = max_grad_norm
@@ -153,8 +153,8 @@ class StreamingAgent(Agent):
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
-            self.reward_processor.update(shaped_reward)
-        metrics["processed_reward"] = self.reward_processor.normalize(
+            self.reward_scaler.update(shaped_reward)
+        metrics["processed_reward"] = self.reward_scaler.normalize(
             torch.tensor(shaped_reward)
         ).item()
         image, scalar_obs = self._preprocess(obs)
@@ -191,13 +191,15 @@ class StreamingAgent(Agent):
         # it, but a chunk still has to be started, so the tick acts without a
         # learning step.
         if not self.rb.latest_window_is_clean(self.seq_len + self.horizon):
-            return self._act(metrics, panels, texts, prompt)
+            return self._act(metrics, panels, texts, prompt, image)
 
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
         data = self.rb.get_latest(self.seq_len + self.horizon)
-        data.rewards = self.reward_processor.normalize(data.rewards)
-        result = self.network.infer_and_compute_loss(data, prompt, self.prompt_builder.turn_text())
+        data.rewards = self.reward_scaler.normalize(data.rewards)
+        result = self.network.infer_and_compute_loss(
+            data, image, prompt, self.prompt_builder.turn_text()
+        )
 
         infer_result = result.infer_result
         self.rnn_state = infer_result.rnn_state
@@ -236,12 +238,19 @@ class StreamingAgent(Agent):
         )
 
     def _act(
-        self, metrics: dict, panels: dict[str, np.ndarray], texts: dict[str, str], prompt: str
+        self,
+        metrics: dict,
+        panels: dict[str, np.ndarray],
+        texts: dict[str, str],
+        prompt: str,
+        image: torch.Tensor,
     ) -> StepResult:
-        """Start a chunk from the newest state window, with no learning step."""
+        """Start a chunk from the newest state window, with no learning step.
+        ``image`` is this tick's raw observation image."""
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
             InferInput(
+                frame=image,
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,
@@ -279,7 +288,7 @@ class StreamingAgent(Agent):
 
     def on_episode_end(self, score: float) -> EpisodeEndResult:
         if self.normalizing_by_return:
-            self.reward_processor.update(score)
+            self.reward_scaler.update(score)
         return EpisodeEndResult(metrics={}, rewritten_instruction=None)
 
     def optimizer_state_dict(self) -> dict:
@@ -334,8 +343,8 @@ class StreamingAgent(Agent):
             self._episode_reset = self.use_done
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
-            self.reward_processor.update(shaped_reward)
-        metrics["processed_reward"] = self.reward_processor.normalize(
+            self.reward_scaler.update(shaped_reward)
+        metrics["processed_reward"] = self.reward_scaler.normalize(
             torch.tensor(shaped_reward)
         ).item()
         image, scalar_obs = self._preprocess(obs)
@@ -367,7 +376,7 @@ class StreamingAgent(Agent):
                 texts=texts,
             )
 
-        return self._act(metrics, panels, texts, prompt)
+        return self._act(metrics, panels, texts, prompt, image)
 
     def _preprocess(self, obs: dict[str, Any]) -> tuple[torch.Tensor, np.ndarray]:
         """Turn the raw observation into what the replay buffer stores this tick:

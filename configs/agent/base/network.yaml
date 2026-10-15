@@ -1,4 +1,9 @@
 # @package _global_
+defaults:
+  - /policy_head: tanh
+  - /value_head: dueling
+  - _self_
+
 weight_decay: 0.01
 
 prediction_head:
@@ -7,35 +12,7 @@ prediction_head:
   predictor_hidden_dim: 512
   predictor_block_num: 2
   predictor_type: flow_matching  # [flow_matching, mean_flow]
-
-value_head:
-  _target_: vla_streaming_rl.networks.build._build_value_head
-  _partial_: true
-  critic_arch: dueling  # [dueling, simbav2]
-  horizon: ${horizon}
-  gamma: ${gamma}
-  multi_gammas: ${multi_gammas}
-  hidden_dim: 1024
-  block_num: 1
-  num_bins: 1
-  sparsity: ${sparsity}
-  detach_state: false
-
-policy_head:
-  _target_: vla_streaming_rl.networks.modules.policy_head.build_policy_head
-  _partial_: true
-  policy_type: tanh
-  hidden_dim: 512
-  block_num: 1
-  horizon: ${horizon}
-  sparsity: ${sparsity}
-  denoising_time: 0.9
-  denoising_steps: 1
-  dacer_loss_weight: 0.05
-  target_entropy_scale: 1.0
-  init_temperature: 0.01
-  temperature_lr: 3e-3
-  detach_state: true
+  detach_predictor: false
 
 vla:
   # 会話は VLM の KV キャッシュに積む。システムプロンプトは常に残し、その後ろのターン
@@ -65,7 +42,6 @@ actor_critic:
   seq_len: 50
   image_encoder_type: qwen  # [taesd, dinov2, siglip2, vjepa2, qwen]
   image_encoder_output_dim: 16
-  detach_predictor: false
   disable_state_predictor: false
   encoder_block_num: 8
   temporal_model_type: gdn

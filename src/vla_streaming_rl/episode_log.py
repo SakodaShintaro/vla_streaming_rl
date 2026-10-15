@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
 import imageio
 import numpy as np
 
@@ -14,7 +13,8 @@ import numpy as np
 class EpisodeRecord:
     """Everything one episode leaves behind for ``save_episode_data``."""
 
-    bgr_images: list[np.ndarray]
+    # 描画したフレーム（RGB）
+    frames: list[np.ndarray]
     actions: list[np.ndarray]
     rewards: list[float]
     observations: list[np.ndarray]
@@ -26,11 +26,11 @@ class EpisodeRecord:
 
     @classmethod
     def start(
-        cls, bgr_image: np.ndarray, obs: dict, texts: dict[str, str], reset_info: dict
+        cls, frame: np.ndarray, obs: dict, texts: dict[str, str], reset_info: dict
     ) -> "EpisodeRecord":
         """リセット直後の描画と観測から、エピソードの記録を始める。"""
         return cls(
-            bgr_images=[bgr_image],
+            frames=[frame],
             actions=[],
             rewards=[],
             observations=[obs["image"].copy()],
@@ -45,17 +45,17 @@ class EpisodeRecord:
         reward: float,
         obs: dict,
         info: dict,
-        bgr_image: np.ndarray,
+        frame: np.ndarray,
         texts: dict[str, str],
     ) -> None:
         """1ステップ分を足す。``action`` を取って ``reward`` と ``obs`` が返り、その観測に
-        エージェントが応えたあとの描画が ``bgr_image``。"""
+        エージェントが応えたあとの描画が ``frame``。"""
         self.actions.append(action.copy())
         self.rewards.append(reward)
         self.observations.append(obs["image"].copy())
         if self.log_position:
             self.xyzs.append(info["agent_xyz"])
-        self.bgr_images.append(bgr_image)
+        self.frames.append(frame)
         self.texts.append(texts)
 
 
@@ -83,13 +83,13 @@ def save_episode_texts(episode_log_dir: Path, text_list: list[dict[str, str]]) -
 
 def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> None:
     """Save episode videos, actions, rewards and positions"""
-    if not record.bgr_images:
+    if not record.frames:
         return
 
     # Stable-panel contract: an agent emits the same set of equally-shaped
     # panels every step, so every render frame has the same size. Fail loudly
     # if that is violated rather than letting the video encoder error out.
-    frame_sizes = {img.shape for img in record.bgr_images}
+    frame_sizes = {img.shape for img in record.frames}
     assert len(frame_sizes) == 1, (
         f"Episode '{name}' produced frames of differing sizes {frame_sizes}; "
         "an agent's panel set / shapes must stay constant across the run."
@@ -97,19 +97,18 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
 
     # libx264 (yuv420p) requires even width/height; the concatenated panel strip
     # can be an odd size. Pad one black row/column when needed.
-    bgr_image_list = record.bgr_images
-    h, w = bgr_image_list[0].shape[:2]
+    frame_list = record.frames
+    h, w = frame_list[0].shape[:2]
     if h % 2 or w % 2:
-        bgr_image_list = [
-            np.pad(img, ((0, h % 2), (0, w % 2), (0, 0)), mode="constant") for img in bgr_image_list
+        frame_list = [
+            np.pad(img, ((0, h % 2), (0, w % 2), (0, 0)), mode="constant") for img in frame_list
         ]
 
     episode_log_dir = episode_dir / f"{name}"
     episode_log_dir.mkdir(parents=True, exist_ok=True)
 
     video_path = episode_log_dir / "render.mp4"
-    rgb_images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in bgr_image_list]
-    imageio.mimsave(str(video_path), rgb_images, fps=10, macro_block_size=1)
+    imageio.mimsave(str(video_path), frame_list, fps=10, macro_block_size=1)
 
     obs_rgb_images = [
         (obs.transpose(1, 2, 0) * 255).astype(np.uint8) for obs in record.observations

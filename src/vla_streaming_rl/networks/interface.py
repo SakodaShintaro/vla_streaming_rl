@@ -37,6 +37,9 @@ class InferInput:
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
     scalar_obs_seq: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
+    # このステップの観測の画像そのもの（保存した形ではない）。会話にフレームを積む
+    # ネットワークが読む
+    frame: torch.Tensor
     # このステップのタスクのプロンプトと、フレームに添える数値のターン
     system_text: str
     turn_text: str
@@ -160,8 +163,8 @@ class NetworkInterface(nn.Module, abc.ABC):
 
     @abc.abstractmethod
     def infer_and_compute_loss(
-        self, data: ReplayBufferData, system_text: str, turn_text: str
+        self, data: ReplayBufferData, frame: torch.Tensor, system_text: str, turn_text: str
     ) -> InferLossResult:
         """Combined inference + loss in one forward, sharing the encoder pass.
-        ``system_text`` and ``turn_text`` are the newest tick's, as in
+        ``frame``, ``system_text`` and ``turn_text`` are the newest tick's, as in
         :class:`InferInput`."""

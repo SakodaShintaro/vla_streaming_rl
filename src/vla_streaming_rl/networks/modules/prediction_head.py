@@ -4,22 +4,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .flux_dit import FluxDiT
-from .reward_processor import RewardProcessor
+from .reward_embed import embed_reward
 
 
 class StatePredictionHead(nn.Module):
     def __init__(
         self,
         image_latent_shape: tuple[int, int, int],
-        reward_processor: RewardProcessor,
         action_dim: int,
         predictor_hidden_dim: int,
         predictor_block_num: int,
         predictor_type: str,
+        detach_predictor: bool,
     ) -> None:
         super().__init__()
+        # 予測の損失の勾配をエンコーダに流さない
+        self.detach_predictor = detach_predictor
         self.image_latent_shape = image_latent_shape
-        self.reward_processor = reward_processor
         self.predictor_type = predictor_type
         hidden_image_dim = image_latent_shape[0]
         self.state_predictor = FluxDiT(
@@ -114,12 +115,14 @@ class StatePredictionHead(nn.Module):
     ) -> torch.Tensor:
         """Build the flow-matching regression target ``x1`` (B, H'*W'+1, C')
         from the next image's latent (B, C', H', W'), which the caller encodes
-        without gradient (fixed target), and the next reward through this
-        head's reward processor, appended as the final position.
+        without gradient (fixed target), and the next reward spread over the
+        channels, appended as the final position.
         """
         target_state_next = next_image_latent.flatten(2).permute(0, 2, 1)  # (B, H'*W', C')
 
-        target_reward_next = self.reward_processor.encode(next_reward).squeeze(1)  # (B, C')
+        target_reward_next = embed_reward(next_reward, self.image_latent_shape[0]).squeeze(
+            1
+        )  # (B, C')
         return torch.cat([target_state_next, target_reward_next.unsqueeze(1)], dim=1)
 
     def compute_loss(
@@ -128,17 +131,16 @@ class StatePredictionHead(nn.Module):
         action: torch.Tensor,
         next_image_latent: torch.Tensor,
         next_reward: torch.Tensor,
-        detach_predictor: bool,
     ) -> tuple[torch.Tensor, dict]:
         """Flow-matching transition loss: train the predictor so that
         ``(predictor_state, action)`` maps to the encoded next ``(image, reward)``.
 
         Mirrors ``PolicyHead.compute_actor_loss`` / ``ValueHead.compute_critic_loss``
-        — the head owns its loss and logging. ``detach_predictor`` stops the
-        gradient into the encoder. The caller supplies the already-prepared
-        ``predictor_state`` (its layout is network-specific).
+        — the head owns its loss and logging. ``detach_predictor`` (set at
+        construction) stops the gradient into the encoder. The caller supplies
+        the already-prepared ``predictor_state`` (its layout is network-specific).
         """
-        if detach_predictor:
+        if self.detach_predictor:
             predictor_state = predictor_state.detach()
 
         # Context layout: (B, tokens, C) where C is the image channel dim

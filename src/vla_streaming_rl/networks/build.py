@@ -9,67 +9,6 @@ from gymnasium import Env
 from omegaconf import DictConfig
 from torch import nn
 
-from vla_streaming_rl.networks.modules.value_head import (
-    ActionValueHead,
-    DistributionalValueHead,
-    HypersphericalActionValueHead,
-)
-
-
-def _build_value_head(
-    in_channels: int,
-    action_dim: int,
-    *,
-    critic_arch: str,
-    horizon: int,
-    gamma: float,
-    multi_gammas: list[float],
-    hidden_dim: int,
-    block_num: int,
-    num_bins: int,
-    sparsity: float,
-    detach_state: bool,
-) -> DistributionalValueHead:
-    """Build the action-value head for a state of width ``in_channels``.
-
-    Networks receive this (via the config's ``value_head`` node fixing every knob but
-    ``in_channels`` and ``action_dim``) and call it with their own state width and
-    action dim — the two shape values only the network knows. All value-related
-    construction — critic architecture, discount, bins, hidden sizes — lives here,
-    so a value change touches only this builder and ``value_head``, never the
-    networks.
-
-    Multi-gamma (AMAGO): the head predicts the action value for several discounts
-    at once. ``gamma`` is the primary/rollout discount and is kept last; the
-    auxiliary ``multi_gammas`` come first. The head owns this list and builds the
-    per-gamma TD target / loss; empty ``multi_gammas`` == single-gamma (original).
-    """
-    gammas = list(multi_gammas) + [gamma]
-    if critic_arch == "simbav2":
-        return HypersphericalActionValueHead(
-            in_channels=in_channels,
-            action_dim=action_dim,
-            horizon=horizon,
-            gammas=gammas,
-            hidden_dim=hidden_dim,
-            block_num=block_num,
-            num_bins=num_bins,
-            detach_state=detach_state,
-        )
-    if critic_arch == "dueling":
-        return ActionValueHead(
-            in_channels=in_channels,
-            action_dim=action_dim,
-            horizon=horizon,
-            gammas=gammas,
-            hidden_dim=hidden_dim,
-            block_num=block_num,
-            num_bins=num_bins,
-            sparsity=sparsity,
-            detach_state=detach_state,
-        )
-    raise ValueError(f"Unknown critic_arch: {critic_arch!r} (expected 'simbav2'/'dueling')")
-
 
 def build_network(
     args: DictConfig,
@@ -94,9 +33,9 @@ def build_network(
             temporal_model_type=args.actor_critic.temporal_model_type,
         ).to(device)
 
-    # 全ネットワーク共通のヘッド工場。critic の設定は config の value_head
-    # ノードが単一ソースで束ね、ネットワークは自分しか知らない in_channels と
-    # action_dim を呼び出し時に渡す。
+    # 全ネットワーク共通のヘッド工場。どのクラスを使うかと設定は config の policy_head と
+    # value_head（configs/policy_head, configs/value_head から選ぶ）が決め、ネットワークは
+    # 自分しか知らない状態の幅と action_dim を呼び出し時に渡す
     value_head_factory = hydra.utils.instantiate(args.value_head)
 
     policy_head_factory = hydra.utils.instantiate(args.policy_head)

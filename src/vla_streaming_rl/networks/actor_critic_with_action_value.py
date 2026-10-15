@@ -15,10 +15,9 @@ from vla_streaming_rl.networks.interface import (
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
-from vla_streaming_rl.networks.modules.reward_processor import RewardProcessor
+from vla_streaming_rl.networks.modules.running_normalizer import RunningNormalizer
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
-from vla_streaming_rl.reward_processor import RunningNormalizer
 from vla_streaming_rl.scalar_obs import SCALAR_OBS_DIM
 
 
@@ -45,7 +44,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             observation_space_shape, actor_critic_config.image_encoder_type
         )
         hidden_image_dim = actor_critic_config.image_encoder_output_dim
-        self.reward_processor = RewardProcessor(embed_dim=hidden_image_dim)
 
         assert 0.0 <= actor_critic_config.token_dropout < 1.0, actor_critic_config.token_dropout
         self.token_dropout = actor_critic_config.token_dropout
@@ -61,7 +59,6 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.encoder = SpatialTemporalEncoder(
             image_features_shape=tuple(self.image_processor.output_shape),
             image_latent_dim=hidden_image_dim,
-            reward_processor=self.reward_processor,
             seq_len=self.seq_len,
             n_layer=actor_critic_config.encoder_block_num,
             action_dim=self.action_dim,
@@ -75,8 +72,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             state_dim=self.encoder.output_dim, action_dim=self.action_dim
         )
 
-        self.value_head = value_head_factory(self.encoder.output_dim, self.action_dim)
-        self.detach_predictor = actor_critic_config.detach_predictor
+        self.value_head = value_head_factory(
+            in_channels=self.encoder.output_dim, action_dim=self.action_dim
+        )
         self.disable_state_predictor = actor_critic_config.disable_state_predictor
         # 次状態の予測を切るときは予測器そのものを作らない。作ると使わない重みが
         # optimizer に入り、weight decay だけを受け続ける
@@ -85,7 +83,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             if self.disable_state_predictor
             else prediction_head_factory(
                 image_latent_shape=(hidden_image_dim, self.encoder.hidden_h, self.encoder.hidden_w),
-                reward_processor=self.reward_processor,
                 action_dim=self.action_dim,
             )
         )
@@ -210,7 +207,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.actions[:, -self.horizon],
             next_image_latent,
             data.rewards[:, -self.horizon],
-            self.detach_predictor,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
@@ -252,10 +248,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         return LossResult(loss=total_loss, info=info_dict)
 
     def infer_and_compute_loss(
-        self, data: ReplayBufferData, system_text: str, turn_text: str
+        self, data: ReplayBufferData, frame: torch.Tensor, system_text: str, turn_text: str
     ) -> InferLossResult:
         """Combined inference and loss computation."""
-        del system_text, turn_text
+        # 画像はバッファの窓から読むので、このステップの生の画像は使わない
+        del frame, system_text, turn_text
         # Next-step inference (no grad): the action the agent will take and its Q.
         with torch.no_grad():
             next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None, 0))

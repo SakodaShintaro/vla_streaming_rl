@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 
-from .reward_processor import RewardProcessor
+from .reward_embed import embed_reward
 from .self_attention import get_fourier_embeds_from_coordinates
 from .spatial_temporal_transformer import SpatialTemporalTransformer
 
@@ -21,7 +21,6 @@ class SpatialTemporalEncoder(nn.Module):
         self,
         image_features_shape: tuple[int, int, int],
         image_latent_dim: int,
-        reward_processor: RewardProcessor,
         seq_len: int,
         n_layer: int,
         action_dim: int,
@@ -31,7 +30,6 @@ class SpatialTemporalEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.n_layer = n_layer
-        self.reward_processor = reward_processor
 
         # The frozen encoder's (C, H, W) grid, projected here to the token width
         # and read as [B, H * W, C'] tokens.
@@ -95,7 +93,7 @@ class SpatialTemporalEncoder(nn.Module):
         image_embed = all_latents.flatten(3).transpose(2, 3)  # [B, T, S, C']
 
         action_embed = get_fourier_embeds_from_coordinates(self.hidden_image_dim, actions)
-        reward_embed = self.reward_processor.encode(rewards)  # [B, T, 1, C']
+        reward_embed = embed_reward(rewards, self.hidden_image_dim)  # [B, T, 1, C']
         scalar_obs_embed = get_fourier_embeds_from_coordinates(self.hidden_image_dim, scalar_obs)
         register_token = torch.zeros(
             (B, T, 1, self.hidden_image_dim), device=images.device, dtype=images.dtype

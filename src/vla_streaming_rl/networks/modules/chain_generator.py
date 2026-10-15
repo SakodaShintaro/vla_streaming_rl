@@ -235,27 +235,8 @@ class ChainGenerator:
                 token = forced.pop(0)
             else:
                 if constrained and not thinking:
-                    # 次に選べるのは、書いた本体に続けて候補のどれかになるトークンだけ。
-                    # 候補を書き切ったら返答を閉じる
-                    allowed = sorted(
-                        {
-                            ids[len(body)] if len(ids) > len(body) else self.eos_token_id
-                            for ids in self._candidate_ids
-                            if ids[: len(body)] == body
-                        }
-                    )
-                    masked = torch.full_like(logits, float("-inf"))
-                    masked[allowed] = logits[allowed]
-                    logits = masked
-                # 温度 0 なら貪欲。それ以外はモデルの生成設定に従い、温度を掛け、上位 top_k に
-                # 絞り、そのうち確率の和が top_p に届く最少のものから引く
-                if self.temperature == 0.0:
-                    token = int(logits.argmax().item())
-                else:
-                    top = torch.topk(logits.float() / self.temperature, self.top_k)
-                    probs = torch.softmax(top.values, dim=-1)
-                    kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
-                    token = int(top.indices[torch.multinomial(kept, 1)].item())
+                    logits = self._constrain(logits, body)
+                token = self._sample(logits)
                 if constrained and not thinking:
                     body.append(token)
             tokens.append(token)
@@ -265,20 +246,7 @@ class ChainGenerator:
                 forced = list(self._after_think_ids) if constrained else []
             if token == self.eos_token_id or len(tokens) >= self.max_len:
                 break
-            # 位置はモデル任せにせず、キャッシュの長さと 3D 位置の起点から渡す
-            self._token.fill_(token)
-            self._cache_position.fill_(self._kv_len)
-            self._position_ids.fill_(self._next_pos)
-            outputs = self.model(
-                input_ids=self._token,
-                past_key_values=self._cache,
-                use_cache=True,
-                output_hidden_states=True,
-                cache_position=self._cache_position,
-                position_ids=self._position_ids,
-            )
-            self._kv_len += 1
-            self._next_pos += 1
+            outputs = self._feed_token(token)
             states.append(self._layer_mean(outputs.hidden_states))
             logits = outputs.logits[0, -1]
         chain = Chain(
@@ -289,10 +257,66 @@ class ChainGenerator:
             msec=(time.perf_counter() - start) * 1000.0,
         )
 
-        # 最後に選んだトークンを、<|im_end|>（打ち切ったときだけ足す）と改行で閉じて積む
+        self._close_reply(tokens[-1])
+        if opening:
+            self._sink_len = len(
+                self.processor.tokenizer.encode(
+                    _history_text(conversation[0], self._system_prefix), add_special_tokens=False
+                )
+            )
+        self._evict()
+        self._last_consumed = conversation[-1]
+        self._committed_reply = chain.text
+        return chain
+
+    def _constrain(self, logits: torch.Tensor, body: list[int]) -> torch.Tensor:
+        """次に選べるトークンを、書いた本体 ``body`` に続けて候補のどれかになるものだけに
+        絞ったロジット。候補を書き切ったら、返答を閉じるトークンだけが残る。"""
+        allowed = sorted(
+            {
+                ids[len(body)] if len(ids) > len(body) else self.eos_token_id
+                for ids in self._candidate_ids
+                if ids[: len(body)] == body
+            }
+        )
+        masked = torch.full_like(logits, float("-inf"))
+        masked[allowed] = logits[allowed]
+        return masked
+
+    def _sample(self, logits: torch.Tensor) -> int:
+        """次のトークンを1つ選ぶ。温度 0 なら貪欲。それ以外はモデルの生成設定に従い、温度を
+        掛け、上位 top_k に絞り、そのうち確率の和が top_p に届く最少のものから引く。"""
+        if self.temperature == 0.0:
+            return int(logits.argmax().item())
+        top = torch.topk(logits.float() / self.temperature, self.top_k)
+        probs = torch.softmax(top.values, dim=-1)
+        kept = probs * (probs.cumsum(dim=-1) - probs < self.top_p)
+        return int(top.indices[torch.multinomial(kept, 1)].item())
+
+    def _feed_token(self, token: int):
+        """選んだ1トークンをキャッシュの続きに積み、その出力を返す。位置はモデル任せに
+        せず、キャッシュの長さと 3D 位置の起点から渡す。"""
+        self._token.fill_(token)
+        self._cache_position.fill_(self._kv_len)
+        self._position_ids.fill_(self._next_pos)
+        outputs = self.model(
+            input_ids=self._token,
+            past_key_values=self._cache,
+            use_cache=True,
+            output_hidden_states=True,
+            cache_position=self._cache_position,
+            position_ids=self._position_ids,
+        )
+        self._kv_len += 1
+        self._next_pos += 1
+        return outputs
+
+    def _close_reply(self, last_token: int) -> None:
+        """最後に選んだトークン（まだキャッシュに入っていない）を、<|im_end|>（打ち切った
+        ときだけ足す）と改行で閉じて積む。"""
         close = (
-            [tokens[-1]]
-            + ([] if tokens[-1] == self.eos_token_id else [self.eos_token_id])
+            [last_token]
+            + ([] if last_token == self.eos_token_id else [self.eos_token_id])
             + self._newline_ids
         )
         self._prefill(
@@ -302,37 +326,31 @@ class ChainGenerator:
             None,
             hidden=False,
         )
-        if opening:
-            self._sink_len = len(
-                self.processor.tokenizer.encode(
-                    _history_text(conversation[0], self._system_prefix), add_special_tokens=False
-                )
-            )
-        # 全注意層の KV を「sink ＋ 直近 window_tokens 行」まで間引く。線形注意層は固定サイズの
-        # 再帰状態なので対象外。行を捨てるだけで位置は元のまま残るから、残った行どうしの
-        # 相対位置は変わらない
+
+    def _evict(self) -> None:
+        """全注意層の KV を「sink ＋ 直近 window_tokens 行」まで間引く。線形注意層は固定
+        サイズの再帰状態なので対象外。行を捨てるだけで位置は元のまま残るから、残った行
+        どうしの相対位置は変わらない。"""
         limit = self._sink_len + self.window_tokens
-        if self._kv_len > limit:
-            for layer in self._cache.layers:
-                if isinstance(layer, DynamicLayer):
-                    layer.keys = torch.cat(
-                        [
-                            layer.keys[..., : self._sink_len, :],
-                            layer.keys[..., -self.window_tokens :, :],
-                        ],
-                        dim=-2,
-                    )
-                    layer.values = torch.cat(
-                        [
-                            layer.values[..., : self._sink_len, :],
-                            layer.values[..., -self.window_tokens :, :],
-                        ],
-                        dim=-2,
-                    )
-            self._kv_len = limit
-        self._last_consumed = conversation[-1]
-        self._committed_reply = chain.text
-        return chain
+        if self._kv_len <= limit:
+            return
+        for layer in self._cache.layers:
+            if isinstance(layer, DynamicLayer):
+                layer.keys = torch.cat(
+                    [
+                        layer.keys[..., : self._sink_len, :],
+                        layer.keys[..., -self.window_tokens :, :],
+                    ],
+                    dim=-2,
+                )
+                layer.values = torch.cat(
+                    [
+                        layer.values[..., : self._sink_len, :],
+                        layer.values[..., -self.window_tokens :, :],
+                    ],
+                    dim=-2,
+                )
+        self._kv_len = limit
 
     def _new_messages(self, conversation: list[dict]) -> list[dict]:
         """前回の返答を書いた後に会話へ増えたメッセージ。前回確定した返答は書いた

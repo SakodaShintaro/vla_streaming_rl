@@ -32,10 +32,10 @@ from vla_streaming_rl.agents.base import (
 )
 from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.render import render_conversation_panel, render_selection_panel
 from vla_streaming_rl.replay_buffer import ReplayBuffer
-from vla_streaming_rl.reward_processor import RewardProcessor
+from vla_streaming_rl.reward_scaler import RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs
-from vla_streaming_rl.utils import render_conversation_panel, render_selection_panel
 
 
 class OffPolicyAgent(Agent):
@@ -77,7 +77,7 @@ class OffPolicyAgent(Agent):
         self.action_high = action_space.high
         self.action_scale = (action_space.high - action_space.low) / 2.0
         self.action_bias = (action_space.high + action_space.low) / 2.0
-        self.reward_processor = RewardProcessor("scaling", 1.0)
+        self.reward_scaler = RewardScaler()
         self.normalizing_by_return = normalizing_by_return
 
         self.learning_starts = learning_starts
@@ -149,7 +149,7 @@ class OffPolicyAgent(Agent):
                 print(f"Start learning at global step {global_step}.")
                 self.is_learning = True
             data = self.rb.sample(self.batch_size)
-            data.rewards = self.reward_processor.normalize(data.rewards)
+            data.rewards = self.reward_scaler.normalize(data.rewards)
             result = self.network.compute_loss(data)
             self.actor_optimizer.zero_grad(set_to_none=True)
             self.critic_optimizer.zero_grad(set_to_none=True)
@@ -164,7 +164,7 @@ class OffPolicyAgent(Agent):
 
     def on_episode_end(self, score: float) -> EpisodeEndResult:
         if self.normalizing_by_return:
-            self.reward_processor.update(score)
+            self.reward_scaler.update(score)
         # 終わったエピソードを振り返らせて、そのタスクの次回のプロンプトを書き直す
         instruction = (
             self.prompt_builder.reflect(score, self.network.answer) if self.use_reflection else None
@@ -221,8 +221,8 @@ class OffPolicyAgent(Agent):
             self.chunk_step = 0
         metrics["action_norm"] = np.linalg.norm(self.prev_action)
         if not self.normalizing_by_return:
-            self.reward_processor.update(shaped_reward)
-        metrics["processed_reward"] = self.reward_processor.normalize(
+            self.reward_scaler.update(shaped_reward)
+        metrics["processed_reward"] = self.reward_scaler.normalize(
             torch.tensor(shaped_reward)
         ).item()
         image, scalar_obs = self._preprocess(obs)
@@ -257,6 +257,7 @@ class OffPolicyAgent(Agent):
         # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
         infer_result = self.network.infer(
             InferInput(
+                frame=image,
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,

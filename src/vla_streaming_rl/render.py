@@ -9,7 +9,7 @@ def concat_images(image_list: list[np.ndarray]) -> np.ndarray:
     Args:
         image_list (list[np.ndarray]): The list of rgb images to concatenate.
     Returns:
-        np.ndarray: The concatenated bgr image (np.uint8).
+        np.ndarray: The concatenated rgb image (np.uint8).
     """
     max_height = max(img.shape[0] for img in image_list)
     padded_images = []
@@ -17,9 +17,7 @@ def concat_images(image_list: list[np.ndarray]) -> np.ndarray:
         padding = np.zeros((max_height - img.shape[0], img.shape[1], 3), dtype=img.dtype)
         padded_img = np.vstack((img, padding))
         padded_images.append(padded_img)
-    concat = cv2.hconcat(padded_images)
-    bgr_array = cv2.cvtColor(concat, cv2.COLOR_RGB2BGR)
-    return bgr_array
+    return cv2.hconcat(padded_images)
 
 
 def convert_to_uint8(image: np.ndarray) -> np.ndarray:
@@ -280,7 +278,7 @@ def render_selection_panel(
 def overlay_caption(image: np.ndarray, text: str) -> np.ndarray:
     """Append a word-wrapped text caption on a dark band below ``image``.
 
-    Used to annotate a panel with free-form text (e.g. the LIBERO task prompt)
+    Used to annotate a panel with free-form text (e.g. the task prompt)
     that is too long to fit on a single-line panel label. The band always
     reserves ``_CAPTION_LINE_BUDGET`` lines of height so the returned frame size
     stays constant across a run even when the text length changes step to step
@@ -377,6 +375,4 @@ def concat_labeled_images(panels: dict[str, np.ndarray]) -> np.ndarray:
     labeled_images = [
         add_text_label_on_top(convert_to_uint8(img), label) for label, img in panels.items()
     ]
-    final_image_bgr = concat_images(labeled_images)
-    final_image_rgb = cv2.cvtColor(final_image_bgr, cv2.COLOR_BGR2RGB)
-    return final_image_rgb
+    return concat_images(labeled_images)
