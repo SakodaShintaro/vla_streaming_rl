@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import Agent, StepResult
+from vla_streaming_rl.agents.base import Agent, EpisodeEndResult, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput, InferResult
 from vla_streaming_rl.optimizers.adam_et import AdamET
@@ -277,9 +277,10 @@ class StreamingAgent(Agent):
             self.rb.set_latest_reply_action(infer_result.reply_action)
             self.prompt_builder.on_reply()
 
-    def on_episode_end(self, score: float) -> dict:
-        del score
-        return {}
+    def on_episode_end(self, score: float) -> EpisodeEndResult:
+        if self.normalizing_by_return:
+            self.reward_processor.update(score)
+        return EpisodeEndResult(metrics={}, rewritten_instruction=None)
 
     def optimizer_state_dict(self) -> dict:
         return {

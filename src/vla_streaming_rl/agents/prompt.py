@@ -73,14 +73,15 @@ class PromptBuilder(ABC):
             f"you reply at once, carrying on with what you last decided. {TEXT_ACTION_PROTOCOL}"
         )
 
-    def reflect(self, score: float, answer) -> bool:
+    def reflect(self, score: float, answer) -> str | None:
         """Rewrite the ended episode's task instruction off a reflection the
-        model writes, when the builder holds a per-task instruction to rewrite.
+        model writes, when the builder holds a per-task instruction to rewrite,
+        and return the new instruction (None when nothing was rewritten).
         ``answer`` puts a request to the model on top of the episode's
         conversation and returns its reply text. The base builder holds none,
         so this is a no-op."""
         del score, answer
-        return False
+        return None
 
     @abstractmethod
     def text_action_names(self) -> list[str]:
@@ -278,7 +279,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
         task_sentence = f"Task: {task} " if task != "" else ""
         return f"{ANIMALAI_FRAMING} {self._action_format()} {task_sentence}{self._protocol()}"
 
-    def reflect(self, score: float, answer) -> bool:
+    def reflect(self, score: float, answer) -> str | None:
         """The Animal-AI rewrite: on every ended episode, ask the model, over
         the episode's own conversation, to rewrite this task's instruction, and
         keep the rewrite for every later episode of the task. A failure
@@ -286,7 +287,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
         empty or would bloat the standing prompt leaves the instruction as it
         was."""
         if self._task_key == "":
-            return False
+            return None
         request = ANIMALAI_REFLECTION_REQUEST.format(
             outcome="success" if score >= self._pass_mark else "failure",
             score=score,
@@ -295,9 +296,9 @@ class AnimalAIPromptBuilder(PromptBuilder):
         )
         reply = answer(request)
         if reply == "" or len(reply) > ANIMALAI_INSTRUCTION_CHARS_MAX:
-            return False
+            return None
         self.tasks[self._task_key] = reply
-        return True
+        return reply
 
     def _turn(
         self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray

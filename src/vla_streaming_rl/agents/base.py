@@ -44,6 +44,19 @@ class StepResult:
     texts: dict[str, str]
 
 
+@dataclass
+class EpisodeEndResult:
+    """エピソードの終わりにエージェントが返すもの。
+
+    - ``metrics``: そのまま wandb に記録するスカラー。
+    - ``rewritten_instruction``: 振り返りでそのタスクの指示を書き直したときの新しい指示。
+      書き直さなかったときは None。
+    """
+
+    metrics: dict[str, float]
+    rewritten_instruction: str | None
+
+
 class Agent(ABC):
     """The contract the trainer drives: ``step`` on every tick while learning,
     ``select_action`` when acting without learning.
@@ -86,7 +99,8 @@ class Agent(ABC):
         """Act on this tick and learn from it, the way this learning mode learns."""
 
     @abstractmethod
-    def on_episode_end(self, score: float) -> dict: ...
+    def on_episode_end(self, score: float) -> EpisodeEndResult:
+        """エピソードが ``score`` で終わったときに呼ぶ。学習でも評価でも呼ぶ。"""
 
     @abstractmethod
     def optimizer_state_dict(self) -> dict:

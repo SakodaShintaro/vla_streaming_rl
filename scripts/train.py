@@ -25,6 +25,7 @@ from vla_streaming_rl.checkpoint import load_checkpoint_weights, save_checkpoint
 from vla_streaming_rl.envs.animalai_curriculum import training_levels
 from vla_streaming_rl.episode_log import EpisodeRecord, save_episode_data
 from vla_streaming_rl.script_setup import disable_render_if_headless, resolve_seed, seed_everything
+from vla_streaming_rl.testbed import run_testbed
 from vla_streaming_rl.utils import render_frame
 from vla_streaming_rl.wrappers import make_env
 
@@ -267,14 +268,71 @@ def build_episode_log(
     return data_dict
 
 
+class EpisodeTable:
+    """log_episode.tsv: one row per episode, the same scalars the episode logs
+    to wandb. The columns are fixed by the first episode's row (plus the
+    running averages, which only appear once enough episodes have ended)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._file = None
+        self._writer = None
+
+    def write(self, data_dict: dict) -> None:
+        if self._writer is None:
+            self._file = open(self.path, "w", newline="")
+            fieldnames = list(data_dict.keys()) + [
+                "recent_average_score",
+                "recent_success_rate",
+            ]
+            self._writer = csv.DictWriter(
+                self._file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
+            )
+            self._writer.writeheader()
+        self._writer.writerow(data_dict)
+        self._file.flush()
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+
+
+def save_episode_videos(
+    result_dir: Path,
+    state: TrainState,
+    arena_name: str,
+    score: float,
+    record: EpisodeRecord,
+    best_score_per_arena: dict[str, float],
+    args: DictConfig,
+) -> None:
+    """終わったエピソードの記録を残す。アリーナのある環境ではアリーナごとの最高点の
+    エピソードを、ない環境では全体の最高点のエピソードを残し、それとは別に
+    ``image_save_interval`` エピソードごとに1つ残す。"""
+    episode_log_dir = result_dir / "episode_log"
+    if arena_name:
+        arena_is_best = (
+            arena_name not in best_score_per_arena or score > best_score_per_arena[arena_name]
+        )
+        if arena_is_best:
+            best_score_per_arena[arena_name] = score
+            save_episode_data(episode_log_dir, f"best_{arena_name}", record)
+    elif score > state.best_score:
+        with open(result_dir / "best_score.txt", "w") as f:
+            f.write(f"{state.episode_id + 1}\t{score:.2f}")
+        state.best_score = score
+        save_episode_data(episode_log_dir, "best_episode", record)
+
+    if state.episode_id == 0 or (state.episode_id + 1) % args.image_save_interval == 0:
+        save_episode_data(episode_log_dir, f"ep_{state.episode_id + 1:08d}", record)
+
+
 def final_evaluation(
     args: DictConfig, agent, network, env, seed: int, global_step: int, result_dir: Path
 ) -> None:
     """Post-training evaluation: the Animal-AI Testbed sweep for AnimalAI runs,
     and the Bench2Drive final summary the closed env stashed on itself."""
     if args.env_id == "AnimalAI-v0" and args.final_evaluation and not args.debug:
-        from test_trained_agent import run_testbed
-
         eval_factory = OmegaConf.merge(args.env_factory, {"mode": "eval"})
         eval_env = make_env(args.env_id, eval_factory, result_dir=None, seed=seed)
         eval_env.action_space.seed(seed)
@@ -329,12 +387,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
         f.write(str(seed))
     write_git_info(result_dir)
 
-    episode_log_dir = result_dir / "episode_log"
-    episode_log_dir.mkdir(parents=True, exist_ok=True)
+    (result_dir / "episode_log").mkdir(parents=True, exist_ok=True)
 
-    log_episode_path = result_dir / "log_episode.tsv"
-    log_episode_file = None
-    log_episode_writer = None
+    episode_table = EpisodeTable(result_dir / "log_episode.tsv")
 
     # env setup
     env = make_env(args.env_id, args.env_factory, result_dir=result_dir, seed=seed)
@@ -398,15 +453,11 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
         # The trainer only owns the environment / observation panels; goal,
         # bev, ... arrive via result.panels. The initial render leads.
-        record = EpisodeRecord.fresh()
         rgb_image = render_frame(env, obs, reset_info, action, result, args.render_scale)
+        record = EpisodeRecord.start(
+            cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR), obs, result.texts, reset_info
+        )
         action = result.action
-        record.bgr_images.append(cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
-        record.observations.append(obs["image"].copy())
-        record.texts.append(result.texts)
-        # Animal-AI reports the agent's arena position every step; an env with no
-        # arena reports none and record.xyzs stays empty.
-        log_position = "agent_xyz" in reset_info
 
         while True:
             state.global_step += 1
@@ -415,12 +466,6 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             env_step_start = time.time()
             obs, reward, terminated, truncated, env_info = env.step(action)
             env_step_time_msec = (time.time() - env_step_start) * 1000
-
-            record.actions.append(action.copy())
-            record.rewards.append(reward)
-            record.observations.append(obs["image"].copy())
-            if log_position:
-                record.xyzs.append(env_info["agent_xyz"])
 
             agent_step_start = time.time()
             result = agent.step(state.global_step, obs, reward, terminated, truncated, env_info)
@@ -441,10 +486,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             )
 
             rgb_image = render_frame(env, obs, env_info, action, result, args.render_scale)
-            action = result.action
             bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
-            record.bgr_images.append(bgr_image)
-            record.texts.append(result.texts)
+            record.add_step(action, reward, obs, env_info, bgr_image, result.texts)
+            action = result.action
             if args.render:
                 cv2.imshow(args.env_id, bgr_image)
                 cv2.waitKey(1)
@@ -462,25 +506,10 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             break
 
         score = env_info["episode"]["r"]
-        if args.normalizing_by_return:
-            agent.reward_processor.update(score)
-
         elapsed_time_sec = time.time() - start_time
         data_dict = build_episode_log(state, env_info, mode, eval_range, elapsed_time_sec)
         wandb.log(data_dict)
-
-        if log_episode_writer is None:
-            log_episode_file = open(log_episode_path, "w", newline="")
-            fieldnames = list(data_dict.keys()) + [
-                "recent_average_score",
-                "recent_success_rate",
-            ]
-            log_episode_writer = csv.DictWriter(
-                log_episode_file, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore"
-            )
-            log_episode_writer.writeheader()
-        log_episode_writer.writerow(data_dict)
-        log_episode_file.flush()
+        episode_table.write(data_dict)
 
         if state.episode_id % args.print_interval == 0:
             recent_average_score = float(np.mean(state.score_list))
@@ -488,43 +517,24 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 f"Ep: {state.episode_id}\tStep: {state.global_step}\tLast score: {score:.2f}\tAverage score: {recent_average_score:.2f}\tLength: {env_info['episode']['l']:.2f}\tElapsed time: {elapsed_time_sec / 3600:.2f}h"
             )
 
-        episode_end_info = agent.on_episode_end(score)
-        wandb.log(episode_end_info)
+        episode_end = agent.on_episode_end(score)
+        wandb.log(episode_end.metrics)
 
         arena_name = env_info["arena_name"] if "arena_name" in env_info else ""
 
-        rewritten = (
-            "reflection/rewritten" in episode_end_info
-            and episode_end_info["reflection/rewritten"] > 0
-        )
-        if rewritten:
-            task_key = arena_name.rsplit("-", 1)[0]
+        if episode_end.rewritten_instruction is not None:
             append_task_instruction(
                 result_dir / "task_instructions.tsv",
                 state,
                 arena_name,
                 "success" if score >= env_info["pass_mark"] else "failure",
                 score,
-                agent.prompt_builder.tasks[task_key],
+                episode_end.rewritten_instruction,
             )
 
-        if arena_name:
-            arena_is_best = (
-                arena_name not in best_score_per_arena or score > best_score_per_arena[arena_name]
-            )
-            if arena_is_best:
-                best_score_per_arena[arena_name] = score
-                save_episode_data(episode_log_dir, f"best_{arena_name}", record)
-        else:
-            is_best = score > state.best_score
-            if is_best:
-                with open(result_dir / "best_score.txt", "w") as f:
-                    f.write(f"{state.episode_id + 1}\t{score:.2f}")
-                state.best_score = score
-                save_episode_data(episode_log_dir, "best_episode", record)
-
-        if state.episode_id == 0 or (state.episode_id + 1) % args.image_save_interval == 0:
-            save_episode_data(episode_log_dir, f"ep_{state.episode_id + 1:08d}", record)
+        save_episode_videos(
+            result_dir, state, arena_name, score, record, best_score_per_arena, args
+        )
 
         state.episode_id += 1
         save_train_state(result_dir, state, env, best_score_per_arena)
@@ -535,8 +545,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
 
     final_evaluation(args, agent, network, env, seed, state.global_step, result_dir)
 
-    if log_episode_file is not None:
-        log_episode_file.close()
+    episode_table.close()
     wandb.finish()
 
 

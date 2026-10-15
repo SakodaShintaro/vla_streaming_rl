@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Saving and loading the trainable weights, shared by every entry script."""
 
+import json
 from pathlib import Path
 
 import torch
@@ -67,3 +68,10 @@ def load_checkpoint_weights(checkpoint_path: Path, network: torch.nn.Module) -> 
         f"network buffers not found in the checkpoint: {missing_buffers[:5]}"
     )
     print(f"Loaded {len(trainable_state)} weight tensors from {checkpoint_path}")
+
+
+def load_global_step(run_dir: Path) -> int:
+    """The training step the checkpoint was written at, from train_state.json."""
+    train_state_path = run_dir / "train_state.json"
+    assert train_state_path.exists(), f"{train_state_path} not found"
+    return int(json.loads(train_state_path.read_text())["global_step"])

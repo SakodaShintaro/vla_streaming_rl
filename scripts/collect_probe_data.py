@@ -11,10 +11,9 @@ import imageio
 import numpy as np
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from test_trained_agent import load_global_step
 
 from vla_streaming_rl.agents.build import build_all
-from vla_streaming_rl.checkpoint import load_checkpoint_weights
+from vla_streaming_rl.checkpoint import load_checkpoint_weights, load_global_step
 from vla_streaming_rl.script_setup import resolve_seed, seed_everything
 from vla_streaming_rl.utils import render_frame
 from vla_streaming_rl.wrappers import make_env

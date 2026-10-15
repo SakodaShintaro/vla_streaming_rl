@@ -27,6 +27,7 @@ from vla_streaming_rl.agents.base import (
     CONVERSATION_PANEL_HEIGHT,
     CONVERSATION_PANEL_WIDTH,
     Agent,
+    EpisodeEndResult,
     StepResult,
 )
 from vla_streaming_rl.agents.prompt import PromptBuilder
@@ -161,10 +162,17 @@ class OffPolicyAgent(Agent):
         step_result.metrics.update(train_metrics)
         return step_result
 
-    def on_episode_end(self, score: float) -> dict:
+    def on_episode_end(self, score: float) -> EpisodeEndResult:
+        if self.normalizing_by_return:
+            self.reward_processor.update(score)
         # 終わったエピソードを振り返らせて、そのタスクの次回のプロンプトを書き直す
-        rewritten = self.use_reflection and self.prompt_builder.reflect(score, self.network.answer)
-        return {"reflection/rewritten": float(rewritten)}
+        instruction = (
+            self.prompt_builder.reflect(score, self.network.answer) if self.use_reflection else None
+        )
+        return EpisodeEndResult(
+            metrics={"reflection/rewritten": float(instruction is not None)},
+            rewritten_instruction=instruction,
+        )
 
     def optimizer_state_dict(self) -> dict:
         return {

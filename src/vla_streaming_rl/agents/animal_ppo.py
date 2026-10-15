@@ -24,7 +24,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import Agent, StepResult
+from vla_streaming_rl.agents.base import Agent, EpisodeEndResult, StepResult
 from vla_streaming_rl.agents.prompt import PromptBuilder
 
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward /
@@ -279,9 +279,9 @@ class AnimalPPOAgent(Agent):
         self._previous_done = bool(terminated or truncated)
         return fresh
 
-    def on_episode_end(self, score: float) -> dict:
+    def on_episode_end(self, score: float) -> EpisodeEndResult:
         del score
-        return {}
+        return EpisodeEndResult(metrics={}, rewritten_instruction=None)
 
     def optimizer_state_dict(self) -> dict:
         return {"ppo": self.optimizer.state_dict()}

@@ -20,10 +20,43 @@ class EpisodeRecord:
     observations: list[np.ndarray]
     texts: list[dict[str, str]]
     xyzs: list[tuple[float, float, float]]
+    # 位置を記録するか。Animal-AI はアリーナの中の位置を毎ステップ出すが、出さない環境では
+    # xyzs は空のまま
+    log_position: bool
 
     @classmethod
-    def fresh(cls) -> "EpisodeRecord":
-        return cls(bgr_images=[], actions=[], rewards=[], observations=[], texts=[], xyzs=[])
+    def start(
+        cls, bgr_image: np.ndarray, obs: dict, texts: dict[str, str], reset_info: dict
+    ) -> "EpisodeRecord":
+        """リセット直後の描画と観測から、エピソードの記録を始める。"""
+        return cls(
+            bgr_images=[bgr_image],
+            actions=[],
+            rewards=[],
+            observations=[obs["image"].copy()],
+            texts=[texts],
+            xyzs=[],
+            log_position="agent_xyz" in reset_info,
+        )
+
+    def add_step(
+        self,
+        action: np.ndarray,
+        reward: float,
+        obs: dict,
+        info: dict,
+        bgr_image: np.ndarray,
+        texts: dict[str, str],
+    ) -> None:
+        """1ステップ分を足す。``action`` を取って ``reward`` と ``obs`` が返り、その観測に
+        エージェントが応えたあとの描画が ``bgr_image``。"""
+        self.actions.append(action.copy())
+        self.rewards.append(reward)
+        self.observations.append(obs["image"].copy())
+        if self.log_position:
+            self.xyzs.append(info["agent_xyz"])
+        self.bgr_images.append(bgr_image)
+        self.texts.append(texts)
 
 
 def save_episode_texts(episode_log_dir: Path, text_list: list[dict[str, str]]) -> None:
