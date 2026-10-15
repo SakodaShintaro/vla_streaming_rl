@@ -517,9 +517,12 @@ class TanhPolicy(nn.Module):
         log_std = self.fc_log_std(x).clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
         return HeadOutput(output=torch.cat([self.fc_mean(x), log_std], dim=-1), activation=x)
 
-    def _sample(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _sample(
+        self, state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """One reparameterized draw: the action chunk and its log density under
-        the squashed Gaussian.
+        the squashed Gaussian, with the Gaussian's mean and log standard
+        deviation it was drawn from.
 
         The correction for the squash is written as ``2 * (log 2 - u -
         softplus(-2u))`` rather than ``log(1 - tanh(u)^2)``, which underflows
@@ -536,10 +539,10 @@ class TanhPolicy(nn.Module):
             - 2.0 * (math.log(2.0) - pre_tanh - F.softplus(-2.0 * pre_tanh))
         ).sum(dim=-1)
         action = torch.tanh(pre_tanh).view(-1, self.horizon, self.action_dim)
-        return action, log_prob
+        return action, log_prob, mean, log_std
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
-        action, _ = self._sample(x)
+        action, _, _, _ = self._sample(x)
         return action
 
     def compute_actor_loss(
@@ -560,7 +563,7 @@ class TanhPolicy(nn.Module):
         del action_chunk
         if self.detach_state:
             state = state.detach()
-        action, log_prob = self._sample(state)
+        action, log_prob, mean, log_std = self._sample(state)
 
         with torch.no_grad():
             self.log_temperature += self.temperature_lr * (log_prob.mean() + self.target_entropy)
@@ -580,5 +583,20 @@ class TanhPolicy(nn.Module):
             "advantage": advantage.mean().item(),
             "entropy": -log_prob.mean().item(),
             "temperature": temperature.item(),
+            **self._distribution_report(mean.detach(), log_std.detach()),
         }
         return actor_loss, info_dict
+
+    def _distribution_report(self, mean: torch.Tensor, log_std: torch.Tensor) -> dict:
+        """方策の分布が行動空間のどこに寄っているか。行動の成分ごとの tanh(平均) のバッチ
+        平均、標準偏差、tanh(平均) が端（絶対値 0.95 超）に張り付いている割合。"""
+        squashed_mean = torch.tanh(mean).view(-1, self.horizon, self.action_dim)
+        std = log_std.exp().view(-1, self.horizon, self.action_dim)
+        return {
+            **{
+                f"policy_mean_{i}": squashed_mean[..., i].mean().item()
+                for i in range(self.action_dim)
+            },
+            **{f"policy_std_{i}": std[..., i].mean().item() for i in range(self.action_dim)},
+            "policy_saturation": (squashed_mean.abs() > 0.95).float().mean().item(),
+        }

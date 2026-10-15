@@ -227,6 +227,8 @@ class Agent(ABC):
         metrics = {
             "shaped_reward": shaped_reward,
             "action_norm": float(np.linalg.norm(self.prev_action)),
+            # 前のステップに実行した行動の成分ごとの値。偏りを見る
+            **{f"action_{i}": float(value) for i, value in enumerate(self.prev_action)},
             "processed_reward": self.reward_scaler.normalize(torch.tensor(shaped_reward)).item(),
         }
 
