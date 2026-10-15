@@ -160,14 +160,9 @@ ANIMALAI_FRAMING = (
     "ones are bright yellow and the episode goes on after touching them. Red "
     "spheres and red zones are penalties that end the episode as a failure, never "
     "touch them. "
-    "A sphere's reward equals its size: between goals the bigger one is worth "
-    "more, and a bigger red sphere costs more. "
-    "Walls are never the goal, whatever their color. "
-    "Turn until the target is at the center of the view, then move forward in "
-    "bursts short enough to keep it centered, turning to re-center it whenever "
-    "it drifts. A target that slips out of view is usually right beside or "
-    "behind you: turn back to that same target rather than switching to "
-    "another. Move to a new spot only if a full turn shows nothing. "
+    "A sphere's reward equals its size: between goals the bigger one is worth more. "
+    "Turn until the target is at the center of the view, then move forward "
+    "with keeping it centered."
 )
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
@@ -194,20 +189,6 @@ ANIMALAI_INSTRUCTION_CHARS_MAX = 500
 
 
 def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: float) -> str:
-    """Animal-AI's live scalars: the numbers the frame cannot show.
-
-    The forward speed is the average over the steps since the last answer
-    rather than this tick's own: an action of fewer steps than the interval has
-    run out by the time the next answer is asked for, so the speed at that
-    moment reads 0 whether the move got somewhere or not.
-
-    Read off the observation the network's scalar branch is fed, cut down to
-    what a reply can act on: of the three velocity components only the forward
-    one, since a model handed all three reads the vector as motion the animal
-    cannot have -- it reported flying and ascending off a standing still frame.
-    The lateral and vertical components still reach the policy through the
-    scalar branch. These are what the env reports, not how the run frames it.
-    """
     return (
         f"Average forward speed since your last answer: {average_forward_speed:+.2f}. "
         f"Reward: {reward:+.3f}. "
@@ -221,15 +202,6 @@ def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: fl
 
 
 class AnimalAIPromptBuilder(PromptBuilder):
-    """Animal-AI: the framing, this arena's own instruction, and the live
-    scalars.
-
-    Every task's instruction starts empty and is written by
-    :meth:`reflect`, so what the prompt says about a task is only what the
-    run's own episodes taught it, keyed by the "XX-YY" prefix of the episode's
-    arena name.
-    """
-
     def __init__(self, env: Env, thinking_interval: int) -> None:
         super().__init__(env, thinking_interval)
         self.tasks = {arena.task: "" for arena in env.unwrapped.selector.arenas}
@@ -280,12 +252,6 @@ class AnimalAIPromptBuilder(PromptBuilder):
         return f"{ANIMALAI_FRAMING} {self._action_format()} {task_sentence}{self._protocol()}"
 
     def reflect(self, score: float, answer) -> str | None:
-        """The Animal-AI rewrite: on every ended episode, ask the model, over
-        the episode's own conversation, to rewrite this task's instruction, and
-        keep the rewrite for every later episode of the task. A failure
-        distills what to change, a success what to hold on to. A reply that is
-        empty or would bloat the standing prompt leaves the instruction as it
-        was."""
         if self._task_key == "":
             return None
         request = ANIMALAI_REFLECTION_REQUEST.format(
