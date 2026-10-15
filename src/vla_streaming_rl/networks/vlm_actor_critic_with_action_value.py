@@ -243,7 +243,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         chain, exchange = self._write_reply(frame, system_text, turn_text, step)
         representation = self._pool_states(chain.states)
         state = self._state(representation.unsqueeze(0))
-        head_action, _ = self.policy_head.get_action(state)
+        head_action = self.policy_head.get_action(state)
         critic_out = self.value_head(state, head_action)
         vlm_action, parsed, answer = self._text_action(chain.text, head_action)
         q_head = self.value_head.scalar_value(state, head_action).item()
@@ -330,7 +330,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         # 行動から行動価値で選んだもの
         with torch.inference_mode():
             next_state = self._state(next_representation)
-            next_action, _ = self.policy_head.get_action(next_state)
+            next_action = self.policy_head.get_action(next_state)
             vlm_action = next_reply_actions.unsqueeze(1).expand(-1, self.horizon, -1)
             q_head = self.value_head.scalar_value(next_state, next_action)
             q_vlm = self.value_head.scalar_value(next_state, vlm_action)

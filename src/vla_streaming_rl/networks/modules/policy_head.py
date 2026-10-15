@@ -133,23 +133,15 @@ class DiffusionPolicy(nn.Module):
         x = torch.tanh(x)
         return HeadOutput(output=x, activation=activation)
 
-    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
         bs = x.size(0)
         noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
 
-        # Capture the penultimate feature of the final denoising step as the
-        # actor representation.
-        activations = []
-
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            head_out = self.forward(x_flat, t, x)
-            activations.append(head_out.activation)
-            return head_out.output.view(bs, self.horizon, self.action_dim)
+            return self.forward(x_flat, t, x).output.view(bs, self.horizon, self.action_dim)
 
-        action = _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
-
-        return action, activations[-1]
+        return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
     def compute_actor_loss(
         self,
@@ -164,7 +156,7 @@ class DiffusionPolicy(nn.Module):
         del action_chunk
         if self.detach_state:
             state = state.detach()
-        action, _ = self.get_action(state)
+        action = self.get_action(state)
         B, horizon, action_dim = action.shape
         device = action.device
 
@@ -287,7 +279,7 @@ class CFGDiffusionPolicy(nn.Module):
         x = torch.tanh(x)
         return HeadOutput(output=x, activation=activation)
 
-    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
         """
         Inference using CFG.
 
@@ -302,21 +294,14 @@ class CFGDiffusionPolicy(nn.Module):
         cond_positive = torch.ones((bs,), dtype=torch.long, device=device)
         cond_uncond = torch.full((bs,), 2, dtype=torch.long, device=device)
 
-        # Capture the positive-conditioned feature of the final denoising step
-        # as the actor representation.
-        activations = []
-
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            pos = self.forward(x_flat, t, x, cond_positive)
+            out_pos = self.forward(x_flat, t, x, cond_positive).output
             out_unc = self.forward(x_flat, t, x, cond_uncond).output
-            activations.append(pos.activation)
-            out = (1 - self.cfgrl_beta) * out_unc + self.cfgrl_beta * pos.output
+            out = (1 - self.cfgrl_beta) * out_unc + self.cfgrl_beta * out_pos
             return out.view(bs, self.horizon, self.action_dim)
 
-        action = _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
-
-        return action, activations[-1]
+        return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
     def compute_actor_loss(
         self,
@@ -411,12 +396,10 @@ class IMLEPolicy(nn.Module):
         x = torch.tanh(x)
         return HeadOutput(output=x, activation=activation)
 
-    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
         bs = x.size(0)
         z = torch.randn(bs, self.horizon * self.action_dim, device=x.device)
-        head_out = self.forward(z, x)
-        action = head_out.output.view(bs, self.horizon, self.action_dim)
-        return action, head_out.activation
+        return self.forward(z, x).output.view(bs, self.horizon, self.action_dim)
 
     def compute_actor_loss(
         self,
@@ -534,9 +517,9 @@ class TanhPolicy(nn.Module):
         log_std = self.fc_log_std(x).clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
         return HeadOutput(output=torch.cat([self.fc_mean(x), log_std], dim=-1), activation=x)
 
-    def _sample(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """One reparameterized draw: the action chunk, its log density under the
-        squashed Gaussian, and the penultimate feature.
+    def _sample(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """One reparameterized draw: the action chunk and its log density under
+        the squashed Gaussian.
 
         The correction for the squash is written as ``2 * (log 2 - u -
         softplus(-2u))`` rather than ``log(1 - tanh(u)^2)``, which underflows
@@ -553,11 +536,11 @@ class TanhPolicy(nn.Module):
             - 2.0 * (math.log(2.0) - pre_tanh - F.softplus(-2.0 * pre_tanh))
         ).sum(dim=-1)
         action = torch.tanh(pre_tanh).view(-1, self.horizon, self.action_dim)
-        return action, log_prob, head_out.activation
+        return action, log_prob
 
-    def get_action(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        action, _, activation = self._sample(x)
-        return action, activation
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+        action, _ = self._sample(x)
+        return action
 
     def compute_actor_loss(
         self,
@@ -577,7 +560,7 @@ class TanhPolicy(nn.Module):
         del action_chunk
         if self.detach_state:
             state = state.detach()
-        action, log_prob, _ = self._sample(state)
+        action, log_prob = self._sample(state)
 
         with torch.no_grad():
             self.log_temperature += self.temperature_lr * (log_prob.mean() + self.target_entropy)

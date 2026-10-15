@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -19,6 +20,21 @@ from vla_streaming_rl.networks.modules.running_normalizer import RunningNormaliz
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 from vla_streaming_rl.scalar_obs import SCALAR_OBS_DIM
+
+
+@dataclass
+class LossTerms:
+    """リプレイバッチ1つ分の損失と、それを計算する途中で得た次状態での推論結果。"""
+
+    total_loss: torch.Tensor
+    actor_loss: torch.Tensor
+    info: dict
+    state: torch.Tensor
+    action_chunk: torch.Tensor
+    next_state: torch.Tensor
+    next_rnn_state: torch.Tensor
+    next_action: torch.Tensor
+    next_critic_output: torch.Tensor
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -169,7 +185,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         )  # (B, state_dim)
 
         # Get action chunk from policy_head
-        action, _ = self.policy_head.get_action(x)  # (B, horizon, action_dim)
+        action = self.policy_head.get_action(x)  # (B, horizon, action_dim)
 
         # Get action-value from value_head
         q_out = self.value_head(x, action)
@@ -210,42 +226,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
-        # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
-        # ターゲットは観測を落とさない次状態から作る
-        with torch.no_grad():
-            next_state, _ = self.encoder(*self._window(data, self.horizon, None, 0))
-            next_action, _ = self.policy_head.get_action(next_state)
-            next_output = self.value_head(next_state, next_action).output
-        chunk_rewards = data.rewards[:, -self.horizon :]
-        chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self.value_head.compute_target_value(next_output, chunk_rewards, chunk_dones)
-
-        # Use seq_len frames (excluding last horizon frames)
-        curr_state, _ = self.encoder(
-            *self._window(data, 0, -self.horizon, self.observation_drop_steps_max)
-        )
-
-        # Action chunk: (B, horizon, action_dim)
-        action_chunk = data.actions[:, -self.horizon :]
-
-        critic_loss, critic_info = self.value_head.compute_critic_loss(
-            curr_state, action_chunk, target_value
-        )
-        actor_loss, actor_info = self.policy_head.compute_actor_loss(
-            curr_state,
-            action_chunk,
-            value_head=self.value_head,
-        )
-        seq_loss, seq_info = self._prediction_loss(curr_state, data)
-
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
-
-        info_dict = {
-            f"losses/{key}": value
-            for key, value in {**critic_info, **actor_info, **seq_info}.items()
-        }
-
-        return LossResult(loss=total_loss, info=info_dict)
+        terms = self._loss_terms(data)
+        return LossResult(loss=terms.total_loss, info=terms.info)
 
     def infer_and_compute_loss(
         self, data: ReplayBufferData, frame: torch.Tensor, system_text: str, turn_text: str
@@ -253,48 +235,16 @@ class ActorCriticWithActionValue(NetworkInterface):
         """Combined inference and loss computation."""
         # 画像はバッファの窓から読むので、このステップの生の画像は使わない
         del frame, system_text, turn_text
-        # Next-step inference (no grad): the action the agent will take and its Q.
-        with torch.no_grad():
-            next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None, 0))
-            next_action, _ = self.policy_head.get_action(next_state)
-            next_q_out = self.value_head(next_state, next_action)
-        chunk_rewards = data.rewards[:, -self.horizon :]
-        chunk_dones = data.dones[:, -self.horizon :]
-        target_value = self.value_head.compute_target_value(
-            next_q_out.output, chunk_rewards, chunk_dones
-        )
-
-        prev_state, _ = self.encoder(
-            *self._window(data, 0, -self.horizon, self.observation_drop_steps_max)
-        )
-
-        action_chunk = data.actions[:, -self.horizon :]
-
-        critic_loss, critic_info = self.value_head.compute_critic_loss(
-            prev_state, action_chunk, target_value
-        )
-        actor_loss, actor_info = self.policy_head.compute_actor_loss(
-            prev_state,
-            action_chunk,
-            value_head=self.value_head,
-        )
-        seq_loss, seq_info = self._prediction_loss(prev_state, data)
-
-        total_loss = self.critic_loss_weight * critic_loss + actor_loss + seq_loss
-
-        # Actor-only loss (no critic component)
-        actor_entropy_loss = actor_loss + seq_loss
-
+        terms = self._loss_terms(data)
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
-            prev_state.detach(), action_chunk.detach()
+            terms.state.detach(), terms.action_chunk.detach()
         ).mean()
-
         infer_result = InferResult(
-            action=next_action,
-            value_report=self.value_head.value_report(next_q_out.output),
-            rnn_state=next_rnn_state,
-            features=next_state,
+            action=terms.next_action,
+            value_report=self.value_head.value_report(terms.next_critic_output),
+            rnn_state=terms.next_rnn_state,
+            features=terms.next_state,
             stored_state=None,
             text=None,
             text_status=None,
@@ -303,20 +253,54 @@ class ActorCriticWithActionValue(NetworkInterface):
             selection_status=None,
             selection_rows=None,
         )
+        return InferLossResult(
+            infer_result=infer_result,
+            loss_result=LossResult(loss=terms.total_loss, info=terms.info),
+            et_info=EligibilityTraceInfo(
+                # Actor-only loss (no critic component)
+                actor_entropy_loss=terms.actor_loss,
+                neg_value=neg_value_detached,
+                delta=terms.info["losses/delta"],
+            ),
+        )
 
-        info_dict = {
+    def _loss_terms(self, data: ReplayBufferData) -> LossTerms:
+        """リプレイバッチの損失。現在の状態はチャンクの手前までの窓から、次の状態は
+        チャンクの分だけ進めた窓から作る。"""
+        # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
+        # ターゲットは観測を落とさない次状態から作る
+        with torch.no_grad():
+            next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None, 0))
+            next_action = self.policy_head.get_action(next_state)
+            next_critic_output = self.value_head(next_state, next_action).output
+        target_value = self.value_head.compute_target_value(
+            next_critic_output, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
+        )
+
+        state, _ = self.encoder(
+            *self._window(data, 0, -self.horizon, self.observation_drop_steps_max)
+        )
+        action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
+        critic_loss, critic_info = self.value_head.compute_critic_loss(
+            state, action_chunk, target_value
+        )
+        actor_loss, actor_info = self.policy_head.compute_actor_loss(
+            state, action_chunk, value_head=self.value_head
+        )
+        seq_loss, seq_info = self._prediction_loss(state, data)
+        info = {
             f"losses/{key}": value
             for key, value in {**critic_info, **actor_info, **seq_info}.items()
         }
-
-        et_info = EligibilityTraceInfo(
-            actor_entropy_loss=actor_entropy_loss,
-            neg_value=neg_value_detached,
-            delta=critic_info["delta"],
-        )
-
-        return InferLossResult(
-            infer_result=infer_result,
-            loss_result=LossResult(loss=total_loss, info=info_dict),
-            et_info=et_info,
+        return LossTerms(
+            total_loss=self.critic_loss_weight * critic_loss + actor_loss + seq_loss,
+            # 次状態の予測の損失は actor 側に入れる
+            actor_loss=actor_loss + seq_loss,
+            info=info,
+            state=state,
+            action_chunk=action_chunk,
+            next_state=next_state,
+            next_rnn_state=next_rnn_state,
+            next_action=next_action,
+            next_critic_output=next_critic_output,
         )
