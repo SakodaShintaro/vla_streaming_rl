@@ -1,7 +1,10 @@
 # @package _global_
 defaults:
-  - vlm_off_policy
+  - base/network
   - _self_
 
-vla:
-  select_margin: 0.0
+agent_type: off_policy
+network_class: vlm_actor_critic_with_action_value
+batch_size: 16
+actor_lr: 1e-5
+critic_lr: 1e-5
