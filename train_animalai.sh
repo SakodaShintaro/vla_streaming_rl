@@ -31,7 +31,6 @@ export DISPLAY
 case ${difficulty} in
   easy)
     difficulty_overrides=(
-      'env_factory.mode=sequential'
       'env_factory.train_levels=["01"]'
       'env_factory.train_variant="01"'
       # level 01 の 30 アリーナをそれぞれ 10 回ずつ回す量

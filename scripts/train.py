@@ -76,8 +76,7 @@ def write_git_info(result_dir: Path) -> None:
 def write_arena_stats(path: Path, curriculum: dict, best_score_per_arena: dict) -> None:
     """Per-arena record (attempts / successes / success rate / best score).
 
-    `cleared` is the arena selector's own verdict, which depends on the mode:
-    one pass is enough for most, while "success" wants a repeatable pass rate.
+    `cleared` is the arena selector's own verdict: passed at least once.
 
     Human-readable, and also read back by ``load_resume_state`` on resume."""
     attempts = curriculum["arena_attempts"]
@@ -226,7 +225,7 @@ def build_episode_log(
         if arena_name:
             data_dict[f"success/{arena_name}"] = success
             data_dict[f"episodic_return/{arena_name}"] = score
-        if mode in ("success", "sequential", "random"):
+        if mode in ("sequential", "random"):
             data_dict["cleared_count"] = env_info["cleared_count"]
             data_dict["round_index"] = env_info["round_index"]
             data_dict["round_success_rate"] = env_info["round_success_rate"]
@@ -235,9 +234,6 @@ def build_episode_log(
                 data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
                 for level, rate in env_info["last_round_level_success_rate"].items():
                     data_dict[f"last_round_success_rate/{level}"] = rate
-        if mode == "success":
-            data_dict["stage"] = env_info["stage"]
-            data_dict["advanced"] = float(env_info["advanced"])
     if len(state.score_list) >= eval_range:
         data_dict["recent_average_score"] = float(np.mean(state.score_list))
     return data_dict

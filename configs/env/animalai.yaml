@@ -1,7 +1,7 @@
 # @package _global_
 env_id: AnimalAI-v0
-# Only bounds the training modes, which never run out ("staged", "success",
-# "sequential", "random"). "eval" instead ends when its arena order has run out,
+# Only bounds the training modes, which never run out ("staged", "sequential",
+# "random"). "eval" instead ends when its arena order has run out,
 # which the env reports as `is_exhausted`.
 # For "staged": stages 1-10 take steps_per_stage each and stage 11 runs out the
 # remainder, so the paper's 2M x 10 + 5M = 25M is step_limit == 12.5 x
@@ -19,10 +19,6 @@ env_factory:
   #     staged  : train with the Animal-AI paper's cumulative 11-stage
   #               curriculum, one stage per competition level, drawing
   #               uniformly from the arenas the stage has unlocked.
-  #     success : one stage per level, advanced by clearing a round of it --
-  #               the stage's whole pool drawn without replacement, then the
-  #               next stage if the round's success rate reached
-  #               advance_success_rate (steps_per_stage is ignored).
   #     sequential : no curriculum. The whole training set in laps, each lap
   #               in label order (steps_per_stage is ignored).
   #     random  : no curriculum. The whole training set in laps, each lap a
@@ -34,7 +30,7 @@ env_factory:
   #   Training and eval overlap on purpose: eval is the fixed 900-arena
   #   benchmark and the trained variant is part of it, so test_result.tsv also
   #   reports the score over the arenas no training episode has seen.
-  mode: random
+  mode: sequential
   # - train_variant: which of a task's three variants the training modes use.
   #   Competition arenas are named XX-YY-ZZ (level-task-variant), so this picks
   #   one arena per task: 300 arenas, 30 per level. "eval" ignores it and
@@ -53,11 +49,6 @@ env_factory:
   eval_variants: ["01"]
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 20_000
-  # - advance_success_rate ("success"): the share of a round that has to be
-  #   passed for the next stage to open. Pools are cumulative, so a round is 30
-  #   arenas at stage 1 and 60 at stage 2; at 1.0 that is 30 then 60 straight
-  #   passes. A round below the rate repeats the stage with a fresh draw order.
-  advance_success_rate: 0.6
   binary_path: ~/animalai_env/4.3.2_alpha3/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
   #     false : discretize to the official MultiDiscrete([3, 3]) branches with a
