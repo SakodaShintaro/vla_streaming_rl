@@ -14,14 +14,14 @@ field (see `build_selector`):
               300) drawn without replacement, then the next stage if the
               round's success rate reached `advance_success_rate`
               (`RoundSelector`).
-  - "sequential" no curriculum: every training arena once, in label order,
-              then the run ends (`SequentialSelector`, not cycling).
+  - "sequential" no curriculum: the whole training set in laps, each lap in
+              label order (`RoundSelector`).
   - "random"  no curriculum: the whole training set in laps, each lap a fresh
               shuffle drawn without replacement (`RoundSelector`).
   - "eval"    every configs/competition/ arena of `eval_levels` and
               `eval_variants` once, in order -- with every level and variant,
-              the 900-arena Testbed sweep (the same `SequentialSelector`, not
-              cycling, so it ends).
+              the 900-arena Testbed sweep (`SequentialSelector`, which ends
+              after one pass).
 
 Every arena comes from configs/competition/, whose files are named
 XX-YY-ZZ.yaml for level, task and variant. Each of the 300 tasks ships three
@@ -407,16 +407,23 @@ class RoundSelector(ArenaSelector):
     60 at stage 2 and so on up to 300, and nothing already learned is dropped.
     At the default rate of 1.0 stage 2 therefore asks for 60 straight passes.
 
-    With a single stage (the "random" mode: the whole training set) there is
-    nothing to advance to, so the rounds are laps over the full set -- the
-    curriculum-free baseline the staged modes are compared against. Either way
-    the selector runs until train.py's step_limit ends the run.
+    With a single stage (the "sequential" and "random" modes: the whole training
+    set) there is nothing to advance to, so the rounds are laps over the full
+    set -- the curriculum-free baseline the staged modes are compared against.
+    Either way the selector runs until train.py's episode_limit or step_limit
+    ends the run.
+
+    `shuffle` は周の中の並べ方で、True なら毎周シャッフルし、False ならプールの並び順
+    （ラベル順）のまま回す。
     """
 
-    def __init__(self, stages: list[list[Arena]], advance_success_rate: float, seed: int):
+    def __init__(
+        self, stages: list[list[Arena]], advance_success_rate: float, shuffle: bool, seed: int
+    ):
         super().__init__(stages[-1])
         self._stages = stages
         self.advance_success_rate = advance_success_rate
+        self.shuffle = shuffle
         self._rng = np.random.default_rng(seed)
         self._stage = 0
         self._queue: list[str] = []
@@ -440,8 +447,10 @@ class RoundSelector(ArenaSelector):
         episode the caller abandons still moves the round along."""
         if not self._queue:
             names = [arena.name for arena in self._stages[self._stage]]
-            order = self._rng.permutation(len(names))
-            self._queue = [names[int(i)] for i in order]
+            if self.shuffle:
+                order = self._rng.permutation(len(names))
+                names = [names[int(i)] for i in order]
+            self._queue = names
         return self._arena_by_name[self._queue.pop(0)]
 
     def on_episode_end(self, arena: Arena, success: bool) -> None:
@@ -536,26 +545,20 @@ class RoundSelector(ArenaSelector):
 
 
 class SequentialSelector(ArenaSelector):
-    """Every arena of `arenas` in label order.
+    """Every arena of `arenas` once, in label order, then `is_exhausted`.
 
-    `cycle` is what separates the two ways this is used:
-
-      - False: one pass, then `is_exhausted`. Over the whole competition set
-        this is the paper's Testbed protocol -- one episode per arena, pass/fail
-        by that arena's pass mark (scripts/test_trained_agent.py loops until
-        exhausted).
-      - True: wrap back to the first arena instead of ending, so the set is
-        replayed until train.py's step_limit stops the run.
+    Over the whole competition set this is the paper's Testbed protocol -- one
+    episode per arena, pass/fail by that arena's pass mark
+    (scripts/test_trained_agent.py loops until exhausted).
     """
 
-    def __init__(self, arenas: list[Arena], cycle: bool):
+    def __init__(self, arenas: list[Arena]):
         super().__init__(arenas)
-        self.cycle = cycle
         self._next_index = 0
 
     @property
     def is_exhausted(self) -> bool:
-        return not self.cycle and self._next_index >= len(self.arenas)
+        return self._next_index >= len(self.arenas)
 
     def next_arena(self, global_step: int) -> Arena:
         arena = self.arenas[self._next_index % len(self.arenas)]
@@ -611,23 +614,24 @@ def build_selector(
         "success": lambda: RoundSelector(
             stages=_cumulative_stages(train_variant),
             advance_success_rate=advance_success_rate,
+            shuffle=True,
             seed=seed,
         ),
-        # One pass and done: the curriculum-free sweep is a measurement of the
-        # training set, so a second lap over the same arenas would only mix
-        # repeats into the score.
-        "sequential": lambda: SequentialSelector(
-            arenas=_training_arenas(train_variant, train_levels), cycle=False
+        # random と同じく学習用セット全体を周回し、周の中だけラベル順に回す
+        "sequential": lambda: RoundSelector(
+            stages=[_training_arenas(train_variant, train_levels)],
+            advance_success_rate=advance_success_rate,
+            shuffle=False,
+            seed=seed,
         ),
         # 段階が1つしかないので、advance_success_rate によらず進むことはない
         "random": lambda: RoundSelector(
             stages=[_training_arenas(train_variant, train_levels)],
             advance_success_rate=advance_success_rate,
+            shuffle=True,
             seed=seed,
         ),
-        "eval": lambda: SequentialSelector(
-            arenas=_eval_arenas(eval_levels, eval_variants), cycle=False
-        ),
+        "eval": lambda: SequentialSelector(arenas=_eval_arenas(eval_levels, eval_variants)),
     }
     assert mode in builders, f"unknown Animal-AI mode {mode!r}; expected one of {sorted(builders)}"
     return builders[mode]()

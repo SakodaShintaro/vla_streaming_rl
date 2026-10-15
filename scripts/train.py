@@ -226,7 +226,7 @@ def build_episode_log(
         if arena_name:
             data_dict[f"success/{arena_name}"] = success
             data_dict[f"episodic_return/{arena_name}"] = score
-        if mode in ("success", "random"):
+        if mode in ("success", "sequential", "random"):
             data_dict["cleared_count"] = env_info["cleared_count"]
             data_dict["round_index"] = env_info["round_index"]
             data_dict["round_success_rate"] = env_info["round_success_rate"]
@@ -421,7 +421,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
     action = np.zeros(env.action_space.shape, dtype=np.float32)
     while True:
         # Stop when the env has dispensed every scenario in a fixed playlist:
-        # Animal-AI's "sequential" and "eval" arena orders, Bench2Drive220's
+        # Animal-AI's "eval" arena order, Bench2Drive220's
         # sequential runtime. An env with no finite playlist does not publish
         # the flag and is left to episode_limit / step_limit.
         if getattr(env.unwrapped, "is_exhausted", False):

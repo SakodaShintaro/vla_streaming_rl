@@ -168,8 +168,8 @@ class AnimalAIEnv(gym.Env):
     @property
     def is_exhausted(self) -> bool:
         """Whether the selector has served its whole playlist, which is what ends
-        a run over a finite arena order ("sequential", "eval"). The modes that
-        never run out answer False forever and leave the run to `step_limit`."""
+        a run over a finite arena order ("eval"). The modes that never run out
+        answer False forever and leave the run to `episode_limit` / `step_limit`."""
         return self.selector.is_exhausted
 
     def set_global_step(self, global_step: int) -> None:
