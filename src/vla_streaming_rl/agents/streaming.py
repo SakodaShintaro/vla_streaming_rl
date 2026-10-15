@@ -9,25 +9,19 @@ trace across ticks and is reset on episode boundaries.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the off-policy
-half is ``off_policy.py``. The two share no base beyond :class:`Agent`, which
-costs some repetition in the per-tick path and buys each mode being readable
-end to end in one file.
+half is ``off_policy.py``. The per-tick flow both share lives in :class:`Agent`.
 """
 
 from typing import Any
 
 import gymnasium as gym
-import numpy as np
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import Agent, EpisodeEndResult, StepResult
+from vla_streaming_rl.agents.base import Agent, StepResult, split_actor_critic_params
 from vla_streaming_rl.agents.prompt import PromptBuilder
-from vla_streaming_rl.networks.interface import InferInput, InferResult
+from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
-from vla_streaming_rl.replay_buffer import ReplayBuffer
-from vla_streaming_rl.reward_scaler import RewardScaler
-from vla_streaming_rl.scalar_obs import read_scalar_obs
 
 
 class StreamingAgent(Agent):
@@ -51,75 +45,33 @@ class StreamingAgent(Agent):
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
     ) -> None:
-        super().__init__(
-            horizon=horizon,
-            reset_on_episode_end=reset_on_episode_end,
-            prompt_builder=prompt_builder,
-        )
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # action properties
-        self.action_space = action_space
-        self.action_dim = np.prod(action_space.shape)
-        self.action_low = action_space.low
-        self.action_high = action_space.high
-        self.action_scale = (action_space.high - action_space.low) / 2.0
-        self.action_bias = (action_space.high + action_space.low) / 2.0
-        self.reward_scaler = RewardScaler()
-        self.normalizing_by_return = normalizing_by_return
-
-        self.max_grad_norm = max_grad_norm
-        self.use_done = use_done
-
-        # Sequence observation management
-        self.seq_len = seq_len
-
-        # Action chunking state
-        self.action_chunk = None  # (horizon, action_dim) - current action chunk
-        self.chunk_step = 0  # current step within chunk
-
-        self.network = network
-        self.rnn_state = self.network.init_state().to(self.device)
-
         # Actor / critic optimizer split (critic == value head). The critic uses
         # AdamET (eligibility traces) when the trace is on, AdamW otherwise; the
         # actor is always AdamW.
-        self.use_eligibility_trace = bool(use_eligibility_trace)
-        critic_params = list(self.network.value_head.parameters())
-        critic_param_ids = {id(p) for p in critic_params}
-        actor_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]
-        self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
-        if self.use_eligibility_trace:
-            self.critic_optimizer = AdamET(
-                critic_params, lr=critic_lr, gamma=gamma, et_lambda=et_lambda
-            )
-        else:
-            self.critic_optimizer = optim.AdamW(
-                critic_params, lr=critic_lr, weight_decay=weight_decay
-            )
-
-        # Only the one window the update trains on is kept.
-        self.rb = ReplayBuffer(
-            size=seq_len + horizon,
-            seq_len=self.seq_len + self.horizon,
-            horizon=self.horizon,
-            obs_shape=self.network.stored_image_shape(),
-            rnn_state_shape=self.rnn_state.squeeze(0).shape,
-            action_shape=action_space.shape,
-            state_shape=self.network.stored_state_shape(),
-            output_device=self.device,
-            storage_device=torch.device(buffer_device),
+        actor_params, critic_params = split_actor_critic_params(network)
+        super().__init__(
+            action_space=action_space,
+            network=network,
+            prompt_builder=prompt_builder,
+            actor_optimizer=optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay),
+            critic_optimizer=(
+                AdamET(critic_params, lr=critic_lr, gamma=gamma, et_lambda=et_lambda)
+                if use_eligibility_trace
+                else optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay)
+            ),
+            # Only the one window the update trains on is kept.
+            buffer_size=seq_len + horizon,
+            buffer_device=buffer_device,
+            seq_len=seq_len,
+            horizon=horizon,
+            normalizing_by_return=normalizing_by_return,
+            use_done=use_done,
+            reset_on_episode_end=reset_on_episode_end,
         )
-
-        self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
+        self.max_grad_norm = max_grad_norm
+        self.use_eligibility_trace = use_eligibility_trace
+        # エピソードが終わったか。次の critic の更新で AdamET のトレースを切る
         self._episode_reset = False
-        # the first observation of a run starts an episode
-        self._previous_done = True
-        # Shared representation fed to policy/value/prediction heads on the
-        # most recent select_action inference (used by scripts/probe.py).
-        self.last_features: torch.Tensor | None = None
-
-    # --- agent surface -----------------------------------------------------
 
     def step(
         self,
@@ -130,60 +82,11 @@ class StreamingAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        del global_step
-        metrics = {}
-        episode_done = terminated or truncated
-        # A terminal observation still belongs to the episode that ended, so the
-        # conversation and the chain are dropped on the tick after it rather than
-        # on it -- the same boundary the rnn state resets on. Dropped on the
-        # terminal tick instead, the turn that tick then writes would be the one
-        # the next episode opens on.
-        episode_started = self._previous_done
-        # What the agent trains on, against what the env reported as its score.
-        shaped_reward = info["shaped_reward"]
-        metrics["shaped_reward"] = shaped_reward
-        self._reset_rnn_state_if_fresh(episode_done)
-        if episode_started:
-            self.prompt_builder.reset()
-            # A chunk begun on the terminal frame would otherwise run into the
-            # new episode; the first action of an episode comes from its own frame.
-            self.action_chunk = None
-            self.chunk_step = 0
-        if episode_done:
+        image, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
+        if terminated or truncated:
             self._episode_reset = self.use_done
-        metrics["action_norm"] = np.linalg.norm(self.prev_action)
-        if not self.normalizing_by_return:
-            self.reward_scaler.update(shaped_reward)
-        metrics["processed_reward"] = self.reward_scaler.normalize(
-            torch.tensor(shaped_reward)
-        ).item()
-        image, scalar_obs = self._preprocess(obs)
-        # The language this tick, composed from the env's state and never read off
-        # the observation.
-        self.prompt_builder.observe(obs, reward, info, self.prev_action)
-        prompt = self.prompt_builder.task_text()
-        normalized_action = (self.prev_action - self.action_bias) / self.action_scale
-        self.rb.add(
-            self.network.to_stored_image(image),
-            shaped_reward,
-            episode_done if self.use_done else False,
-            self.rnn_state.squeeze(0),
-            torch.from_numpy(normalized_action).to(self.device),
-            scalar_obs,
-        )
-        panels = {}
-        texts = {"prompt": prompt}
-        if self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self._to_env_action(self.action_chunk[self.chunk_step])
-            self.prev_action = action
-            self.chunk_step += 1
-            metrics["chunk_step"] = self.chunk_step
-            return StepResult(
-                action=action,
-                metrics=metrics,
-                panels=panels,
-                texts=texts,
-            )
+        if self._has_chunk_left():
+            return self._continue_chunk(metrics, prompt)
 
         # Right after an episode boundary the newest window spans two episodes:
         # its states come from both and its chunk carries actions the agent never
@@ -191,7 +94,7 @@ class StreamingAgent(Agent):
         # it, but a chunk still has to be started, so the tick acts without a
         # learning step.
         if not self.rb.latest_window_is_clean(self.seq_len + self.horizon):
-            return self._act(metrics, panels, texts, prompt, image)
+            return self._act(image, prompt, metrics, global_step)
 
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
@@ -200,17 +103,6 @@ class StreamingAgent(Agent):
         result = self.network.infer_and_compute_loss(
             data, image, prompt, self.prompt_builder.turn_text()
         )
-
-        infer_result = result.infer_result
-        self.rnn_state = infer_result.rnn_state
-        metrics.update(infer_result.value_report)
-        self._keep_network_outputs(infer_result)
-        action_chunk = infer_result.action[0].cpu().numpy()
-        self.action_chunk = action_chunk
-        self.chunk_step = 1
-        action = self._to_env_action(action_chunk[0])
-        self.prev_action = action
-        metrics["chunk_step"] = self.chunk_step
         metrics.update(result.loss_result.info)
 
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -230,23 +122,29 @@ class StreamingAgent(Agent):
             self.actor_optimizer.step()
             self.critic_optimizer.step()
 
-        return StepResult(
-            action=action,
-            metrics=metrics,
-            panels=panels,
-            texts=texts,
-        )
+        return self._start_chunk(result.infer_result, metrics, prompt, global_step)
 
-    def _act(
+    @torch.no_grad()
+    def select_action(
         self,
-        metrics: dict,
-        panels: dict[str, np.ndarray],
-        texts: dict[str, str],
-        prompt: str,
-        image: torch.Tensor,
+        global_step: int,
+        obs: dict[str, Any],
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        info: dict,
     ) -> StepResult:
-        """Start a chunk from the newest state window, with no learning step.
-        ``image`` is this tick's raw observation image."""
+        """Act without learning: the trainer calls this once per episode after
+        the reset, and the testbed calls it on every tick."""
+        image, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
+        if terminated or truncated:
+            self._episode_reset = self.use_done
+        if self._has_chunk_left():
+            return self._continue_chunk(metrics, prompt)
+        return self._act(image, prompt, metrics, global_step)
+
+    def _act(self, image: torch.Tensor, prompt: str, metrics: dict, global_step: int) -> StepResult:
+        """Start a chunk from the newest state window, with no learning step."""
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
             InferInput(
@@ -261,134 +159,4 @@ class StreamingAgent(Agent):
                 warmup=False,
             )
         )
-        self.rnn_state = infer_result.rnn_state
-        self.last_features = infer_result.features
-        metrics.update(infer_result.value_report)
-        self._keep_network_outputs(infer_result)
-        action_chunk = infer_result.action[0].cpu().numpy()
-        self.action_chunk = action_chunk
-        self.chunk_step = 1
-        action = self._to_env_action(action_chunk[0])
-        self.prev_action = action
-        metrics["chunk_step"] = self.chunk_step
-        return StepResult(
-            action=action,
-            metrics=metrics,
-            panels=panels,
-            texts=texts,
-        )
-
-    def _keep_network_outputs(self, infer_result: InferResult) -> None:
-        """ネットワークがこのステップに作った状態の元と返答が指す行動を、その行に残す。"""
-        if infer_result.stored_state is not None:
-            self.rb.set_latest_state(infer_result.stored_state)
-        if infer_result.text is not None:
-            self.rb.set_latest_reply_action(infer_result.reply_action)
-            self.prompt_builder.on_reply()
-
-    def on_episode_end(self, score: float) -> EpisodeEndResult:
-        if self.normalizing_by_return:
-            self.reward_scaler.update(score)
-        return EpisodeEndResult(metrics={}, rewritten_instruction=None)
-
-    def optimizer_state_dict(self) -> dict:
-        return {
-            "actor": self.actor_optimizer.state_dict(),
-            "critic": self.critic_optimizer.state_dict(),
-        }
-
-    def load_optimizer_state_dict(self, state: dict) -> None:
-        self.actor_optimizer.load_state_dict(state["actor"])
-        self.critic_optimizer.load_state_dict(state["critic"])
-
-    # --- per-tick machinery ------------------------------------------------
-
-    def _reset_rnn_state_if_fresh(self, episode_done: bool) -> None:
-        if self._previous_done and self.reset_on_episode_end:
-            self.rnn_state = self.network.init_state().to(self.device)
-        self._previous_done = episode_done
-
-    @torch.no_grad()
-    def select_action(
-        self,
-        global_step: int,
-        obs: dict[str, Any],
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        info: dict,
-    ) -> StepResult:
-        """Act without learning: the trainer calls this once per episode after
-        the reset, and the testbed calls it on every tick."""
-        del global_step
-        metrics = {}
-        episode_done = terminated or truncated
-        # A terminal observation still belongs to the episode that ended, so the
-        # conversation and the chain are dropped on the tick after it rather than
-        # on it -- the same boundary the rnn state resets on. Dropped on the
-        # terminal tick instead, the turn that tick then writes would be the one
-        # the next episode opens on.
-        episode_started = self._previous_done
-        # What the agent trains on, against what the env reported as its score.
-        shaped_reward = info["shaped_reward"]
-        metrics["shaped_reward"] = shaped_reward
-        self._reset_rnn_state_if_fresh(episode_done)
-        if episode_started:
-            self.prompt_builder.reset()
-            # A chunk begun on the terminal frame would otherwise run into the
-            # new episode; the first action of an episode comes from its own frame.
-            self.action_chunk = None
-            self.chunk_step = 0
-        if episode_done:
-            self._episode_reset = self.use_done
-        metrics["action_norm"] = np.linalg.norm(self.prev_action)
-        if not self.normalizing_by_return:
-            self.reward_scaler.update(shaped_reward)
-        metrics["processed_reward"] = self.reward_scaler.normalize(
-            torch.tensor(shaped_reward)
-        ).item()
-        image, scalar_obs = self._preprocess(obs)
-        # The language this tick, composed from the env's state and never read off
-        # the observation.
-        self.prompt_builder.observe(obs, reward, info, self.prev_action)
-        prompt = self.prompt_builder.task_text()
-        normalized_action = (self.prev_action - self.action_bias) / self.action_scale
-        self.rb.add(
-            self.network.to_stored_image(image),
-            shaped_reward,
-            episode_done if self.use_done else False,
-            self.rnn_state.squeeze(0),
-            torch.from_numpy(normalized_action).to(self.device),
-            scalar_obs,
-        )
-        panels = {}
-        texts = {"prompt": prompt}
-
-        if self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self._to_env_action(self.action_chunk[self.chunk_step])
-            self.prev_action = action
-            self.chunk_step += 1
-            metrics["chunk_step"] = self.chunk_step
-            return StepResult(
-                action=action,
-                metrics=metrics,
-                panels=panels,
-                texts=texts,
-            )
-
-        return self._act(metrics, panels, texts, prompt, image)
-
-    def _preprocess(self, obs: dict[str, Any]) -> tuple[torch.Tensor, np.ndarray]:
-        """Turn the raw observation into what the replay buffer stores this tick:
-        the image tensor and the raw scalar observations (the network updates
-        its running normalizer stats here)."""
-        image = torch.from_numpy(obs["image"]).to(self.device)
-        scalar_obs = read_scalar_obs(obs)
-        self.network.observe_scalar_obs(scalar_obs)
-        return image, scalar_obs
-
-    def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
-        """Map a single normalized policy action into the env's action space."""
-        return np.clip(
-            net_action * self.action_scale + self.action_bias, self.action_low, self.action_high
-        )
+        return self._start_chunk(infer_result, metrics, prompt, global_step)

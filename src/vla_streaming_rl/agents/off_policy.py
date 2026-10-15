@@ -11,37 +11,26 @@ output while the network's recurrent state still follows the episode.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
-half is ``streaming.py``. The two share no base beyond :class:`Agent`, which
-costs some repetition in the per-tick path and buys each mode being readable
-end to end in one file.
+half is ``streaming.py``. The per-tick flow both share lives in :class:`Agent`.
 """
 
 from typing import Any
 
 import gymnasium as gym
-import numpy as np
 import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.base import (
-    CONVERSATION_PANEL_HEIGHT,
-    CONVERSATION_PANEL_WIDTH,
     Agent,
     EpisodeEndResult,
     StepResult,
+    split_actor_critic_params,
 )
 from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
-from vla_streaming_rl.render import render_conversation_panel, render_selection_panel
-from vla_streaming_rl.replay_buffer import ReplayBuffer
-from vla_streaming_rl.reward_scaler import RewardScaler
-from vla_streaming_rl.scalar_obs import read_scalar_obs
 
 
 class OffPolicyAgent(Agent):
-    SELECTION_PANEL_WIDTH = 320
-    SELECTION_PANEL_HEIGHT = 560
-
     def __init__(
         self,
         *,
@@ -63,72 +52,28 @@ class OffPolicyAgent(Agent):
         reset_on_episode_end: bool,
         prompt_builder: PromptBuilder,
     ) -> None:
+        # Actor / critic optimizer split (critic == value head); both AdamW,
+        # the replayed update has no trace to carry.
+        actor_params, critic_params = split_actor_critic_params(network)
         super().__init__(
-            horizon=horizon,
-            reset_on_episode_end=reset_on_episode_end,
+            action_space=action_space,
+            network=network,
             prompt_builder=prompt_builder,
+            actor_optimizer=optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay),
+            critic_optimizer=optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay),
+            buffer_size=buffer_size,
+            buffer_device=buffer_device,
+            seq_len=seq_len,
+            horizon=horizon,
+            normalizing_by_return=normalizing_by_return,
+            use_done=use_done,
+            reset_on_episode_end=reset_on_episode_end,
         )
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # action properties
-        self.action_space = action_space
-        self.action_dim = np.prod(action_space.shape)
-        self.action_low = action_space.low
-        self.action_high = action_space.high
-        self.action_scale = (action_space.high - action_space.low) / 2.0
-        self.action_bias = (action_space.high + action_space.low) / 2.0
-        self.reward_scaler = RewardScaler()
-        self.normalizing_by_return = normalizing_by_return
-
         self.learning_starts = learning_starts
         self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
-        self.use_done = use_done
         self.use_reflection = use_reflection
-
-        # Sequence observation management
-        self.seq_len = seq_len
-
-        # Action chunking state
-        self.action_chunk = None  # (horizon, action_dim) - current action chunk
-        self.chunk_step = 0  # current step within chunk
-
-        self.network = network
-        self.rnn_state = self.network.init_state().to(self.device)
-
-        # Actor / critic optimizer split (critic == value head); both AdamW,
-        # the replayed update has no trace to carry.
-        critic_params = list(self.network.value_head.parameters())
-        critic_param_ids = {id(p) for p in critic_params}
-        actor_params = [p for p in self.network.parameters() if id(p) not in critic_param_ids]
-        self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
-        self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay)
-
-        self.rb = ReplayBuffer(
-            size=buffer_size,
-            seq_len=self.seq_len + self.horizon,
-            horizon=self.horizon,
-            obs_shape=self.network.stored_image_shape(),
-            rnn_state_shape=self.rnn_state.squeeze(0).shape,
-            action_shape=action_space.shape,
-            state_shape=self.network.stored_state_shape(),
-            output_device=self.device,
-            storage_device=torch.device(buffer_device),
-        )
-
-        self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
-        # ネットワークが最後に書いた文と、それを会話とともに描いたパネル。文を書かない
-        # ネットワークでは空のまま
-        self.last_reply = ""
-        self.reply_panels = {}
-        # the first observation of a run starts an episode
-        self._previous_done = True
-        # Shared representation fed to policy/value/prediction heads on the
-        # most recent select_action inference (used by scripts/probe.py).
-        self.last_features: torch.Tensor | None = None
         self.is_learning = False
-
-    # --- agent surface -----------------------------------------------------
 
     def step(
         self,
@@ -162,35 +107,6 @@ class OffPolicyAgent(Agent):
         step_result.metrics.update(train_metrics)
         return step_result
 
-    def on_episode_end(self, score: float) -> EpisodeEndResult:
-        if self.normalizing_by_return:
-            self.reward_scaler.update(score)
-        # 終わったエピソードを振り返らせて、そのタスクの次回のプロンプトを書き直す
-        instruction = (
-            self.prompt_builder.reflect(score, self.network.answer) if self.use_reflection else None
-        )
-        return EpisodeEndResult(
-            metrics={"reflection/rewritten": float(instruction is not None)},
-            rewritten_instruction=instruction,
-        )
-
-    def optimizer_state_dict(self) -> dict:
-        return {
-            "actor": self.actor_optimizer.state_dict(),
-            "critic": self.critic_optimizer.state_dict(),
-        }
-
-    def load_optimizer_state_dict(self, state: dict) -> None:
-        self.actor_optimizer.load_state_dict(state["actor"])
-        self.critic_optimizer.load_state_dict(state["critic"])
-
-    # --- per-tick machinery ------------------------------------------------
-
-    def _reset_rnn_state_if_fresh(self, episode_done: bool) -> None:
-        if self._previous_done and self.reset_on_episode_end:
-            self.rnn_state = self.network.init_state().to(self.device)
-        self._previous_done = episode_done
-
     @torch.no_grad()
     def select_action(
         self,
@@ -201,57 +117,10 @@ class OffPolicyAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        metrics = {}
-        episode_done = terminated or truncated
-        # A terminal observation still belongs to the episode that ended, so the
-        # conversation and the chain are dropped on the tick after it rather than
-        # on it -- the same boundary the rnn state resets on. Dropped on the
-        # terminal tick instead, the turn that tick then writes would be the one
-        # the next episode opens on.
-        episode_started = self._previous_done
-        # What the agent trains on, against what the env reported as its score.
-        shaped_reward = info["shaped_reward"]
-        metrics["shaped_reward"] = shaped_reward
-        self._reset_rnn_state_if_fresh(episode_done)
-        if episode_started:
-            self.prompt_builder.reset()
-            # A chunk begun on the terminal frame would otherwise run into the
-            # new episode; the first action of an episode comes from its own frame.
-            self.action_chunk = None
-            self.chunk_step = 0
-        metrics["action_norm"] = np.linalg.norm(self.prev_action)
-        if not self.normalizing_by_return:
-            self.reward_scaler.update(shaped_reward)
-        metrics["processed_reward"] = self.reward_scaler.normalize(
-            torch.tensor(shaped_reward)
-        ).item()
-        image, scalar_obs = self._preprocess(obs)
-        # The language this tick, composed from the env's state and never read off
-        # the observation.
-        self.prompt_builder.observe(obs, reward, info, self.prev_action)
-        prompt = self.prompt_builder.task_text()
-        normalized_action = (self.prev_action - self.action_bias) / self.action_scale
-        self.rb.add(
-            self.network.to_stored_image(image),
-            shaped_reward,
-            episode_done if self.use_done else False,
-            self.rnn_state.squeeze(0),
-            torch.from_numpy(normalized_action).to(self.device),
-            scalar_obs,
-        )
+        image, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
         warmup = global_step < self.learning_starts
-
-        if not warmup and self.action_chunk is not None and self.chunk_step < self.horizon:
-            action = self._to_env_action(self.action_chunk[self.chunk_step])
-            self.prev_action = action
-            self.chunk_step += 1
-            metrics["chunk_step"] = self.chunk_step
-            return StepResult(
-                action=action,
-                metrics=metrics,
-                panels=self.reply_panels,
-                texts={"prompt": prompt, "reply": self.last_reply},
-            )
+        if not warmup and self._has_chunk_left():
+            return self._continue_chunk(metrics, prompt)
 
         latest_data = self.rb.get_latest(self.seq_len)
         # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
@@ -268,57 +137,15 @@ class OffPolicyAgent(Agent):
                 warmup=warmup,
             )
         )
-        self.rnn_state = infer_result.rnn_state
-        self.last_features = infer_result.features
-        metrics.update(infer_result.value_report)
-        # ネットワークがこのステップに作った状態の元と返答が指す行動を、その行に残す。
-        # 書いた文は次のステップの会話に含める
-        if infer_result.stored_state is not None:
-            self.rb.set_latest_state(infer_result.stored_state)
-        if infer_result.text is not None:
-            self.last_reply = infer_result.text
-            self.rb.set_latest_reply_action(infer_result.reply_action)
-            self.reply_panels = {
-                "conversation": render_conversation_panel(
-                    infer_result.exchange,
-                    infer_result.text_status,
-                    CONVERSATION_PANEL_WIDTH,
-                    CONVERSATION_PANEL_HEIGHT,
-                )
-            }
-            self.prompt_builder.on_reply()
-        if infer_result.selection_rows is not None:
-            # 2つの候補とその行動価値、どちらが選ばれたか
-            self.reply_panels["selection"] = render_selection_panel(
-                f"step {global_step}, {infer_result.selection_status}",
-                infer_result.selection_rows,
-                self.SELECTION_PANEL_WIDTH,
-                self.SELECTION_PANEL_HEIGHT,
-            )
-        action_chunk = infer_result.action[0].cpu().numpy()
-        self.action_chunk = action_chunk
-        self.chunk_step = 1
-        action = self._to_env_action(action_chunk[0])
-        self.prev_action = action
-        metrics["chunk_step"] = self.chunk_step
-        return StepResult(
-            action=action,
-            metrics=metrics,
-            panels=self.reply_panels,
-            texts={"prompt": prompt, "reply": self.last_reply},
+        return self._start_chunk(infer_result, metrics, prompt, global_step)
+
+    def on_episode_end(self, score: float) -> EpisodeEndResult:
+        result = super().on_episode_end(score)
+        # 終わったエピソードを振り返らせて、そのタスクの次回のプロンプトを書き直す
+        instruction = (
+            self.prompt_builder.reflect(score, self.network.answer) if self.use_reflection else None
         )
-
-    def _preprocess(self, obs: dict[str, Any]) -> tuple[torch.Tensor, np.ndarray]:
-        """Turn the raw observation into what the replay buffer stores this tick:
-        the image tensor and the raw scalar observations (the network updates
-        its running normalizer stats here)."""
-        image = torch.from_numpy(obs["image"]).to(self.device)
-        scalar_obs = read_scalar_obs(obs)
-        self.network.observe_scalar_obs(scalar_obs)
-        return image, scalar_obs
-
-    def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
-        """Map a single normalized policy action into the env's action space."""
-        return np.clip(
-            net_action * self.action_scale + self.action_bias, self.action_low, self.action_high
+        return EpisodeEndResult(
+            metrics={**result.metrics, "reflection/rewritten": float(instruction is not None)},
+            rewritten_instruction=instruction,
         )
