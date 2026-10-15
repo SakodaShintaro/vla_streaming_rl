@@ -317,10 +317,6 @@ class OffPolicyAgent(Agent):
         self.network.observe_scalar_obs(scalar_obs)
         return image, scalar_obs
 
-    def _to_net_action(self, env_action: np.ndarray) -> np.ndarray:
-        """Map a single env action into the policy's normalized action space."""
-        return ((env_action - self.action_bias) / self.action_scale).astype(np.float32)
-
     def _to_env_action(self, net_action: np.ndarray) -> np.ndarray:
         """Map a single normalized policy action into the env's action space."""
         return np.clip(

@@ -13,5 +13,5 @@ vla:
   select_margin: -.inf
   model_id: Qwen/Qwen3.5-0.8B
   load_in_4bit: false
-  reasoning_effort: none  # [none, low, medium, high, xhigh]
+  reasoning_effort: none  # [none, low, medium, xhigh]
   use_reflection: false

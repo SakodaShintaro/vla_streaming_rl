@@ -108,7 +108,6 @@ class Bench2DriveEvalWriter:
         self._metric_records: dict[int, dict[str, list[float]]] | None = None
         self._step: int = 0
         self._save_name: str | None = None
-        self._scenario_index: int | None = None
         self._wall_start: float = 0.0
         self._game_start: float = 0.0
 
@@ -160,7 +159,6 @@ class Bench2DriveEvalWriter:
         self._metric_records = {}
         self._step = 0
         self._save_name = save_name
-        self._scenario_index = scenario_index
         self._wall_start = time.time()
         self._game_start = GameTime.get_time()
 
@@ -229,7 +227,6 @@ class Bench2DriveEvalWriter:
         self._stats = None
         self._metric_records = None
         self._save_name = None
-        self._scenario_index = None
         return summary
 
     def finalize_all(self) -> dict[str, float] | None:

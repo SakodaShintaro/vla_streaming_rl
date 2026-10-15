@@ -28,7 +28,7 @@ vla:
   # 思考を書かせる返答での思考の量。none なら思考は書かせない。思考は、エピソードの最初の
   # ステップから thinking_interval ステップごとの返答で書かせ、そのあいだの返答は行動だけを
   # 書く。思考を書いた返答も、ほかのターンと同じく window_tokens の中で古くなれば押し出される
-  reasoning_effort: low  # [none, low, medium, high, xhigh]
+  reasoning_effort: low  # [none, low, medium, xhigh]
   thinking_interval: 32
   temperature: 0.5
   # 返答の行動とヘッドの行動を行動価値で選ぶときの余裕。ヘッドの行動の価値が返答の行動を

@@ -189,31 +189,3 @@ class ImageProcessor(nn.Module):
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         # (B, 3, H, W) -> (B, C, H', W'): one cell per patch of the encoder's grid
         return self.backbone.encode(x)
-
-
-if __name__ == "__main__":
-    import time
-
-    device = "cuda"
-    measure_speed = True
-    speed_iters = 10
-    x = torch.zeros(1, 3, 96, 96, device=device)
-
-    for name, encoder_class in IMAGE_ENCODERS.items():
-        encoder = encoder_class(tuple(x.shape[1:])).eval().requires_grad_(False).to(device)
-        param_num = sum(p.numel() for p in encoder.parameters())
-        with torch.inference_mode():
-            output = encoder.encode(x)
-        print(f"{name}: params={param_num:,} output_shape={tuple(output.shape)}")
-
-        if measure_speed:
-            with torch.inference_mode():
-                for _ in range(3):
-                    encoder.encode(x)
-                torch.cuda.synchronize()
-                start_time = time.perf_counter()
-                for _ in range(speed_iters):
-                    encoder.encode(x)
-                torch.cuda.synchronize()
-                elapsed_time = time.perf_counter() - start_time
-            print(f"{name}: {elapsed_time / speed_iters * 1000:.2f} ms/iter")

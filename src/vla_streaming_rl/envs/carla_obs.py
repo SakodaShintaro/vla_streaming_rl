@@ -44,23 +44,6 @@ def make_action_space() -> gym.spaces.Box:
     return gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
 
 
-def camera_sensor_spec(cfg: CARLAObsConfig, sensor_id: str = "Center") -> dict:
-    """Sensor dict for Bench2Drive's ``sensors()`` method, matching training."""
-    return {
-        "type": "sensor.camera.rgb",
-        "id": sensor_id,
-        "x": cfg.camera_x,
-        "y": 0.0,
-        "z": cfg.camera_z,
-        "roll": 0.0,
-        "pitch": 0.0,
-        "yaw": 0.0,
-        "width": cfg.image_size[0],
-        "height": cfg.image_size[1],
-        "fov": cfg.fov,
-    }
-
-
 def world_to_vehicle_coords(
     world_loc: carla.Location,
     vehicle_loc: carla.Location,

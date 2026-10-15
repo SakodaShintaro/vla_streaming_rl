@@ -9,7 +9,7 @@ import json
 import os
 import subprocess
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import cv2
@@ -112,53 +112,28 @@ def write_success_rate(path: Path, curriculum: dict) -> None:
 
 
 def load_resume_state(resume_dir: Path, network, agent, env) -> tuple[TrainState, dict[str, float]]:
-    """Restore weights / optimizer / counters / curriculum from a previous run dir.
-
-    checkpoint.pt is required; the other files are optional so directories
-    written before this resume mechanism existed still load (their missing
-    parts keep the fresh defaults)."""
+    """Restore weights / optimizer / counters / curriculum from a previous run dir,
+    as ``save_checkpoint`` and ``save_train_state`` wrote them."""
     load_checkpoint_weights(resume_dir / "checkpoint.pt", network)
+    agent.load_optimizer_state_dict(torch.load(resume_dir / "optimizer.pt", map_location="cuda"))
 
-    optimizer_path = resume_dir / "optimizer.pt"
-    if optimizer_path.exists():
-        agent.load_optimizer_state_dict(torch.load(optimizer_path, map_location="cuda"))
-        print(f"Resume: loaded optimizer states from {optimizer_path}")
-    else:
-        print(f"Resume: {optimizer_path} not found, optimizers start fresh")
-
-    state = TrainState.fresh()
-    curriculum_progress: dict = {}
-    train_state_path = resume_dir / "train_state.json"
-    if train_state_path.exists():
-        data = json.loads(train_state_path.read_text())
-        if "curriculum_progress" in data:
-            curriculum_progress = data["curriculum_progress"]
-        for state_field in fields(TrainState):
-            if state_field.name in data:
-                setattr(state, state_field.name, data[state_field.name])
-        print(f"Resume: loaded counters from {train_state_path}")
-    else:
-        print(f"Resume: {train_state_path} not found, counters start from zero")
-
+    data = json.loads((resume_dir / "train_state.json").read_text())
     best_score_per_arena: dict[str, float] = {}
-    arena_stats_path = resume_dir / "arena_stats.tsv"
     set_curriculum = getattr(env.unwrapped, "set_curriculum_state", None)
-    if arena_stats_path.exists() and set_curriculum is not None:
+    if set_curriculum is not None:
+        # カリキュラムのある環境では、進み具合とアリーナごとの記録も一緒に書いてある
+        curriculum_progress = data.pop("curriculum_progress")
         attempts = {}
         successes = {}
-        cleared_count = 0
+        arena_stats_path = resume_dir / "arena_stats.tsv"
         for row in arena_stats_path.read_text().splitlines()[1:]:
-            arena, n_attempt, n_success, _rate, best, cleared = row.split("\t")
+            arena, n_attempt, n_success, _rate, best, _cleared = row.split("\t")
             attempts[arena] = int(n_attempt)
             successes[arena] = int(n_success)
             best_score_per_arena[arena] = float(best)
-            cleared_count += int(cleared)
         set_curriculum(attempts, successes, curriculum_progress)
-        print(
-            f"Resume: loaded {len(attempts)} arena records from {arena_stats_path} "
-            f"(cleared={cleared_count})"
-        )
-    return state, best_score_per_arena
+        print(f"Resume: loaded {len(attempts)} arena records from {arena_stats_path}")
+    return TrainState(**data), best_score_per_arena
 
 
 def save_train_state(

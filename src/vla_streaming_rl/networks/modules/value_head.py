@@ -23,8 +23,7 @@ class DistributionalValueHead(nn.Module):
     task that enriches the representation; the actor / rollout maximize the mean
     over gammas (so :meth:`to_value` averages), while the critic is trained on a
     *per-gamma* TD target (:meth:`to_values`, :meth:`value_loss`). With
-    ``num_gammas == 1`` everything collapses to the original single-gamma head:
-    logits stay ``(B, num_bins)`` and every scalar caller is unchanged.
+    ``num_gammas == 1`` the logits keep the same ``(B, 1, num_bins)`` shape.
 
     With ``num_bins > 1`` the head emits categorical logits and holds an
     :class:`HLGaussLoss` (Gaussian-histogram cross-entropy, the repo's drop-in
@@ -68,17 +67,13 @@ class DistributionalValueHead(nn.Module):
         return float(self.value_ranges[self.primary_gamma_index])
 
     def _shape_logits(self, flat: torch.Tensor) -> torch.Tensor:
-        """``(B, num_gammas * num_bins)`` → ``(B, num_bins)`` for a single gamma
-        (legacy shape) else ``(B, num_gammas, num_bins)``."""
-        if self.num_gammas == 1:
-            return flat
+        """``(B, num_gammas * num_bins)`` → ``(B, num_gammas, num_bins)``。割引率が1つでも
+        同じ形にする。"""
         return flat.view(flat.shape[0], self.num_gammas, self.num_bins)
 
     def _normalized_value(self, logits: torch.Tensor) -> torch.Tensor:
-        """Logits → value in the normalized ``[-1, 1]`` space, bin dim reduced.
-
-        Shape ``(B,)`` for single-gamma logits, ``(B, num_gammas)`` otherwise.
-        """
+        """Logits → value in the normalized ``[-1, 1]`` space, bin dim reduced,
+        shape ``(B, num_gammas)``."""
         if self.num_bins > 1:
             flat = logits.reshape(-1, self.num_bins)
             return self.hl_gauss_loss(flat).view(logits.shape[:-1])
@@ -87,16 +82,11 @@ class DistributionalValueHead(nn.Module):
     def to_values(self, logits: torch.Tensor) -> torch.Tensor:
         """Per-gamma denormalized values, shape ``(B, num_gammas)`` — the
         per-gamma TD-target read-out."""
-        norm = self._normalized_value(logits)
-        if self.num_gammas == 1:
-            norm = norm.unsqueeze(-1)
-        return norm * self.value_ranges
+        return self._normalized_value(logits) * self.value_ranges
 
     def to_value(self, logits: torch.Tensor) -> torch.Tensor:
         """Scalar value per sample, **averaged over all gammas** — the actor /
-        eligibility-trace / rollout objective. Shape ``(B,)``. For a single
-        gamma this is just that gamma's value, so existing callers are unchanged.
-        """
+        eligibility-trace / rollout objective. Shape ``(B,)``."""
         return self.to_values(logits).mean(dim=1)
 
     def scalar_value(self, x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
@@ -324,7 +314,7 @@ class ActionValueHead(DistributionalValueHead):
         adv = self.a_fc_in(xa)
         adv = self.a_fc_mid(adv)
         adv = self.a_norm(adv)
-        adv_out = self._shape_logits(self.a_fc_out(adv))  # (B, [G,] num_bins)
+        adv_out = self._shape_logits(self.a_fc_out(adv))  # (B, G, num_bins)
 
         return HeadOutput(output=adv_out, activation=adv)
 

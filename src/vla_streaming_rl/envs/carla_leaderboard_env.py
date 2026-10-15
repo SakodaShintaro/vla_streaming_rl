@@ -9,7 +9,6 @@ import gymnasium as gym
 import numpy as np
 import py_trees
 from leaderboard.utils.statistics_manager import PENALTY_PERC_DICT, PENALTY_VALUE_DICT
-from srunner.scenariomanager.traffic_events import TrafficEventType
 
 from vla_streaming_rl.envs.bench2drive_scenario_runtime import Bench2DriveRuntime
 from vla_streaming_rl.envs.carla_bootstrap import get_client
@@ -131,7 +130,7 @@ class CARLALeaderboardEnv(gym.Env):
 
     def __init__(
         self,
-        route_xml: str | None,
+        route_xml: str,
         route_id: str | None,
         sequence_mode: str,
         start_index: int,
@@ -143,11 +142,10 @@ class CARLALeaderboardEnv(gym.Env):
         """Create the env.
 
         Args:
-            route_xml: Path to a Bench2Drive route XML, or ``None`` to
-                sample a random 200 m route in Town01 each episode.
+            route_xml: Path to a Bench2Drive route XML.
             route_id: Specific route id to pin to (only meaningful with
-                ``route_xml`` set and ``sequence_mode='random'``). ``None``
-                means "pick a random route from the XML each episode".
+                ``sequence_mode='random'``). ``None`` means "pick a random
+                route from the XML each episode".
             sequence_mode: ``"random"`` (legacy: pick a random route each
                 reset; requires single-town XML) or ``"sequential"`` (walk
                 the XML in **town-grouped** order starting at
@@ -180,20 +178,16 @@ class CARLALeaderboardEnv(gym.Env):
                 directory after every episode — same files Bench2Drive's
                 standard eval scripts produce, so the
                 downstream tools (merge_route_json.py,
-                efficiency_smoothness_benchmark.py) work unmodified. Only
-                used when a Bench2DriveRuntime is attached. The matching
-                ``weather.xml`` is auto-derived from ``route_xml``'s
+                efficiency_smoothness_benchmark.py) work unmodified. The
+                matching ``weather.xml`` is auto-derived from ``route_xml``'s
                 parent directory (Bench2Drive's standard layout).
         """
         super().__init__()
 
-        # If a Bench2Drive route XML is given, the env runs the eval-equivalent
-        # RouteScenario (ego spawn, BackgroundActivity NPC traffic, scripted
-        # scenarios, parked vehicles) via Bench2DriveRuntime.
-        self._route_xml = route_xml
-        self._route_id = route_id
+        # The env runs the eval-equivalent RouteScenario of the Bench2Drive route
+        # XML (ego spawn, BackgroundActivity NPC traffic, scripted scenarios,
+        # parked vehicles) via Bench2DriveRuntime.
         self._tm_port = 8000
-        self.runtime: Bench2DriveRuntime | None = None
 
         # Optional early-termination thresholds (Bench2Drive's
         # InRouteTest=30m / AgentBlockedTest=60s are also active; these
@@ -216,7 +210,6 @@ class CARLALeaderboardEnv(gym.Env):
         # forever. 20 FPS × 600 s = 12000 covers the longest Town12 routes.
         self.max_episode_steps = 12000
         self.render_mode = "rgb_array"
-        self.fps = 20  # Simulation FPS
 
         self.observation_space = gym.spaces.Dict({"image": make_obs_space(self.obs_cfg)})
         self.action_space = make_action_space()
@@ -232,31 +225,25 @@ class CARLALeaderboardEnv(gym.Env):
         # initial town off the upcoming config before deciding which world
         # to load. Sequential mode tolerates mixed-town XMLs (e.g. the
         # bench2drive220 driver); the env reloads the world on town change.
-        if route_xml is not None:
-            self.runtime = Bench2DriveRuntime(
-                client=self.client,
-                traffic_manager_port=self._tm_port,
-                route_xml=route_xml,
-                route_id=route_id,
-                sequence_mode=sequence_mode,
-                start_index=start_index,
-                loop=loop,
-            )
-            initial_town = self.runtime.peek_next_town()
-        else:
-            initial_town = "Town12"
+        self.runtime = Bench2DriveRuntime(
+            client=self.client,
+            traffic_manager_port=self._tm_port,
+            route_xml=route_xml,
+            route_id=route_id,
+            sequence_mode=sequence_mode,
+            start_index=start_index,
+            loop=loop,
+        )
+        initial_town = self.runtime.peek_next_town()
 
-        # Eval-artifact writer. Only attaches when running against a
-        # bench2drive XML; random-route mode has no comparable "scenario"
-        # concept and no StatisticsManager would apply. weather.xml lives
-        # next to the route XML in every Bench2Drive layout we ship.
+        # Eval-artifact writer. weather.xml lives next to the route XML in
+        # every Bench2Drive layout we ship.
         self.eval_writer: Bench2DriveEvalWriter | None = None
-        if eval_output_dir is not None and self.runtime is not None:
+        if eval_output_dir is not None:
             weather_xml = Path(route_xml).parent / "weather.xml"
-            if not weather_xml.exists():
-                raise FileNotFoundError(
-                    f"weather_xml not found at {weather_xml} (expected next to route_xml)"
-                )
+            assert weather_xml.exists(), (
+                f"weather_xml not found at {weather_xml} (expected next to route_xml)"
+            )
             self.eval_writer = Bench2DriveEvalWriter(
                 output_root=eval_output_dir,
                 weather_xml=weather_xml,
@@ -273,10 +260,9 @@ class CARLALeaderboardEnv(gym.Env):
         self.traffic_manager.set_synchronous_mode(True)
         self.traffic_manager.set_hybrid_physics_mode(True)
 
-        # Map and spawn points (refreshed when the world is reloaded for a
-        # different town during sequential iteration).
+        # Map (refreshed when the world is reloaded for a different town during
+        # sequential iteration).
         self.map = self.world.get_map()
-        self.spawn_points = self.map.get_spawn_points()
 
         # Sensors and vehicle
         self.vehicle = None
@@ -284,20 +270,10 @@ class CARLALeaderboardEnv(gym.Env):
         self.third_person_camera = None
         self.collision_sensor = None
         self.lane_invasion_sensor = None
-        self.gnss_sensor = None
-        self.imu_sensor = None
 
         # Sensor data
         self.current_image = None
         self.third_person_image = None
-        self.lane_invasion_history = []
-        # Latest raw sensor readings exposed via info["sensors"] for VLA agents
-        # that need leaderboard-compatible GNSS / IMU / camera frames. Tuple
-        # shape mirrors the Bench2Drive AutonomousAgent sensors() contract:
-        # (frame_idx, payload). None until the first post-reset tick fills them.
-        self._last_camera: tuple[int, np.ndarray] | None = None
-        self._last_gnss: tuple[int, np.ndarray] | None = None
-        self._last_imu: tuple[int, np.ndarray] | None = None
 
         # Route tracker (initialized in reset)
         self.route_tracker: RouteTracker | None = None
@@ -314,7 +290,6 @@ class CARLALeaderboardEnv(gym.Env):
         self._latest_score_route = 0.0
         self._latest_score_penalty = 1.0
         self._latest_driving_score = 0.0
-        self._latest_off_route_pct = 0.0
 
         # Episode information
         self.episode_step = 0
@@ -333,9 +308,8 @@ class CARLALeaderboardEnv(gym.Env):
     @property
     def is_exhausted(self) -> bool:
         """Whether the runtime has dispensed its whole playlist, which is what
-        ends a Bench2Drive220 sequential sweep. A run with no fixed playlist has
-        no runtime and never runs out."""
-        return self.runtime is not None and self.runtime.is_exhausted
+        ends a Bench2Drive220 sequential sweep."""
+        return self.runtime.is_exhausted
 
     def _apply_world_settings(self) -> None:
         """Apply the sync-mode + large-map streaming settings to ``self.world``.
@@ -361,8 +335,6 @@ class CARLALeaderboardEnv(gym.Env):
         runs with abrupt town flips — only reload when the town actually
         differs from what's currently in the world.
         """
-        if self.runtime is None:
-            return
         next_town = self.runtime.peek_next_town()
         if next_town == self.current_town:
             return
@@ -377,7 +349,6 @@ class CARLALeaderboardEnv(gym.Env):
         # new world is synchronous before the first tick.
         self.traffic_manager.set_synchronous_mode(True)
         self.map = self.world.get_map()
-        self.spawn_points = self.map.get_spawn_points()
 
     def reset(
         self,
@@ -396,56 +367,29 @@ class CARLALeaderboardEnv(gym.Env):
             self.third_person_camera,
             self.collision_sensor,
             self.lane_invasion_sensor,
-            self.gnss_sensor,
-            self.imu_sensor,
         ):
             if sensor is not None:
                 sensor.stop()
                 sensor.destroy()
 
-        if self.runtime is not None:
-            # The runtime owns the ego (RouteScenario spawns it) plus all NPCs
-            # and parked vehicles. Tear them down before any potential
-            # load_world so the previous-world actor handles don't leak.
-            self.runtime.cleanup()
-            # Now safe to switch towns (sequential mode walks the XML in
-            # order and may cross towns between consecutive resets).
-            self._switch_town_if_needed()
-            self.vehicle, route_locations = self.runtime.reset(self.world)
-            # Open a fresh Bench2Drive eval record now that the scenario
-            # is built. Doing it here (not in begin_episode-on-step-1)
-            # means StatisticsManager.set_scenario sees the live
-            # RouteScenario before the criteria sensors start firing.
-            if self.eval_writer is not None:
-                self.eval_writer.begin_episode(
-                    route_scenario=self.runtime.route_scenario,
-                    config=self.runtime.configs[self.runtime.current_index],
-                    scenario_index=self.runtime.current_index,
-                )
-        else:
-            if self.vehicle is not None:
-                self.vehicle.destroy()
-            route_locations, start_pose = self._sample_random_route()
-            blueprint_library = self.world.get_blueprint_library()
-            # role_name='hero' is required on large maps (Town13 etc.); without
-            # it, attaching a camera to the vehicle crashes UE4 with SIGSEGV.
-            vehicle_bp = blueprint_library.filter("vehicle.tesla.model3")[0]
-            vehicle_bp.set_attribute("role_name", "hero")
-            spawn_transform = carla.Transform(
-                carla.Location(
-                    x=start_pose.location.x,
-                    y=start_pose.location.y,
-                    z=start_pose.location.z + 0.5,
-                ),
-                start_pose.rotation,
+        # The runtime owns the ego (RouteScenario spawns it) plus all NPCs and
+        # parked vehicles. Tear them down before any potential load_world so the
+        # previous-world actor handles don't leak.
+        self.runtime.cleanup()
+        # Now safe to switch towns (sequential mode walks the XML in order and
+        # may cross towns between consecutive resets).
+        self._switch_town_if_needed()
+        self.vehicle, route_locations = self.runtime.reset(self.world)
+        # Open a fresh Bench2Drive eval record now that the scenario is built.
+        # Doing it here (not in begin_episode-on-step-1) means
+        # StatisticsManager.set_scenario sees the live RouteScenario before the
+        # criteria sensors start firing.
+        if self.eval_writer is not None:
+            self.eval_writer.begin_episode(
+                route_scenario=self.runtime.route_scenario,
+                config=self.runtime.configs[self.runtime.current_index],
+                scenario_index=self.runtime.current_index,
             )
-            while True:
-                try:
-                    self.vehicle = self.world.spawn_actor(vehicle_bp, spawn_transform)
-                    break
-                except RuntimeError:
-                    time.sleep(0.1)
-                    continue
 
         self.vehicle.apply_control(carla.VehicleControl(manual_gear_shift=True, gear=1))
 
@@ -491,67 +435,34 @@ class CARLALeaderboardEnv(gym.Env):
         )
         self.lane_invasion_sensor.listen(lambda event: self._on_lane_invasion(event))
 
-        # GNSS / IMU — exposed via info["sensors"] for VLA agents that need
-        # leaderboard-compatible pose / inertial readings. Default attributes
-        # match Bench2Drive's AutonomousAgent sensor specs.
-        gnss_bp = blueprint_library.find("sensor.other.gnss")
-        self.gnss_sensor = self.world.spawn_actor(
-            gnss_bp, carla.Transform(), attach_to=self.vehicle
-        )
-        self.gnss_sensor.listen(lambda data: self._on_gnss(data))
-
-        imu_bp = blueprint_library.find("sensor.other.imu")
-        self.imu_sensor = self.world.spawn_actor(imu_bp, carla.Transform(), attach_to=self.vehicle)
-        self.imu_sensor.listen(lambda data: self._on_imu(data))
-
         # Initialization
         self.episode_step = 0
         self._blocked_step_counter = 0
         self._prev_collision_total = 0
-        self.lane_invasion_history = []
         self.infractions = {k: 0 for k in self.infractions}
         self.prev_driving_score = 0.0
         self._latest_score_route = 0.0
         self._latest_score_penalty = 1.0
         self._latest_driving_score = 0.0
-        self._latest_off_route_pct = 0.0
         self.current_image = None
-        self._last_camera = None
-        self._last_gnss = None
-        self._last_imu = None
         self.vehicle_physics = VehiclePhysics.create()
         self.physics_history = []
 
-        # Wait until camera, GNSS and IMU have all delivered at least one
-        # frame so info["sensors"] handed back from reset is fully populated.
+        # Wait until the camera has delivered at least one frame.
         while True:
             self.world.tick()
-            if (
-                self.current_image is not None
-                and self._last_gnss is not None
-                and self._last_imu is not None
-            ):
+            if self.current_image is not None:
                 break
             time.sleep(0.1)
 
         # The lane invasion sensor can fire spuriously on the spawn tick when
         # the ego is placed near a marking; clear here so only agent-driven
         # crossings count.
-        self.lane_invasion_history = []
         self.infractions["lane_invasion"] = 0
 
         self._update_spectator()
 
-        observation = {"image": self.current_image.copy(), "sensors": self._build_sensors_dict()}
-        # The (gps, world-coord) global plan for VLA agents that build their own
-        # route planner. Only the Bench2Drive runtime has a
-        # RouteScenario; the reset observation carries it once per episode so the
-        # agent never reaches into the env to fetch it.
-        if self.runtime is not None and self.runtime.route_scenario is not None:
-            observation["route_plan"] = (
-                self.runtime.route_scenario.gps_route,
-                self.runtime.route_scenario.route,
-            )
+        observation = {"image": self.current_image.copy()}
         return observation, self._build_scenario_info(
             {
                 "maneuver_command": self._maneuver_command(),
@@ -573,7 +484,7 @@ class CARLALeaderboardEnv(gym.Env):
         indexes the current position, and a small look-ahead surfaces the next turn.
         Published as ``info["maneuver_command"]``: the env states the navigation
         intent, the agent decides how to word it."""
-        if self.runtime is None or self.runtime.route_scenario is None:
+        if self.runtime.route_scenario is None:
             return _VOID_COMMAND
         route = self.runtime.route_scenario.route
         if not route:
@@ -584,13 +495,7 @@ class CARLALeaderboardEnv(gym.Env):
         return int(cmd.value) if hasattr(cmd, "value") else int(cmd)
 
     def _build_scenario_info(self, base: dict[str, any]) -> dict[str, any]:
-        """Merge bench2drive scenario metadata into an info dict.
-
-        Only populated when a runtime is attached; for random-route mode
-        these keys are absent (trainer side guards with ``in info``).
-        """
-        if self.runtime is None:
-            return base
+        """Merge bench2drive scenario metadata into an info dict."""
         base["scenario_index"] = self.runtime.current_index
         base["route_id"] = self.runtime.current_route_id
         base["town"] = self.runtime.current_town
@@ -618,16 +523,14 @@ class CARLALeaderboardEnv(gym.Env):
         # ``NoiseControl.update`` prints
         # ``WARNING: Couldn't add noise to the ego because the control
         # couldn't be found`` every tick and skips its noise pass.
-        if self.runtime is not None:
-            py_trees.blackboard.Blackboard().set("AV_control", control, overwrite=True)
+        py_trees.blackboard.Blackboard().set("AV_control", control, overwrite=True)
 
         self.world.tick()
 
         # Tick the Bench2Drive scenario tree after the world advances so that
         # NPC commands issued this tick land on the next world.tick (matches
         # ScenarioManager._tick_scenario ordering).
-        if self.runtime is not None:
-            self.runtime.tick(self.world)
+        self.runtime.tick(self.world)
 
         # Capture ego physics for metric_info.json. Done after both
         # world.tick + scenario tick so the recorded acceleration/yaw
@@ -664,16 +567,9 @@ class CARLALeaderboardEnv(gym.Env):
         collided = collision_total > self._prev_collision_total
         self._prev_collision_total = collision_total
 
-        if self.runtime is not None and self.runtime.route_scenario is not None:
-            scenario_running = (
-                self.runtime.route_scenario.scenario_tree.status == py_trees.common.Status.RUNNING
-            )
-            terminated = not scenario_running
-        else:
-            # Random-route mode (no Bench2DriveRuntime): no scenario_tree,
-            # so route completion is the only natural end. The
-            # max_episode_steps cap below catches everything else.
-            terminated = self.route_tracker.route_completion >= 1.0
+        terminated = (
+            self.runtime.route_scenario.scenario_tree.status != py_trees.common.Status.RUNNING
+        )
 
         # Collision is a hard terminal failure — stop the episode at once.
         if collided:
@@ -713,7 +609,7 @@ class CARLALeaderboardEnv(gym.Env):
 
         # Observation is the raw camera RGB; the route is given to the agent as
         # text, so no route overlay is baked into the policy input.
-        observation = {"image": self.current_image.copy(), "sensors": self._build_sensors_dict()}
+        observation = {"image": self.current_image.copy()}
 
         # Record history
         self.physics_history.append(copy.deepcopy(self.vehicle_physics))
@@ -771,18 +667,13 @@ class CARLALeaderboardEnv(gym.Env):
             self.third_person_camera,
             self.collision_sensor,
             self.lane_invasion_sensor,
-            self.gnss_sensor,
-            self.imu_sensor,
         ):
             if sensor is not None:
                 sensor.stop()
                 sensor.destroy()
 
-        if self.runtime is not None:
-            # Tears down the ego, NPCs, scripted scenario actors, parked vehicles.
-            self.runtime.cleanup()
-        elif self.vehicle is not None:
-            self.vehicle.destroy()
+        # Tears down the ego, NPCs, scripted scenario actors, parked vehicles.
+        self.runtime.cleanup()
 
         if self.world is not None:
             settings = self.world.get_settings()
@@ -797,40 +688,6 @@ class CARLALeaderboardEnv(gym.Env):
         if self.eval_writer is not None:
             self.final_eval_summary = self.eval_writer.finalize_all()
 
-    def _sample_random_route(self) -> tuple[list[carla.Location], carla.Transform]:
-        """Sample a random ~200 m route in the current map.
-
-        Used only when no Bench2Drive XML is configured; the XML path goes
-        through ``Bench2DriveRuntime`` which spawns the ego itself.
-        """
-        start_wp = self.map.get_waypoint(
-            np.random.choice(self.spawn_points).location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
-        )
-
-        route_waypoints = [start_wp]
-        current_wp = start_wp
-        distance = 0.0
-
-        while distance < 200.0:
-            next_wps = current_wp.next(2.0)
-            if not next_wps:
-                break
-
-            # Randomly select next waypoint (branch at intersections)
-            current_wp = np.random.choice(next_wps)
-            route_waypoints.append(current_wp)
-
-            if len(route_waypoints) > 1:
-                prev_loc = route_waypoints[-2].transform.location
-                curr_loc = current_wp.transform.location
-                distance += prev_loc.distance(curr_loc)
-
-        start_pose = route_waypoints[0].transform
-        raw_locations = [wp.transform.location for wp in route_waypoints]
-        return raw_locations, start_pose
-
     def _compute_reward(self) -> float:
         """
         Reward = step delta of Bench2Drive ``score_composed`` (range ~[0, 100]).
@@ -840,15 +697,10 @@ class CARLALeaderboardEnv(gym.Env):
         score multiplicatively, so the delta is naturally negative on the step
         the infraction fires. Matches what eval reports in ``eval.json``.
 
-        Bench2Drive runtime reads the same ``RouteScenario`` criteria that
-        ``statistics_manager.compute_route_statistics`` reads at end-of-
-        episode; random-route mode falls back to a coarse, sensor-based
-        approximation (collisions only — no waypoint-aware off-route check).
+        It reads the same ``RouteScenario`` criteria that
+        ``statistics_manager.compute_route_statistics`` reads at end-of-episode.
         """
-        if self.runtime is not None and self.runtime.route_scenario is not None:
-            score_route, score_penalty = self._score_from_criteria()
-        else:
-            score_route, score_penalty = self._score_from_sensors()
+        score_route, score_penalty = self._score_from_criteria()
         new_score = max(score_route * score_penalty, 0.0)
 
         # Cache for info dict.
@@ -862,7 +714,6 @@ class CARLALeaderboardEnv(gym.Env):
 
     def _score_from_criteria(self) -> tuple[float, float]:
         score_penalty = 1.0
-        off_route_pct = 0.0
         for criterion in self.runtime.route_scenario.get_criteria():
             for event in criterion.events:
                 event_type = event.get_type()
@@ -877,25 +728,10 @@ class CARLALeaderboardEnv(gym.Env):
                         pct = event.get_dict()["percentage"]
                         score_penalty *= 1 - (1 - pv) * (1 - pct / 100.0)
                     # "unused" → no-op (matches statistics_manager).
-                    if event_type == TrafficEventType.OUTSIDE_ROUTE_LANES_INFRACTION:
-                        off_route_pct = event.get_dict()["percentage"]
-        self._latest_off_route_pct = off_route_pct
         # RouteCompletionTest only advances on discrete waypoint crossings
         # (external/Bench2Drive .../atomic_criteria.py); route_tracker gives
         # continuous sub-segment progress instead, for dense reward shaping.
         score_route = self.route_tracker.route_completion * 100.0
-        return score_route, score_penalty
-
-    def _score_from_sensors(self) -> tuple[float, float]:
-        """Coarse fallback for random-route mode (no RouteScenario criteria)."""
-        score_route = self.route_tracker.route_completion * 100.0
-        score_penalty = (
-            0.5 ** self.infractions["collision_pedestrian"]
-            * 0.6 ** self.infractions["collision_vehicle"]
-            * 0.65 ** self.infractions["collision_static"]
-        )
-        # No criterion-equivalent off-route check in random-route mode.
-        self._latest_off_route_pct = 0.0
         return score_route, score_penalty
 
     def _update_spectator(self):
@@ -915,46 +751,8 @@ class CARLALeaderboardEnv(gym.Env):
         array = np.frombuffer(image.raw_data, dtype=np.uint8).reshape(
             (image.height, image.width, 4)
         )
-        # Keep BGR HWC uint8 alongside the RGB CHW float32 obs so VLA agents
-        # that expect the leaderboard sensor format can read it from
-        # info["sensors"]["rgb"] without a second decode pass.
-        bgr = array[:, :, :3].copy()
-        self._last_camera = (image.frame, bgr)
-        self.current_image = bgr[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
-
-    def _on_gnss(self, data):
-        self._last_gnss = (
-            data.frame,
-            np.array([data.latitude, data.longitude, data.altitude], dtype=np.float64),
-        )
-
-    def _on_imu(self, data):
-        acc = data.accelerometer
-        gyr = data.gyroscope
-        self._last_imu = (
-            data.frame,
-            np.array(
-                [acc.x, acc.y, acc.z, gyr.x, gyr.y, gyr.z, float(data.compass)],
-                dtype=np.float32,
-            ),
-        )
-
-    def _build_sensors_dict(self) -> dict[str, tuple[int, object]]:
-        """Latest sensor snapshot in Bench2Drive AutonomousAgent format.
-
-        Speed comes from ``vehicle.get_velocity()`` rather than a dedicated
-        sensor; we tag it with the camera frame so all four entries share a
-        consistent monotonic index for VLA agents that want to skip stale
-        readings.
-        """
-        vel = self.vehicle.get_velocity()
-        speed_mps = float(np.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z))
-        return {
-            "rgb": self._last_camera,
-            "gps": self._last_gnss,
-            "imu": self._last_imu,
-            "speed": (self._last_camera[0], {"speed": speed_mps}),
-        }
+        # BGRA HWC uint8 -> RGB CHW float32 in [0, 1]
+        self.current_image = array[:, :, 2::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
 
     def _process_third_person_image(self, image):
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
@@ -972,5 +770,5 @@ class CARLALeaderboardEnv(gym.Env):
             self.infractions["collision_static"] += 1
 
     def _on_lane_invasion(self, event):
-        self.lane_invasion_history.append(event)
+        del event
         self.infractions["lane_invasion"] += 1

@@ -408,31 +408,3 @@ class AnimalAIEnv(gym.Env):
         if self._aai is not None:
             self._aai.close()
             self._aai = None
-
-
-if __name__ == "__main__":
-    from vla_streaming_rl.envs.animalai_curriculum import StagedSelector
-
-    env = AnimalAIEnv(
-        resolution=96,
-        seed=0,
-        base_port=5005,
-        binary_path="~/animalai_env/4.3.2_alpha2/Linux/animalAI.x86_64",
-        continuous_action=False,
-        topdown_camera=False,
-        topdown_resolution=96,
-        colored_walls=True,
-        end_at_pass_mark=True,
-        selector=StagedSelector(variant="01", steps_per_stage=2_000_000, seed=0),
-    )
-    for episode in range(8):
-        obs, info = env.reset(seed=episode, options=None)
-        print(f"ep={episode} arena={info['arena_name']} stage={info['stage']}")
-        total_reward = 0.0
-        for _ in range(20):
-            obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
-            total_reward += reward
-            if terminated or truncated:
-                break
-        print(f"  return={total_reward:.4f} success={info.get('success')}")
-    env.close()
