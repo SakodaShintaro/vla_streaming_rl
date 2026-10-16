@@ -33,8 +33,14 @@ case ${difficulty} in
     difficulty_overrides=(
       'env_factory.train_levels=["01"]'
       'env_factory.train_variant="01"'
-      # level 01 の 30 アリーナをそれぞれ 10 回ずつ回す量
       episode_limit=300
+    )
+    ;;
+  one_lap)
+    difficulty_overrides=(
+      'env_factory.train_levels=["01"]'
+      'env_factory.train_variant="01"'
+      episode_limit=30
     )
     ;;
   normal)
