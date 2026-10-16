@@ -11,15 +11,15 @@ class SpatialTemporalEncoder(nn.Module):
     """The observation laid flat on one space axis, mixed across space and time.
 
     Every input the network has becomes tokens on a single axis -- the patch
-    grid, the previous action a token per component, the reward, the
-    interoceptive scalars and a register -- and
+    grid of every image, one after another, the previous action a token per
+    component, the reward, the interoceptive scalars and a register -- and
     :class:`SpatialTemporalTransformer` mixes them across that axis and across
     the window. The last step's whole axis is the state the heads read.
     """
 
     def __init__(
         self,
-        image_features_shape: tuple[int, int, int],
+        image_features_shapes: list[tuple[int, int, int]],
         image_latent_dim: int,
         seq_len: int,
         n_layer: int,
@@ -31,15 +31,21 @@ class SpatialTemporalEncoder(nn.Module):
         super().__init__()
         self.n_layer = n_layer
 
-        # The frozen encoder's (C, H, W) grid, projected here to the token width
-        # and read as [B, H * W, C'] tokens.
-        features_dim, self.hidden_h, self.hidden_w = image_features_shape
+        # The frozen encoder's (C, H, W) grid of each image, projected here to the
+        # token width and read as [B, H * W, C'] tokens. 画像はどれも同じエンコーダの
+        # 出力なのでチャネル数が揃い、射影を共有する。どの画像のトークンかは位置の埋め込みが
+        # 見分ける
+        self.image_features_shapes = [tuple(shape) for shape in image_features_shapes]
+        features_dims = {shape[0] for shape in self.image_features_shapes}
+        assert len(features_dims) == 1, self.image_features_shapes
         self.hidden_image_dim = image_latent_dim
-        self.image_projection = nn.Conv2d(features_dim, image_latent_dim, kernel_size=1)
-        self.image_tokens_num = self.hidden_h * self.hidden_w
+        self.image_projection = nn.Conv2d(features_dims.pop(), image_latent_dim, kernel_size=1)
+        # 保存した形では、画像ごとの (C, H, W) を平らにして並べてある
+        self.image_features_sizes = [c * h * w for c, h, w in self.image_features_shapes]
+        self.image_tokens_num = sum(h * w for _, h, w in self.image_features_shapes)
 
         self.space_len = (
-            self.image_tokens_num  # patch grid
+            self.image_tokens_num  # patch grids
             + action_dim  # previous action, one token per component
             + 1  # reward
             + scalar_obs_dim  # interoceptive scalars
@@ -68,9 +74,24 @@ class SpatialTemporalEncoder(nn.Module):
         # [1, space_len, state_size, n_layer] (batch size 1)
         return torch.zeros(1, self.space_len, state_size, self.n_layer)
 
+    def image_tokens(self, images: torch.Tensor) -> torch.Tensor:
+        """保存した形の画像 (..., sum(image_features_sizes)) を射影したトークン
+        (..., image_tokens_num, C')。画像の順に並べる。"""
+        leading = images.shape[:-1]
+        flat = images.reshape(-1, images.shape[-1])
+        tokens = []
+        for (c, h, w), features in zip(
+            self.image_features_shapes,
+            flat.split(self.image_features_sizes, dim=-1),
+            strict=True,
+        ):
+            latents = self.image_projection(features.reshape(-1, c, h, w))  # [N, C', H, W]
+            tokens.append(latents.flatten(2).transpose(1, 2))  # [N, H * W, C']
+        return torch.cat(tokens, dim=1).reshape(*leading, self.image_tokens_num, -1)
+
     def forward(
         self,
-        images: torch.Tensor,  # (B, T, *image_features_shape): the frozen encoder's output per frame
+        images: torch.Tensor,  # (B, T, sum(image_features_sizes)): the frozen encoder's output
         actions: torch.Tensor,  # (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)
@@ -87,10 +108,7 @@ class SpatialTemporalEncoder(nn.Module):
         # External [B, space_len, state_size, n_layer] -> internal [1, B*space_len, ...]
         rnn_state_internal = rnn_state.reshape(1, B * self.space_len, -1, self.n_layer)
 
-        all_frames = images.reshape(-1, *images.shape[2:])
-        all_latents = self.image_projection(all_frames)  # [B*T, C', H', W']
-        all_latents = all_latents.reshape(B, T, *all_latents.shape[1:])
-        image_embed = all_latents.flatten(3).transpose(2, 3)  # [B, T, S, C']
+        image_embed = self.image_tokens(images)  # [B, T, S, C']
 
         action_embed = get_fourier_embeds_from_coordinates(self.hidden_image_dim, actions)
         reward_embed = embed_reward(rewards, self.hidden_image_dim)  # [B, T, 1, C']

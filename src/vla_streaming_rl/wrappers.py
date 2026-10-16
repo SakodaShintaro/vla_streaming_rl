@@ -3,6 +3,8 @@
 import gymnasium as gym
 import numpy as np
 
+from vla_streaming_rl.image_obs import image_obs_names
+
 
 def make_env(env_id: str, env_factory, result_dir, seed: int) -> gym.Env:
     """Build the training env.
@@ -117,17 +119,23 @@ class AverageRewardEarlyStopWrapper(gym.Wrapper):
 
 
 class TransposeAndNormalizeObs(gym.ObservationWrapper):
+    """観測の画像（IMAGE_OBS_NAMES のうち観測にあるもの全部）を [0, 1] の (3, H, W) にする。"""
+
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
-        h, w = env.observation_space["image"].shape[0:2]
+        self.image_names = image_obs_names(env.observation_space)
         spaces = dict(env.observation_space.spaces)
-        spaces["image"] = gym.spaces.Box(low=0.0, high=1.0, shape=(3, h, w), dtype=np.float32)
+        for name in self.image_names:
+            h, w = env.observation_space[name].shape[0:2]
+            spaces[name] = gym.spaces.Box(low=0.0, high=1.0, shape=(3, h, w), dtype=np.float32)
         self.observation_space = gym.spaces.Dict(spaces)
 
     def observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        o = obs["image"].astype(np.float32) / 255.0
-        o = np.transpose(o, (2, 0, 1))
-        return {**obs, "image": o}
+        images = {
+            name: np.transpose(obs[name].astype(np.float32) / 255.0, (2, 0, 1))
+            for name in self.image_names
+        }
+        return {**obs, **images}
 
 
 class DictObsWrapper(gym.ObservationWrapper):

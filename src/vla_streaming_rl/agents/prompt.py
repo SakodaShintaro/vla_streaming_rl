@@ -7,6 +7,8 @@ import numpy as np
 from gymnasium import Env
 from omegaconf import DictConfig
 
+from vla_streaming_rl.image_obs import image_obs_names
+
 TEXT_ACTION_PROTOCOL = "Reply with the action only."
 
 
@@ -164,6 +166,11 @@ ANIMALAI_FRAMING = (
     "Turn until the target is at the center of the view, then move forward "
     "with keeping it centered."
 )
+# 鳥瞰図を観測に入れたときに、各ステップの2枚の画像が何かを伝える文
+ANIMALAI_TOPDOWN_FRAMING = (
+    "Each step shows two images: first your first-person view, then the whole arena "
+    "seen from straight above."
+)
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
 # Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
@@ -205,6 +212,12 @@ class AnimalAIPromptBuilder(PromptBuilder):
     def __init__(self, env: Env, thinking_interval: int) -> None:
         super().__init__(env, thinking_interval)
         self.tasks = {arena.task: "" for arena in env.unwrapped.selector.arenas}
+        # 鳥瞰図が観測にあるか（env の topdown_observation）
+        self._framing = (
+            f"{ANIMALAI_FRAMING} {ANIMALAI_TOPDOWN_FRAMING}"
+            if "topdown_image" in image_obs_names(env.observation_space)
+            else ANIMALAI_FRAMING
+        )
         self._task_key = ""
         self._pass_mark = 0.0
         self._forward_speed_sum = 0.0
@@ -249,7 +262,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
         self._task_key = info["arena_name"].rsplit("-", 1)[0]
         task = self.tasks[self._task_key]
         task_sentence = f"Task: {task} " if task != "" else ""
-        return f"{ANIMALAI_FRAMING} {self._action_format()} {task_sentence}{self._protocol()}"
+        return f"{self._framing} {self._action_format()} {task_sentence}{self._protocol()}"
 
     def reflect(self, score: float, answer) -> str | None:
         if self._task_key == "":

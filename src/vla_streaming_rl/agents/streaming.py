@@ -29,6 +29,7 @@ class StreamingAgent(Agent):
         self,
         *,
         action_space: gym.spaces.Box,
+        image_names: tuple[str, ...],
         network: nn.Module,
         normalizing_by_return: bool,
         max_grad_norm: float,
@@ -51,6 +52,7 @@ class StreamingAgent(Agent):
         actor_params, critic_params = split_actor_critic_params(network)
         super().__init__(
             action_space=action_space,
+            image_names=image_names,
             network=network,
             prompt_builder=prompt_builder,
             actor_optimizer=optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay),
@@ -82,7 +84,7 @@ class StreamingAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        image, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
+        images, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
         if terminated or truncated:
             self._episode_reset = self.use_done
         if self._has_chunk_left():
@@ -94,14 +96,14 @@ class StreamingAgent(Agent):
         # it, but a chunk still has to be started, so the tick acts without a
         # learning step.
         if not self.rb.latest_window_is_clean(self.seq_len + self.horizon):
-            return self._act(image, prompt, metrics, global_step)
+            return self._act(images, prompt, metrics, global_step)
 
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_scaler.normalize(data.rewards)
         result = self.network.infer_and_compute_loss(
-            data, image, prompt, self.prompt_builder.turn_text()
+            data, images, prompt, self.prompt_builder.turn_text()
         )
         metrics.update(result.loss_result.info)
 
@@ -136,19 +138,21 @@ class StreamingAgent(Agent):
     ) -> StepResult:
         """Act without learning: the trainer calls this once per episode after
         the reset, and the testbed calls it on every tick."""
-        image, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
+        images, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
         if terminated or truncated:
             self._episode_reset = self.use_done
         if self._has_chunk_left():
             return self._continue_chunk(metrics, prompt)
-        return self._act(image, prompt, metrics, global_step)
+        return self._act(images, prompt, metrics, global_step)
 
-    def _act(self, image: torch.Tensor, prompt: str, metrics: dict, global_step: int) -> StepResult:
+    def _act(
+        self, images: list[torch.Tensor], prompt: str, metrics: dict, global_step: int
+    ) -> StepResult:
         """Start a chunk from the newest state window, with no learning step."""
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
             InferInput(
-                frame=image,
+                frames=images,
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,

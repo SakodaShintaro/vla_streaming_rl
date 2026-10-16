@@ -9,6 +9,8 @@ from gymnasium import Env
 from omegaconf import DictConfig
 from torch import nn
 
+from vla_streaming_rl.image_obs import image_obs_names
+
 
 def build_network(
     args: DictConfig,
@@ -19,7 +21,10 @@ def build_network(
 ) -> nn.Module:
     """``parse_action_text`` と ``text_action_names`` は返答に書かせる行動の決まりで、
     環境ごとのプロンプトの builder が持つ。返答を書くネットワークだけが使う。"""
-    observation_space_shape = env.observation_space["image"].shape
+    # 観測の画像ごとの (3, H, W)、IMAGE_OBS_NAMES の並び
+    image_shapes = [
+        env.observation_space[name].shape for name in image_obs_names(env.observation_space)
+    ]
     action_space_shape = env.action_space.shape
     # 全ネットワーク共通のヘッド工場。どのクラスを使うかと設定は config の policy_head と
     # value_head（configs/policy_head, configs/value_head から選ぶ）が決め、ネットワークは
@@ -34,7 +39,7 @@ def build_network(
         )
 
         network = ActorCriticWithActionValue(
-            observation_space_shape=observation_space_shape,
+            image_shapes=image_shapes,
             action_space_shape=action_space_shape,
             value_head_factory=value_head_factory,
             critic_loss_weight=args.critic_loss_weight,
@@ -50,7 +55,6 @@ def build_network(
         )
 
         network = VLMActorCriticWithActionValue(
-            observation_space_shape=observation_space_shape,
             action_space_shape=action_space_shape,
             value_head_factory=value_head_factory,
             horizon=args.horizon,

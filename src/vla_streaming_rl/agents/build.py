@@ -4,6 +4,7 @@ from gymnasium import Env
 from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.prompt import PromptBuilder, build_prompt_builder
+from vla_streaming_rl.image_obs import image_obs_names
 
 
 def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module, object]:
@@ -30,6 +31,7 @@ def build_agent(
 
         return StreamingAgent(
             action_space=env.action_space,
+            image_names=image_obs_names(env.observation_space),
             network=network,
             normalizing_by_return=args.normalizing_by_return,
             max_grad_norm=args.max_grad_norm,
@@ -52,6 +54,7 @@ def build_agent(
 
     return OffPolicyAgent(
         action_space=env.action_space,
+        image_names=image_obs_names(env.observation_space),
         network=network,
         normalizing_by_return=args.normalizing_by_return,
         learning_starts=args.learning_starts,

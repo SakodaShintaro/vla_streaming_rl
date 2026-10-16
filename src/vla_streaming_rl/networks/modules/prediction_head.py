@@ -20,7 +20,7 @@ class StatePredictionHead(nn.Module):
 
     def __init__(
         self,
-        image_latent_shape: tuple[int, int, int],
+        image_latent_dim: int,
         action_dim: int,
         predictor_hidden_dim: int,
         predictor_block_num: int,
@@ -31,9 +31,9 @@ class StatePredictionHead(nn.Module):
         super().__init__()
         # 予測の損失の勾配をエンコーダに流さない
         self.detach_predictor = detach_predictor
-        self.image_latent_shape = image_latent_shape
+        self.image_latent_dim = image_latent_dim
         self.predictor_type = predictor_type
-        hidden_image_dim = image_latent_shape[0]
+        hidden_image_dim = image_latent_dim
         self.state_predictor = FluxDiT(
             in_channels=hidden_image_dim,
             out_channels=hidden_image_dim,
@@ -170,25 +170,22 @@ class StatePredictionHead(nn.Module):
         return loss, activation, info
 
     def encode_target(
-        self, next_image_latent: torch.Tensor, next_reward: torch.Tensor
+        self, next_image_tokens: torch.Tensor, next_reward: torch.Tensor
     ) -> torch.Tensor:
-        """Build the flow-matching regression target ``x1`` (B, H'*W'+1, C')
-        from the next image's latent (B, C', H', W'), which the caller encodes
-        without gradient (fixed target), and the next reward spread over the
-        channels, appended as the final position.
+        """Build the flow-matching regression target ``x1`` (B, N+1, C')
+        from the next step's image tokens (B, N, C') -- every image of the
+        observation, one after another -- which the caller encodes without
+        gradient (fixed target), and the next reward spread over the channels,
+        appended as the final position.
         """
-        target_state_next = next_image_latent.flatten(2).permute(0, 2, 1)  # (B, H'*W', C')
-
-        target_reward_next = embed_reward(next_reward, self.image_latent_shape[0]).squeeze(
-            1
-        )  # (B, C')
-        return torch.cat([target_state_next, target_reward_next.unsqueeze(1)], dim=1)
+        target_reward_next = embed_reward(next_reward, self.image_latent_dim).squeeze(1)  # (B, C')
+        return torch.cat([next_image_tokens, target_reward_next.unsqueeze(1)], dim=1)
 
     def compute_loss(
         self,
         predictor_state: torch.Tensor,
         action: torch.Tensor,
-        next_image_latent: torch.Tensor,
+        next_image_tokens: torch.Tensor,
         next_reward: torch.Tensor,
         next_predictor_state: torch.Tensor,
         next_action: torch.Tensor,
@@ -209,12 +206,12 @@ class StatePredictionHead(nn.Module):
 
         # Context layout: (B, tokens, C) where C is the image channel dim
         # (no-op for callers already in that shape).
-        C = self.image_latent_shape[0]
+        C = self.image_latent_dim
         predictor_state = predictor_state.view(predictor_state.size(0), -1, C)
         next_predictor_state = next_predictor_state.view(next_predictor_state.size(0), -1, C)
 
         self._update_target()
-        x1 = self.encode_target(next_image_latent, next_reward)
+        x1 = self.encode_target(next_image_tokens, next_reward)
         if self.predictor_type == "flow_matching":
             loss, _, info = self._loss_flow_matching(
                 predictor_state, action, x1, next_predictor_state, next_action, done

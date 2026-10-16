@@ -111,14 +111,18 @@ class AnimalAIEnv(gym.Env):
         continuous_action: bool,
         topdown_camera: bool,
         topdown_resolution: int,
+        topdown_observation: bool,
         colored_walls: bool,
         end_at_pass_mark: bool,
         selector: ArenaSelector,
     ):
         super().__init__()
+        # 鳥瞰図を観測に入れるには、それを描くカメラが要る
+        assert topdown_camera or not topdown_observation, "topdown_observation needs topdown_camera"
         self.continuous_action = continuous_action
         self.topdown_camera = topdown_camera
         self.topdown_resolution = topdown_resolution
+        self.topdown_observation = topdown_observation
         self.colored_walls = colored_walls
         self.end_at_pass_mark = end_at_pass_mark
         self.selector = selector
@@ -131,9 +135,18 @@ class AnimalAIEnv(gym.Env):
         self.render_mode = "rgb_array"
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
-        self.observation_space = spaces.Box(
-            low=0, high=255, shape=(resolution, resolution, 3), dtype=np.uint8
-        )
+        # 一人称の視点と、topdown_observation なら鳥瞰図
+        image_spaces = {
+            "image": spaces.Box(low=0, high=255, shape=(resolution, resolution, 3), dtype=np.uint8)
+        }
+        if topdown_observation:
+            image_spaces["topdown_image"] = spaces.Box(
+                low=0,
+                high=255,
+                shape=(topdown_resolution, topdown_resolution, 3),
+                dtype=np.uint8,
+            )
+        self.observation_space = spaces.Dict(image_spaces)
 
         self._aai: AnimalAIEnvironment | None = None
         self._behavior_name: str | None = None
@@ -142,8 +155,8 @@ class AnimalAIEnv(gym.Env):
         # behavior spec at launch.
         self._continuous_size = 0
         self._latest_image: np.ndarray | None = None
-        # The overhead camera's view, on the binaries that have one. It is not
-        # part of `observation_space`: `render` draws it, the policy never sees it.
+        # The overhead camera's view, on the binaries that have one. `render`
+        # draws it, and with `topdown_observation` it is also an observation.
         self._latest_topdown_image: np.ndarray | None = None
         self.global_step = 0
         self.episode_step = 0
@@ -245,6 +258,10 @@ class AnimalAIEnv(gym.Env):
         # last either way.
         self._observation_count = len(spec.observation_specs)
         assert self._observation_count in (2, 3), self._observation_count
+        assert self._observation_count == 3 or not self.topdown_observation, (
+            f"{self.binary_path} renders no overhead camera; topdown_observation needs a "
+            "binary rebuilt from animal-ai-unity."
+        )
         self._vector_size = spec.observation_specs[self._observation_count - 1].shape[0]
         assert self._vector_size == 10, (
             f"{self.binary_path} emits a {self._vector_size}-element vector observation; "
@@ -265,7 +282,7 @@ class AnimalAIEnv(gym.Env):
         # observation is [health, vx, vy, vz, x, y, z, pitch, yaw, roll].
         vec = steps.obs[self._observation_count - 1][0]
         self._latest_image = self._decode_obs(steps.obs[0][0])
-        # Watched in `render`, never handed to the policy.
+        # Watched in `render`, and handed to the policy with `topdown_observation`.
         self._latest_topdown_image = (
             self._decode_obs(steps.obs[1][0]) if self._observation_count == 3 else None
         )
@@ -292,6 +309,12 @@ class AnimalAIEnv(gym.Env):
             reward += PASS_MARK_BONUS if cleared else -PASS_MARK_BONUS
         return reward
 
+    def _observation(self) -> dict[str, np.ndarray]:
+        images = {"image": self._latest_image}
+        if self.topdown_observation:
+            images["topdown_image"] = self._latest_topdown_image
+        return images
+
     def _build_info(self, shaped_reward: float) -> dict:
         info = {
             "shaped_reward": shaped_reward,
@@ -308,7 +331,7 @@ class AnimalAIEnv(gym.Env):
         info.update(self.selector.info(self.global_step))
         return info
 
-    def reset(self, seed: int | None, options: dict | None) -> tuple[np.ndarray, dict]:
+    def reset(self, seed: int | None, options: dict | None) -> tuple[dict, dict]:
         super().reset(seed=seed)
         self._ensure_started()
 
@@ -329,9 +352,9 @@ class AnimalAIEnv(gym.Env):
 
         decision_steps, _ = self._aai.get_steps(self._behavior_name)
         self._read_observation(decision_steps)
-        return self._latest_image, self._build_info(0.0)
+        return self._observation(), self._build_info(0.0)
 
-    def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
+    def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict]:
         self.global_step += 1
         a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0).reshape(1, 2)
         # Both halves go out every step; which one Unity obeys was fixed at
@@ -376,7 +399,7 @@ class AnimalAIEnv(gym.Env):
         info = self._build_info(shaped_reward)
         if done:
             info["success"] = bool(success)
-        return self._latest_image, reward, terminated, truncated, info
+        return self._observation(), reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
         """This episode's arena from above, beside the arena set's coverage.
@@ -384,6 +407,7 @@ class AnimalAIEnv(gym.Env):
         The arena pane is the overhead camera when the binary renders one, and
         otherwise a schematic drawn from the arena yaml -- the camera shows where
         everything is, the schematic only where everything started.
+        鳥瞰図を観測に入れているときは、それは観測の列に描かれるので、ここは模式図にする。
         """
         if self.render_mode != "rgb_array":
             return None
@@ -394,7 +418,7 @@ class AnimalAIEnv(gym.Env):
         ]
         arena = (
             fit_square(self._latest_topdown_image, RENDER_SIZE_PX)
-            if self._latest_topdown_image is not None
+            if self._latest_topdown_image is not None and not self.topdown_observation
             else render_topdown(self._arena_items, self._agent_xyz)
         )
         topdown = np.vstack([draw_header(header_lines, RENDER_SIZE_PX), arena])

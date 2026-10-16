@@ -41,7 +41,7 @@ class ActorCriticWithActionValue(NetworkInterface):
     def __init__(
         self,
         *,
-        observation_space_shape: tuple[int],
+        image_shapes: list[tuple[int, ...]],
         action_space_shape: tuple[int],
         value_head_factory: Callable[[int, int], DistributionalValueHead],
         critic_loss_weight: float,
@@ -56,9 +56,7 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         self.action_dim = action_space_shape[0]
 
-        self.image_processor = ImageProcessor(
-            observation_space_shape, actor_critic_config.image_encoder_type
-        )
+        self.image_processor = ImageProcessor(image_shapes, actor_critic_config.image_encoder_type)
         hidden_image_dim = actor_critic_config.image_encoder_output_dim
 
         assert 0.0 <= actor_critic_config.token_dropout < 1.0, actor_critic_config.token_dropout
@@ -73,7 +71,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
 
         self.encoder = SpatialTemporalEncoder(
-            image_features_shape=tuple(self.image_processor.output_shape),
+            image_features_shapes=self.image_processor.output_shapes,
             image_latent_dim=hidden_image_dim,
             seq_len=self.seq_len,
             n_layer=actor_critic_config.encoder_block_num,
@@ -98,7 +96,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             None
             if self.disable_state_predictor
             else prediction_head_factory(
-                image_latent_shape=(hidden_image_dim, self.encoder.hidden_h, self.encoder.hidden_w),
+                image_latent_dim=hidden_image_dim,
                 action_dim=self.action_dim,
             )
         )
@@ -118,11 +116,14 @@ class ActorCriticWithActionValue(NetworkInterface):
         return self.encoder.init_state()
 
     def stored_image_shape(self) -> tuple[int, ...]:
-        """The frozen encoder's output for the frame, not the frame."""
-        return tuple(self.image_processor.output_shape)
+        """The frozen encoder's output for the frames, not the frames: each image's
+        (C, H', W') flattened and laid one after another."""
+        return (sum(self.encoder.image_features_sizes),)
 
-    def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
-        return self.image_processor.encode(image.unsqueeze(0)).squeeze(0)
+    def to_stored_image(self, images: list[torch.Tensor]) -> torch.Tensor:
+        return torch.cat(
+            [self.image_processor.encode(image.unsqueeze(0)).flatten() for image in images]
+        )
 
     def answer(self, request: str) -> str:
         """文を書かないネットワークなので、何も答えない。"""
@@ -224,11 +225,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         # チャンク1ステップのときだけ使える
         assert self.horizon == 1, f"the successor prediction needs horizon 1; got {self.horizon}"
         with torch.no_grad():
-            next_image_latent = self.encoder.image_projection(data.observations[:, -self.horizon])
+            next_image_tokens = self.encoder.image_tokens(data.observations[:, -self.horizon])
         return self.prediction_head.compute_loss(
             state,
             data.actions[:, -self.horizon],
-            next_image_latent,
+            next_image_tokens,
             data.rewards[:, -self.horizon],
             next_state,
             next_action[:, 0],
@@ -240,11 +241,15 @@ class ActorCriticWithActionValue(NetworkInterface):
         return LossResult(loss=terms.total_loss, info=terms.info)
 
     def infer_and_compute_loss(
-        self, data: ReplayBufferData, frame: torch.Tensor, system_text: str, turn_text: str
+        self,
+        data: ReplayBufferData,
+        frames: list[torch.Tensor],
+        system_text: str,
+        turn_text: str,
     ) -> InferLossResult:
         """Combined inference and loss computation."""
         # 画像はバッファの窓から読むので、このステップの生の画像は使わない
-        del frame, system_text, turn_text
+        del frames, system_text, turn_text
         terms = self._loss_terms(data)
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(

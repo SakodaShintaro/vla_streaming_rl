@@ -96,6 +96,7 @@ class Agent(ABC):
         self,
         *,
         action_space: gym.spaces.Box,
+        image_names: tuple[str, ...],
         network: nn.Module,
         prompt_builder: PromptBuilder,
         actor_optimizer: optim.Optimizer,
@@ -109,6 +110,8 @@ class Agent(ABC):
         reset_on_episode_end: bool,
     ) -> None:
         self.device = torch.device("cuda")
+        # 観測から読んでネットワークに渡す画像の名前（IMAGE_OBS_NAMES の並び）
+        self.image_names = image_names
         self.network = network
         self.prompt_builder = prompt_builder
         self.actor_optimizer = actor_optimizer
@@ -201,9 +204,10 @@ class Agent(ABC):
 
     def _observe(
         self, obs: dict[str, Any], reward: float, terminated: bool, truncated: bool, info: dict
-    ) -> tuple[torch.Tensor, str, dict[str, float]]:
+    ) -> tuple[list[torch.Tensor], str, dict[str, float]]:
         """このティックの観測を受け取り、エピソードの境目を処理して、バッファに1行積む。
-        このステップの観測の画像そのもの、タスクのプロンプト、metrics を返す。"""
+        このステップの観測の画像そのもの（``image_names`` の並び）、タスクのプロンプト、
+        metrics を返す。"""
         episode_done = terminated or truncated
         # A terminal observation still belongs to the episode that ended, so the
         # conversation and the chain are dropped on the tick after it rather than
@@ -232,7 +236,7 @@ class Agent(ABC):
             "processed_reward": self.reward_scaler.normalize(torch.tensor(shaped_reward)).item(),
         }
 
-        image = torch.from_numpy(obs["image"]).to(self.device)
+        images = [torch.from_numpy(obs[name]).to(self.device) for name in self.image_names]
         scalar_obs = read_scalar_obs(obs)
         # ネットワークはここでスカラーの観測の統計を更新する
         self.network.observe_scalar_obs(scalar_obs)
@@ -241,14 +245,14 @@ class Agent(ABC):
         self.prompt_builder.observe(obs, reward, info, self.prev_action)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            self.network.to_stored_image(image),
+            self.network.to_stored_image(images),
             shaped_reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
             scalar_obs,
         )
-        return image, self.prompt_builder.task_text(), metrics
+        return images, self.prompt_builder.task_text(), metrics
 
     def _has_chunk_left(self) -> bool:
         """実行中のチャンクに、まだ実行していない行動があるか。"""

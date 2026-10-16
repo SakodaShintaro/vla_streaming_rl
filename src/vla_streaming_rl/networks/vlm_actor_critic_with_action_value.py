@@ -44,7 +44,8 @@ class LossTerms:
 class VLMActorCriticWithActionValue(NetworkInterface):
     """VLM backbone + DiffusionPolicy + Action Value critic.
 
-    Every tick the VLM reads the tick's frame and text on top of the episode's
+    Every tick the VLM reads the tick's frames (every image of the observation)
+    and text on top of the episode's
     conversation so far and writes the reply the zero-shot controller would --
     its action, after thinking on every ``thinking_interval``-th tick. The
     conversation lives in the VLM's KV cache: the system prompt stays, the
@@ -75,7 +76,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def __init__(
         self,
         *,
-        observation_space_shape: tuple[int],
         action_space_shape: tuple[int],
         value_head_factory: Callable[[int, int], DistributionalValueHead],
         horizon: int,
@@ -146,9 +146,9 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         """何も保存しない。フレームは会話に積んだ時点で KV キャッシュに入る。"""
         return (0,)
 
-    def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
-        """バッファには何も置かない。フレームは推論のときに ``InferInput.frame`` で受け取る。"""
-        del image
+    def to_stored_image(self, images: list[torch.Tensor]) -> torch.Tensor:
+        """バッファには何も置かない。フレームは推論のときに ``InferInput.frames`` で受け取る。"""
+        del images
         return torch.zeros(0)
 
     def stored_state_shape(self) -> tuple[int, ...]:
@@ -180,7 +180,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         return self._act(
-            data.frame, data.system_text, data.turn_text, data.scalar_obs_seq, data.warmup
+            data.frames, data.system_text, data.turn_text, data.scalar_obs_seq, data.warmup
         )
 
     @torch.inference_mode()
@@ -199,11 +199,15 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         return LossResult(loss=terms.total_loss, info=terms.info)
 
     def infer_and_compute_loss(
-        self, data: ReplayBufferData, frame: torch.Tensor, system_text: str, turn_text: str
+        self,
+        data: ReplayBufferData,
+        frames: list[torch.Tensor],
+        system_text: str,
+        turn_text: str,
     ) -> InferLossResult:
         # 最後のステップはまだ行動を決めていないので、ここで返答を書いて表現を作る
         with torch.inference_mode():
-            infer_result = self._act(frame, system_text, turn_text, data.scalar_obs, False)
+            infer_result = self._act(frames, system_text, turn_text, data.scalar_obs, False)
         terms = self._loss_terms(
             data,
             infer_result.stored_state.unsqueeze(0).clone(),
@@ -230,17 +234,18 @@ class VLMActorCriticWithActionValue(NetworkInterface):
 
     def _act(
         self,
-        frame: torch.Tensor,
+        frames: list[torch.Tensor],
         system_text: str,
         turn_text: str,
         scalar_obs: torch.Tensor,
         warmup: bool,
     ) -> InferResult:
-        """最後のステップの行動を決める。そのステップのフレームと数値のターンを会話に積んで
-        返答を書かせ、その計算の活性から状態を作り、返答の行動とヘッドの行動を行動価値で選ぶ。"""
+        """最後のステップの行動を決める。そのステップのフレーム（観測の画像すべて）と数値の
+        ターンを会話に積んで返答を書かせ、その計算の活性から状態を作り、返答の行動とヘッドの
+        行動を行動価値で選ぶ。"""
         assert scalar_obs.shape[0] == 1, "Batch size must be 1 for inference"
         step = float(scalar_obs[0, -1, EPISODE_STEP_INDEX])
-        chain, exchange = self._write_reply(frame, system_text, turn_text, step)
+        chain, exchange = self._write_reply(frames, system_text, turn_text, step)
         representation = self._pool_states(chain.states)
         state = self._state(representation.unsqueeze(0))
         head_action = self.policy_head.get_action(state)
@@ -287,7 +292,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
     def _write_reply(
-        self, frame: torch.Tensor, system_text: str, turn_text: str, step: float
+        self, frames: list[torch.Tensor], system_text: str, turn_text: str, step: float
     ) -> tuple[Chain, list[dict]]:
         """このステップのフレームと数値のターンを会話に積んで返答を書かせる。書いた返答と、
         表示用に残す直近の会話を返す。エピソードの最初のステップでは、前のエピソードの会話を
@@ -299,7 +304,7 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             ]
             self._decisions_num = 0
             self._vlm_chosen_num = 0
-        self._exchange.append(user_turn(step / self.decision_fps, frame, turn_text))
+        self._exchange.append(user_turn(step / self.decision_fps, frames, turn_text))
         # 一定の間隔のステップで、思考を書いてから返答させる。そのあいだは行動だけを書かせる
         thinking = self.generator.thinking_enabled and int(step) % self.thinking_interval == 0
         chain = self.generator.generate(self._exchange, thinking, self.constrained)

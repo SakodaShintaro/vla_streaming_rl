@@ -32,15 +32,18 @@ def assistant_turn(text: str) -> dict:
     return {"role": "assistant", "content": [{"type": "text", "text": text}]}
 
 
-def user_turn(seconds: float, image, text: str) -> dict:
-    """A turn the env puts to the agent: the frame under its timestamp, then the
-    turn's text. The timestamp comes first and is written the way the model's
-    video frames carry theirs, which is the order it learned them in."""
+def user_turn(seconds: float, images: list, text: str) -> dict:
+    """A turn the env puts to the agent: the frames under their timestamp, then
+    the turn's text. The timestamp comes first and is written the way the model's
+    video frames carry theirs, which is the order it learned them in.
+
+    1ステップの観測の画像（IMAGE_OBS_NAMES の並び）をこの順に並べる。どれが何の画像かは
+    タスクの文が伝える。"""
     return {
         "role": "user",
         "content": [
             {"type": "text", "text": f"<{seconds:.1f} seconds>"},
-            {"type": "image", "image": image},
+            *[{"type": "image", "image": image} for image in images],
             {"type": "text", "text": text},
         ],
     }

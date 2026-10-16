@@ -169,21 +169,25 @@ class ImageProcessor(nn.Module):
 
     It never trains, so a replay buffer stores what it produces for a frame
     rather than the frame: the agents run ``encode`` once when a frame is
-    collected, and a learning step reads ``output_shape`` tensors back. The
+    collected, and a learning step reads ``output_shapes`` tensors back. The
     trainable layer on top, projecting to the network's token width, belongs to
     the network.
     """
 
     def __init__(
         self,
-        observation_space_shape: tuple[int],
+        image_shapes: list[tuple[int, ...]],
         image_encoder_type: str,
     ) -> None:
         super().__init__()
-        self.observation_space_shape = observation_space_shape
-        backbone = IMAGE_ENCODERS[image_encoder_type](observation_space_shape)
+        # 1ステップの観測の画像ごとの (3, H, W)。どれも同じエンコーダに通す
+        assert all(shape[0] == 3 for shape in image_shapes), image_shapes
+        backbone = IMAGE_ENCODERS[image_encoder_type](image_shapes[0])
         self.backbone = backbone.train(False).requires_grad_(False)
-        self.output_shape = list(self.encode(torch.zeros(1, *observation_space_shape)).size())[1:]
+        # 画像ごとのエンコーダの出力の (C, H', W')
+        self.output_shapes = [
+            tuple(self.encode(torch.zeros(1, *shape)).size()[1:]) for shape in image_shapes
+        ]
 
     @torch.no_grad()
     def encode(self, x: torch.Tensor) -> torch.Tensor:

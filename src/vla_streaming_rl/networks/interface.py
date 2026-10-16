@@ -37,9 +37,9 @@ class InferInput:
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
     scalar_obs_seq: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
-    # このステップの観測の画像そのもの（保存した形ではない）。会話にフレームを積む
-    # ネットワークが読む
-    frame: torch.Tensor
+    # このステップの観測の画像そのもの（保存した形ではない）を IMAGE_OBS_NAMES の並びで。
+    # 会話にフレームを積むネットワークが読む
+    frames: list[torch.Tensor]
     # このステップのタスクのプロンプトと、フレームに添える数値のターン
     system_text: str
     turn_text: str
@@ -132,9 +132,9 @@ class NetworkInterface(nn.Module, abc.ABC):
         pre-encodes it into (see ``to_stored_image``)."""
 
     @abc.abstractmethod
-    def to_stored_image(self, image: torch.Tensor) -> torch.Tensor:
-        """The stored form of one raw observation image, matching
-        ``stored_image_shape``."""
+    def to_stored_image(self, images: list[torch.Tensor]) -> torch.Tensor:
+        """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）をまとめて保存する形、
+        ``stored_image_shape`` の形。"""
 
     @abc.abstractmethod
     def answer(self, request: str) -> str:
@@ -163,8 +163,12 @@ class NetworkInterface(nn.Module, abc.ABC):
 
     @abc.abstractmethod
     def infer_and_compute_loss(
-        self, data: ReplayBufferData, frame: torch.Tensor, system_text: str, turn_text: str
+        self,
+        data: ReplayBufferData,
+        frames: list[torch.Tensor],
+        system_text: str,
+        turn_text: str,
     ) -> InferLossResult:
         """Combined inference + loss in one forward, sharing the encoder pass.
-        ``frame``, ``system_text`` and ``turn_text`` are the newest tick's, as in
+        ``frames``, ``system_text`` and ``turn_text`` are the newest tick's, as in
         :class:`InferInput`."""

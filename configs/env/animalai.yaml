@@ -59,16 +59,19 @@ env_factory:
   #             branches exactly, so it is a strict superset of false.
   continuous_action: true
   # - topdown_camera: have the binary render a second camera looking straight
-  #   down at the whole arena. It never reaches the policy (it is not part of
-  #   observation_space); `render` draws it in the pane the schematic would have
-  #   filled, so a run can be watched as it happens. Costs roughly a quarter of
-  #   the environment's throughput, so turn it off for runs nobody is watching.
-  #   Ignored by an official binary.
+  #   down at the whole arena. `render` draws it in the pane the schematic would
+  #   have filled, so a run can be watched as it happens. Costs roughly a quarter
+  #   of the environment's throughput, so turn it off for runs nobody is watching
+  #   and that do not observe it. Ignored by an official binary.
   topdown_camera: true
   # - topdown_resolution: that camera's square resolution, independent of
-  #   `resolution` since only a human looks at it. Cost grows with the pixel
-  #   count, so this is the knob to turn when the view is too slow or too coarse.
-  topdown_resolution: 96
+  #   `resolution`. Cost grows with the pixel count, so this is the knob to turn
+  #   when the view is too slow or too coarse.
+  topdown_resolution: 256
+  # - topdown_observation: 鳥瞰図を一人称の視点と並べて観測に入れ、VLM にもヘッド側の
+  #   ネットワークにも読ませる。false なら鳥瞰図は描画にしか使わない。topdown_camera と、
+  #   それを描く binary が要る。鳥瞰図の解像度は topdown_resolution
+  topdown_observation: true
   # - colored_walls: tint the arena's four outer walls four different colors, so
   #   that a view of a wall says which side of the arena the agent is facing.
   #   false leaves every wall the shade it has always had. Requires a binary

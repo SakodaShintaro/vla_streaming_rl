@@ -2,6 +2,8 @@
 import cv2
 import numpy as np
 
+from vla_streaming_rl.image_obs import image_obs_names
+
 
 def concat_images(image_list: list[np.ndarray]) -> np.ndarray:
     """
@@ -333,13 +335,23 @@ def render_frame(env, obs, info, prev_action, result, scale: float) -> np.ndarra
     prompt, the observation panel (rescaled by ``scale`` for display only)
     above the scalar inputs the network reads this tick, then whatever panels
     the agent contributed. ``prev_action`` is the action the agent returned on
-    the previous tick, which the network reads as its action input."""
-    obs_viz = obs["image"].copy().transpose(1, 2, 0)
-    if scale != 1.0:
-        h, w = obs_viz.shape[:2]
-        obs_viz = cv2.resize(
-            obs_viz, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+    the previous tick, which the network reads as its action input.
+
+    観測の画像が複数あるときは、ネットワークが読む並びで観測の列に縦に積む。どの画像にも
+    同じ ``scale`` だけを掛けるので、画像どうしの大きさの違いはそのまま見える。幅の足りない
+    画像は右を黒で埋める。"""
+    images = [
+        cv2.resize(
+            obs[name].transpose(1, 2, 0),
+            (int(obs[name].shape[2] * scale), int(obs[name].shape[1] * scale)),
+            interpolation=cv2.INTER_AREA,
         )
+        for name in image_obs_names(env.observation_space)
+    ]
+    width = max(image.shape[1] for image in images)
+    obs_viz = np.vstack(
+        [np.pad(image, ((0, 0), (0, width - image.shape[1]), (0, 0))) for image in images]
+    )
     # ネットワークが読む順に、正規化する前の値を並べる
     velocity = obs["velocity"]
     scalar_rows = [

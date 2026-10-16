@@ -35,6 +35,7 @@ class OffPolicyAgent(Agent):
         self,
         *,
         action_space: gym.spaces.Box,
+        image_names: tuple[str, ...],
         network: nn.Module,
         normalizing_by_return: bool,
         learning_starts: int,
@@ -57,6 +58,7 @@ class OffPolicyAgent(Agent):
         actor_params, critic_params = split_actor_critic_params(network)
         super().__init__(
             action_space=action_space,
+            image_names=image_names,
             network=network,
             prompt_builder=prompt_builder,
             actor_optimizer=optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay),
@@ -117,7 +119,7 @@ class OffPolicyAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        image, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
+        images, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
         warmup = global_step < self.learning_starts
         if not warmup and self._has_chunk_left():
             return self._continue_chunk(metrics, prompt)
@@ -126,7 +128,7 @@ class OffPolicyAgent(Agent):
         # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
         infer_result = self.network.infer(
             InferInput(
-                frame=image,
+                frames=images,
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=latest_data.rewards,

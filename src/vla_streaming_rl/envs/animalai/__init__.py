@@ -6,7 +6,6 @@ import gymnasium as gym
 import hydra
 
 from vla_streaming_rl.wrappers import (
-    DictObsWrapper,
     EpisodeReturnObsWrapper,
     InfoToObsWrapper,
     RemainingReturnObsWrapper,
@@ -26,6 +25,7 @@ def make_animalai_env(
     continuous_action: bool,
     topdown_camera: bool,
     topdown_resolution: int,
+    topdown_observation: bool,
     colored_walls: bool,
     end_at_pass_mark: bool,
     seed: int,
@@ -52,6 +52,7 @@ def make_animalai_env(
         continuous_action=continuous_action,
         topdown_camera=topdown_camera,
         topdown_resolution=topdown_resolution,
+        topdown_observation=topdown_observation,
         colored_walls=colored_walls,
         end_at_pass_mark=end_at_pass_mark,
         selector=selector,
@@ -63,7 +64,6 @@ def make_env(env_factory, seed: int) -> gym.Env:
     that move the scalar observations into the observation dict."""
     env = hydra.utils.instantiate(env_factory, seed=seed)
     env = gym.wrappers.RecordEpisodeStatistics(env)
-    env = DictObsWrapper(env)
     env = TransposeAndNormalizeObs(env)
     env = InfoToObsWrapper(env, key="velocity", shape=(3,), pop=True)
     env = InfoToObsWrapper(env, key="pass_mark", shape=(1,), pop=False)
