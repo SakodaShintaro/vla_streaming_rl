@@ -3,29 +3,21 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.prompt import PromptBuilder, build_prompt_builder
+from vla_streaming_rl.agents.instruction import ENV_INSTRUCTIONS
 from vla_streaming_rl.image_obs import image_obs_names
 
 
 def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module, object]:
-    """The prompt builder, network and agent a config describes, wired
-    together the way every entry script needs them."""
+    """The network and agent a config describes, wired together the way every
+    entry script needs them."""
     from vla_streaming_rl.networks.build import build_network
 
-    prompt_builder = build_prompt_builder(env, args)
-    network = build_network(
-        args,
-        env,
-        prompt_builder.parse_action_text,
-        prompt_builder.text_action_names(),
-        torch.device("cuda"),
-    )
-    return network, build_agent(env, network, prompt_builder, args)
+    network = build_network(args, env, torch.device("cuda"))
+    return network, build_agent(env, network, args)
 
 
-def build_agent(
-    env: Env, network: torch.nn.Module, prompt_builder: PromptBuilder, args: DictConfig
-):
+def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
+    instruction = ENV_INSTRUCTIONS[args.env_id]
     if args.agent_type == "streaming":
         from vla_streaming_rl.agents.streaming import StreamingAgent
 
@@ -46,7 +38,7 @@ def build_agent(
             et_lambda=args.et_lambda,
             buffer_device=args.replay_buffer.device,
             reset_on_episode_end=args.reset_on_episode_end,
-            prompt_builder=prompt_builder,
+            instruction=instruction,
         )
 
     assert args.agent_type == "off_policy", f"Unknown agent_type: {args.agent_type!r}"
@@ -68,7 +60,6 @@ def build_agent(
         weight_decay=args.weight_decay,
         buffer_size=args.replay_buffer.size,
         buffer_device=args.replay_buffer.device,
-        use_reflection=args.vla.use_reflection,
         reset_on_episode_end=args.reset_on_episode_end,
-        prompt_builder=prompt_builder,
+        instruction=instruction,
     )

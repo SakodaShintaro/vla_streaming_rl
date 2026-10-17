@@ -155,29 +155,6 @@ def save_train_state(
     (result_dir / "train_state.json").write_text(json.dumps(train_state, indent=2))
 
 
-def append_task_instruction(
-    path: Path,
-    state: "TrainState",
-    arena_name: str,
-    outcome: str,
-    score: float,
-    instruction: str,
-) -> None:
-    """One row per rewrite of a task instruction, appended as it happens: which
-    episode wrote it, how that episode went, and the instruction the following
-    episodes of the task will read. What lets a lap-over-lap regression be
-    audited against the exact words the arena was attempted under."""
-    is_new = not path.exists()
-    escaped = instruction.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
-    with open(path, "a", encoding="utf-8") as f:
-        if is_new:
-            f.write("episode_id\tglobal_step\tarena\toutcome\tscore\tinstruction\n")
-        f.write(
-            f"{state.episode_id}\t{state.global_step}\t{arena_name}\t{outcome}\t"
-            f"{score:.3f}\t{escaped}\n"
-        )
-
-
 def build_episode_log(
     state: TrainState, env_info: dict, mode: str, eval_range: int, elapsed_time_sec: float
 ) -> dict:
@@ -498,20 +475,9 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
                 f"Ep: {state.episode_id}\tStep: {state.global_step}\tLast score: {score:.2f}\tAverage score: {recent_average_score:.2f}\tLength: {env_info['episode']['l']:.2f}\tElapsed time: {elapsed_time_sec / 3600:.2f}h"
             )
 
-        episode_end = agent.on_episode_end(score)
-        wandb.log(episode_end.metrics)
+        agent.on_episode_end(score)
 
         arena_name = env_info["arena_name"] if "arena_name" in env_info else ""
-
-        if episode_end.rewritten_instruction is not None:
-            append_task_instruction(
-                result_dir / "task_instructions.tsv",
-                state,
-                arena_name,
-                "success" if score >= env_info["pass_mark"] else "failure",
-                score,
-                episode_end.rewritten_instruction,
-            )
 
         save_episode_videos(
             result_dir, state, arena_name, score, record, best_score_per_arena, args

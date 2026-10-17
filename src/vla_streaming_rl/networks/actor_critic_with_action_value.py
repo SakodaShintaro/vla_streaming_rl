@@ -126,11 +126,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             [self.image_processor.encode(image.unsqueeze(0)).flatten() for image in images]
         )
 
-    def answer(self, request: str) -> str:
-        """文を書かないネットワークなので、何も答えない。"""
-        del request
-        return ""
-
     def stored_state_shape(self) -> tuple[int, ...]:
         """状態は毎回バッファの窓から作るので、保存しない。"""
         return (0,)
@@ -204,12 +199,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             rnn_state=rnn_state,
             features=x,
             stored_state=None,
-            text=None,
-            text_status=None,
-            reply_action=None,
-            exchange=None,
-            selection_status=None,
-            selection_rows=None,
         )
 
     def _prediction_loss(
@@ -264,12 +253,11 @@ class ActorCriticWithActionValue(NetworkInterface):
         self,
         data: ReplayBufferData,
         frames: list[torch.Tensor],
-        system_text: str,
-        turn_text: str,
+        instruction: str,
     ) -> InferLossResult:
         """Combined inference and loss computation."""
-        # 画像はバッファの窓から読むので、このステップの生の画像は使わない
-        del frames, system_text, turn_text
+        # 画像はバッファの窓から読むので、このステップの生の画像は使わない。指示の文は読まない
+        del frames, instruction
         terms = self._loss_terms(data)
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
@@ -281,12 +269,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             rnn_state=terms.next_rnn_state,
             features=terms.next_state,
             stored_state=None,
-            text=None,
-            text_status=None,
-            reply_action=None,
-            exchange=None,
-            selection_status=None,
-            selection_rows=None,
         )
         return InferLossResult(
             infer_result=infer_result,

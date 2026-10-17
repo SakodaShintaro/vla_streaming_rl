@@ -19,7 +19,6 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult, split_actor_critic_params
-from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
 
@@ -44,7 +43,7 @@ class StreamingAgent(Agent):
         et_lambda: float,
         buffer_device: str,
         reset_on_episode_end: bool,
-        prompt_builder: PromptBuilder,
+        instruction: str,
     ) -> None:
         # Actor / critic optimizer split (critic == value head). The critic uses
         # AdamET (eligibility traces) when the trace is on, AdamW otherwise; the
@@ -54,7 +53,7 @@ class StreamingAgent(Agent):
             action_space=action_space,
             image_names=image_names,
             network=network,
-            prompt_builder=prompt_builder,
+            instruction=instruction,
             actor_optimizer=optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay),
             critic_optimizer=(
                 AdamET(critic_params, lr=critic_lr, gamma=gamma, et_lambda=et_lambda)
@@ -84,11 +83,11 @@ class StreamingAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        images, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
+        images, metrics = self._observe(obs, reward, terminated, truncated, info)
         if terminated or truncated:
             self._episode_reset = self.use_done
         if self._has_chunk_left():
-            return self._continue_chunk(metrics, prompt)
+            return self._continue_chunk(metrics)
 
         # Right after an episode boundary the newest window spans two episodes:
         # its states come from both and its chunk carries actions the agent never
@@ -96,15 +95,13 @@ class StreamingAgent(Agent):
         # it, but a chunk still has to be started, so the tick acts without a
         # learning step.
         if not self.rb.latest_window_is_clean(self.seq_len + self.horizon):
-            return self._act(images, prompt, metrics, global_step)
+            return self._act(images, metrics)
 
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_scaler.normalize(data.rewards)
-        result = self.network.infer_and_compute_loss(
-            data, images, prompt, self.prompt_builder.turn_text()
-        )
+        result = self.network.infer_and_compute_loss(data, images, self.instruction)
         metrics.update(result.loss_result.info)
 
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -124,7 +121,7 @@ class StreamingAgent(Agent):
             self.actor_optimizer.step()
             self.critic_optimizer.step()
 
-        return self._start_chunk(result.infer_result, metrics, prompt, global_step)
+        return self._start_chunk(result.infer_result, metrics)
 
     @torch.no_grad()
     def select_action(
@@ -138,16 +135,14 @@ class StreamingAgent(Agent):
     ) -> StepResult:
         """Act without learning: the trainer calls this once per episode after
         the reset, and the testbed calls it on every tick."""
-        images, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
+        images, metrics = self._observe(obs, reward, terminated, truncated, info)
         if terminated or truncated:
             self._episode_reset = self.use_done
         if self._has_chunk_left():
-            return self._continue_chunk(metrics, prompt)
-        return self._act(images, prompt, metrics, global_step)
+            return self._continue_chunk(metrics)
+        return self._act(images, metrics)
 
-    def _act(
-        self, images: list[torch.Tensor], prompt: str, metrics: dict, global_step: int
-    ) -> StepResult:
+    def _act(self, images: list[torch.Tensor], metrics: dict) -> StepResult:
         """Start a chunk from the newest state window, with no learning step."""
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
@@ -158,9 +153,8 @@ class StreamingAgent(Agent):
                 r_seq=latest_data.rewards,
                 rnn_state=self.rnn_state,
                 scalar_obs_seq=latest_data.scalar_obs,
-                system_text=prompt,
-                turn_text=self.prompt_builder.turn_text(),
+                instruction=self.instruction,
                 warmup=False,
             )
         )
-        return self._start_chunk(infer_result, metrics, prompt, global_step)
+        return self._start_chunk(infer_result, metrics)

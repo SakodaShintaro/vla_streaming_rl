@@ -4,10 +4,9 @@
 Every tick is stored; once ``learning_starts`` ticks have gone by, one gradient
 step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
 before the action of that tick is chosen. Below ``learning_starts`` the network
-is told it is warming up and decides what drives the env -- uniform random
-actions for the plain actor-critic, the action its own reply names for the VLM
-one -- so the buffer fills with something other than an untrained policy's
-output while the network's recurrent state still follows the episode.
+is told it is warming up and returns uniform random actions, so the buffer
+fills with something other than an untrained policy's output while the
+network's recurrent state still follows the episode.
 
 The learning mode is the class and the network is a constructor argument, so
 this file is one half of the (learning mode) x (network) grid; the streaming
@@ -20,13 +19,7 @@ import gymnasium as gym
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.agents.base import (
-    Agent,
-    EpisodeEndResult,
-    StepResult,
-    split_actor_critic_params,
-)
-from vla_streaming_rl.agents.prompt import PromptBuilder
+from vla_streaming_rl.agents.base import Agent, StepResult, split_actor_critic_params
 from vla_streaming_rl.networks.interface import InferInput
 
 
@@ -49,9 +42,8 @@ class OffPolicyAgent(Agent):
         weight_decay: float,
         buffer_size: int,
         buffer_device: str,
-        use_reflection: bool,
         reset_on_episode_end: bool,
-        prompt_builder: PromptBuilder,
+        instruction: str,
     ) -> None:
         # Actor / critic optimizer split (critic == value head); both AdamW,
         # the replayed update has no trace to carry.
@@ -60,7 +52,7 @@ class OffPolicyAgent(Agent):
             action_space=action_space,
             image_names=image_names,
             network=network,
-            prompt_builder=prompt_builder,
+            instruction=instruction,
             actor_optimizer=optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay),
             critic_optimizer=optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay),
             buffer_size=buffer_size,
@@ -74,7 +66,6 @@ class OffPolicyAgent(Agent):
         self.learning_starts = learning_starts
         self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
-        self.use_reflection = use_reflection
         self.is_learning = False
 
     def step(
@@ -119,10 +110,10 @@ class OffPolicyAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        images, prompt, metrics = self._observe(obs, reward, terminated, truncated, info)
+        images, metrics = self._observe(obs, reward, terminated, truncated, info)
         warmup = global_step < self.learning_starts
         if not warmup and self._has_chunk_left():
-            return self._continue_chunk(metrics, prompt)
+            return self._continue_chunk(metrics)
 
         latest_data = self.rb.get_latest(self.seq_len)
         # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
@@ -134,20 +125,8 @@ class OffPolicyAgent(Agent):
                 r_seq=latest_data.rewards,
                 rnn_state=latest_data.rnn_state[:, 0],
                 scalar_obs_seq=latest_data.scalar_obs,
-                system_text=prompt,
-                turn_text=self.prompt_builder.turn_text(),
+                instruction=self.instruction,
                 warmup=warmup,
             )
         )
-        return self._start_chunk(infer_result, metrics, prompt, global_step)
-
-    def on_episode_end(self, score: float) -> EpisodeEndResult:
-        result = super().on_episode_end(score)
-        # 終わったエピソードを振り返らせて、そのタスクの次回のプロンプトを書き直す
-        instruction = (
-            self.prompt_builder.reflect(score, self.network.answer) if self.use_reflection else None
-        )
-        return EpisodeEndResult(
-            metrics={**result.metrics, "reflection/rewritten": float(instruction is not None)},
-            rewritten_instruction=instruction,
-        )
+        return self._start_chunk(infer_result, metrics)

@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: MIT
 
-from collections.abc import Callable
-
 import hydra
-import numpy as np
 import torch
 from gymnasium import Env
 from omegaconf import DictConfig
@@ -15,12 +12,8 @@ from vla_streaming_rl.image_obs import image_obs_names
 def build_network(
     args: DictConfig,
     env: Env,
-    parse_action_text: Callable[[str], tuple[np.ndarray, bool]],
-    text_action_names: list[str],
     device: torch.device,
 ) -> nn.Module:
-    """``parse_action_text`` と ``text_action_names`` は返答に書かせる行動の決まりで、
-    環境ごとのプロンプトの builder が持つ。返答を書くネットワークだけが使う。"""
     # 観測の画像ごとの (3, H, W)、IMAGE_OBS_NAMES の並び
     image_shapes = [
         env.observation_space[name].shape for name in image_obs_names(env.observation_space)
@@ -49,24 +42,20 @@ def build_network(
             policy_head_factory=policy_head_factory,
         ).to(device)
 
-    elif args.network_class == "vlm_actor_critic_with_action_value":
-        from vla_streaming_rl.networks.vlm_actor_critic_with_action_value import (
-            VLMActorCriticWithActionValue,
+    elif args.network_class == "vla_actor_critic_with_action_value":
+        from vla_streaming_rl.networks.vla_actor_critic_with_action_value import (
+            VLAActorCriticWithActionValue,
         )
 
-        network = VLMActorCriticWithActionValue(
+        # 4 ビットに量子化した VLM を含みうるので .to(device) はせず、内部で cuda に置く
+        network = VLAActorCriticWithActionValue(
             action_space_shape=action_space_shape,
             value_head_factory=value_head_factory,
+            policy_head_factory=policy_head_factory,
             horizon=args.horizon,
             critic_loss_weight=args.critic_loss_weight,
-            policy_head_factory=policy_head_factory,
             vla_config=args.vla,
-            parse_action_text=parse_action_text,
-            text_action_names=text_action_names,
-            action_low=env.action_space.low,
-            action_high=env.action_space.high,
-            decision_fps=env.metadata["decision_fps"],
-        ).to(device)
+        )
 
     else:
         raise ValueError(f"Unknown network class: {args.network_class}")

@@ -8,20 +8,10 @@ import numpy as np
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.agents.prompt import PromptBuilder
 from vla_streaming_rl.networks.interface import InferResult
-from vla_streaming_rl.render import render_conversation_panel, render_selection_panel
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_scaler import RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs
-
-# 会話のパネルの大きさ。数ターン分の会話が一度に見える幅と高さで、学習全体で固定する
-# （StepResult の固定パネルの約束）。モデルに実際に何を見せたかが分かるのはこのパネルだけ
-CONVERSATION_PANEL_WIDTH = 680
-CONVERSATION_PANEL_HEIGHT = 560
-# 行動の候補とその行動価値を並べるパネルの大きさ
-SELECTION_PANEL_WIDTH = 320
-SELECTION_PANEL_HEIGHT = 560
 
 
 @dataclass
@@ -45,27 +35,14 @@ class StepResult:
     - ``texts``: named free-form text, written to the episode's ``texts.tsv``.
       What a panel shows as pixels this keeps as characters, so a chain of
       thought can be read back and searched after the run. Every agent puts the
-      language input it composed this tick under ``"prompt"`` (empty when it
-      composes none), which is also what the trainer captions the render with.
+      instruction its policy read this tick under ``"prompt"``, which is also
+      what the trainer captions the render with.
     """
 
     action: np.ndarray
     metrics: dict[str, float]
     panels: dict[str, np.ndarray]
     texts: dict[str, str]
-
-
-@dataclass
-class EpisodeEndResult:
-    """エピソードの終わりにエージェントが返すもの。
-
-    - ``metrics``: そのまま wandb に記録するスカラー。
-    - ``rewritten_instruction``: 振り返りでそのタスクの指示を書き直したときの新しい指示。
-      書き直さなかったときは None。
-    """
-
-    metrics: dict[str, float]
-    rewritten_instruction: str | None
 
 
 def split_actor_critic_params(
@@ -84,8 +61,8 @@ class Agent(ABC):
 
     The agent grid is orthogonal: the learning rule (off-policy / streaming) is
     the class, which ``agent_type`` names, and the network it optimizes is a
-    constructor argument. ``prompt_builder`` is the third axis: the env
-    publishes state, the agent turns it into the language its policy reads.
+    constructor argument. ``instruction`` is the text the policy reads beside
+    the image.
 
     どの学習モードも、毎ティックの観測をバッファに1行積み、ネットワークが出した行動
     チャンクを1ステップずつ実行する。その共通の流れ（:meth:`_observe`、
@@ -98,7 +75,7 @@ class Agent(ABC):
         action_space: gym.spaces.Box,
         image_names: tuple[str, ...],
         network: nn.Module,
-        prompt_builder: PromptBuilder,
+        instruction: str,
         actor_optimizer: optim.Optimizer,
         critic_optimizer: optim.Optimizer,
         buffer_size: int,
@@ -113,7 +90,7 @@ class Agent(ABC):
         # 観測から読んでネットワークに渡す画像の名前（IMAGE_OBS_NAMES の並び）
         self.image_names = image_names
         self.network = network
-        self.prompt_builder = prompt_builder
+        self.instruction = instruction
         self.actor_optimizer = actor_optimizer
         self.critic_optimizer = critic_optimizer
         self.seq_len = seq_len
@@ -149,10 +126,6 @@ class Agent(ABC):
         self.prev_action = np.zeros(action_space.shape, dtype=np.float32)
         # the first observation of a run starts an episode
         self._previous_done = True
-        # ネットワークが最後に書いた文と、それを会話とともに描いたパネル。文を書かない
-        # ネットワークでは空のまま
-        self.last_reply = ""
-        self.reply_panels: dict[str, np.ndarray] = {}
         # Shared representation fed to policy/value/prediction heads on the most
         # recent inference (used by scripts/collect_probe_data.py).
         self.last_features: torch.Tensor | None = None
@@ -182,11 +155,10 @@ class Agent(ABC):
     ) -> StepResult:
         """Act on this tick and learn from it, the way this learning mode learns."""
 
-    def on_episode_end(self, score: float) -> EpisodeEndResult:
+    def on_episode_end(self, score: float) -> None:
         """エピソードが ``score`` で終わったときに呼ぶ。学習でも評価でも呼ぶ。"""
         if self.normalizing_by_return:
             self.reward_scaler.update(score)
-        return EpisodeEndResult(metrics={}, rewritten_instruction=None)
 
     def optimizer_state_dict(self) -> dict:
         """Optimizer states to checkpoint. The trainer stores and restores this
@@ -204,20 +176,15 @@ class Agent(ABC):
 
     def _observe(
         self, obs: dict[str, Any], reward: float, terminated: bool, truncated: bool, info: dict
-    ) -> tuple[list[torch.Tensor], str, dict[str, float]]:
+    ) -> tuple[list[torch.Tensor], dict[str, float]]:
         """このティックの観測を受け取り、エピソードの境目を処理して、バッファに1行積む。
-        このステップの観測の画像そのもの（``image_names`` の並び）、タスクのプロンプト、
-        metrics を返す。"""
+        このステップの観測の画像そのもの（``image_names`` の並び）と metrics を返す。"""
         episode_done = terminated or truncated
         # A terminal observation still belongs to the episode that ended, so the
-        # conversation and the chain are dropped on the tick after it rather than
-        # on it -- the same boundary the rnn state resets on. Dropped on the
-        # terminal tick instead, the turn that tick then writes would be the one
-        # the next episode opens on.
+        # recurrent state is reset on the tick after it rather than on it.
         if self._previous_done:
             if self.reset_on_episode_end:
                 self.rnn_state = self.network.init_state().to(self.device)
-            self.prompt_builder.reset()
             # A chunk begun on the terminal frame would otherwise run into the
             # new episode; the first action of an episode comes from its own frame.
             self.action_chunk = None
@@ -240,9 +207,6 @@ class Agent(ABC):
         scalar_obs = read_scalar_obs(obs)
         # ネットワークはここでスカラーの観測の統計を更新する
         self.network.observe_scalar_obs(scalar_obs)
-        # The language this tick, composed from the env's state and never read off
-        # the observation.
-        self.prompt_builder.observe(obs, reward, info, self.prev_action)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             self.network.to_stored_image(images),
@@ -252,51 +216,26 @@ class Agent(ABC):
             torch.from_numpy(normalized_action).to(self.device),
             scalar_obs,
         )
-        return images, self.prompt_builder.task_text(), metrics
+        return images, metrics
 
     def _has_chunk_left(self) -> bool:
         """実行中のチャンクに、まだ実行していない行動があるか。"""
         return self.action_chunk is not None and self.chunk_step < self.horizon
 
-    def _start_chunk(
-        self, infer_result: InferResult, metrics: dict, prompt: str, global_step: int
-    ) -> StepResult:
+    def _start_chunk(self, infer_result: InferResult, metrics: dict) -> StepResult:
         """ネットワークが出したチャンクを始め、その最初の行動を実行する。ネットワークが
-        このステップに作った状態の元と返答が指す行動はバッファのその行に、書いた文は次の
-        ステップの会話に入れる。"""
+        このステップに作った状態の元はバッファのその行に入れる。"""
         self.rnn_state = infer_result.rnn_state
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
         if infer_result.stored_state is not None:
             self.rb.set_latest_state(infer_result.stored_state)
-        if infer_result.reply_action is not None:
-            self.rb.set_latest_reply_action(infer_result.reply_action)
-        if infer_result.text is not None:
-            self.last_reply = infer_result.text
-            self.reply_panels = {
-                "conversation": render_conversation_panel(
-                    infer_result.exchange,
-                    infer_result.text_status,
-                    CONVERSATION_PANEL_WIDTH,
-                    CONVERSATION_PANEL_HEIGHT,
-                )
-            }
-            self.prompt_builder.on_reply()
-        if infer_result.selection_rows is not None:
-            # 2つの候補とその行動価値、どちらが選ばれたか
-            self.reply_panels["selection"] = render_selection_panel(
-                f"step {global_step}, {infer_result.selection_status}",
-                infer_result.selection_rows,
-                SELECTION_PANEL_WIDTH,
-                SELECTION_PANEL_HEIGHT,
-            )
         self.action_chunk = infer_result.action[0].cpu().numpy()
         self.chunk_step = 0
-        return self._continue_chunk(metrics, prompt)
+        return self._continue_chunk(metrics)
 
-    def _continue_chunk(self, metrics: dict, prompt: str) -> StepResult:
-        """実行中のチャンクの次の行動を、環境の行動空間に写して実行する。パネルと返答は、
-        最後に行動を決めたステップのもの。"""
+    def _continue_chunk(self, metrics: dict) -> StepResult:
+        """実行中のチャンクの次の行動を、環境の行動空間に写して実行する。"""
         action = np.clip(
             self.action_chunk[self.chunk_step] * self.action_scale + self.action_bias,
             self.action_low,
@@ -308,6 +247,6 @@ class Agent(ABC):
         return StepResult(
             action=action,
             metrics=metrics,
-            panels=self.reply_panels,
-            texts={"prompt": prompt, "reply": self.last_reply},
+            panels={},
+            texts={"prompt": self.instruction},
         )

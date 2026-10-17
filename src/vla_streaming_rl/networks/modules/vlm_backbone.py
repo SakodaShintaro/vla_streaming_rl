@@ -10,7 +10,6 @@ import fla.ops.gated_delta_rule as _gated_delta_rule
 _gated_delta_rule.recurrent_gated_delta_rule = _gated_delta_rule.fused_recurrent_gated_delta_rule
 
 import torch
-from peft import LoraConfig, get_peft_model
 from torch import nn
 from transformers import (
     AutoModelForImageTextToText,
@@ -20,7 +19,7 @@ from transformers import (
 
 
 def load_model(
-    model_id: str, use_lora: bool, load_in_4bit: bool, device: torch.device
+    model_id: str, load_in_4bit: bool, device: torch.device
 ) -> tuple[nn.Module, AutoProcessor]:
     """Load Qwen3.5 model and processor."""
 
@@ -40,32 +39,6 @@ def load_model(
         attn_implementation="sdpa",
         device_map=device,
     )
-    if use_lora:
-        lora_config = LoraConfig(
-            r=8,
-            lora_alpha=8,
-            lora_dropout=0.1,
-            target_modules=[
-                # Language model
-                "down_proj",
-                "o_proj",
-                "k_proj",
-                "q_proj",
-                "gate_proj",
-                "up_proj",
-                "v_proj",
-                # Vision encoder (attn.proj only, not patch_embed.proj)
-                "qkv",
-                r"attn\.proj",
-                "linear_fc1",
-                "linear_fc2",
-            ],
-            use_dora=False,
-            init_lora_weights="gaussian",
-        )
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-
     processor = AutoProcessor.from_pretrained(model_id, device_map=device)
 
     return model, processor

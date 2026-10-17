@@ -8,32 +8,12 @@ defaults:
 weight_decay: 0.01
 
 vla:
-  # 会話は VLM の KV キャッシュに積む。システムプロンプトは常に残し、その後ろのターン
-  # （フレーム・数値・返答）は直近この数のトークンまでを先入れ先出しで持つ
-  window_tokens: 32768
   model_id: Qwen/Qwen3.8-27B
   load_in_4bit: true
-  use_lora: false
+  # VLM の全位置の活性を全層で平均し、この数の位置に平均プーリングしたものを表現とする
   num_state_queries: 100
+  # プーリングした位置ごとに射影する幅。状態の幅は num_state_queries * state_out_dim
   state_out_dim: 4
-  # 返答（思考と行動）の生成の上限。思考の長さの目安として、この 0.4 倍の語数をプロンプトで
-  # 伝える（agents/prompt.py の THINKING_WORDS_PER_TOKEN）。目安を越えた思考は上限の手前で
-  # 打ち切られ、行動を書かされる
-  max_new_tokens: 256
-  # 返答のたびに書かせる思考の量。none なら思考は書かせない。思考を書いた返答も、ほかの
-  # ターンと同じく window_tokens の中で古くなれば押し出される
-  reasoning_effort: low  # [none, low, medium, xhigh]
-  # 返答を書かせる間隔（ステップ数）。1つの返答の行動は、このステップ数のあいだ実行する。
-  # Animal-AI の返答は `<name>(<n>)` で、n は 1 からこの数まで、残りのステップはその場で
-  # 止まる。CarRacing と CARLA の返答は1ステップの行動なので 1 にする
-  reply_interval: 10
-  temperature: 0.5
-  # 返答の行動とヘッドの行動を行動価値で選ぶときの余裕。ヘッドの行動の価値が返答の行動を
-  # これより大きく上回るときだけヘッドの行動を実行する。.inf なら常に返答の行動、
-  # -.inf なら常にヘッドの行動（バッファを貯めている間は常に返答の行動）
-  select_margin: 0.0
-  # エピソードの終わりに振り返らせて、そのタスクの次回のプロンプトを書き直すか
-  use_reflection: true
 
 actor_critic:
   seq_len: 50

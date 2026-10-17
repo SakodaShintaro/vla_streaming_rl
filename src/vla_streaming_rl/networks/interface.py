@@ -37,14 +37,11 @@ class InferInput:
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
     scalar_obs_seq: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
-    # このステップの観測の画像そのもの（保存した形ではない）を IMAGE_OBS_NAMES の並びで。
-    # 会話にフレームを積むネットワークが読む
+    # このステップの観測の画像そのもの（保存した形ではない）を IMAGE_OBS_NAMES の並びで
     frames: list[torch.Tensor]
-    # このステップのタスクのプロンプトと、フレームに添える数値のターン
-    system_text: str
-    turn_text: str
-    # バッファを貯めている間のステップか。このあいだの行動（一様乱数や、返答に書いた行動）は
-    # ネットワークが決める
+    # このステップに方策が読む指示の文
+    instruction: str
+    # バッファを貯めている間のステップか。このあいだは一様乱数の行動を返す
     warmup: bool
 
 
@@ -65,20 +62,6 @@ class InferResult:
     # このステップの行に保存しておく状態の元（``stored_state_shape`` の形）。学習はこれを
     # 読み戻して状態を作る。保存しないネットワークでは None
     stored_state: torch.Tensor | None
-    # このステップにネットワークが書いた文と、それに添える1行（読んだ・書いたトークン数、
-    # かかった時間など）。文を書かないネットワークや、このステップに書かなかったときは
-    # どちらも None
-    text: str | None
-    text_status: str | None
-    # 最後に書いた文が指す、このステップの行動（正規化した行動空間、(action_dim,)）。学習は
-    # これを読み戻して使う。文を書かないネットワークでは None
-    reply_action: torch.Tensor | None
-    # その文を書いたときに実際に読んだ会話と、その文。描画用。文を書かなかったときは None
-    exchange: list[dict] | None
-    # 行動の候補を比べて選んだときの、その経緯の1行と、候補ごとの
-    # （名前、行動の説明、行動価値、選ばれたか）。描画用。候補を比べないネットワークでは None
-    selection_status: str | None
-    selection_rows: list[tuple[str, str, float, bool]] | None
 
 
 @dataclass
@@ -138,11 +121,6 @@ class NetworkInterface(nn.Module, abc.ABC):
         ``stored_image_shape`` の形。"""
 
     @abc.abstractmethod
-    def answer(self, request: str) -> str:
-        """エピソードの会話の続きに ``request`` を足して、自由な文の返答を書かせたもの。
-        文を書かないネットワークでは空文字列。"""
-
-    @abc.abstractmethod
     def stored_state_shape(self) -> tuple[int, ...]:
         """行動を決めたステップの行に保存する状態の元の形。保存しないネットワークでは
         大きさ 0 の形。"""
@@ -167,9 +145,8 @@ class NetworkInterface(nn.Module, abc.ABC):
         self,
         data: ReplayBufferData,
         frames: list[torch.Tensor],
-        system_text: str,
-        turn_text: str,
+        instruction: str,
     ) -> InferLossResult:
         """Combined inference + loss in one forward, sharing the encoder pass.
-        ``frames``, ``system_text`` and ``turn_text`` are the newest tick's, as in
+        ``frames`` and ``instruction`` are the newest tick's, as in
         :class:`InferInput`."""

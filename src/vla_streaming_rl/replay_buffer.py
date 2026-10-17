@@ -26,7 +26,6 @@ class ReplayBufferData:
     rnn_state: torch.Tensor  # (B, min(T, horizon + 1), space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
     states: torch.Tensor  # (B, T, *state_shape)
-    reply_actions: torch.Tensor  # (B, T, action_shape)
     scalar_obs: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
 
 
@@ -71,9 +70,6 @@ class ReplayBuffer:
             (size, *state_shape), dtype=torch.bfloat16, device=self.storage_device
         )
         self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM))
-        # ネットワークがそのステップに書いた返答が指す行動（正規化した行動空間）。返答を
-        # 書かないネットワークでは 0 のまま
-        self.reply_actions = init_tensor((size, *action_shape))
 
         self.pin_memory = self.storage_device.type == "cpu" and self.output_device.type == "cuda"
         self._staging = {}
@@ -94,7 +90,7 @@ class ReplayBuffer:
         scalar_obs: np.ndarray,
     ) -> None:
         """Store the tick. What the network then makes of it comes after,
-        through :meth:`set_latest_state` and :meth:`set_latest_reply_action`."""
+        through :meth:`set_latest_state`."""
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
         self.rewards[self.idx].fill_(reward)
@@ -102,7 +98,6 @@ class ReplayBuffer:
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
         self.scalar_obs[self.idx].copy_(torch.from_numpy(scalar_obs))
-        self.reply_actions[self.idx].zero_()
         self.states[self.idx].zero_()
 
         self.idx = (self.idx + 1) % self.size
@@ -111,12 +106,6 @@ class ReplayBuffer:
     def set_latest_state(self, state: torch.Tensor) -> None:
         """最新の行に、そのステップでネットワークが作った状態の元を入れる。"""
         self.states[(self.idx - 1) % self.size].copy_(state)
-
-    def set_latest_reply_action(self, reply_action: torch.Tensor) -> None:
-        """最新の行に、そのステップでネットワークが書いた返答が指す行動を入れる。"""
-        self.reply_actions[(self.idx - 1) % self.size].copy_(
-            reply_action.reshape(self.reply_actions.shape[1:])
-        )
 
     def _gather(self, name: str, storage: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         """``storage[indices]`` on the output device, ``indices`` of any shape.
@@ -152,7 +141,6 @@ class ReplayBuffer:
             self._gather("rnn_states", self.rnn_states, indices[:, : self.horizon + 1]),
             self._gather("actions", self.actions, indices),
             self._gather("states", self.states, indices),
-            self._gather("reply_actions", self.reply_actions, indices),
             self._gather("scalar_obs", self.scalar_obs, indices),
         )
 

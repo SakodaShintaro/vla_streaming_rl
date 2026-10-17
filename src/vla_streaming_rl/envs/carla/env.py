@@ -26,8 +26,7 @@ from vla_streaming_rl.envs.carla.vehicle_graph import overlay_vehicle_graphs
 DT = 0.05  # [s] (20 FPS)
 
 # CARLA RoadOption (agents.navigation.local_planner.RoadOption) reported when
-# there is no route to read a maneuver off. The agent turns the command into the
-# sentence the policy reads (see agents/prompt.py).
+# there is no route to read a maneuver off.
 _VOID_COMMAND = -1
 _MANEUVER_LOOKAHEAD_PTS = 10  # route points ahead to read the upcoming command from
 _SHAPED_REWARD_CLIP = 1.0

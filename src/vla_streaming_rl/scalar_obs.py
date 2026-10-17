@@ -20,8 +20,6 @@ SCALAR_OBS_NAMES = (
     "health",
 )
 SCALAR_OBS_DIM = len(SCALAR_OBS_NAMES)
-# エピソードの最初のステップを見分けるのに使う位置
-EPISODE_STEP_INDEX = SCALAR_OBS_NAMES.index("episode_step")
 
 
 def read_scalar_obs(obs: dict[str, Any]) -> np.ndarray:
