@@ -2,19 +2,10 @@
 defaults:
   - /policy_head: tanh
   - /value_head: dueling
+  - /prediction_head: td_jepa  # [flow_matching, td_jepa]
   - _self_
 
 weight_decay: 0.01
-
-prediction_head:
-  _target_: vla_streaming_rl.networks.modules.prediction_head.StatePredictionHead
-  _partial_: true
-  predictor_hidden_dim: 512
-  predictor_block_num: 2
-  predictor_type: flow_matching  # [flow_matching, mean_flow]
-  detach_predictor: false
-  # 予測する successor representation の割引率
-  gamma: ${gamma}
 
 vla:
   # 会話は VLM の KV キャッシュに積む。システムプロンプトは常に残し、その後ろのターン

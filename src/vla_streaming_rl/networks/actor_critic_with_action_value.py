@@ -97,6 +97,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             if self.disable_state_predictor
             else prediction_head_factory(
                 image_latent_dim=hidden_image_dim,
+                state_dim=self.encoder.output_dim,
                 action_dim=self.action_dim,
             )
         )
@@ -236,6 +237,25 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.dones[:, -self.horizon],
         )
 
+    def _state_grad_info(
+        self, state: torch.Tensor, critic_loss: torch.Tensor, seq_loss: torch.Tensor
+    ) -> dict:
+        """エンコーダの出力 ``state`` に、critic の損失と将来の状態の予測の損失がそれぞれ
+        どれだけの大きさの勾配を流すか。ヘッドの分だけ逆伝播するので、エンコーダの中は
+        通らない。予測を切っているときは critic の分だけ。"""
+        critic_grad = torch.autograd.grad(
+            self.critic_loss_weight * critic_loss, state, retain_graph=True
+        )[0]
+        info = {"grad/state_critic": critic_grad.norm().item()}
+        if self.disable_state_predictor:
+            return info
+        seq_grad = torch.autograd.grad(seq_loss, state, retain_graph=True)[0]
+        info["grad/state_seq"] = seq_grad.norm().item()
+        info["grad/state_seq_over_critic"] = info["grad/state_seq"] / max(
+            info["grad/state_critic"], 1e-12
+        )
+        return info
+
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         terms = self._loss_terms(data)
         return LossResult(loss=terms.total_loss, info=terms.info)
@@ -307,6 +327,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             f"losses/{key}": value
             for key, value in {**critic_info, **actor_info, **seq_info}.items()
         }
+        info.update(self._state_grad_info(state, critic_loss, seq_loss))
         return LossTerms(
             total_loss=self.critic_loss_weight * critic_loss + actor_loss + seq_loss,
             # 将来の状態の予測の損失は actor 側に入れる
