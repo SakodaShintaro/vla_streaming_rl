@@ -256,7 +256,7 @@ def save_episode_videos(
 ) -> None:
     """終わったエピソードの記録を残す。アリーナのある環境ではアリーナごとの最高点の
     エピソードを、ない環境では全体の最高点のエピソードを残し、それとは別に
-    ``image_save_interval`` エピソードごとに1つ残す。"""
+    ``save_interval`` エピソードごとに1つ残す。"""
     episode_log_dir = result_dir / "episode_log"
     if arena_name:
         arena_is_best = (
@@ -271,7 +271,7 @@ def save_episode_videos(
         state.best_score = score
         save_episode_data(episode_log_dir, "best_episode", record)
 
-    if state.episode_id == 0 or (state.episode_id + 1) % args.image_save_interval == 0:
+    if state.episode_id == 0 or (state.episode_id + 1) % args.save_interval == 0:
         save_episode_data(episode_log_dir, f"ep_{state.episode_id + 1:08d}", record)
 
 
