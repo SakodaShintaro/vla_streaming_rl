@@ -180,15 +180,23 @@ ANIMALAI_TOPDOWN_FRAMING = (
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
 # Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
 # named action maps onto the extreme Box value that survives that dead-zone.
-# An action is written as a call, `<name>(<n>)`: one of four names, each a move
+# An action is written as a call, `<name>(<n>)`: one of four names, each a push
 # or a rotation alone, taken for n steps in a row. A reply is asked for every
-# ``reply_interval`` steps, and the steps left over after n stand still.
+# ``reply_interval`` steps, and the steps left over after n take no action.
+#
+# 作用は animal-ai-unity（SakodaShintaro/feat/continuous_actions）の
+# TrainingAgent.MoveAgent と、2026-10-17 の実測による。回転は 1 ステップ（5 物理ステップ）
+# ちょうど 10 度で、値に比例し、慣性はない。前後は位置ではなく速度に作用する加速で、
+# 押し続けると 1 ステップ約 2.4（秒速約 24）に近づき、押さなければ数ステップでブレーキが
+# かかって止まる。
 ANIMALAI_ACTIONS = {
-    "move_forward": (1.0, 0.0),
-    "move_backward": (-1.0, 0.0),
+    "accelerate_forward": (1.0, 0.0),
+    "accelerate_backward": (-1.0, 0.0),
     "turn_right": (0.0, 1.0),
     "turn_left": (0.0, -1.0),
 }
+# 止まった状態から n ステップ前に押し、あとは押さずに止まるまでに進む距離（実測）
+ANIMALAI_PUSH_DISTANCES = {1: 0.4, 2: 1.3, 3: 2.5, 5: 5.6, 10: 15.6}
 
 ANIMALAI_REFLECTION_REQUEST = (
     "The episode just ended in {outcome}: return {score:+.3f} against pass mark "
@@ -203,7 +211,8 @@ ANIMALAI_INSTRUCTION_CHARS_MAX = 500
 
 def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: float) -> str:
     return (
-        f"Average forward speed since your last answer: {average_forward_speed:+.2f}. "
+        f"Average forward speed since your last answer: {average_forward_speed:+.2f} units "
+        f"per second. "
         f"Reward: {reward:+.3f}. "
         f"Return so far: {obs['episode_return'][0]:+.3f}. "
         f"Pass mark: {obs['pass_mark'][0]:+.3f}. "
@@ -268,11 +277,21 @@ class AnimalAIPromptBuilder(PromptBuilder):
             f"Write the action as `<name>(<n>)`, for example `turn_right(3)`: <name> is one "
             f"of {' / '.join(ANIMALAI_ACTIONS)}, and <n> is how many steps in a row it is "
             f"taken, an integer from 1 to {self.reply_interval}. You are shown a new frame "
-            f"and asked for an action every {self.reply_interval} steps, and the steps left "
-            f"over after <n> are spent standing still. One turn step rotates 10 degrees; one "
-            f"forward step moves about 1.5 units, the arena being 40 units across. Each frame "
-            f"comes with the action that was actually taken on the step before it, as two "
-            f"numbers: move (+1 forward, -1 backward) and turn (+1 right, -1 left)."
+            f"and asked for an action every {self.reply_interval} steps, and on the steps left "
+            f"over after <n> no action is taken. Turning rotates you in place by exactly 10 "
+            f"degrees per step and stops the moment you stop turning. Accelerating pushes you "
+            f"along the direction you face: it changes your speed, not your position. Speed "
+            f"builds up while you keep pushing, toward about 24 units per second (2.4 units "
+            f"per step), and once you stop pushing you brake and slide to a halt within a few "
+            f"steps. Starting from standing still, accelerating for n steps and then braking "
+            f"moves you about this far in total: "
+            + ", ".join(
+                f"n={steps}: {distance} units"
+                for steps, distance in ANIMALAI_PUSH_DISTANCES.items()
+            )
+            + ". The arena is 40 units across. Each frame comes with the action that was "
+            "actually taken on the step before it, as two numbers: accelerate (+1 forward, -1 "
+            "backward) and turn (+1 right, -1 left)."
         )
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -309,7 +328,7 @@ class AnimalAIPromptBuilder(PromptBuilder):
             # エピソードの最初のステップには、その前に取られた行動がない
             return scalars
         return (
-            f"Action taken: move {previous_action[0]:+.2f}, turn {previous_action[1]:+.2f}. "
+            f"Action taken: accelerate {previous_action[0]:+.2f}, turn {previous_action[1]:+.2f}. "
             f"{scalars}"
         )
 
