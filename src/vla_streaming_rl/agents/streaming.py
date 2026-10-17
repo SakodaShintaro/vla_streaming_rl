@@ -63,6 +63,10 @@ class StreamingAgent(Agent):
             # Only the one window the update trains on is kept.
             buffer_size=seq_len + horizon,
             buffer_device=buffer_device,
+            # 最新の窓だけで学習し、引くことがないので優先度は使わない
+            priority_alpha=0.0,
+            priority_beta=0.0,
+            priority_epsilon=1.0,
             seq_len=seq_len,
             horizon=horizon,
             normalizing_by_return=normalizing_by_return,

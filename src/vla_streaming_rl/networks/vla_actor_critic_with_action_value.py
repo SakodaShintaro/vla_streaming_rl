@@ -36,6 +36,7 @@ class LossTerms:
     info: dict
     state: torch.Tensor
     action_chunk: torch.Tensor
+    td_error: torch.Tensor
 
 
 class VLAActorCriticWithActionValue(NetworkInterface):
@@ -112,7 +113,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         terms = self._loss_terms(data, data.states[:, -1])
-        return LossResult(loss=terms.total_loss, info=terms.info)
+        return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
 
     def infer_and_compute_loss(
         self,
@@ -130,7 +131,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         ).mean()
         return InferLossResult(
             infer_result=infer_result,
-            loss_result=LossResult(loss=terms.total_loss, info=terms.info),
+            loss_result=LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error),
             et_info=EligibilityTraceInfo(
                 actor_entropy_loss=terms.actor_loss,
                 neg_value=neg_value_detached,
@@ -194,8 +195,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         )
         state = self._state(data.states[:, -self.horizon - 1])
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
-        critic_loss, critic_info = self.value_head.compute_critic_loss(
-            state, action_chunk, target_value
+        critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
+            state, action_chunk, target_value, data.weights
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state, action_chunk, value_head=self.value_head
@@ -207,6 +208,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             info=info,
             state=state,
             action_chunk=action_chunk,
+            td_error=td_error,
         )
 
     def _state(self, representation: torch.Tensor) -> torch.Tensor:

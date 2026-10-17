@@ -4,7 +4,6 @@ import math
 import torch
 from hl_gauss_pytorch import HLGaussLoss
 from torch import nn
-from torch.nn import functional as F
 
 from .blocks import HyperLERPBlock, HypersphericalEmbedding, NormedLinear, Scaler, SimbaBlock
 from .head_output import HeadOutput
@@ -148,7 +147,7 @@ class DistributionalValueHead(nn.Module):
             )
 
     def value_loss(self, logits: torch.Tensor, target_value: torch.Tensor) -> torch.Tensor:
-        """Per-gamma regression/TD loss, averaged over gammas (and batch).
+        """Per-gamma regression/TD loss, averaged over gammas, per sample ``(B,)``.
 
         ``num_bins > 1``: HL-Gauss categorical cross-entropy against the
         per-gamma-normalized target. ``num_bins == 1``: plain MSE on the scalar.
@@ -157,8 +156,11 @@ class DistributionalValueHead(nn.Module):
         target = target_value.view(target_value.shape[0], self.num_gammas)
         if self.num_bins > 1:
             target_norm = (target / self.value_ranges).clamp(-1.0, 1.0)
-            return self.hl_gauss_loss(logits.reshape(-1, self.num_bins), target_norm.reshape(-1))
-        return F.mse_loss(self.to_values(logits), target)
+            loss = self.hl_gauss_loss(
+                logits.reshape(-1, self.num_bins), target_norm.reshape(-1), reduction="none"
+            )
+            return loss.view(target.shape).mean(dim=1)
+        return (self.to_values(logits) - target).pow(2).mean(dim=1)
 
     @torch.no_grad()
     def compute_target_value(
@@ -185,8 +187,13 @@ class DistributionalValueHead(nn.Module):
         state: torch.Tensor,
         action_chunk: torch.Tensor,
         target_value: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict]:
+        weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
         """Distributional TD loss for Q(state, action_chunk) vs ``target_value``.
+
+        Each sample's loss is scaled by its importance weight ``weights`` ``(B,)``
+        (all ones under uniform replay). Also returns the per-sample TD error
+        ``(B,)``, detached, for the replay buffer's priorities.
 
         Mirrors :meth:`PolicyHead.compute_actor_loss`: given the state, action
         chunk and the per-gamma TD target ``(B, num_gammas)`` (built by
@@ -202,7 +209,7 @@ class DistributionalValueHead(nn.Module):
         self.update_value_range(target_value)
         # ``to_value`` averages over gammas; the per-gamma loss is in ``value_loss``.
         curr_critic_value = self.to_value(logits).view(-1)
-        critic_loss = self.value_loss(logits, target_value)
+        critic_loss = (weights * self.value_loss(logits, target_value)).mean()
 
         delta = target_value.mean(dim=1) - curr_critic_value
 
@@ -212,9 +219,11 @@ class DistributionalValueHead(nn.Module):
             "curr_critic_value": curr_critic_value.mean().item(),
             "target_value": target_value.mean().item(),
             "value_range": self.value_range,
+            "td_error_abs": delta.abs().mean().item(),
+            "is_weight_mean": weights.mean().item(),
         }
 
-        return critic_loss, info
+        return critic_loss, info, delta.detach()
 
 
 def weights_init_(m: nn.Module) -> None:

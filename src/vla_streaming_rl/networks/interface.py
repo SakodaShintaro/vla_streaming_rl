@@ -84,6 +84,7 @@ class LossResult:
 
     loss: torch.Tensor
     info: dict  # scalar name -> float
+    td_error: torch.Tensor  # (B,) 窓ごとの TD 誤差。リプレイの優先度の更新に使う
 
 
 @dataclass

@@ -80,6 +80,9 @@ class Agent(ABC):
         critic_optimizer: optim.Optimizer,
         buffer_size: int,
         buffer_device: str,
+        priority_alpha: float,
+        priority_beta: float,
+        priority_epsilon: float,
         seq_len: int,
         horizon: int,
         normalizing_by_return: bool,
@@ -117,6 +120,9 @@ class Agent(ABC):
             state_shape=network.stored_state_shape(),
             output_device=self.device,
             storage_device=torch.device(buffer_device),
+            priority_alpha=priority_alpha,
+            priority_beta=priority_beta,
+            priority_epsilon=priority_epsilon,
         )
 
         # 実行中の行動チャンク (horizon, action_dim) と、そのうち実行した数

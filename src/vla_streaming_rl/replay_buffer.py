@@ -27,9 +27,22 @@ class ReplayBufferData:
     actions: torch.Tensor  # (B, T, action_shape)
     states: torch.Tensor  # (B, T, *state_shape)
     scalar_obs: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
+    # 窓の先頭の行。学習の後に、その窓の TD 誤差で優先度を更新するのに使う
+    start_indices: torch.Tensor  # (B,)
+    # 優先度で引いた偏りを打ち消す重要度の重み。最大が 1
+    weights: torch.Tensor  # (B,)
 
 
 class ReplayBuffer:
+    """窓を、その先頭の行の優先度で引くリングバッファ（Prioritized Experience Replay,
+    Schaul et al. 2016 の proportional 版）。
+
+    優先度は窓の TD 誤差の絶対値に ``priority_epsilon`` を足したもので、窓を引く確率は
+    その ``priority_alpha`` 乗に比例する。新しい行には、それまでの最大の優先度を入れて、
+    一度は引かれるようにする。重要度の重みは ``(N * P)^(-priority_beta)`` を最大で割った
+    もの。``priority_alpha`` が 0 なら一様に引き、重みはすべて 1 になる。
+    """
+
     def __init__(
         self,
         size: int,
@@ -41,8 +54,14 @@ class ReplayBuffer:
         state_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
+        priority_alpha: float,
+        priority_beta: float,
+        priority_epsilon: float,
     ) -> None:
         self.size = size
+        self.priority_alpha = priority_alpha
+        self.priority_beta = priority_beta
+        self.priority_epsilon = priority_epsilon
         self.seq_len = seq_len
         self.horizon = horizon
         self.action_shape = action_shape
@@ -70,6 +89,9 @@ class ReplayBuffer:
             (size, *state_shape), dtype=torch.bfloat16, device=self.storage_device
         )
         self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM))
+        # 行 t を先頭とする窓の優先度（TD 誤差の絶対値 + priority_epsilon）
+        self.priorities = init_tensor((size,))
+        self.max_priority = 1.0
 
         self.pin_memory = self.storage_device.type == "cpu" and self.output_device.type == "cuda"
         self._staging = {}
@@ -99,6 +121,7 @@ class ReplayBuffer:
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
         self.scalar_obs[self.idx].copy_(torch.from_numpy(scalar_obs))
         self.states[self.idx].zero_()
+        self.priorities[self.idx] = self.max_priority
 
         self.idx = (self.idx + 1) % self.size
         self.full = self.full or self.idx == 0
@@ -131,7 +154,7 @@ class ReplayBuffer:
             self.output_device, non_blocking=True
         )
 
-    def _gather_all(self, indices: torch.Tensor) -> ReplayBufferData:
+    def _gather_all(self, indices: torch.Tensor, weights: torch.Tensor) -> ReplayBufferData:
         return ReplayBufferData(
             self._gather("observations", self.observations, indices),
             self._gather("rewards", self.rewards, indices),
@@ -142,6 +165,8 @@ class ReplayBuffer:
             self._gather("actions", self.actions, indices),
             self._gather("states", self.states, indices),
             self._gather("scalar_obs", self.scalar_obs, indices),
+            indices[:, 0].to(self.output_device),
+            weights.to(self.output_device),
         )
 
     def valid_start_indices(self) -> torch.Tensor:
@@ -213,19 +238,30 @@ class ReplayBuffer:
             "No window of the buffer stays inside one episode: every start of "
             f"length {self.seq_len} crosses a done or the write head."
         )
-        indices = valid_starts[
-            torch.randint(0, valid_starts.numel(), (batch_size,), device=self.storage_device)
-        ]
+        scaled = self.priorities[valid_starts].pow(self.priority_alpha)
+        probs = scaled / scaled.sum()
+        picks = torch.multinomial(probs, batch_size, replacement=True)
+        indices = valid_starts[picks]
+        # 一番引かれにくい窓の重みが最大なので、それで割って最大を 1 にする
+        weights = (valid_starts.numel() * probs[picks]).pow(-self.priority_beta)
+        weights = weights / (valid_starts.numel() * probs.min()).pow(-self.priority_beta)
 
         # Create vectorized sequence indices: (batch_size, seq_len)
         seq_indices = (
             indices[:, None] + torch.arange(self.seq_len, device=self.storage_device)[None, :]
         )
-        return self._gather_all(seq_indices)
+        return self._gather_all(seq_indices, weights)
+
+    def update_priorities(self, start_indices: torch.Tensor, td_errors: torch.Tensor) -> None:
+        """引いた窓の優先度を、学習で出た TD 誤差の絶対値 (B,) で置き換える。同じ窓を
+        何度か引いたときは、どれか1つの値が残る。"""
+        priorities = td_errors.detach().abs().to(self.storage_device) + self.priority_epsilon
+        self.priorities[start_indices.to(self.storage_device)] = priorities
+        self.max_priority = max(self.max_priority, float(priorities.max()))
 
     def get_latest(self, seq_len: int) -> ReplayBufferData:
         # Create vectorized indices for the latest sequence
         indices = (
             self.idx - seq_len + torch.arange(seq_len, device=self.storage_device)
         ) % self.size
-        return self._gather_all(indices.unsqueeze(0))
+        return self._gather_all(indices.unsqueeze(0), torch.ones(1))

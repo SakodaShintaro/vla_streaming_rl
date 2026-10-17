@@ -35,6 +35,7 @@ class LossTerms:
     next_rnn_state: torch.Tensor
     next_action: torch.Tensor
     next_critic_output: torch.Tensor
+    td_error: torch.Tensor
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -247,7 +248,7 @@ class ActorCriticWithActionValue(NetworkInterface):
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         terms = self._loss_terms(data)
-        return LossResult(loss=terms.total_loss, info=terms.info)
+        return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
 
     def infer_and_compute_loss(
         self,
@@ -272,7 +273,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         )
         return InferLossResult(
             infer_result=infer_result,
-            loss_result=LossResult(loss=terms.total_loss, info=terms.info),
+            loss_result=LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error),
             et_info=EligibilityTraceInfo(
                 # Actor-only loss (no critic component)
                 actor_entropy_loss=terms.actor_loss,
@@ -298,8 +299,8 @@ class ActorCriticWithActionValue(NetworkInterface):
             *self._window(data, 0, -self.horizon, self.observation_drop_steps_max)
         )
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
-        critic_loss, critic_info = self.value_head.compute_critic_loss(
-            state, action_chunk, target_value
+        critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
+            state, action_chunk, target_value, data.weights
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state, action_chunk, value_head=self.value_head
@@ -321,4 +322,5 @@ class ActorCriticWithActionValue(NetworkInterface):
             next_rnn_state=next_rnn_state,
             next_action=next_action,
             next_critic_output=next_critic_output,
+            td_error=td_error,
         )

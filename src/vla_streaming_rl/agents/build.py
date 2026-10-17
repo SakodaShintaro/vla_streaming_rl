@@ -60,6 +60,9 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
         weight_decay=args.weight_decay,
         buffer_size=args.replay_buffer.size,
         buffer_device=args.replay_buffer.device,
+        priority_alpha=args.replay_buffer.priority_alpha,
+        priority_beta=args.replay_buffer.priority_beta,
+        priority_epsilon=args.replay_buffer.priority_epsilon,
         reset_on_episode_end=args.reset_on_episode_end,
         instruction=instruction,
     )

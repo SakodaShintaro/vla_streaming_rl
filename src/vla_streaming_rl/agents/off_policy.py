@@ -42,6 +42,9 @@ class OffPolicyAgent(Agent):
         weight_decay: float,
         buffer_size: int,
         buffer_device: str,
+        priority_alpha: float,
+        priority_beta: float,
+        priority_epsilon: float,
         reset_on_episode_end: bool,
         instruction: str,
     ) -> None:
@@ -57,6 +60,9 @@ class OffPolicyAgent(Agent):
             critic_optimizer=optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay),
             buffer_size=buffer_size,
             buffer_device=buffer_device,
+            priority_alpha=priority_alpha,
+            priority_beta=priority_beta,
+            priority_epsilon=priority_epsilon,
             seq_len=seq_len,
             horizon=horizon,
             normalizing_by_return=normalizing_by_return,
@@ -95,6 +101,7 @@ class OffPolicyAgent(Agent):
             nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
             self.critic_optimizer.step()
+            self.rb.update_priorities(data.start_indices, result.td_error)
             train_metrics = result.info
         step_result = self.select_action(global_step, obs, reward, terminated, truncated, info)
         step_result.metrics.update(train_metrics)
