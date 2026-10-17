@@ -1,34 +1,10 @@
 # SPDX-License-Identifier: MIT
-"""Drawing helpers for `AnimalAIEnv.render`: the top-down arena schematic,
-the caption strip above it, and the curriculum-progress bars beside it."""
+"""Drawing helpers for `AnimalAIEnv.render`: the caption strip, the overhead
+camera's pane under it, and the curriculum-progress bars beside them."""
 
 import cv2
 import numpy as np
 
-# RGB colors (matplotlib-style) for each AAI item type when drawn top-down.
-_ITEM_COLORS: dict[str, tuple[int, int, int]] = {
-    "GoodGoal": (40, 200, 40),
-    "GoodGoalMulti": (40, 230, 80),
-    "GoodGoalBounce": (40, 200, 120),
-    "GoodGoalMultiBounce": (40, 230, 160),
-    "BadGoal": (220, 40, 40),
-    "BadGoalBounce": (220, 100, 40),
-    "DeathZone": (140, 20, 20),
-    "HotZone": (220, 120, 40),
-    "Wall": (110, 110, 110),
-    "WallTransparent": (200, 200, 220),
-    "Ramp": (140, 100, 60),
-    "Cardbox1": (210, 160, 80),
-    "Cardbox2": (180, 130, 70),
-    "LObject": (220, 200, 50),
-    "LObject2": (200, 180, 50),
-    "UObject": (220, 220, 50),
-    "CylinderTunnel": (160, 190, 210),
-    "CylinderTunnelTransparent": (200, 220, 230),
-}
-_DEFAULT_ITEM_COLOR: tuple[int, int, int] = (180, 180, 180)
-_AGENT_COLOR: tuple[int, int, int] = (40, 80, 220)
-_ARENA_SIZE_M = 40.0  # standard Animal-AI arena is 40 m square
 RENDER_SIZE_PX = 256
 _HEADER_LINE_PX = 20
 
@@ -125,51 +101,5 @@ def render_progress(groups: list[tuple[str, int, int]]) -> np.ndarray:
 
 
 def fit_square(image: np.ndarray, size_px: int) -> np.ndarray:
-    """Scale a camera frame to the pane the schematic would have filled."""
+    """Scale a camera frame to the arena pane."""
     return cv2.resize(image, (size_px, size_px), interpolation=cv2.INTER_NEAREST)
-
-
-def render_topdown(items: list[dict], agent_xyz: tuple[float, float, float] | None) -> np.ndarray:
-    scale = RENDER_SIZE_PX / _ARENA_SIZE_M
-    canvas = np.full((RENDER_SIZE_PX, RENDER_SIZE_PX, 3), 240, dtype=np.uint8)
-
-    # Flip z so the +z arena axis points up in the image (Unity-editor-like).
-    def to_px(x: float, z: float) -> tuple[int, int]:
-        return int(round(x * scale)), int(round((_ARENA_SIZE_M - z) * scale))
-
-    cv2.rectangle(canvas, (0, 0), (RENDER_SIZE_PX - 1, RENDER_SIZE_PX - 1), (60, 60, 60), 2)
-
-    for item in items:
-        if item["name"] == "Agent":
-            continue
-        # x or z = -1 in the yaml means Unity randomizes the position at
-        # reset; we don't know the actual location, so skip drawing.
-        if item["x"] < 0 or item["z"] < 0:
-            continue
-        cx, cy = to_px(item["x"], item["z"])
-        color = _ITEM_COLORS.get(item["name"], _DEFAULT_ITEM_COLOR)
-        # Goals are spherical in the Unity scene; draw as circles so they
-        # are visually distinct from rectangular zones/walls/boxes.
-        if "Goal" in item["name"]:
-            radius = max(int(0.5 * item["size_x"] * scale), 3)
-            cv2.circle(canvas, (cx, cy), radius, color, cv2.FILLED)
-            cv2.circle(canvas, (cx, cy), radius, (20, 20, 20), 1)
-            continue
-        sx_px = max(item["size_x"] * scale, 3.0)
-        sz_px = max(item["size_z"] * scale, 3.0)
-        # Unity Y-axis rotation is CW from above (in left-handed world);
-        # our z-flipped image preserves "north up" so we pass the raw angle
-        # to cv2 (positive cv2 angle is CW in image after the z flip).
-        rect = ((float(cx), float(cy)), (sx_px, sz_px), item["rotation"])
-        box = np.intp(cv2.boxPoints(rect))
-        transparent = "Transparent" in item["name"]
-        cv2.drawContours(canvas, [box], 0, color, 1 if transparent else cv2.FILLED)
-
-    if agent_xyz is not None:
-        ax, _ay, az = agent_xyz
-        apx, apy = to_px(ax, az)
-        radius = max(int(0.6 * scale), 4)
-        cv2.circle(canvas, (apx, apy), radius, _AGENT_COLOR, cv2.FILLED)
-        cv2.circle(canvas, (apx, apy), radius, (20, 20, 20), 1)
-
-    return canvas

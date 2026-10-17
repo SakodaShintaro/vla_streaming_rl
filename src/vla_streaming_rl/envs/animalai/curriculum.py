@@ -60,48 +60,22 @@ for _tag in ("!ArenaConfig", "!Arena", "!Item", "!Vector3", "!RGB"):
 @lru_cache(maxsize=None)
 def _load_arena_yaml(yaml_path: Path) -> dict:
     """The first arena mapping of an arena yaml, parsed once per file: both
-    `parse_arena` and `_arena_signature` read from here, and `seen_in_training`
+    `read_pass_mark` and `_arena_signature` read from here, and `seen_in_training`
     hashes the whole 900-arena set, so the cache is what keeps that a single
     parse per file. The mapping is shared -- callers read, never mutate."""
     return yaml.load(yaml_path.read_text(), Loader=_AAILoader)["arenas"][0]
 
 
-def parse_arena(yaml_path: Path) -> tuple[float, list[dict]]:
-    """Return (pass_mark, items) from an Animal-AI arena yaml.
+def read_pass_mark(yaml_path: Path) -> float:
+    """The pass mark of an Animal-AI arena yaml.
 
     The arena's ``t`` is deliberately not read: it is not a step cap but the
     decay rate of the agent's health, and collecting a reward refills that
     health, so an episode routinely runs well past ``t`` steps. What is left of
     the episode is the health value in the AAI vector observation, not a step
     count, so that is what the agent is given (see `AnimalAIEnv._read_observation`).
-
-    Each item dict carries one (position, size, rotation) triple in arena
-    coordinates: {name, x, z, size_x, size_z, rotation}. yaml entries with
-    multiple positions are expanded into multiple item dicts; if `sizes` is
-    shorter than `positions` the last given size is reused (AAI's convention).
     """
-    arena = _load_arena_yaml(yaml_path)
-    pass_mark = float(arena.get("pass_mark", 0))
-    items_out: list[dict] = []
-    for item in arena.get("items", []) or []:
-        name = item["name"]
-        positions = item.get("positions") or []
-        sizes = item.get("sizes") or []
-        rotations = item.get("rotations") or []
-        for i, pos in enumerate(positions):
-            size = sizes[i] if i < len(sizes) else (sizes[-1] if sizes else None)
-            rot = rotations[i] if i < len(rotations) else (rotations[-1] if rotations else 0)
-            items_out.append(
-                {
-                    "name": name,
-                    "x": float(pos["x"]),
-                    "z": float(pos["z"]),
-                    "size_x": float(size["x"]) if size else 1.0,
-                    "size_z": float(size["z"]) if size else 1.0,
-                    "rotation": float(rot),
-                }
-            )
-    return pass_mark, items_out
+    return float(_load_arena_yaml(yaml_path).get("pass_mark", 0))
 
 
 @dataclass(frozen=True)

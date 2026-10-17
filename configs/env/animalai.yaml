@@ -59,8 +59,9 @@ env_factory:
   #             branches exactly, so it is a strict superset of false.
   continuous_action: true
   # - topdown_camera: have the binary render a second camera looking straight
-  #   down at the whole arena. `render` draws it in the pane the schematic would
-  #   have filled, so a run can be watched as it happens. Costs roughly a quarter
+  #   down at the whole arena. `render` draws it in the environment pane (or, with
+  #   topdown_observation, the observation column draws it instead), so a run can
+  #   be watched as it happens. Costs roughly a quarter
   #   of the environment's throughput, so turn it off for runs nobody is watching
   #   and that do not observe it. Ignored by an official binary.
   topdown_camera: true

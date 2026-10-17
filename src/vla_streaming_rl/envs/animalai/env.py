@@ -37,13 +37,12 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
     EnvironmentParametersChannel,
 )
 
-from vla_streaming_rl.envs.animalai.curriculum import Arena, ArenaSelector, parse_arena
+from vla_streaming_rl.envs.animalai.curriculum import Arena, ArenaSelector, read_pass_mark
 from vla_streaming_rl.envs.animalai.render import (
     RENDER_SIZE_PX,
     draw_header,
     fit_square,
     render_progress,
-    render_topdown,
 )
 
 # Environment parameter the rebuilt binary reads to pick continuous over
@@ -163,7 +162,6 @@ class AnimalAIEnv(gym.Env):
         self.arena_name: str = ""
         self.pass_mark: float = 0.0
         self._arena: Arena | None = None
-        self._arena_items: list[dict] = []
         self._episode_return = 0.0
         # (x, y, z) agent position in arena coords; populated each step from
         # the AAI vector observation. None before the first reset.
@@ -345,7 +343,7 @@ class AnimalAIEnv(gym.Env):
         )
 
         self.arena_name = self._arena.name
-        self.pass_mark, self._arena_items = parse_arena(self._arena.path)
+        self.pass_mark = read_pass_mark(self._arena.path)
         self._aai.reset(arenas_configurations=str(self._arena.path))
         self.episode_step = 0
         self._episode_return = 0.0
@@ -402,12 +400,11 @@ class AnimalAIEnv(gym.Env):
         return self._observation(), reward, terminated, truncated, info
 
     def render(self) -> np.ndarray | None:
-        """This episode's arena from above, beside the arena set's coverage.
+        """This episode's arena and the arena set's coverage.
 
-        The arena pane is the overhead camera when the binary renders one, and
-        otherwise a schematic drawn from the arena yaml -- the camera shows where
-        everything is, the schematic only where everything started.
-        鳥瞰図を観測に入れているときは、それは観測の列に描かれるので、ここは模式図にする。
+        The overhead camera's view goes under the caption when the binary renders
+        one and it is not an observation; 観測に入れているときは観測の列に描かれるので、
+        ここには描かない。
         """
         if self.render_mode != "rgb_array":
             return None
@@ -416,17 +413,24 @@ class AnimalAIEnv(gym.Env):
             f"{self.arena_name}  {successes}/{attempts}",
             self.selector.status(self.global_step),
         ]
-        arena = (
-            fit_square(self._latest_topdown_image, RENDER_SIZE_PX)
-            if self._latest_topdown_image is not None and not self.topdown_observation
-            else render_topdown(self._arena_items, self._agent_xyz)
+        panes = [draw_header(header_lines, RENDER_SIZE_PX)]
+        if self._latest_topdown_image is not None and not self.topdown_observation:
+            panes.append(fit_square(self._latest_topdown_image, RENDER_SIZE_PX))
+        columns = [np.vstack(panes), render_progress(self.selector.progress_by_group())]
+        height = max(column.shape[0] for column in columns)
+        return np.hstack(
+            [
+                np.vstack(
+                    [
+                        column,
+                        np.full(
+                            (height - column.shape[0], column.shape[1], 3), 240, dtype=np.uint8
+                        ),
+                    ]
+                )
+                for column in columns
+            ]
         )
-        topdown = np.vstack([draw_header(header_lines, RENDER_SIZE_PX), arena])
-        progress = render_progress(self.selector.progress_by_group())
-        padding = np.full(
-            (topdown.shape[0] - progress.shape[0], progress.shape[1], 3), 240, dtype=np.uint8
-        )
-        return np.hstack([topdown, np.vstack([progress, padding])])
 
     def close(self):
         if self._aai is not None:
