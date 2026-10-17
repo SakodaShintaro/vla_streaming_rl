@@ -9,6 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..replay_buffer import ReplayBufferData
+from ..scalar_obs import scalar_obs_text
 from .interface import (
     EligibilityTraceInfo,
     InferInput,
@@ -40,8 +41,8 @@ class LossTerms:
 class VLAActorCriticWithActionValue(NetworkInterface):
     """1枚の画像と指示の文から行動を出す VLA。
 
-    毎ステップ、一人称の視点の画像1枚と指示の文を1つの user ターンとして VLM に読ませる。
-    過去の観測は読まない。全位置の活性を全層（埋め込みと各層の出力）で平均し、
+    毎ステップ、一人称の視点の画像1枚と、指示の文にそのステップのスカラーの観測を文にして
+    添えたものを、1つの user ターンとして VLM に読ませる。過去の観測は読まない。全位置の活性を全層（埋め込みと各層の出力）で平均し、
     ``num_state_queries`` 個の位置に平均プーリングしたものを表現とし、それを位置ごとに
     ``state_out_dim`` へ射影したものを状態にする。方策ヘッドと行動価値ヘッドはその状態を読む。
 
@@ -107,7 +108,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        return self._act(data.frames, data.instruction, data.warmup)
+        return self._act(data.frames, data.instruction, data.scalar_obs_seq, data.warmup)
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         terms = self._loss_terms(data, data.states[:, -1])
@@ -121,7 +122,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     ) -> InferLossResult:
         # 最後のステップはまだ行動を決めていないので、ここで表現を作る
         with torch.inference_mode():
-            infer_result = self._act(frames, instruction, False)
+            infer_result = self._act(frames, instruction, data.scalar_obs, False)
         terms = self._loss_terms(data, infer_result.stored_state.unsqueeze(0).clone())
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
@@ -141,9 +142,18 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     # Internal methods #
     ####################
 
-    def _act(self, frames: list[torch.Tensor], instruction: str, warmup: bool) -> InferResult:
-        """一人称の視点（IMAGE_OBS_NAMES の先頭）の1枚と指示から表現を作り、行動を決める。"""
-        representation = self._represent(frames[0], instruction)
+    def _act(
+        self,
+        frames: list[torch.Tensor],
+        instruction: str,
+        scalar_obs: torch.Tensor,
+        warmup: bool,
+    ) -> InferResult:
+        """一人称の視点（IMAGE_OBS_NAMES の先頭）の1枚と、指示に最後のステップのスカラーの観測
+        （(1, T, SCALAR_OBS_DIM) の最後）を文にして添えたものから表現を作り、行動を決める。"""
+        assert scalar_obs.shape[0] == 1, "Batch size must be 1 for inference"
+        text = f"{instruction} Current values: {scalar_obs_text(scalar_obs[0, -1].cpu().numpy())}."
+        representation = self._represent(frames[0], text)
         state = self._state(representation.unsqueeze(0))
         action = self.policy_head.get_action(state)
         if warmup:
@@ -157,12 +167,12 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             stored_state=representation,
         )
 
-    def _represent(self, image: torch.Tensor, instruction: str) -> torch.Tensor:
-        """[0, 1] の画像 (3, H, W) と指示を VLM に読ませ、全位置の活性の全層平均を
+    def _represent(self, image: torch.Tensor, text: str) -> torch.Tensor:
+        """[0, 1] の画像 (3, H, W) と文を VLM に読ませ、全位置の活性の全層平均を
         ``num_state_queries`` 個の位置に均した表現 (num_state_queries, hidden_size)。"""
-        text = f"{IM_START}user\n{IMAGE_PLACEHOLDER}{instruction}{IM_END}\n{IM_START}assistant\n"
+        prompt = f"{IM_START}user\n{IMAGE_PLACEHOLDER}{text}{IM_END}\n{IM_START}assistant\n"
         inputs = self.processor(
-            text=[text], images=[image], return_tensors="pt", do_rescale=False
+            text=[prompt], images=[image], return_tensors="pt", do_rescale=False
         ).to(self.device)
         outputs = self.vlm(**inputs, output_hidden_states=True, logits_to_keep=1)
         # 全層を一度に積まず、足し込みながら平均する

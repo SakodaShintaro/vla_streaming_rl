@@ -37,3 +37,10 @@ def read_scalar_obs(obs: dict[str, Any]) -> np.ndarray:
     ).astype(np.float32)
     assert scalar_obs.shape == (SCALAR_OBS_DIM,), scalar_obs.shape
     return scalar_obs
+
+
+def scalar_obs_text(scalar_obs: np.ndarray) -> str:
+    """``SCALAR_OBS_NAMES`` の並びのベクトル (SCALAR_OBS_DIM,) を、名前と値を並べた文にしたもの。"""
+    return ", ".join(
+        f"{name}: {value:+.4f}" for name, value in zip(SCALAR_OBS_NAMES, scalar_obs, strict=True)
+    )
