@@ -49,6 +49,33 @@ from vla_streaming_rl.envs.animalai.render import (
 # discrete actions (see TrainingAgent.ReadAction in animal-ai-unity).
 CONTINUOUS_ACTIONS_KEY = "continuousActions"
 
+# 自キャラクターの見た目。アリーナの yaml が指定しなければ Unity は panda / pig / hedgehog
+# から毎回ランダムに選ぶので、ここで固定する。hedgehog は濃い色の体に明るい色の顔が前に
+# 付いていて、鳥瞰図で向きがわかる（pig は丸く、panda は前後の区別がつきにくい）
+AGENT_SKIN = "hedgehog"
+_AGENT_NAME_LINE = "      name: Agent\n"
+
+
+def with_agent_skin(arena_yaml: str) -> str:
+    """アリーナの yaml の Agent の項目に ``AGENT_SKIN`` の見た目を足したもの。Agent の
+    項目がなければ、位置と向きを -1（Unity がランダムに決める）にした Agent の項目を末尾に
+    足す。Unity は Agent の項目があると位置を必ず読むので、位置を省けない。また Agent の
+    項目があるとエージェントを物体より先に置くので、その順番だけは元の yaml と変わる。
+    競技用のアリーナはどれも1つのアリーナで、items が最後のキーなので、文字列のまま足せる。"""
+    assert "skins:" not in arena_yaml, "the arena already names a skin"
+    skin_line = f"      skins: [{AGENT_SKIN}]\n"
+    count = arena_yaml.count(_AGENT_NAME_LINE)
+    assert count <= 1, count
+    if count == 1:
+        return arena_yaml.replace(_AGENT_NAME_LINE, _AGENT_NAME_LINE + skin_line)
+    return (
+        arena_yaml.rstrip("\n")
+        + "\n    - !Item\n"
+        + _AGENT_NAME_LINE
+        + "      positions:\n      - !Vector3 {x: -1, y: 0, z: -1}\n      rotations: [-1]\n"
+        + skin_line
+    )
+
 
 def _aai_environment_class(extra_args: list[str]) -> type:
     """`AnimalAIEnvironment` subclass that actually passes `extra_args` to Unity.
@@ -344,7 +371,11 @@ class AnimalAIEnv(gym.Env):
 
         self.arena_name = self._arena.name
         self.pass_mark = read_pass_mark(self._arena.path)
-        self._aai.reset(arenas_configurations=str(self._arena.path))
+        # yaml のパスではなく、自キャラクターの見た目を足した中身を送る
+        self._aai.arenas_parameters_side_channel.send_raw_data(
+            bytearray(with_agent_skin(self._arena.path.read_text()), encoding="utf-8")
+        )
+        self._aai.reset()
         self.episode_step = 0
         self._episode_return = 0.0
 

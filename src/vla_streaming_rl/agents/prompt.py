@@ -172,9 +172,11 @@ ANIMALAI_FRAMING = (
     "with keeping it centered."
 )
 # 鳥瞰図を観測に入れたときに、各ステップの2枚の画像が何かを伝える文
+# 自キャラクターは env の AGENT_SKIN（hedgehog）に固定している
 ANIMALAI_TOPDOWN_FRAMING = (
     "Each step shows two images: first your first-person view, then the whole arena "
-    "seen from straight above."
+    "seen from straight above. In the view from above you are the dark spiky hedgehog, "
+    "and its light-colored face points the way you are facing."
 )
 # Animal-AI's native action is MultiDiscrete([3, 3]): one move (noop / forward
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
