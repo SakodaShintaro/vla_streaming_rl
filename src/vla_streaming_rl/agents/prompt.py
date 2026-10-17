@@ -10,6 +10,10 @@ from omegaconf import DictConfig
 from vla_streaming_rl.image_obs import image_obs_names
 
 TEXT_ACTION_PROTOCOL = "Reply with the action only."
+# 返答の生成の上限（max_new_tokens）に対して、プロンプトで伝える思考の語数の目安の割合。
+# 英語の1語はおよそ 1.3 トークンで、モデルは目安より長めに書くので、上限の半分より少なく
+# 伝えて、思考が上限で打ち切られないようにする
+THINKING_WORDS_PER_TOKEN = 0.4
 
 
 class PromptBuilder(ABC):
@@ -20,11 +24,13 @@ class PromptBuilder(ABC):
     残さない。返答に書かせる行動の名前と、返答の文から行動を読む関数もここが持つ。
     """
 
-    def __init__(self, env: Env, thinking: bool, reply_interval: int) -> None:
+    def __init__(self, env: Env, thinking: bool, thinking_words: int, reply_interval: int) -> None:
         # env から読むものは環境ごとに違う（Animal-AI はアリーナの一覧）
         del env
-        # 返答のたびに思考を書かせるか
+        # 返答のたびに思考を書かせるか。書かせるときの思考の長さの目安（語数）
         self.thinking = thinking
+        assert thinking_words >= 1, thinking_words
+        self.thinking_words = thinking_words
         # 返答を書かせる間隔（ステップ数）。1つの返答の行動は、このステップ数のあいだ実行する
         assert reply_interval >= 1, reply_interval
         self.reply_interval = reply_interval
@@ -65,12 +71,14 @@ class PromptBuilder(ABC):
         return self._task_text
 
     def _protocol(self) -> str:
-        """返答の書式。思考を書かせるときは、思考を何に使うかを先に伝える。"""
+        """返答の書式。思考を書かせるときは、思考を何に使うかと、その長さの目安を先に
+        伝える。目安を越えて書き続けると、生成の上限で思考を打ち切られるため。"""
         if not self.thinking:
             return TEXT_ACTION_PROTOCOL
         return (
-            f"You think before every reply: use that to review the frames and the actions "
-            f"taken so far, and to decide the next action. {TEXT_ACTION_PROTOCOL}"
+            f"You think before every reply, in at most about {self.thinking_words} words: use "
+            f"that to review the frames and the actions taken so far, and to decide the next "
+            f"action. {TEXT_ACTION_PROTOCOL}"
         )
 
     def reflect(self, score: float, answer) -> str | None:
@@ -115,10 +123,10 @@ STEER_ACCEL_ACTION_FORMAT = (
 class SteerAccelPromptBuilder(PromptBuilder):
     """行動を ``steer=<value>, accel=<value>`` の数値で書かせる環境（CarRacing と CARLA）。"""
 
-    def __init__(self, env: Env, thinking: bool, reply_interval: int) -> None:
+    def __init__(self, env: Env, thinking: bool, thinking_words: int, reply_interval: int) -> None:
         # 返答は1ステップの行動だけなので、毎ステップ返答させる
         assert reply_interval == 1, reply_interval
-        super().__init__(env, thinking, reply_interval)
+        super().__init__(env, thinking, thinking_words, reply_interval)
 
     def text_action_names(self) -> list[str]:
         # 行動は数値で書かせるので、決まった候補はない
@@ -226,8 +234,8 @@ def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: fl
 
 
 class AnimalAIPromptBuilder(PromptBuilder):
-    def __init__(self, env: Env, thinking: bool, reply_interval: int) -> None:
-        super().__init__(env, thinking, reply_interval)
+    def __init__(self, env: Env, thinking: bool, thinking_words: int, reply_interval: int) -> None:
+        super().__init__(env, thinking, thinking_words, reply_interval)
         # 返答に書ける行動の文と、その (名前, ステップ数)
         self._action_calls = {
             f"{name}({steps})": (name, steps)
@@ -382,5 +390,8 @@ def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
     # 思考を書かせない設定では、思考のこともプロンプトに書かない
     return PROMPT_BUILDERS[args.env_id](
-        env, args.vla.reasoning_effort != "none", args.vla.reply_interval
+        env,
+        args.vla.reasoning_effort != "none",
+        int(args.vla.max_new_tokens * THINKING_WORDS_PER_TOKEN),
+        args.vla.reply_interval,
     )

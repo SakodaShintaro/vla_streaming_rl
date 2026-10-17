@@ -25,8 +25,10 @@ vla:
   use_lora: false
   num_state_queries: 100
   state_out_dim: 4
-  # 返答（思考と行動）の生成
-  max_new_tokens: 512
+  # 返答（思考と行動）の生成の上限。思考の長さの目安として、この 0.4 倍の語数をプロンプトで
+  # 伝える（agents/prompt.py の THINKING_WORDS_PER_TOKEN）。目安を越えた思考は上限の手前で
+  # 打ち切られ、行動を書かされる
+  max_new_tokens: 256
   # 返答のたびに書かせる思考の量。none なら思考は書かせない。思考を書いた返答も、ほかの
   # ターンと同じく window_tokens の中で古くなれば押し出される
   reasoning_effort: low  # [none, low, medium, xhigh]
