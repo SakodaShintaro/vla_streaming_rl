@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /policy_head: tanh
+  - /policy_head: diffusion
   - /value_head: dueling
   - /prediction_head: td_jepa  # [flow_matching, td_jepa]
   - _self_
