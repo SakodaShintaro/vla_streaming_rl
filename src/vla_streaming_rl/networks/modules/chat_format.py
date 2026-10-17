@@ -15,16 +15,17 @@ def read_action_reply(
     action_low: np.ndarray,
     action_high: np.ndarray,
 ) -> tuple[str, np.ndarray, bool]:
-    """The one-step action a reply names, clipped to the action bounds: the
-    reply itself, or what follows its thinking if it wrote any. A reply that
-    named no runnable action yields standing still."""
+    """The actions a reply names, one row per step to take them in a row
+    (steps, action_dim), clipped to the action bounds: the reply itself, or what
+    follows its thinking if it wrote any. A reply that named no runnable action
+    yields standing still for as many steps as the parser gave rows."""
     answer_text = reply_text.rsplit(THINK_CLOSE, 1)[-1].strip()
-    action, parse_ok = parse_action_text(answer_text)
+    actions, parse_ok = parse_action_text(answer_text)
     if parse_ok:
-        action = np.clip(action.astype(np.float32), action_low, action_high)
+        actions = np.clip(actions.astype(np.float32), action_low, action_high)
     else:
-        action = np.zeros(action_low.shape, dtype=np.float32)
-    return answer_text, action, parse_ok
+        actions = np.zeros_like(actions, dtype=np.float32)
+    return answer_text, actions, parse_ok
 
 
 def assistant_turn(text: str) -> dict:

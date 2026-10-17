@@ -269,9 +269,10 @@ class Agent(ABC):
         metrics.update(infer_result.value_report)
         if infer_result.stored_state is not None:
             self.rb.set_latest_state(infer_result.stored_state)
+        if infer_result.reply_action is not None:
+            self.rb.set_latest_reply_action(infer_result.reply_action)
         if infer_result.text is not None:
             self.last_reply = infer_result.text
-            self.rb.set_latest_reply_action(infer_result.reply_action)
             self.reply_panels = {
                 "conversation": render_conversation_panel(
                     infer_result.exchange,

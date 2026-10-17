@@ -44,10 +44,13 @@ class LossTerms:
 class VLMActorCriticWithActionValue(NetworkInterface):
     """VLM backbone + DiffusionPolicy + Action Value critic.
 
-    Every tick the VLM reads the tick's frames (every image of the observation)
-    and text on top of the episode's
-    conversation so far and writes the reply the zero-shot controller would --
-    its action, after thinking on every ``thinking_interval``-th tick. The
+    When the actions its last reply named have run out, the VLM reads the
+    tick's frames (every image of the observation) and text on top of the
+    episode's conversation so far and writes the reply the zero-shot controller
+    would -- after thinking, the actions for the steps until it is asked again
+    (for Animal-AI an action, how many steps to take it, and standing still for
+    the rest of a fixed interval). While those actions run, the VLM is not
+    asked and the frames of those ticks stay out of the conversation. The
     conversation lives in the VLM's KV cache: the system prompt stays, the
     turns behind it are kept first-in first-out up to ``window_tokens``, and a
     tick only runs the tokens it adds. The state is
@@ -106,9 +109,6 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self.action_low = action_low
         self.action_high = action_high
         self.decision_fps = decision_fps
-        # 思考を書かせる間隔（ステップ数）。エピソードの最初のステップから、この間隔ごと
-        assert vla_config.thinking_interval >= 1, vla_config.thinking_interval
-        self.thinking_interval = vla_config.thinking_interval
 
         # 返答を書く VLM。会話は KV キャッシュに積み、システムプロンプトを残して、その後ろを
         # 直近 window_tokens トークンまで FIFO で持つ
@@ -135,6 +135,12 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         self._dummy_state = torch.zeros(1, 1, 1)
         # 表示用に残す直近の会話
         self._exchange = None
+        # 最後の返答が指した行動のうち、まだ実行していないステップの分（それぞれ
+        # (1, horizon, action_dim)）と、その返答を書いたときの表現と行動の文。行動を
+        # 続けているステップの状態は、その返答を書いたときの表現から作る
+        self._pending_actions: list[torch.Tensor] = []
+        self._representation: torch.Tensor | None = None
+        self._answer = ""
         # このエピソードで行動を選んだ回数と、そのうち返答の行動を選んだ回数。表示用
         self._decisions_num = 0
         self._vlm_chosen_num = 0
@@ -159,16 +165,18 @@ class VLMActorCriticWithActionValue(NetworkInterface):
     def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
         del scalar_obs
 
-    def _text_action(self, reply: str, like: torch.Tensor) -> tuple[torch.Tensor, bool, str]:
-        """返答が指す行動を、方策の正規化した行動空間のチャンク (1, horizon, action_dim) に
-        したものと、読めたかどうか、行動として書かれていた文。"""
+    def _text_actions(self, reply: str) -> tuple[list[torch.Tensor], bool, str]:
+        """返答が指す行動を、続けて実行するステップごとに方策の正規化した行動空間の
+        チャンク (1, horizon, action_dim) にしたものと、読めたかどうか、行動として書かれて
+        いた文。"""
         scale = (self.action_high - self.action_low) / 2.0
         bias = (self.action_high + self.action_low) / 2.0
-        answer, action, parse_ok = read_action_reply(
+        answer, actions, parse_ok = read_action_reply(
             reply, self.parse_action_text, self.action_low, self.action_high
         )
-        chunk = torch.from_numpy((action - bias) / scale).to(like.device, like.dtype)
-        return chunk.view(1, 1, -1).expand(-1, self.horizon, -1), parse_ok, answer
+        normalized = torch.from_numpy((actions - bias) / scale).to(self.device, torch.float32)
+        chunks = [row.view(1, 1, -1).expand(-1, self.horizon, -1) for row in normalized]
+        return chunks, parse_ok, answer
 
     def _format_action(self, net_action: torch.Tensor) -> str:
         """正規化した1ステップの行動を、環境の行動空間の数値で書いたもの。"""
@@ -240,53 +248,77 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         scalar_obs: torch.Tensor,
         warmup: bool,
     ) -> InferResult:
-        """最後のステップの行動を決める。そのステップのフレーム（観測の画像すべて）と数値の
-        ターンを会話に積んで返答を書かせ、その計算の活性から状態を作り、返答の行動とヘッドの
-        行動を行動価値で選ぶ。"""
+        """最後のステップの行動を決める。最後の返答が指した行動を実行し終えていれば、
+        そのステップのフレーム（観測の画像すべて）と数値のターンを会話に積んで返答を書かせ、
+        その計算の活性から状態を作る。まだ残っていれば、その行動の次のステップを返答の行動と
+        し、状態はその返答を書いたときの表現から作る。返答の行動とヘッドの行動は行動価値で
+        選ぶ。"""
         assert scalar_obs.shape[0] == 1, "Batch size must be 1 for inference"
         step = float(scalar_obs[0, -1, EPISODE_STEP_INDEX])
-        chain, exchange = self._write_reply(frames, system_text, turn_text, step)
-        representation = self._pool_states(chain.states)
-        state = self._state(representation.unsqueeze(0))
+        if step == 0.0:
+            # 前のエピソードの返答の行動は持ち越さない
+            self._pending_actions = []
+        written = len(self._pending_actions) == 0
+        if written:
+            chain, exchange = self._write_reply(frames, system_text, turn_text, step)
+            self._representation = self._pool_states(chain.states)
+            self._pending_actions, parsed, answer = self._text_actions(chain.text)
+            self._answer = answer if parsed else f"(unparsed: {answer})"
+        vlm_action = self._pending_actions.pop(0)
+        state = self._state(self._representation.unsqueeze(0))
         head_action = self.policy_head.get_action(state)
         critic_out = self.value_head(state, head_action)
-        vlm_action, parsed, answer = self._text_action(chain.text, head_action)
         q_head = self.value_head.scalar_value(state, head_action).item()
         q_vlm = self.value_head.scalar_value(state, vlm_action).item()
         # バッファを貯めている間は返答の行動だけで動く
         vlm_chosen = warmup or q_head - q_vlm <= self.select_margin
         self._decisions_num += 1
         self._vlm_chosen_num += int(vlm_chosen)
-        answer = answer if parsed else f"(unparsed: {answer})"
+        value_report = {
+            **self.value_head.value_report(critic_out.output),
+            "select/q_vlm": q_vlm,
+            "select/q_head": q_head,
+            "select/vlm_chosen": float(vlm_chosen),
+            "vlm/written": float(written),
+        }
+        if written:
+            value_report.update(
+                {
+                    "vlm/parse_failed": float(not parsed),
+                    "vlm/prompt_tokens": float(chain.prompt_tokens),
+                    "vlm/completion_tokens": float(len(chain.tokens)),
+                    "vlm/msec": chain.msec,
+                }
+            )
 
         return InferResult(
             action=vlm_action if vlm_chosen else head_action,
-            value_report={
-                **self.value_head.value_report(critic_out.output),
-                "select/q_vlm": q_vlm,
-                "select/q_head": q_head,
-                "select/vlm_chosen": float(vlm_chosen),
-                "vlm/parse_failed": float(not parsed),
-                "vlm/prompt_tokens": float(chain.prompt_tokens),
-                "vlm/completion_tokens": float(len(chain.tokens)),
-                "vlm/msec": chain.msec,
-            },
+            value_report=value_report,
             rnn_state=self._dummy_state.clone(),
             features=state,
-            stored_state=representation,
-            text=chain.text,
+            stored_state=self._representation,
+            # 返答を書かなかったステップでは、文と会話は None
+            text=chain.text if written else None,
             reply_action=vlm_action[0, 0],
             text_status=(
                 f"in {chain.prompt_tokens} tok   out {len(chain.tokens)} tok   "
                 f"{chain.msec:.0f} ms   parse {'ok' if parsed else 'failed'}"
+                if written
+                else None
             ),
-            exchange=exchange,
+            exchange=exchange if written else None,
             selection_status=(
                 f"{'warmup: VLM only' if warmup else 'chosen by Q'}. "
-                f"VLM chosen {self._vlm_chosen_num}/{self._decisions_num} this episode."
+                f"VLM chosen {self._vlm_chosen_num}/{self._decisions_num} this episode. "
+                f"{len(self._pending_actions)} steps of the reply left."
             ),
             selection_rows=[
-                ("VLM", f"{answer}  {self._format_action(vlm_action[0, 0])}", q_vlm, vlm_chosen),
+                (
+                    "VLM",
+                    f"{self._answer}  {self._format_action(vlm_action[0, 0])}",
+                    q_vlm,
+                    vlm_chosen,
+                ),
                 ("head", self._format_action(head_action[0, 0]), q_head, not vlm_chosen),
             ],
         )
@@ -305,9 +337,10 @@ class VLMActorCriticWithActionValue(NetworkInterface):
             self._decisions_num = 0
             self._vlm_chosen_num = 0
         self._exchange.append(user_turn(step / self.decision_fps, frames, turn_text))
-        # 一定の間隔のステップで、思考を書いてから返答させる。そのあいだは行動だけを書かせる
-        thinking = self.generator.thinking_enabled and int(step) % self.thinking_interval == 0
-        chain = self.generator.generate(self._exchange, thinking, self.constrained)
+        # 思考を書かせる設定なら、返答のたびに思考を書いてから返答させる
+        chain = self.generator.generate(
+            self._exchange, self.generator.thinking_enabled, self.constrained
+        )
         self._exchange.append(assistant_turn(chain.text))
         # モデルの文脈はキャッシュが持つので、リストには差分の計算と表示に要る直近だけを残す
         self._exchange = self._exchange[-EXCHANGE_MESSAGES:]

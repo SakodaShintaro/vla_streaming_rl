@@ -20,12 +20,14 @@ class PromptBuilder(ABC):
     残さない。返答に書かせる行動の名前と、返答の文から行動を読む関数もここが持つ。
     """
 
-    def __init__(self, env: Env, thinking_interval: int) -> None:
+    def __init__(self, env: Env, thinking: bool, reply_interval: int) -> None:
         # env から読むものは環境ごとに違う（Animal-AI はアリーナの一覧）
         del env
-        assert thinking_interval >= 0, thinking_interval
-        # 思考を書かせる間隔（ステップ数）。思考を書かせない設定では 0
-        self.thinking_interval = thinking_interval
+        # 返答のたびに思考を書かせるか
+        self.thinking = thinking
+        # 返答を書かせる間隔（ステップ数）。1つの返答の行動は、このステップ数のあいだ実行する
+        assert reply_interval >= 1, reply_interval
+        self.reply_interval = reply_interval
         self._task_text = ""
         self._turn_text = ""
         # エピソードの中で何ステップ目か
@@ -63,16 +65,12 @@ class PromptBuilder(ABC):
         return self._task_text
 
     def _protocol(self) -> str:
-        """返答の書式。思考を書かせるときは、その間隔と、思考を何に使うかを先に伝える。
-        思考のあとに書くのは1ステップの行動だけなので、それまでの振り返りと、次に考える
-        までの方針は、ここで求めておく。"""
-        if self.thinking_interval == 0:
+        """返答の書式。思考を書かせるときは、思考を何に使うかを先に伝える。"""
+        if not self.thinking:
             return TEXT_ACTION_PROTOCOL
         return (
-            f"On the first step and every {self.thinking_interval} steps after it you think "
-            f"before you reply: use that to review the frames and the actions taken since you "
-            f"last thought, and to decide what to do until you next think. On the other steps "
-            f"you reply at once, carrying on with what you last decided. {TEXT_ACTION_PROTOCOL}"
+            f"You think before every reply: use that to review the frames and the actions "
+            f"taken so far, and to decide the next action. {TEXT_ACTION_PROTOCOL}"
         )
 
     def reflect(self, score: float, answer) -> str | None:
@@ -91,7 +89,8 @@ class PromptBuilder(ABC):
 
     @abstractmethod
     def parse_action_text(self, action_text: str) -> tuple[np.ndarray, bool]:
-        """返答の行動の文を環境の行動にしたものと、読めたかどうか。"""
+        """返答の行動の文を、続けて実行する環境の行動の列 (steps, action_dim) にしたものと、
+        読めたかどうか。"""
 
     @abstractmethod
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -116,16 +115,22 @@ STEER_ACCEL_ACTION_FORMAT = (
 class SteerAccelPromptBuilder(PromptBuilder):
     """行動を ``steer=<value>, accel=<value>`` の数値で書かせる環境（CarRacing と CARLA）。"""
 
+    def __init__(self, env: Env, thinking: bool, reply_interval: int) -> None:
+        # 返答は1ステップの行動だけなので、毎ステップ返答させる
+        assert reply_interval == 1, reply_interval
+        super().__init__(env, thinking, reply_interval)
+
     def text_action_names(self) -> list[str]:
         # 行動は数値で書かせるので、決まった候補はない
         return []
 
     def parse_action_text(self, action_text: str) -> tuple[np.ndarray, bool]:
-        """Decode `steer=<value>, accel=<value>` into the one action it names."""
+        """Decode `steer=<value>, accel=<value>` into the one action it names, a
+        single row."""
         match = re.search(r"steer=([+-]?\d*\.?\d+),\s*accel=([+-]?\d*\.?\d+)", action_text)
         if match is None:
-            return np.zeros(2, dtype=np.float32), False
-        action = np.array([float(match.group(1)), float(match.group(2))], dtype=np.float32)
+            return np.zeros((1, 2), dtype=np.float32), False
+        action = np.array([[float(match.group(1)), float(match.group(2))]], dtype=np.float32)
         return np.clip(action, -1.0, 1.0), True
 
 
@@ -175,8 +180,9 @@ ANIMALAI_TOPDOWN_FRAMING = (
 # / back) and one rotation (noop / right / left) per tick. The env exposes it as
 # Box(-1, 1, shape=(2,)) and discretizes back with a +/-1/3 dead-zone, so each
 # named action maps onto the extreme Box value that survives that dead-zone.
-# An action is written as one of four names, each a move or a rotation alone,
-# taken for one step.
+# An action is written as a call, `<name>(<n>)`: one of four names, each a move
+# or a rotation alone, taken for n steps in a row. A reply is asked for every
+# ``reply_interval`` steps, and the steps left over after n stand still.
 ANIMALAI_ACTIONS = {
     "move_forward": (1.0, 0.0),
     "move_backward": (-1.0, 0.0),
@@ -209,8 +215,14 @@ def _animalai_turn(obs: dict[str, Any], reward: float, average_forward_speed: fl
 
 
 class AnimalAIPromptBuilder(PromptBuilder):
-    def __init__(self, env: Env, thinking_interval: int) -> None:
-        super().__init__(env, thinking_interval)
+    def __init__(self, env: Env, thinking: bool, reply_interval: int) -> None:
+        super().__init__(env, thinking, reply_interval)
+        # 返答に書ける行動の文と、その (名前, ステップ数)
+        self._action_calls = {
+            f"{name}({steps})": (name, steps)
+            for name in ANIMALAI_ACTIONS
+            for steps in range(1, reply_interval + 1)
+        }
         self.tasks = {arena.task: "" for arena in env.unwrapped.selector.arenas}
         # 鳥瞰図が観測にあるか（env の topdown_observation）
         self._framing = (
@@ -235,26 +247,32 @@ class AnimalAIPromptBuilder(PromptBuilder):
         self._forward_speed_steps = 0
 
     def text_action_names(self) -> list[str]:
-        return list(ANIMALAI_ACTIONS)
+        return list(self._action_calls)
 
     def parse_action_text(self, action_text: str) -> tuple[np.ndarray, bool]:
-        """Decode the action's name into the Box action that the env discretizes
-        back into Animal-AI's native MultiDiscrete([3, 3]) pair. Anything that is
-        not exactly one of the names stays a format violation, reported as such
+        """Decode the `<name>(<n>)` call into ``reply_interval`` rows: n rows of
+        the Box action that the env discretizes back into Animal-AI's native
+        MultiDiscrete([3, 3]) pair, then standing still. Anything that is not
+        exactly one of the calls stays a format violation, reported as such
         rather than repaired here."""
-        name = action_text.strip().lower()
-        if name not in ANIMALAI_ACTIONS:
-            return np.zeros(2, dtype=np.float32), False
-        return np.array(ANIMALAI_ACTIONS[name], dtype=np.float32), True
+        actions = np.zeros((self.reply_interval, 2), dtype=np.float32)
+        call = action_text.strip().lower()
+        if call not in self._action_calls:
+            return actions, False
+        name, steps = self._action_calls[call]
+        actions[:steps] = ANIMALAI_ACTIONS[name]
+        return actions, True
 
     def _action_format(self) -> str:
         return (
-            f"Write the action as one of {' / '.join(ANIMALAI_ACTIONS)}. It is taken for one "
-            f"step, and you are then shown the next frame and asked again. One turn step "
-            f"rotates 10 degrees; one forward step moves about 1.5 units, the arena being "
-            f"40 units across. Each frame comes with the action that was actually taken on "
-            f"the step before it, as two numbers: move (+1 forward, -1 backward) and turn "
-            f"(+1 right, -1 left). It can differ from the action you named."
+            f"Write the action as `<name>(<n>)`, for example `turn_right(3)`: <name> is one "
+            f"of {' / '.join(ANIMALAI_ACTIONS)}, and <n> is how many steps in a row it is "
+            f"taken, an integer from 1 to {self.reply_interval}. You are shown a new frame "
+            f"and asked for an action every {self.reply_interval} steps, and the steps left "
+            f"over after <n> are spent standing still. One turn step rotates 10 degrees; one "
+            f"forward step moves about 1.5 units, the arena being 40 units across. Each frame "
+            f"comes with the action that was actually taken on the step before it, as two "
+            f"numbers: move (+1 forward, -1 backward) and turn (+1 right, -1 left)."
         )
 
     def _task(self, obs: dict[str, Any], info: dict) -> str:
@@ -341,6 +359,7 @@ PROMPT_BUILDERS = {
 
 def build_prompt_builder(env: Env, args: DictConfig) -> PromptBuilder:
     assert args.env_id in PROMPT_BUILDERS, f"No prompt builder for {args.env_id}"
-    # 思考を書かせない設定では、思考の間隔もプロンプトに書かない
-    thinking_interval = 0 if args.vla.reasoning_effort == "none" else args.vla.thinking_interval
-    return PROMPT_BUILDERS[args.env_id](env, thinking_interval)
+    # 思考を書かせない設定では、思考のこともプロンプトに書かない
+    return PROMPT_BUILDERS[args.env_id](
+        env, args.vla.reasoning_effort != "none", args.vla.reply_interval
+    )
