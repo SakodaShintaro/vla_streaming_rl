@@ -93,6 +93,7 @@ class OffPolicyAgent(Agent):
                 print(f"Start learning at global step {global_step}.")
                 self.is_learning = True
             data = self.rb.sample(self.batch_size)
+            replay_stats = self.rb.batch_stats(data)
             data.rewards = self.reward_scaler.normalize(data.rewards)
             result = self.network.compute_loss(data)
             self.actor_optimizer.zero_grad(set_to_none=True)
@@ -102,7 +103,7 @@ class OffPolicyAgent(Agent):
             self.actor_optimizer.step()
             self.critic_optimizer.step()
             self.rb.update_priorities(data.start_indices, result.td_error)
-            train_metrics = result.info
+            train_metrics = {**result.info, **replay_stats}
         step_result = self.select_action(global_step, obs, reward, terminated, truncated, info)
         step_result.metrics.update(train_metrics)
         return step_result

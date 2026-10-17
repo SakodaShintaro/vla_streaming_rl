@@ -259,6 +259,30 @@ class ReplayBuffer:
         self.priorities[start_indices.to(self.storage_device)] = priorities
         self.max_priority = max(self.max_priority, float(priorities.max()))
 
+    def batch_stats(self, data: ReplayBufferData) -> dict[str, float]:
+        """引いたバッチがバッファ全体と比べてどこに偏っているか。``data`` は :meth:`sample`
+        が返したもので、報酬を正規化する前のもの。"""
+        stored = self.num_stored()
+        starts = data.start_indices.to(self.storage_device)
+        # 窓の先頭が書き込まれてから何ステップ経ったか
+        age = (self.idx - 1 - starts) % self.size
+        # 窓の最後の行（遷移の結果）が終端か、大きな報酬（ゴールや赤い玉）を持つか
+        terminal = data.dones[:, -1, 0].float()
+        event = (data.rewards[:, -1, 0].abs() > 0.3).float()
+        return {
+            "replay/age_mean": age.float().mean().item(),
+            "replay/terminal_frac": terminal.mean().item(),
+            "replay/terminal_frac_buffer": self.dones[:stored, 0].mean().item(),
+            "replay/event_frac": event.mean().item(),
+            "replay/event_frac_buffer": (self.rewards[:stored, 0].abs() > 0.3)
+            .float()
+            .mean()
+            .item(),
+            "replay/priority_mean": self.priorities[starts].mean().item(),
+            "replay/priority_mean_buffer": self.priorities[:stored].mean().item(),
+            "replay/priority_max": self.max_priority,
+        }
+
     def get_latest(self, seq_len: int) -> ReplayBufferData:
         # Create vectorized indices for the latest sequence
         indices = (
