@@ -17,7 +17,7 @@ vla:
   # （"\n<|im_start|>assistant\n" の 4 トークン）で、画像と指示を読んだ後の活性を持つ
   num_last_tokens: 4
   # 位置ごとに射影する幅。状態の幅は (image_pool_size^2 + num_last_tokens) * state_out_dim
-  state_out_dim: 4
+  state_out_dim: 32
 
 actor_critic:
   seq_len: 50

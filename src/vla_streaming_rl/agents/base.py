@@ -10,7 +10,7 @@ from torch import nn, optim
 
 from vla_streaming_rl.networks.interface import InferResult
 from vla_streaming_rl.replay_buffer import ReplayBuffer
-from vla_streaming_rl.reward_scaler import RewardScaler
+from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs
 
 
@@ -86,6 +86,7 @@ class Agent(ABC):
         seq_len: int,
         horizon: int,
         normalizing_by_return: bool,
+        reward_scaler: RewardScaler | FixedRewardScaler,
         use_done: bool,
         reset_on_episode_end: bool,
     ) -> None:
@@ -101,7 +102,7 @@ class Agent(ABC):
         self.normalizing_by_return = normalizing_by_return
         self.use_done = use_done
         self.reset_on_episode_end = reset_on_episode_end
-        self.reward_scaler = RewardScaler()
+        self.reward_scaler = reward_scaler
 
         # 方策の行動は [-1, 1] に正規化した空間にあり、環境の行動空間へはこれで写す
         self.action_low = action_space.low

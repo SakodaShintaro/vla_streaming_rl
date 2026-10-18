@@ -21,6 +21,7 @@ from torch import nn, optim
 from vla_streaming_rl.agents.base import Agent, StepResult, split_actor_critic_params
 from vla_streaming_rl.networks.interface import InferInput
 from vla_streaming_rl.optimizers.adam_et import AdamET
+from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
 
 
 class StreamingAgent(Agent):
@@ -31,6 +32,7 @@ class StreamingAgent(Agent):
         image_names: tuple[str, ...],
         network: nn.Module,
         normalizing_by_return: bool,
+        reward_scaler: RewardScaler | FixedRewardScaler,
         max_grad_norm: float,
         use_done: bool,
         seq_len: int,
@@ -70,6 +72,7 @@ class StreamingAgent(Agent):
             seq_len=seq_len,
             horizon=horizon,
             normalizing_by_return=normalizing_by_return,
+            reward_scaler=reward_scaler,
             use_done=use_done,
             reset_on_episode_end=reset_on_episode_end,
         )

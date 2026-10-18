@@ -21,6 +21,7 @@ from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult, split_actor_critic_params
 from vla_streaming_rl.networks.interface import InferInput, InferResult
+from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
 
 
 class OffPolicyAgent(Agent):
@@ -31,6 +32,7 @@ class OffPolicyAgent(Agent):
         image_names: tuple[str, ...],
         network: nn.Module,
         normalizing_by_return: bool,
+        reward_scaler: RewardScaler | FixedRewardScaler,
         learning_starts: int,
         batch_size: int,
         max_grad_norm: float,
@@ -66,6 +68,7 @@ class OffPolicyAgent(Agent):
             seq_len=seq_len,
             horizon=horizon,
             normalizing_by_return=normalizing_by_return,
+            reward_scaler=reward_scaler,
             use_done=use_done,
             reset_on_episode_end=reset_on_episode_end,
         )

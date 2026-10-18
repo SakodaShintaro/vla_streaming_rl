@@ -5,6 +5,7 @@ from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.instruction import ENV_INSTRUCTIONS
 from vla_streaming_rl.image_obs import image_obs_names
+from vla_streaming_rl.reward_scaler import build_reward_scaler
 
 
 def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module, object]:
@@ -26,6 +27,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
             image_names=image_obs_names(env.observation_space),
             network=network,
             normalizing_by_return=args.normalizing_by_return,
+            reward_scaler=build_reward_scaler(args.reward_scale_mode, args.fixed_reward_scale),
             max_grad_norm=args.max_grad_norm,
             use_done=args.use_done,
             seq_len=network.seq_len,
@@ -49,6 +51,7 @@ def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
         image_names=image_obs_names(env.observation_space),
         network=network,
         normalizing_by_return=args.normalizing_by_return,
+        reward_scaler=build_reward_scaler(args.reward_scale_mode, args.fixed_reward_scale),
         learning_starts=args.learning_starts,
         batch_size=args.batch_size,
         max_grad_norm=args.max_grad_norm,
