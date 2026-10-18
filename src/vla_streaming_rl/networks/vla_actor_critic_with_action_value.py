@@ -65,6 +65,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     def __init__(
         self,
         *,
+        images_num: int,
         action_space_shape: tuple[int],
         value_head_factory: Callable[[int, int], DistributionalValueHead],
         policy_head_factory,
@@ -90,7 +91,9 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         self.num_last_tokens = vla_config.num_last_tokens
         self.image_pad_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         self.merge_size = self.processor.image_processor.merge_size
-        self.num_positions = self.image_pool_size**2 + self.num_last_tokens
+        # 観測の画像（一人称の視点と、あれば鳥瞰図）ごとにプーリングした格子を並べる
+        self.images_num = images_num
+        self.num_positions = images_num * self.image_pool_size**2 + self.num_last_tokens
         self.state_out_proj = nn.Linear(self.vlm_hidden_size, vla_config.state_out_dim).to(device)
         # スカラーをトークンにする sin/cos の角周波数。周期を scalar_max_period から
         # scalar_min_period まで対数等間隔にとり、sin と cos で state_out_dim 幅にする
@@ -177,7 +180,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         """一人称の視点（IMAGE_OBS_NAMES の先頭）の1枚と指示から表現を作り、最後のステップの
         スカラーの観測（(1, T, SCALAR_OBS_DIM) の最後）と合わせて行動を決める。"""
         assert scalar_obs.shape[0] == 1, "Batch size must be 1 for inference"
-        representation = self._represent(frames[0], instruction)
+        representation = self._represent(frames, instruction)
         state = self._state(representation.unsqueeze(0), scalar_obs[:, -1])
         action = self.policy_head.get_action(state)
         if warmup:
@@ -191,25 +194,35 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             stored_state=representation,
         )
 
-    def _represent(self, image: torch.Tensor, text: str) -> torch.Tensor:
-        """[0, 1] の画像 (3, H, W) と文を VLM に読ませた、全位置の活性の全層平均から、画像の
-        トークンの格子を ``image_pool_size`` 四方にプーリングしたものと末尾の
+    def _represent(self, images: list[torch.Tensor], text: str) -> torch.Tensor:
+        """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませた、全位置の活性の全層平均から、
+        画像ごとにトークンの格子を ``image_pool_size`` 四方にプーリングしたものと末尾の
         ``num_last_tokens`` 個の位置を並べた表現 (num_positions, hidden_size)。"""
-        prompt = f"{IM_START}user\n{IMAGE_PLACEHOLDER}{text}{IM_END}\n{IM_START}assistant\n"
+        assert len(images) == self.images_num, (len(images), self.images_num)
+        placeholders = IMAGE_PLACEHOLDER * len(images)
+        prompt = f"{IM_START}user\n{placeholders}{text}{IM_END}\n{IM_START}assistant\n"
         inputs = self.processor(
-            text=[prompt], images=[image], return_tensors="pt", do_rescale=False
+            text=[prompt], images=list(images), return_tensors="pt", do_rescale=False
         ).to(self.device)
         outputs = self.vlm(**inputs, output_hidden_states=True, logits_to_keep=1)
         # 全層を一度に積まず、足し込みながら平均する
         layer_mean = sum(depth[0].to(torch.float32) for depth in outputs.hidden_states) / len(
             outputs.hidden_states
         )
-        # 画像のトークンは、統合後の格子のラスター順に並ぶ
+        # 画像のトークンは、画像の順に、それぞれ統合後の格子のラスター順に並ぶ
         image_tokens = layer_mean[inputs["input_ids"][0] == self.image_pad_id]
-        height, width = (inputs["image_grid_thw"][0, 1:] // self.merge_size).tolist()
-        grid = image_tokens.T.reshape(1, self.vlm_hidden_size, height, width)
-        pooled = F.adaptive_avg_pool2d(grid, self.image_pool_size).flatten(start_dim=2)[0].T
-        return torch.cat([pooled, layer_mean[-self.num_last_tokens :]]).to(torch.bfloat16)
+        grids = (inputs["image_grid_thw"][:, 1:] // self.merge_size).tolist()
+        pooled = [
+            F.adaptive_avg_pool2d(
+                tokens.T.reshape(1, self.vlm_hidden_size, height, width), self.image_pool_size
+            )
+            .flatten(start_dim=2)[0]
+            .T
+            for (height, width), tokens in zip(
+                grids, image_tokens.split([h * w for h, w in grids]), strict=True
+            )
+        ]
+        return torch.cat([*pooled, layer_mean[-self.num_last_tokens :]]).to(torch.bfloat16)
 
     def _loss_terms(self, data: ReplayBufferData, next_representation: torch.Tensor) -> LossTerms:
         """リプレイバッチの損失。現在の状態はチャンクの手前のステップに保存した表現から、

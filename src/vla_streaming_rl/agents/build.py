@@ -3,7 +3,7 @@ import torch
 from gymnasium import Env
 from omegaconf import DictConfig
 
-from vla_streaming_rl.agents.instruction import ENV_INSTRUCTIONS
+from vla_streaming_rl.agents.instruction import ENV_INSTRUCTIONS, TOPDOWN_INSTRUCTION
 from vla_streaming_rl.image_obs import image_obs_names
 from vla_streaming_rl.reward_scaler import build_reward_scaler
 
@@ -19,6 +19,8 @@ def build_all(env: Env, args: DictConfig) -> tuple[torch.nn.Module, object]:
 
 def build_agent(env: Env, network: torch.nn.Module, args: DictConfig):
     instruction = ENV_INSTRUCTIONS[args.env_id]
+    if "topdown_image" in image_obs_names(env.observation_space):
+        instruction = f"{instruction} {TOPDOWN_INSTRUCTION}"
     if args.agent_type == "streaming":
         from vla_streaming_rl.agents.streaming import StreamingAgent
 

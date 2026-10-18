@@ -23,3 +23,10 @@ ENV_INSTRUCTIONS = {
         "obey traffic rules, and avoid collisions."
     ),
 }
+# 鳥瞰図も観測にあるとき（Animal-AI の topdown_observation）に指示に足す、2枚の画像が何かを
+# 伝える文。自キャラクターは env の AGENT_SKIN（hedgehog）に固定している
+TOPDOWN_INSTRUCTION = (
+    "The first image is your first-person view and the second is the whole arena seen "
+    "from straight above. In the view from above you are the dark spiky hedgehog, and its "
+    "light-colored face points the way you are facing."
+)
