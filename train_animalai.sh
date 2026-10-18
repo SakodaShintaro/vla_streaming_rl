@@ -31,9 +31,9 @@ export DISPLAY
 case ${difficulty} in
   easy)
     difficulty_overrides=(
-      'env_factory.train_levels=["11"]'
+      'env_factory.train_levels=["01"]'
       'env_factory.train_variant="01"'
-      episode_limit=20
+      episode_limit=600
     )
     ;;
   one_lap)
