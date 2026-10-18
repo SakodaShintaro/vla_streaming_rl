@@ -352,6 +352,8 @@ class AnimalAIEnv(gym.Env):
             "velocity": self._agent_velocity,
             "agent_xyz": self._agent_xyz,
             "agent_rotation": self._agent_rotation,
+            # 鳥瞰カメラの画像（カメラがなければ None）。観測とは別に、振り返りに見せるため
+            "topdown_image": self._latest_topdown_image,
         }
         info.update(self.selector.info(self.global_step))
         return info
