@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -89,6 +90,8 @@ class ReplayBuffer:
             (size, *state_shape), dtype=torch.bfloat16, device=self.storage_device
         )
         self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM))
+        # ネットワークが状態の元を保存するか（VLA の表現）。保存しないネットワークは毎回窓から作る
+        self.stores_state = math.prod(state_shape) > 0
         # 行 t を先頭とする窓の優先度（TD 誤差の絶対値 + priority_epsilon）
         self.priorities = init_tensor((size,))
         self.max_priority = 1.0

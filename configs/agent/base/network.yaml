@@ -10,9 +10,13 @@ weight_decay: 0.01
 vla:
   model_id: Qwen/Qwen3.8-27B
   load_in_4bit: true
-  # VLM の全位置の活性を全層で平均し、この数の位置に平均プーリングしたものを表現とする
-  num_state_queries: 100
-  # プーリングした位置ごとに射影する幅。状態の幅は num_state_queries * state_out_dim
+  # VLM の全位置の活性を全層で平均し、画像のトークンの格子（256px なら 8x8）をこの数の
+  # 四方に平均プーリングしたものを表現に入れる
+  image_pool_size: 8
+  # 表現に加える末尾の位置の数。末尾はチャットテンプレートの固定の部分
+  # （"\n<|im_start|>assistant\n" の 4 トークン）で、画像と指示を読んだ後の活性を持つ
+  num_last_tokens: 4
+  # 位置ごとに射影する幅。状態の幅は (image_pool_size^2 + num_last_tokens) * state_out_dim
   state_out_dim: 4
 
 actor_critic:

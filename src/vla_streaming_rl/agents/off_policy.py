@@ -2,8 +2,8 @@
 """Off-policy learning mode: act now, learn later from a large replay buffer.
 
 Every tick is stored; once ``learning_starts`` ticks have gone by, one gradient
-step on a ``batch_size`` sample of the buffer fires every ``horizon`` ticks,
-before the action of that tick is chosen. Below ``learning_starts`` the network
+step on a ``batch_size`` sample of the buffer fires every tick, before the
+action of that tick is chosen, whatever the ``horizon`` of the action chunks. Below ``learning_starts`` the network
 is told it is warming up and returns uniform random actions, so the buffer
 fills with something other than an untrained policy's output while the
 network's recurrent state still follows the episode.
@@ -20,7 +20,7 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.base import Agent, StepResult, split_actor_critic_params
-from vla_streaming_rl.networks.interface import InferInput
+from vla_streaming_rl.networks.interface import InferInput, InferResult
 
 
 class OffPolicyAgent(Agent):
@@ -86,7 +86,6 @@ class OffPolicyAgent(Agent):
         train_metrics = {}
         if (
             global_step >= self.learning_starts
-            and global_step % self.horizon == 0
             and self.rb.num_stored() >= self.batch_size + self.rb.seq_len
         ):
             if not self.is_learning:
@@ -121,11 +120,18 @@ class OffPolicyAgent(Agent):
         images, metrics = self._observe(obs, reward, terminated, truncated, info)
         warmup = global_step < self.learning_starts
         if not warmup and self._has_chunk_left():
+            if self.rb.stores_state:
+                # 行動はチャンクの続きを使うが、状態は毎ステップ保存する。学習の窓はどの行からも
+                # 始められ、チャンクの途中で終わったエピソードの終端も学習に使える
+                self.rb.set_latest_state(self._infer(images, warmup).stored_state)
             return self._continue_chunk(metrics)
+        return self._start_chunk(self._infer(images, warmup), metrics)
 
+    def _infer(self, images: list[torch.Tensor], warmup: bool) -> InferResult:
+        """このステップの画像とバッファの最新の窓から、ネットワークに推論させる。"""
         latest_data = self.rb.get_latest(self.seq_len)
         # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
-        infer_result = self.network.infer(
+        return self.network.infer(
             InferInput(
                 frames=images,
                 s_seq=latest_data.observations,
@@ -137,4 +143,3 @@ class OffPolicyAgent(Agent):
                 warmup=warmup,
             )
         )
-        return self._start_chunk(infer_result, metrics)
