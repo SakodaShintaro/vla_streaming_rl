@@ -176,6 +176,7 @@ ANIMALAI_FRAMING = (
     "spheres and red zones are penalties that end the episode as a failure, never "
     "touch them. "
     "A sphere's reward equals its size: between goals the bigger one is worth more. "
+    "The episode is a success when its return reaches the pass mark. "
     "Turn until the target is at the center of the view, then move forward "
     "with keeping it centered."
 )
@@ -210,10 +211,19 @@ ANIMALAI_PUSH_DISTANCES = {1: 0.4, 2: 1.3, 3: 2.5, 5: 5.6, 10: 15.6}
 
 ANIMALAI_REFLECTION_REQUEST = (
     "The episode just ended in {outcome}: return {score:+.3f} against pass mark "
-    '{pass_mark:+.3f}. Your standing instruction for this task so far: "{task}" '
+    "{pass_mark:+.3f}. Its last step gave a reward of {last_reward:+.3f} with "
+    "{last_health:.2f} health left. Your attempts at this task so far, oldest first, each with the "
+    "instruction you followed in it:\n{attempts}\n"
     "Write the instruction to follow on the next attempt at this task, keeping "
-    "what worked and fixing what did not. Reply with the "
+    "what worked and fixing what did not. If the same plan has failed more than once, "
+    "change the plan itself rather than its details. Reply with the "
     "instruction only, at most three sentences."
+)
+# 振り返りに最後の鳥瞰図を見せるときに、依頼の先頭に足す文
+ANIMALAI_REFLECTION_TOPDOWN = (
+    "The image is the whole arena seen from straight above at the end of the episode; in "
+    "it you are the dark spiky hedgehog, and its light-colored face points the way you were "
+    "facing. "
 )
 # これより長い指示は、常設のプロンプトを膨らませるので採らない
 ANIMALAI_INSTRUCTION_CHARS_MAX = 500
@@ -243,6 +253,8 @@ class AnimalAIPromptBuilder(PromptBuilder):
             for steps in range(1, reply_interval + 1)
         }
         self.tasks = {arena.task: "" for arena in env.unwrapped.selector.arenas}
+        # タスクごとの、これまでの試行の記録（結果、リターン、従った指示）の行。振り返りに渡す
+        self.attempts: dict[str, list[str]] = {task: [] for task in self.tasks}
         # 鳥瞰図が観測にあるか（env の topdown_observation）
         self._framing = (
             f"{ANIMALAI_FRAMING} {ANIMALAI_TOPDOWN_FRAMING}"
@@ -253,6 +265,11 @@ class AnimalAIPromptBuilder(PromptBuilder):
         self._pass_mark = 0.0
         self._forward_speed_sum = 0.0
         self._forward_speed_steps = 0
+        # 直近のステップの報酬と体力と鳥瞰図（鳥瞰カメラがなければ None）。エピソードが
+        # どう終わったかを振り返りに伝える。鳥瞰図は観測に入れていなくても振り返りには見せる
+        self._last_reward = 0.0
+        self._last_health = 0.0
+        self._last_topdown: np.ndarray | None = None
 
     def reset(self) -> None:
         super().reset()
@@ -314,13 +331,24 @@ class AnimalAIPromptBuilder(PromptBuilder):
     def reflect(self, score: float, answer) -> str | None:
         if self._task_key == "":
             return None
+        outcome = "success" if score >= self._pass_mark else "failure"
+        instruction = self.tasks[self._task_key]
+        self.attempts[self._task_key].append(
+            f"{len(self.attempts[self._task_key]) + 1}. {outcome}, return {score:+.3f}, "
+            f'instruction: "{instruction if instruction != "" else "(none)"}"'
+        )
         request = ANIMALAI_REFLECTION_REQUEST.format(
-            outcome="success" if score >= self._pass_mark else "failure",
+            outcome=outcome,
             score=score,
             pass_mark=self._pass_mark,
-            task=self.tasks[self._task_key],
+            last_reward=self._last_reward,
+            last_health=self._last_health,
+            attempts="\n".join(self.attempts[self._task_key]),
         )
-        reply = answer(request)
+        images = [] if self._last_topdown is None else [self._last_topdown]
+        if self._last_topdown is not None:
+            request = ANIMALAI_REFLECTION_TOPDOWN + request
+        reply = answer(request, images)
         if reply == "" or len(reply) > ANIMALAI_INSTRUCTION_CHARS_MAX:
             return None
         self.tasks[self._task_key] = reply
@@ -329,8 +357,10 @@ class AnimalAIPromptBuilder(PromptBuilder):
     def _turn(
         self, obs: dict[str, Any], reward: float, info: dict, previous_action: np.ndarray
     ) -> str:
-        del info
         self._pass_mark = float(obs["pass_mark"][0])
+        self._last_reward = reward
+        self._last_health = float(obs["health"][0])
+        self._last_topdown = info["topdown_image"]
         self._forward_speed_sum += float(obs["velocity"][2])
         self._forward_speed_steps += 1
         scalars = _animalai_turn(obs, reward, self._forward_speed_sum / self._forward_speed_steps)

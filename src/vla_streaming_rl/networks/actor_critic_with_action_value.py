@@ -126,9 +126,9 @@ class ActorCriticWithActionValue(NetworkInterface):
             [self.image_processor.encode(image.unsqueeze(0)).flatten() for image in images]
         )
 
-    def answer(self, request: str) -> str:
+    def answer(self, request: str, images: list) -> str:
         """文を書かないネットワークなので、何も答えない。"""
-        del request
+        del request, images
         return ""
 
     def stored_state_shape(self) -> tuple[int, ...]:

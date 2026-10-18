@@ -192,11 +192,14 @@ class VLMActorCriticWithActionValue(NetworkInterface):
         )
 
     @torch.inference_mode()
-    def answer(self, request: str) -> str:
-        """いまの会話の続きに ``request`` を user の発言として足し、自由な文で返答を
-        書かせる。返答のうち、思考より後ろを返す。"""
+    def answer(self, request: str, images: list) -> str:
+        """いまの会話の続きに ``images`` と ``request`` を user の発言として足し、自由な文で
+        返答を書かせる。返答のうち、思考より後ろを返す。"""
         assert self._exchange is not None, "there is no conversation to answer on yet"
-        self._exchange.append({"role": "user", "content": [{"type": "text", "text": request}]})
+        content = [{"type": "image", "image": image} for image in images]
+        self._exchange.append(
+            {"role": "user", "content": [*content, {"type": "text", "text": request}]}
+        )
         chain = self.generator.generate(self._exchange, self.generator.thinking_enabled, False)
         self._exchange.append(assistant_turn(chain.text))
         return chain.text.rsplit(THINK_CLOSE, 1)[-1].strip()

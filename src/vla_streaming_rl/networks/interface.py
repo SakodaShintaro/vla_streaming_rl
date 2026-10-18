@@ -138,9 +138,9 @@ class NetworkInterface(nn.Module, abc.ABC):
         ``stored_image_shape`` の形。"""
 
     @abc.abstractmethod
-    def answer(self, request: str) -> str:
-        """エピソードの会話の続きに ``request`` を足して、自由な文の返答を書かせたもの。
-        文を書かないネットワークでは空文字列。"""
+    def answer(self, request: str, images: list) -> str:
+        """エピソードの会話の続きに ``images``（8 ビットの (H, W, 3) 画像）と ``request`` を
+        足して、自由な文の返答を書かせたもの。文を書かないネットワークでは空文字列。"""
 
     @abc.abstractmethod
     def stored_state_shape(self) -> tuple[int, ...]:
