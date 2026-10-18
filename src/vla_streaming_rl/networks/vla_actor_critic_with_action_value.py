@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -52,8 +53,9 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     全層（埋め込みと各層の出力）で平均し、画像のトークンの格子を ``image_pool_size`` 四方に平均
     プーリングしたものと、末尾の ``num_last_tokens`` 個の位置を並べたものを表現とする。末尾は
     チャットテンプレートの固定の部分で、画像と指示を読んだ後の活性を持つ。それを位置ごとに
-    ``state_out_dim`` へ射影し、そのステップのスカラーの観測（global_step を除く）を symlog で
-    変換して連結したものを状態にする。方策ヘッドと行動価値ヘッドはその状態を読む。
+    ``state_out_dim`` へ射影し、そのステップのスカラーの観測（global_step を除く）をそれぞれ
+    sin/cos の特徴で ``state_out_dim`` 幅のトークンにしたものを並べて、状態にする。方策ヘッドと
+    行動価値ヘッドはその状態を読む。
 
     VLM は凍結して使うので、表現は毎ステップ一度だけ計算してバッファに保存する（行動は
     ``horizon`` ステップのチャンクごとに決めるが、表現はチャンクの途中のステップでも保存する）。
@@ -90,7 +92,16 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         self.merge_size = self.processor.image_processor.merge_size
         self.num_positions = self.image_pool_size**2 + self.num_last_tokens
         self.state_out_proj = nn.Linear(self.vlm_hidden_size, vla_config.state_out_dim).to(device)
-        state_dim = self.num_positions * vla_config.state_out_dim + len(HEAD_SCALAR_INDICES)
+        # スカラーをトークンにする sin/cos の角周波数。周期を scalar_max_period から
+        # scalar_min_period まで対数等間隔にとり、sin と cos で state_out_dim 幅にする
+        assert vla_config.state_out_dim % 2 == 0, vla_config.state_out_dim
+        periods = torch.logspace(
+            math.log10(vla_config.scalar_max_period),
+            math.log10(vla_config.scalar_min_period),
+            vla_config.state_out_dim // 2,
+        )
+        self.register_buffer("scalar_frequencies", (2.0 * math.pi / periods).to(device))
+        state_dim = (self.num_positions + len(HEAD_SCALAR_INDICES)) * vla_config.state_out_dim
         action_dim = action_space_shape[0]
         self.policy_head = policy_head_factory(state_dim=state_dim, action_dim=action_dim).to(
             device
@@ -232,11 +243,15 @@ class VLAActorCriticWithActionValue(NetworkInterface):
 
     def _state(self, representation: torch.Tensor, scalar_obs: torch.Tensor) -> torch.Tensor:
         """保存した表現 (B, num_positions, hidden_size) を射影したものに、同じステップの
-        スカラーの観測 (B, SCALAR_OBS_DIM) を symlog で変換して連結し、ヘッドが読む状態にする。
+        スカラーの観測 (B, SCALAR_OBS_DIM) を sin/cos の特徴でトークンにしたものを並べ、ヘッドが
+        読む状態にする。
 
-        見てきた値の平均と標準偏差で正規化すると、ステップ数の多い長いアリーナ（pass mark が
-        大きい）の値に統計が引っ張られ、多くのアリーナの pass mark や残りの収益（0〜4 程度）の
-        違いが潰れる。symlog は小さい値の違いを保ったまま大きい値を抑え、学習中に変わらない。"""
-        projected = self.state_out_proj(representation.to(torch.float32)).flatten(start_dim=1)
+        スカラー1つを1次元のまま連結すると、表現の次元に比べて割合が小さく埋もれやすく、残りの
+        収益の 1 と 2 のような小さい違いも1つの入力のわずかな差にしかならない。周期の短い成分は
+        小さい違いを別のベクトルにし、周期の長い成分は大きい値のおおよその位置を表す。変換は
+        固定で、学習中に変わらない。"""
+        projected = self.state_out_proj(representation.to(torch.float32))
         scalars = scalar_obs.to(projected.device, torch.float32)[:, HEAD_SCALAR_INDICES]
-        return torch.cat([projected, torch.sign(scalars) * torch.log1p(scalars.abs())], dim=1)
+        angles = scalars.unsqueeze(-1) * self.scalar_frequencies
+        scalar_tokens = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        return torch.cat([projected, scalar_tokens], dim=1).flatten(start_dim=1)
