@@ -9,7 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..replay_buffer import ReplayBufferData
-from ..scalar_obs import SCALAR_OBS_DIM, SCALAR_OBS_NAMES
+from ..scalar_obs import SCALAR_OBS_NAMES
 from .interface import (
     EligibilityTraceInfo,
     InferInput,
@@ -18,7 +18,6 @@ from .interface import (
     LossResult,
     NetworkInterface,
 )
-from .modules.running_normalizer import RunningNormalizer
 from .modules.value_head import DistributionalValueHead
 from .modules.vlm_backbone import load_model
 
@@ -53,8 +52,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     全層（埋め込みと各層の出力）で平均し、画像のトークンの格子を ``image_pool_size`` 四方に平均
     プーリングしたものと、末尾の ``num_last_tokens`` 個の位置を並べたものを表現とする。末尾は
     チャットテンプレートの固定の部分で、画像と指示を読んだ後の活性を持つ。それを位置ごとに
-    ``state_out_dim`` へ射影し、そのステップのスカラーの観測（global_step を除く）を正規化して
-    数値のまま連結したものを状態にする。方策ヘッドと行動価値ヘッドはその状態を読む。
+    ``state_out_dim`` へ射影し、そのステップのスカラーの観測（global_step を除く）を symlog で
+    変換して連結したものを状態にする。方策ヘッドと行動価値ヘッドはその状態を読む。
 
     VLM は凍結して使うので、表現は毎ステップ一度だけ計算してバッファに保存する（行動は
     ``horizon`` ステップのチャンクごとに決めるが、表現はチャンクの途中のステップでも保存する）。
@@ -91,7 +90,6 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         self.merge_size = self.processor.image_processor.merge_size
         self.num_positions = self.image_pool_size**2 + self.num_last_tokens
         self.state_out_proj = nn.Linear(self.vlm_hidden_size, vla_config.state_out_dim).to(device)
-        self.scalar_obs_normalizer = RunningNormalizer(SCALAR_OBS_DIM)
         state_dim = self.num_positions * vla_config.state_out_dim + len(HEAD_SCALAR_INDICES)
         action_dim = action_space_shape[0]
         self.policy_head = policy_head_factory(state_dim=state_dim, action_dim=action_dim).to(
@@ -119,7 +117,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         return (self.num_positions, self.vlm_hidden_size)
 
     def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
-        self.scalar_obs_normalizer.update(scalar_obs)
+        """スカラーの観測は固定の symlog で変換するので、統計は取らない。"""
+        del scalar_obs
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
@@ -233,9 +232,11 @@ class VLAActorCriticWithActionValue(NetworkInterface):
 
     def _state(self, representation: torch.Tensor, scalar_obs: torch.Tensor) -> torch.Tensor:
         """保存した表現 (B, num_positions, hidden_size) を射影したものに、同じステップの
-        スカラーの観測 (B, SCALAR_OBS_DIM) を正規化して連結し、ヘッドが読む状態にする。"""
+        スカラーの観測 (B, SCALAR_OBS_DIM) を symlog で変換して連結し、ヘッドが読む状態にする。
+
+        見てきた値の平均と標準偏差で正規化すると、ステップ数の多い長いアリーナ（pass mark が
+        大きい）の値に統計が引っ張られ、多くのアリーナの pass mark や残りの収益（0〜4 程度）の
+        違いが潰れる。symlog は小さい値の違いを保ったまま大きい値を抑え、学習中に変わらない。"""
         projected = self.state_out_proj(representation.to(torch.float32)).flatten(start_dim=1)
-        normalized = self.scalar_obs_normalizer.normalize(
-            scalar_obs.to(projected.device, torch.float32)
-        )
-        return torch.cat([projected, normalized[:, HEAD_SCALAR_INDICES]], dim=1)
+        scalars = scalar_obs.to(projected.device, torch.float32)[:, HEAD_SCALAR_INDICES]
+        return torch.cat([projected, torch.sign(scalars) * torch.log1p(scalars.abs())], dim=1)
