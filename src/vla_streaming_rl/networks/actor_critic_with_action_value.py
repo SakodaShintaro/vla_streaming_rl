@@ -130,14 +130,12 @@ class ActorCriticWithActionValue(NetworkInterface):
         (C, H', W') flattened and laid one after another."""
         return (sum(self.encoder.image_features_sizes),)
 
-    def to_stored_image(self, images: list[torch.Tensor]) -> torch.Tensor:
+    def to_stored_image(self, images: list[torch.Tensor], instruction: str) -> torch.Tensor:
+        # 指示の文は読まない
+        del instruction
         return torch.cat(
             [self.image_processor.encode(image.unsqueeze(0)).flatten() for image in images]
         )
-
-    def stored_state_shape(self) -> tuple[int, ...]:
-        """状態は毎回バッファの窓から作るので、保存しない。"""
-        return (0,)
 
     def _token_keep(self, batch_size: int, steps: int, device: torch.device) -> torch.Tensor:
         """Which tokens of a batch's windows the encoder gets to read, the rest
@@ -210,7 +208,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_report=value_report,
             rnn_state=rnn_state,
             features=x,
-            stored_state=None,
         )
 
     def _prediction_loss(
@@ -261,15 +258,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         terms = self._loss_terms(data)
         return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
 
-    def infer_and_compute_loss(
-        self,
-        data: ReplayBufferData,
-        frames: list[torch.Tensor],
-        instruction: str,
-    ) -> InferLossResult:
+    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         """Combined inference and loss computation."""
-        # 画像はバッファの窓から読むので、このステップの生の画像は使わない。指示の文は読まない
-        del frames, instruction
         terms = self._loss_terms(data)
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
@@ -280,7 +270,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             value_report=self.value_head.value_report(terms.next_critic_output),
             rnn_state=terms.next_rnn_state,
             features=terms.next_state,
-            stored_state=None,
         )
         return InferLossResult(
             infer_result=infer_result,

@@ -97,6 +97,7 @@ class VLMEncoder(nn.Module):
         """``represent`` が返す表現の形。射影は学習するので、その手前を保存する。"""
         return (self.num_positions, self.vlm_hidden_size)
 
+    @torch.no_grad()
     def represent(self, images: list[torch.Tensor], text: str) -> torch.Tensor:
         """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませた、全位置の活性の全層平均から、
         画像ごとにトークンの格子を ``image_pool_size`` 四方にプーリングしたものと末尾の
@@ -125,7 +126,7 @@ class VLMEncoder(nn.Module):
                 grids, image_tokens.split([h * w for h, w in grids]), strict=True
             )
         ]
-        return torch.cat([*pooled, layer_mean[-self.num_last_tokens :]]).to(torch.bfloat16)
+        return torch.cat([*pooled, layer_mean[-self.num_last_tokens :]])
 
     def forward(
         self,
@@ -142,7 +143,7 @@ class VLMEncoder(nn.Module):
         収益の 1 と 2 のような小さい違いも1つの入力のわずかな差にしかならない。周期の短い成分は
         小さい違いを別のベクトルにし、周期の長い成分は大きい値のおおよその位置を表す。変換は
         固定で、学習中に変わらない。"""
-        projected = self.state_out_proj(representation.to(torch.float32))
+        projected = self.state_out_proj(representation)
         device = projected.device
         action_tokens = get_fourier_embeds_from_coordinates(
             self.state_out_dim, actions.to(device, torch.float32).unsqueeze(1)

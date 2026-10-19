@@ -90,7 +90,7 @@ class StreamingAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        images, metrics = self._observe(obs, reward, terminated, truncated, info)
+        metrics = self._observe(obs, reward, terminated, truncated, info)
         if terminated or truncated:
             self._episode_reset = self.use_done
         if self._has_chunk_left():
@@ -102,13 +102,13 @@ class StreamingAgent(Agent):
         # it, but a chunk still has to be started, so the tick acts without a
         # learning step.
         if not self.rb.latest_window_is_clean(self.seq_len + self.horizon):
-            return self._act(images, metrics)
+            return self._act(metrics)
 
         # new chunk: a single grad-enabled forward yields both the action chunk
         # and the training loss (fused inference + training).
         data = self.rb.get_latest(self.seq_len + self.horizon)
         data.rewards = self.reward_scaler.normalize(data.rewards)
-        result = self.network.infer_and_compute_loss(data, images, self.instruction)
+        result = self.network.infer_and_compute_loss(data)
         metrics.update(result.loss_result.info)
 
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -142,25 +142,23 @@ class StreamingAgent(Agent):
     ) -> StepResult:
         """Act without learning: the trainer calls this once per episode after
         the reset, and the testbed calls it on every tick."""
-        images, metrics = self._observe(obs, reward, terminated, truncated, info)
+        metrics = self._observe(obs, reward, terminated, truncated, info)
         if terminated or truncated:
             self._episode_reset = self.use_done
         if self._has_chunk_left():
             return self._continue_chunk(metrics)
-        return self._act(images, metrics)
+        return self._act(metrics)
 
-    def _act(self, images: list[torch.Tensor], metrics: dict) -> StepResult:
+    def _act(self, metrics: dict) -> StepResult:
         """Start a chunk from the newest state window, with no learning step."""
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
             InferInput(
-                frames=images,
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=self.reward_scaler.normalize(latest_data.rewards),
                 rnn_state=self.rnn_state,
                 scalar_obs_seq=latest_data.scalar_obs,
-                instruction=self.instruction,
                 warmup=False,
             )
         )

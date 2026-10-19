@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: MIT
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,7 +25,6 @@ class ReplayBufferData:
     dones: torch.Tensor  # (B, T)
     rnn_state: torch.Tensor  # (B, min(T, horizon + 1), space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
-    states: torch.Tensor  # (B, T, *state_shape)
     scalar_obs: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
     # 窓の先頭の行。学習の後に、その窓の TD 誤差で優先度を更新するのに使う
     start_indices: torch.Tensor  # (B,)
@@ -52,7 +50,6 @@ class ReplayBuffer:
         obs_shape: tuple[int, ...],
         rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
-        state_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
         priority_alpha: float,
@@ -84,14 +81,7 @@ class ReplayBuffer:
         self.dones = init_tensor((size, 1))
         self.rnn_states = init_tensor((size, *rnn_state_shape))
         self.actions = init_tensor((size, *action_shape))
-        # ネットワークが行動を決めたステップで保存する状態の元。VLM の表現のように
-        # 大きいので半精度で持つ
-        self.states = torch.zeros(
-            (size, *state_shape), dtype=torch.bfloat16, device=self.storage_device
-        )
         self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM))
-        # ネットワークが状態の元を保存するか（VLA の表現）。保存しないネットワークは毎回窓から作る
-        self.stores_state = math.prod(state_shape) > 0
         # 行 t を先頭とする窓の優先度（TD 誤差の絶対値 + priority_epsilon）
         self.priorities = init_tensor((size,))
         self.max_priority = 1.0
@@ -114,8 +104,7 @@ class ReplayBuffer:
         action: torch.Tensor,
         scalar_obs: np.ndarray,
     ) -> None:
-        """Store the tick. What the network then makes of it comes after,
-        through :meth:`set_latest_state`."""
+        """Store the tick."""
         # Copy tensors to buffer storage
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
         self.rewards[self.idx].fill_(reward)
@@ -123,15 +112,10 @@ class ReplayBuffer:
         self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
         self.scalar_obs[self.idx].copy_(torch.from_numpy(scalar_obs))
-        self.states[self.idx].zero_()
         self.priorities[self.idx] = self.max_priority
 
         self.idx = (self.idx + 1) % self.size
         self.full = self.full or self.idx == 0
-
-    def set_latest_state(self, state: torch.Tensor) -> None:
-        """最新の行に、そのステップでネットワークが作った状態の元を入れる。"""
-        self.states[(self.idx - 1) % self.size].copy_(state)
 
     def _gather(self, name: str, storage: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         """``storage[indices]`` on the output device, ``indices`` of any shape.
@@ -166,7 +150,6 @@ class ReplayBuffer:
             # その範囲だけ集める。状態が大きい時間モデルでは、全ステップ分の転送が重い
             self._gather("rnn_states", self.rnn_states, indices[:, : self.horizon + 1]),
             self._gather("actions", self.actions, indices),
-            self._gather("states", self.states, indices),
             self._gather("scalar_obs", self.scalar_obs, indices),
             indices[:, 0].to(self.output_device),
             weights.to(self.output_device),

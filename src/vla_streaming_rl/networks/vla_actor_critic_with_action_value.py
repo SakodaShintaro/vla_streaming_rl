@@ -20,13 +20,16 @@ from .modules.vlm_encoder import VLMEncoder
 
 @dataclass
 class LossTerms:
-    """リプレイバッチ1つ分の損失と、それを計算する途中で得た状態。"""
+    """リプレイバッチ1つ分の損失と、それを計算する途中で得た次状態での推論結果。"""
 
     total_loss: torch.Tensor
     actor_loss: torch.Tensor
     info: dict
     state: torch.Tensor
     action_chunk: torch.Tensor
+    next_state: torch.Tensor
+    next_action: torch.Tensor
+    next_critic_output: torch.Tensor
     td_error: torch.Tensor
 
 
@@ -36,9 +39,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     毎ステップ、観測の画像と指示の文をエンコーダ（凍結した VLM）に読ませて状態を作る。過去の
     観測は読まない。方策ヘッドと行動価値ヘッドはその状態を読む。
 
-    VLM は凍結して使うので、表現は毎ステップ一度だけ計算してバッファに保存する（行動は
-    ``horizon`` ステップのチャンクごとに決めるが、表現はチャンクの途中のステップでも保存する）。
-    学習はそれを読み戻し、VLM を通さない。
+    VLM は凍結して使うので、表現は観測を受け取ったときに一度だけ計算してバッファに保存する。
+    推論も学習もそれを読み戻し、VLM を通さない。
     """
 
     def __init__(
@@ -75,44 +77,45 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         return self._dummy_state.clone()
 
     def stored_image_shape(self) -> tuple[int, ...]:
-        """何も保存しない。画像は推論のときに ``InferInput.frames`` で受け取る。"""
-        return (0,)
-
-    def to_stored_image(self, images: list[torch.Tensor]) -> torch.Tensor:
-        del images
-        return torch.zeros(0)
-
-    def stored_state_shape(self) -> tuple[int, ...]:
         """VLM の表現の、画像をプーリングした格子と末尾の位置。射影は学習するので、その手前を
         保存する。"""
         return self.encoder.representation_shape()
 
+    def to_stored_image(self, images: list[torch.Tensor], instruction: str) -> torch.Tensor:
+        return self.encoder.represent(images, instruction)
+
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        return self._act(
-            data.frames, data.instruction, data.a_seq, data.r_seq, data.scalar_obs_seq, data.warmup
+        assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
+        state = self._state(data.s_seq, data.a_seq, data.r_seq, data.scalar_obs_seq, -1)
+        action = self.policy_head.get_action(state)
+        value_report = self.value_head.value_report(self.value_head(state, action).output)
+        if data.warmup:
+            # バッファを貯めている間は一様乱数の行動を返す
+            action = torch.rand_like(action) * 2.0 - 1.0
+        return InferResult(
+            action=action,
+            value_report=value_report,
+            rnn_state=self._dummy_state.clone(),
+            features=state,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
-        terms = self._loss_terms(data, data.states[:, -1])
+        terms = self._loss_terms(data)
         return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
 
-    def infer_and_compute_loss(
-        self,
-        data: ReplayBufferData,
-        frames: list[torch.Tensor],
-        instruction: str,
-    ) -> InferLossResult:
-        # 最後のステップはまだ行動を決めていないので、ここで表現を作る
-        with torch.inference_mode():
-            infer_result = self._act(
-                frames, instruction, data.actions, data.rewards, data.scalar_obs, False
-            )
-        terms = self._loss_terms(data, infer_result.stored_state.unsqueeze(0).clone())
+    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
+        terms = self._loss_terms(data)
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
             terms.state.detach(), terms.action_chunk.detach()
         ).mean()
+        infer_result = InferResult(
+            action=terms.next_action,
+            value_report=self.value_head.value_report(terms.next_critic_output),
+            rnn_state=self._dummy_state.clone(),
+            features=terms.next_state,
+        )
         return InferLossResult(
             infer_result=infer_result,
             loss_result=LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error),
@@ -127,56 +130,32 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     # Internal methods #
     ####################
 
-    def _act(
+    def _state(
         self,
-        frames: list[torch.Tensor],
-        instruction: str,
+        observations: torch.Tensor,
         actions: torch.Tensor,
         rewards: torch.Tensor,
         scalar_obs: torch.Tensor,
-        warmup: bool,
-    ) -> InferResult:
-        """観測の画像と指示から表現を作り、最後のステップの前の行動 (1, T, action_dim)・報酬
-        (1, T, 1)・スカラーの観測 (1, T, SCALAR_OBS_DIM) の最後と合わせて行動を決める。"""
-        assert scalar_obs.shape[0] == 1, "Batch size must be 1 for inference"
-        representation = self.encoder.represent(frames, instruction)
-        state = self.encoder(
-            representation.unsqueeze(0), actions[:, -1], rewards[:, -1], scalar_obs[:, -1]
-        )
-        action = self.policy_head.get_action(state)
-        if warmup:
-            # バッファを貯めている間は一様乱数の行動を返す
-            action = torch.rand_like(action) * 2.0 - 1.0
-        return InferResult(
-            action=action,
-            value_report=self.value_head.value_report(self.value_head(state, action).output),
-            rnn_state=self._dummy_state.clone(),
-            features=state,
-            stored_state=representation,
+        step: int,
+    ) -> torch.Tensor:
+        """窓 (B, T, ...) の ``step`` 番目のステップの、保存した表現・前の行動・報酬・スカラーの
+        観測から状態を作る。"""
+        return self.encoder(
+            observations[:, step], actions[:, step], rewards[:, step], scalar_obs[:, step]
         )
 
-    def _loss_terms(self, data: ReplayBufferData, next_representation: torch.Tensor) -> LossTerms:
-        """リプレイバッチの損失。現在の状態はチャンクの手前のステップに保存した表現から、
-        次の状態は ``next_representation``（最後のステップのもの）から作る。"""
+    def _loss_terms(self, data: ReplayBufferData) -> LossTerms:
+        """リプレイバッチの損失。現在の状態はチャンクの手前のステップから、次の状態は最後の
+        ステップから作る。"""
+        window = (data.observations, data.actions, data.rewards, data.scalar_obs)
         with torch.no_grad():
-            next_state = self.encoder(
-                next_representation,
-                data.actions[:, -1],
-                data.rewards[:, -1],
-                data.scalar_obs[:, -1],
-            )
+            next_state = self._state(*window, -1)
             next_action = self.policy_head.get_action(next_state)
-            next_output = self.value_head(next_state, next_action).output
+            next_critic_output = self.value_head(next_state, next_action).output
         target_value = self.value_head.compute_target_value(
-            next_output, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
+            next_critic_output, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
         )
-        current = -self.horizon - 1
-        state = self.encoder(
-            data.states[:, current],
-            data.actions[:, current],
-            data.rewards[:, current],
-            data.scalar_obs[:, current],
-        )
+        state = self._state(*window, -self.horizon - 1)
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
             state, action_chunk, target_value, data.weights
@@ -191,5 +170,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             info=info,
             state=state,
             action_chunk=action_chunk,
+            next_state=next_state,
+            next_action=next_action,
+            next_critic_output=next_critic_output,
             td_error=td_error,
         )

@@ -36,10 +36,6 @@ class InferInput:
     r_seq: torch.Tensor  # (B, T, 1)
     rnn_state: torch.Tensor  # live recurrent state carried by the agent
     scalar_obs_seq: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
-    # このステップの観測の画像そのもの（保存した形ではない）を IMAGE_OBS_NAMES の並びで
-    frames: list[torch.Tensor]
-    # このステップに方策が読む指示の文
-    instruction: str
     # バッファを貯めている間のステップか。このあいだは一様乱数の行動を返す
     warmup: bool
 
@@ -58,9 +54,6 @@ class InferResult:
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
     rnn_state: torch.Tensor  # (B, ...)
     features: torch.Tensor
-    # このステップの行に保存しておく状態の元（``stored_state_shape`` の形）。学習はこれを
-    # 読み戻して状態を作る。保存しないネットワークでは None
-    stored_state: torch.Tensor | None
 
 
 @dataclass
@@ -116,14 +109,9 @@ class NetworkInterface(nn.Module, abc.ABC):
         pre-encodes it into (see ``to_stored_image``)."""
 
     @abc.abstractmethod
-    def to_stored_image(self, images: list[torch.Tensor]) -> torch.Tensor:
-        """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）をまとめて保存する形、
-        ``stored_image_shape`` の形。"""
-
-    @abc.abstractmethod
-    def stored_state_shape(self) -> tuple[int, ...]:
-        """行動を決めたステップの行に保存する状態の元の形。保存しないネットワークでは
-        大きさ 0 の形。"""
+    def to_stored_image(self, images: list[torch.Tensor], instruction: str) -> torch.Tensor:
+        """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）と方策が読む指示の文を、まとめて
+        保存する形、``stored_image_shape`` の形。"""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:
@@ -135,12 +123,5 @@ class NetworkInterface(nn.Module, abc.ABC):
         """Training loss over a replay batch."""
 
     @abc.abstractmethod
-    def infer_and_compute_loss(
-        self,
-        data: ReplayBufferData,
-        frames: list[torch.Tensor],
-        instruction: str,
-    ) -> InferLossResult:
-        """Combined inference + loss in one forward, sharing the encoder pass.
-        ``frames`` and ``instruction`` are the newest tick's, as in
-        :class:`InferInput`."""
+    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
+        """Combined inference + loss in one forward, sharing the encoder pass."""

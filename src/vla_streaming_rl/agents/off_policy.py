@@ -120,29 +120,23 @@ class OffPolicyAgent(Agent):
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        images, metrics = self._observe(obs, reward, terminated, truncated, info)
+        metrics = self._observe(obs, reward, terminated, truncated, info)
         warmup = global_step < self.learning_starts
         if not warmup and self._has_chunk_left():
-            if self.rb.stores_state:
-                # 行動はチャンクの続きを使うが、状態は毎ステップ保存する。学習の窓はどの行からも
-                # 始められ、チャンクの途中で終わったエピソードの終端も学習に使える
-                self.rb.set_latest_state(self._infer(images, warmup).stored_state)
             return self._continue_chunk(metrics)
-        return self._start_chunk(self._infer(images, warmup), metrics)
+        return self._start_chunk(self._infer(warmup), metrics)
 
-    def _infer(self, images: list[torch.Tensor], warmup: bool) -> InferResult:
-        """このステップの画像とバッファの最新の窓から、ネットワークに推論させる。"""
+    def _infer(self, warmup: bool) -> InferResult:
+        """バッファの最新の窓から、ネットワークに推論させる。"""
         latest_data = self.rb.get_latest(self.seq_len)
         # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
         return self.network.infer(
             InferInput(
-                frames=images,
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=self.reward_scaler.normalize(latest_data.rewards),
                 rnn_state=latest_data.rnn_state[:, 0],
                 scalar_obs_seq=latest_data.scalar_obs,
-                instruction=self.instruction,
                 warmup=warmup,
             )
         )

@@ -118,7 +118,6 @@ class Agent(ABC):
             obs_shape=network.stored_image_shape(),
             rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
-            state_shape=network.stored_state_shape(),
             output_device=self.device,
             storage_device=torch.device(buffer_device),
             priority_alpha=priority_alpha,
@@ -183,9 +182,9 @@ class Agent(ABC):
 
     def _observe(
         self, obs: dict[str, Any], reward: float, terminated: bool, truncated: bool, info: dict
-    ) -> tuple[list[torch.Tensor], dict[str, float]]:
+    ) -> dict[str, float]:
         """このティックの観測を受け取り、エピソードの境目を処理して、バッファに1行積む。
-        このステップの観測の画像そのもの（``image_names`` の並び）と metrics を返す。"""
+        metrics を返す。"""
         episode_done = terminated or truncated
         # A terminal observation still belongs to the episode that ended, so the
         # recurrent state is reset on the tick after it rather than on it.
@@ -214,27 +213,24 @@ class Agent(ABC):
         scalar_obs = read_scalar_obs(obs)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            self.network.to_stored_image(images),
+            self.network.to_stored_image(images, self.instruction),
             shaped_reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
             scalar_obs,
         )
-        return images, metrics
+        return metrics
 
     def _has_chunk_left(self) -> bool:
         """実行中のチャンクに、まだ実行していない行動があるか。"""
         return self.action_chunk is not None and self.chunk_step < self.horizon
 
     def _start_chunk(self, infer_result: InferResult, metrics: dict) -> StepResult:
-        """ネットワークが出したチャンクを始め、その最初の行動を実行する。ネットワークが
-        このステップに作った状態の元はバッファのその行に入れる。"""
+        """ネットワークが出したチャンクを始め、その最初の行動を実行する。"""
         self.rnn_state = infer_result.rnn_state
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
-        if infer_result.stored_state is not None:
-            self.rb.set_latest_state(infer_result.stored_state)
         self.action_chunk = infer_result.action[0].cpu().numpy()
         self.chunk_step = 0
         return self._continue_chunk(metrics)
