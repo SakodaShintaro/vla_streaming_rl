@@ -69,21 +69,23 @@ class ReplayBuffer:
         assert self.seq_len <= self.size, "Replay buffer size must be >= sequence length."
         assert self.horizon < self.seq_len, "The window needs a state slot before the chunk."
 
-        def init_tensor(shape: tuple[int, ...]) -> torch.Tensor:
+        def init_tensor(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
             return torch.zeros(
                 shape,
-                dtype=torch.float32,
+                dtype=dtype,
                 device=self.storage_device,
             )
 
-        self.observations = init_tensor((size, *obs_shape))
-        self.rewards = init_tensor((size, 1))
-        self.dones = init_tensor((size, 1))
-        self.rnn_states = init_tensor((size, *rnn_state_shape))
-        self.actions = init_tensor((size, *action_shape))
-        self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM))
+        # 行の大半を占める観測の表現と再帰状態は bf16 で持ち、1行の大きさを半分にする。
+        # 引くときは float32 に戻す
+        self.observations = init_tensor((size, *obs_shape), torch.bfloat16)
+        self.rewards = init_tensor((size, 1), torch.float32)
+        self.dones = init_tensor((size, 1), torch.float32)
+        self.rnn_states = init_tensor((size, *rnn_state_shape), torch.bfloat16)
+        self.actions = init_tensor((size, *action_shape), torch.float32)
+        self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM), torch.float32)
         # 行 t を先頭とする窓の優先度（TD 誤差の絶対値 + priority_epsilon）
-        self.priorities = init_tensor((size,))
+        self.priorities = init_tensor((size,), torch.float32)
         self.max_priority = 1.0
 
         self.pin_memory = self.storage_device.type == "cpu" and self.output_device.type == "cuda"
@@ -118,7 +120,7 @@ class ReplayBuffer:
         self.full = self.full or self.idx == 0
 
     def _gather(self, name: str, storage: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        """``storage[indices]`` on the output device, ``indices`` of any shape.
+        """``storage[indices]`` on the output device as float32, ``indices`` of any shape.
 
         Staged through a pinned buffer of the window's shape, reused across
         calls, so the copy to the device is asynchronous; the previous copy
@@ -137,8 +139,10 @@ class ReplayBuffer:
         if self.pin_memory:
             torch.cuda.current_stream(self.output_device).synchronize()
         torch.index_select(storage, 0, flat, out=staged)
-        return staged.view(*indices.shape, *storage.shape[1:]).to(
-            self.output_device, non_blocking=True
+        return (
+            staged.view(*indices.shape, *storage.shape[1:])
+            .to(self.output_device, non_blocking=True)
+            .float()
         )
 
     def _gather_all(self, indices: torch.Tensor, weights: torch.Tensor) -> ReplayBufferData:

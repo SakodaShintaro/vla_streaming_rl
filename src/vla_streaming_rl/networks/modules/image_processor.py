@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModelForImageTextToText, AutoProcessor
 from transformers.vision_utils import (
@@ -14,27 +13,19 @@ class QwenImageEncoder(nn.Module):
 
     No temporal attention (there is only one frame), so this is just the
     original ViT forward pass: patch_embed + pos_embed, ViT blocks, PatchMerger.
+    画像は VLA と同じく観測の大きさのまま入れ、大きさの調整はプロセッサに任せる。
     """
 
-    resolution = 224
     model_id = "Qwen/Qwen3.5-0.8B"
 
-    def __init__(self, observation_space_shape: tuple[int]) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        assert observation_space_shape[0] == 3
         self.visual = AutoModelForImageTextToText.from_pretrained(
             self.model_id, dtype=torch.float32
         ).model.visual
         self.image_processor = AutoProcessor.from_pretrained(self.model_id).image_processor
-        dummy = torch.zeros(3, self.resolution, self.resolution, dtype=torch.float32)
-        grid = self.image_processor(images=[dummy], return_tensors="pt", do_rescale=False)[
-            "image_grid_thw"
-        ][0]
-        self.grid_h = int(grid[1].item()) // self.image_processor.merge_size
-        self.grid_w = int(grid[2].item()) // self.image_processor.merge_size
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, size=(self.resolution, self.resolution), mode="bilinear")
         batch_size = x.size(0)
         img_out = self.image_processor(
             images=x, return_tensors="pt", do_rescale=False, device=x.device
@@ -78,7 +69,11 @@ class QwenImageEncoder(nn.Module):
 
         merged = self.visual.merger(hidden_states)  # (B*grid_h*grid_w, hidden_dim)
         hidden_dim = merged.size(-1)
-        merged = merged.view(batch_size, self.grid_h, self.grid_w, hidden_dim)
+        # 同じ大きさの画像のバッチなので、格子はどの画像も同じ
+        merge_size = self.image_processor.merge_size
+        grid_h = int(image_grid_thw[0, 1].item()) // merge_size
+        grid_w = int(image_grid_thw[0, 2].item()) // merge_size
+        merged = merged.view(batch_size, grid_h, grid_w, hidden_dim)
         return merged.permute(0, 3, 1, 2)  # (B, hidden_dim, grid_h, grid_w)
 
 
@@ -96,7 +91,7 @@ class ImageProcessor(nn.Module):
         super().__init__()
         # 1ステップの観測の画像ごとの (3, H, W)。どれも同じエンコーダに通す
         assert all(shape[0] == 3 for shape in image_shapes), image_shapes
-        backbone = QwenImageEncoder(image_shapes[0])
+        backbone = QwenImageEncoder()
         self.backbone = backbone.train(False).requires_grad_(False)
         # 画像ごとのエンコーダの出力の (C, H', W')
         self.output_shapes = [
