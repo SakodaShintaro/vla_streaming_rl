@@ -7,7 +7,10 @@ from torch import nn
 from torch.nn import functional as F
 
 from vla_streaming_rl.networks.modules.reward_embed import embed_reward
-from vla_streaming_rl.networks.modules.self_attention import get_fourier_embeds_from_coordinates
+from vla_streaming_rl.networks.modules.self_attention import (
+    SpatialTransformerBlock,
+    get_fourier_embeds_from_coordinates,
+)
 from vla_streaming_rl.networks.modules.vlm_backbone import load_model
 from vla_streaming_rl.scalar_obs import SCALAR_OBS_NAMES
 
@@ -34,8 +37,9 @@ class VLMEncoder(nn.Module):
 
     ``forward`` は保存した表現を位置ごとに ``state_out_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``state_out_dim`` 幅のトークンにした
-    ものを並べて、ヘッドが読む状態にする。前の行動と報酬のトークンは
-    :class:`SpatialTemporalEncoder` と同じ作り方にする。学習するのはこの射影だけ。
+    ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
+    読む状態にする。前の行動と報酬のトークンと、混ぜる層は :class:`SpatialTemporalEncoder` と
+    同じ作り方にする。学習するのは射影と混ぜる層。
     """
 
     def __init__(
@@ -69,9 +73,25 @@ class VLMEncoder(nn.Module):
         self.register_buffer("scalar_frequencies", (2.0 * math.pi / periods).to(device))
         self.state_out_dim = vla_config.state_out_dim
         # 表現の位置、前の行動の成分ごと、報酬、スカラーの観測ごとに1トークン
-        self.output_dim = (
-            self.num_positions + action_dim + 1 + len(STATE_SCALAR_INDICES)
-        ) * vla_config.state_out_dim
+        tokens_num = self.num_positions + action_dim + 1 + len(STATE_SCALAR_INDICES)
+        self.output_dim = tokens_num * vla_config.state_out_dim
+        # ヘッドに渡す前に、トークンどうしを Transformer の層で混ぜる
+        # 位置の埋め込みは 0、残差は layer scale で小さく始めるので、
+        # 学習の始めは混ぜないのとほぼ同じ。層の数が 0 なら混ぜない
+        self.token_position = nn.Parameter(
+            torch.zeros(1, tokens_num, vla_config.state_out_dim, device=device)
+        )
+        self.token_mixer = nn.Sequential(
+            *[
+                SpatialTransformerBlock(
+                    vla_config.state_out_dim,
+                    vla_config.token_mixer_heads,
+                    tokens_num,
+                    vla_config.token_mixer_layer_scale_init,
+                )
+                for _ in range(vla_config.token_mixer_layers)
+            ]
+        ).to(device)
 
     def representation_shape(self) -> tuple[int, ...]:
         """``represent`` が返す表現の形。射影は学習するので、その手前を保存する。"""
@@ -131,5 +151,5 @@ class VLMEncoder(nn.Module):
         scalars = scalar_obs.to(device, torch.float32)[:, STATE_SCALAR_INDICES]
         angles = scalars.unsqueeze(-1) * self.scalar_frequencies
         scalar_tokens = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
-        tokens = [projected, action_tokens, reward_token, scalar_tokens]
-        return torch.cat(tokens, dim=1).flatten(start_dim=1)
+        tokens = torch.cat([projected, action_tokens, reward_token, scalar_tokens], dim=1)
+        return self.token_mixer(tokens + self.token_position).flatten(start_dim=1)

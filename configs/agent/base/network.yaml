@@ -23,6 +23,11 @@ vla:
   # 最長の周期は episode_step などの最大の値を1周期に収める
   scalar_min_period: 0.5
   scalar_max_period: 4096.0
+  # ヘッドに渡す前にトークンどうしを混ぜる Transformer の層の数（0 なら混ぜない）、注意の
+  # ヘッドの数、残差の layer scale の初期値
+  token_mixer_layers: 2
+  token_mixer_heads: 4
+  token_mixer_layer_scale_init: 0.0001
 
 actor_critic:
   seq_len: 50
