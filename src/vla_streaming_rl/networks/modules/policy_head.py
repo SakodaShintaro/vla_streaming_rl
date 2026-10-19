@@ -309,7 +309,9 @@ class CFGDiffusionPolicy(nn.Module):
         *,
         value_head: nn.Module,
     ) -> tuple[torch.Tensor, dict]:
-        """CFGRL/pistar06: condition on advantage sign, drop with condition_drop_prob."""
+        """CFGRL/pistar06: condition on advantage sign, drop with condition_drop_prob.
+
+        データの行動の advantage は、今の方策の行動の Q を基準に Q(s, a) - Q(s, π(s)) とする。"""
         if self.detach_state:
             state = state.detach()
         batch_size = state.shape[0]
@@ -317,7 +319,9 @@ class CFGDiffusionPolicy(nn.Module):
         action_flat = action_chunk.view(batch_size, -1)
 
         with torch.no_grad():
-            advantage = value_head.scalar_advantage(state, action_chunk).view(-1)
+            advantage = value_head.scalar_value(state, action_chunk) - value_head.scalar_value(
+                state, self.get_action(state)
+            )
             threshold = advantage.median()
             condition = (advantage >= threshold).long()
             drop_mask = torch.rand(batch_size, device=device) < self.condition_drop_prob
@@ -439,7 +443,7 @@ class IMLEPolicy(nn.Module):
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": 0.0,
-            "advantage": best_q.mean().item(),
+            "policy_q": best_q.mean().item(),
             "imle_q_gap": (q.max(dim=1).values - q.min(dim=1).values).mean().item(),
             "imle_action_gap": action_gap.mean().item(),
         }
@@ -464,7 +468,7 @@ class TanhPolicy(nn.Module):
     LOG_STD_MIN = -20.0
     LOG_STD_MAX = 2.0
     # Wide enough for any critic scale a run reaches, tight enough that a
-    # transient cannot send the entropy term out of reach of the advantage.
+    # transient cannot send the entropy term out of reach of the Q term.
     LOG_TEMPERATURE_MIN = -10.0
     LOG_TEMPERATURE_MAX = 2.0
 

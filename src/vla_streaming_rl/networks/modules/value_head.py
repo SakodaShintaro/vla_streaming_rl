@@ -98,10 +98,6 @@ class DistributionalValueHead(nn.Module):
         """
         return self.to_value(self(x, a).output)
 
-    def scalar_advantage(self, x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-        """:meth:`scalar_value` off the advantage stream — shape ``(B,)``."""
-        return self.to_value(self.get_advantage(x, a).output)
-
     def value_report(self, logits: torch.Tensor) -> dict[str, float]:
         """Per-sample value diagnostics for inference / rollout logging.
 
@@ -234,8 +230,6 @@ def weights_init_(m: nn.Module) -> None:
 
 
 class ActionValueHead(DistributionalValueHead):
-    """Dueling Architecture: Q(s,a) = V(s) + A(s,a)"""
-
     def __init__(
         self,
         in_channels: int,
@@ -292,40 +286,23 @@ class ActionValueHead(DistributionalValueHead):
         bs = a.size(0)
         a_flat = a.view(bs, -1)  # (B, horizon * action_dim)
 
-        # Value stream: V(s)
+        # 状態だけの流れ
         v = self.v_fc_in(x)
         v = self.v_fc_mid(v)
         v = self.v_norm(v)
         v_out = self.v_fc_out(v)  # (B, num_gammas * num_bins)
 
-        # Advantage stream: A(s,a)
+        # 状態と行動の流れ
         xa = torch.cat([x, a_flat], dim=1)
-        adv = self.a_fc_in(xa)
-        adv = self.a_fc_mid(adv)
-        adv = self.a_norm(adv)
-        adv_out = self.a_fc_out(adv)  # (B, num_gammas * num_bins)
+        sa = self.a_fc_in(xa)
+        sa = self.a_fc_mid(sa)
+        sa = self.a_norm(sa)
+        sa_out = self.a_fc_out(sa)  # (B, num_gammas * num_bins)
 
-        # Q(s,a) = V(s) + A(s,a) in logit space
-        output = self._shape_logits(v_out + adv_out)
+        # 2つの流れをロジットの上で足して Q にする
+        output = self._shape_logits(v_out + sa_out)
 
-        return HeadOutput(output=output, activation=torch.cat([v, adv], dim=1))
-
-    def get_advantage(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
-        """
-        Args:
-            x: state embedding (B, state_dim)
-            a: action chunk (B, horizon, action_dim)
-        """
-        bs = a.size(0)
-        a_flat = a.view(bs, -1)  # (B, horizon * action_dim)
-
-        xa = torch.cat([x, a_flat], dim=1)
-        adv = self.a_fc_in(xa)
-        adv = self.a_fc_mid(adv)
-        adv = self.a_norm(adv)
-        adv_out = self._shape_logits(self.a_fc_out(adv))  # (B, G, num_bins)
-
-        return HeadOutput(output=adv_out, activation=adv)
+        return HeadOutput(output=output, activation=torch.cat([v, sa], dim=1))
 
 
 class HypersphericalActionValueHead(DistributionalValueHead):
@@ -415,8 +392,3 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         v = self.value_scaler(self.value_w1(h))
         logits = self._shape_logits(self.value_w2(v) + self.value_bias)
         return HeadOutput(output=logits, activation=h)
-
-    def get_advantage(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
-        """SimbaV2 has no separate advantage stream (pure Q(s, a)), so the
-        advantage equals the Q output; maximizing it maximizes E[Q(s, π(s))]."""
-        return self.forward(x, a)
