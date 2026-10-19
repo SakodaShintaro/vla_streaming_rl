@@ -2,7 +2,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 from omegaconf import DictConfig
 
@@ -85,10 +84,6 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         """VLM の表現の、画像をプーリングした格子と末尾の位置。射影は学習するので、その手前を
         保存する。"""
         return self.encoder.representation_shape()
-
-    def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
-        """スカラーの観測はエンコーダが固定の sin/cos の特徴で変換するので、統計は取らない。"""
-        del scalar_obs
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:

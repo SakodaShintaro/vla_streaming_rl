@@ -3,7 +3,6 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 from omegaconf import DictConfig
 
@@ -170,10 +169,6 @@ class ActorCriticWithActionValue(NetworkInterface):
             self._scalar_tokens(data.scalar_obs[:, start:stop]),
             token_keep,
         )
-
-    def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
-        """スカラーの観測は固定の sin/cos の特徴で変換するので、統計は取らない。"""
-        del scalar_obs
 
     def _scalar_tokens(self, scalar_obs: torch.Tensor) -> torch.Tensor:
         """スカラーの観測 (..., SCALAR_OBS_DIM) を、global_step を除いてそれぞれ sin/cos の特徴の

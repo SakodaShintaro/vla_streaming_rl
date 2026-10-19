@@ -4,7 +4,7 @@
 Every policy/value network exposes the forward passes — ``infer``,
 ``compute_loss`` and ``infer_and_compute_loss`` — returning the structured
 types defined here, plus the observation-side hooks the agents drive
-(``stored_image_shape`` / ``to_stored_image`` / ``observe_scalar_obs``).
+(``stored_image_shape`` / ``to_stored_image``).
 ``NetworkInterface`` makes that contract explicit: a subclass that does not
 implement all of them cannot be instantiated. Anything else on a concrete
 network is an implementation detail (``_``-prefixed by convention) and is not
@@ -14,7 +14,6 @@ part of the public surface.
 import abc
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -125,12 +124,6 @@ class NetworkInterface(nn.Module, abc.ABC):
     def stored_state_shape(self) -> tuple[int, ...]:
         """行動を決めたステップの行に保存する状態の元の形。保存しないネットワークでは
         大きさ 0 の形。"""
-
-    @abc.abstractmethod
-    def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
-        """This tick's raw scalar observations (``SCALAR_OBS_NAMES`` order),
-        handed over before ``infer`` so a network can track their running
-        statistics."""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:

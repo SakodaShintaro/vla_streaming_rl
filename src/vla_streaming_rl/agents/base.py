@@ -212,8 +212,6 @@ class Agent(ABC):
 
         images = [torch.from_numpy(obs[name]).to(self.device) for name in self.image_names]
         scalar_obs = read_scalar_obs(obs)
-        # ネットワークはここでスカラーの観測の統計を更新する
-        self.network.observe_scalar_obs(scalar_obs)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
             self.network.to_stored_image(images),
