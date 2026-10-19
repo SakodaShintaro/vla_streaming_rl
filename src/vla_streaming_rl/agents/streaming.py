@@ -157,7 +157,7 @@ class StreamingAgent(Agent):
                 frames=images,
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
-                r_seq=latest_data.rewards,
+                r_seq=self.reward_scaler.normalize(latest_data.rewards),
                 rnn_state=self.rnn_state,
                 scalar_obs_seq=latest_data.scalar_obs,
                 instruction=self.instruction,

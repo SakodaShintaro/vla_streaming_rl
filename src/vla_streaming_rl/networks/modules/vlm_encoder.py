@@ -6,6 +6,8 @@ from omegaconf import DictConfig
 from torch import nn
 from torch.nn import functional as F
 
+from vla_streaming_rl.networks.modules.reward_embed import embed_reward
+from vla_streaming_rl.networks.modules.self_attention import get_fourier_embeds_from_coordinates
 from vla_streaming_rl.networks.modules.vlm_backbone import load_model
 from vla_streaming_rl.scalar_obs import SCALAR_OBS_NAMES
 
@@ -30,12 +32,15 @@ class VLMEncoder(nn.Module):
     並べた表現を返す。末尾はチャットテンプレートの固定の部分で、画像と指示を読んだ後の活性を
     持つ。VLM は凍結しているので、この表現はバッファに保存して使い回せる。
 
-    ``forward`` は保存した表現を位置ごとに ``state_out_dim`` へ射影し、同じステップのスカラーの
-    観測（global_step を除く）をそれぞれ sin/cos の特徴で ``state_out_dim`` 幅のトークンにした
-    ものを並べて、ヘッドが読む状態にする。学習するのはこの射影だけ。
+    ``forward`` は保存した表現を位置ごとに ``state_out_dim`` へ射影し、同じステップの前の行動・
+    報酬・スカラーの観測（global_step を除く）をそれぞれ ``state_out_dim`` 幅のトークンにした
+    ものを並べて、ヘッドが読む状態にする。前の行動と報酬のトークンは
+    :class:`SpatialTemporalEncoder` と同じ作り方にする。学習するのはこの射影だけ。
     """
 
-    def __init__(self, *, images_num: int, vla_config: DictConfig, device: str) -> None:
+    def __init__(
+        self, *, images_num: int, action_dim: int, vla_config: DictConfig, device: str
+    ) -> None:
         super().__init__()
         self.device = device
         self.vlm, self.processor = load_model(
@@ -62,8 +67,10 @@ class VLMEncoder(nn.Module):
             vla_config.state_out_dim // 2,
         )
         self.register_buffer("scalar_frequencies", (2.0 * math.pi / periods).to(device))
+        self.state_out_dim = vla_config.state_out_dim
+        # 表現の位置、前の行動の成分ごと、報酬、スカラーの観測ごとに1トークン
         self.output_dim = (
-            self.num_positions + len(STATE_SCALAR_INDICES)
+            self.num_positions + action_dim + 1 + len(STATE_SCALAR_INDICES)
         ) * vla_config.state_out_dim
 
     def representation_shape(self) -> tuple[int, ...]:
@@ -100,17 +107,29 @@ class VLMEncoder(nn.Module):
         ]
         return torch.cat([*pooled, layer_mean[-self.num_last_tokens :]]).to(torch.bfloat16)
 
-    def forward(self, representation: torch.Tensor, scalar_obs: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        representation: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        scalar_obs: torch.Tensor,
+    ) -> torch.Tensor:
         """保存した表現 (B, num_positions, hidden_size) を射影したものに、同じステップの
-        スカラーの観測 (B, SCALAR_OBS_DIM) を sin/cos の特徴でトークンにしたものを並べ、ヘッドが
-        読む状態 (B, output_dim) にする。
+        前の行動 (B, action_dim)、報酬 (B, 1)、スカラーの観測 (B, SCALAR_OBS_DIM) をそれぞれ
+        トークンにしたものを並べ、ヘッドが読む状態 (B, output_dim) にする。
 
         スカラー1つを1次元のまま連結すると、表現の次元に比べて割合が小さく埋もれやすく、残りの
         収益の 1 と 2 のような小さい違いも1つの入力のわずかな差にしかならない。周期の短い成分は
         小さい違いを別のベクトルにし、周期の長い成分は大きい値のおおよその位置を表す。変換は
         固定で、学習中に変わらない。"""
         projected = self.state_out_proj(representation.to(torch.float32))
-        scalars = scalar_obs.to(projected.device, torch.float32)[:, STATE_SCALAR_INDICES]
+        device = projected.device
+        action_tokens = get_fourier_embeds_from_coordinates(
+            self.state_out_dim, actions.to(device, torch.float32).unsqueeze(1)
+        )[:, 0]  # (B, action_dim, state_out_dim)
+        reward_token = embed_reward(rewards.to(device, torch.float32), self.state_out_dim)
+        scalars = scalar_obs.to(device, torch.float32)[:, STATE_SCALAR_INDICES]
         angles = scalars.unsqueeze(-1) * self.scalar_frequencies
         scalar_tokens = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
-        return torch.cat([projected, scalar_tokens], dim=1).flatten(start_dim=1)
+        tokens = [projected, action_tokens, reward_token, scalar_tokens]
+        return torch.cat(tokens, dim=1).flatten(start_dim=1)

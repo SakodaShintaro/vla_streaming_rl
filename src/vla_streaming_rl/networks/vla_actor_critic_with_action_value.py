@@ -58,9 +58,11 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         self.horizon = horizon
         self.critic_loss_weight = critic_loss_weight
         device = "cuda"
-        self.encoder = VLMEncoder(images_num=images_num, vla_config=vla_config, device=device)
-        state_dim = self.encoder.output_dim
         action_dim = action_space_shape[0]
+        self.encoder = VLMEncoder(
+            images_num=images_num, action_dim=action_dim, vla_config=vla_config, device=device
+        )
+        state_dim = self.encoder.output_dim
         self.policy_head = policy_head_factory(state_dim=state_dim, action_dim=action_dim).to(
             device
         )
@@ -87,7 +89,9 @@ class VLAActorCriticWithActionValue(NetworkInterface):
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
-        return self._act(data.frames, data.instruction, data.scalar_obs_seq, data.warmup)
+        return self._act(
+            data.frames, data.instruction, data.a_seq, data.r_seq, data.scalar_obs_seq, data.warmup
+        )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         terms = self._loss_terms(data, data.states[:, -1])
@@ -101,7 +105,9 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     ) -> InferLossResult:
         # 最後のステップはまだ行動を決めていないので、ここで表現を作る
         with torch.inference_mode():
-            infer_result = self._act(frames, instruction, data.scalar_obs, False)
+            infer_result = self._act(
+                frames, instruction, data.actions, data.rewards, data.scalar_obs, False
+            )
         terms = self._loss_terms(data, infer_result.stored_state.unsqueeze(0).clone())
         # -Q(s,a) for eligibility trace backward (detached from encoder)
         neg_value_detached = -self.value_head.scalar_value(
@@ -125,14 +131,18 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         self,
         frames: list[torch.Tensor],
         instruction: str,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
         scalar_obs: torch.Tensor,
         warmup: bool,
     ) -> InferResult:
-        """一人称の視点（IMAGE_OBS_NAMES の先頭）の1枚と指示から表現を作り、最後のステップの
-        スカラーの観測（(1, T, SCALAR_OBS_DIM) の最後）と合わせて行動を決める。"""
+        """観測の画像と指示から表現を作り、最後のステップの前の行動 (1, T, action_dim)・報酬
+        (1, T, 1)・スカラーの観測 (1, T, SCALAR_OBS_DIM) の最後と合わせて行動を決める。"""
         assert scalar_obs.shape[0] == 1, "Batch size must be 1 for inference"
         representation = self.encoder.represent(frames, instruction)
-        state = self.encoder(representation.unsqueeze(0), scalar_obs[:, -1])
+        state = self.encoder(
+            representation.unsqueeze(0), actions[:, -1], rewards[:, -1], scalar_obs[:, -1]
+        )
         action = self.policy_head.get_action(state)
         if warmup:
             # バッファを貯めている間は一様乱数の行動を返す
@@ -149,14 +159,23 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         """リプレイバッチの損失。現在の状態はチャンクの手前のステップに保存した表現から、
         次の状態は ``next_representation``（最後のステップのもの）から作る。"""
         with torch.no_grad():
-            next_state = self.encoder(next_representation, data.scalar_obs[:, -1])
+            next_state = self.encoder(
+                next_representation,
+                data.actions[:, -1],
+                data.rewards[:, -1],
+                data.scalar_obs[:, -1],
+            )
             next_action = self.policy_head.get_action(next_state)
             next_output = self.value_head(next_state, next_action).output
         target_value = self.value_head.compute_target_value(
             next_output, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
         )
+        current = -self.horizon - 1
         state = self.encoder(
-            data.states[:, -self.horizon - 1], data.scalar_obs[:, -self.horizon - 1]
+            data.states[:, current],
+            data.actions[:, current],
+            data.rewards[:, current],
+            data.scalar_obs[:, current],
         )
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
