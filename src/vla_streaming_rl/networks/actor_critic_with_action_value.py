@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -16,10 +17,9 @@ from vla_streaming_rl.networks.interface import (
 )
 from vla_streaming_rl.networks.modules.backbone import SpatialTemporalEncoder
 from vla_streaming_rl.networks.modules.image_processor import ImageProcessor
-from vla_streaming_rl.networks.modules.running_normalizer import RunningNormalizer
 from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
+from vla_streaming_rl.networks.modules.vlm_encoder import STATE_SCALAR_INDICES
 from vla_streaming_rl.replay_buffer import ReplayBufferData
-from vla_streaming_rl.scalar_obs import SCALAR_OBS_DIM
 
 
 @dataclass
@@ -68,8 +68,17 @@ class ActorCriticWithActionValue(NetworkInterface):
             actor_critic_config.observation_drop_steps_max
         )
         self.observation_drop_steps_max = actor_critic_config.observation_drop_steps_max
-        self.scalar_obs_dim = SCALAR_OBS_DIM
-        self.scalar_obs_normalizer = RunningNormalizer(self.scalar_obs_dim)
+        # スカラーの観測は VLMEncoder と同じく、global_step を除いてそれぞれ固定の sin/cos の特徴で
+        # トークンにする。周期を scalar_max_period から scalar_min_period まで対数等間隔にとり、
+        # sin と cos でトークンの幅にする
+        self.scalar_obs_dim = len(STATE_SCALAR_INDICES)
+        assert hidden_image_dim % 2 == 0, hidden_image_dim
+        periods = torch.logspace(
+            math.log10(actor_critic_config.scalar_max_period),
+            math.log10(actor_critic_config.scalar_min_period),
+            hidden_image_dim // 2,
+        )
+        self.register_buffer("scalar_frequencies", 2.0 * math.pi / periods)
 
         self.encoder = SpatialTemporalEncoder(
             image_features_shapes=self.image_processor.output_shapes,
@@ -158,12 +167,19 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.actions[:, start:stop],
             data.rewards[:, start:stop],
             data.rnn_state[:, start],
-            self.scalar_obs_normalizer.normalize(data.scalar_obs[:, start:stop]),
+            self._scalar_tokens(data.scalar_obs[:, start:stop]),
             token_keep,
         )
 
     def observe_scalar_obs(self, scalar_obs: np.ndarray) -> None:
-        self.scalar_obs_normalizer.update(scalar_obs)
+        """スカラーの観測は固定の sin/cos の特徴で変換するので、統計は取らない。"""
+        del scalar_obs
+
+    def _scalar_tokens(self, scalar_obs: torch.Tensor) -> torch.Tensor:
+        """スカラーの観測 (..., SCALAR_OBS_DIM) を、global_step を除いてそれぞれ sin/cos の特徴の
+        トークン (..., scalar_obs_dim, hidden_image_dim) にする。"""
+        angles = scalar_obs[..., STATE_SCALAR_INDICES].unsqueeze(-1) * self.scalar_frequencies
+        return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
 
     @torch.no_grad()
     def infer(self, data: InferInput) -> InferResult:
@@ -174,7 +190,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             data.a_seq,
             data.r_seq,
             data.rnn_state,
-            self.scalar_obs_normalizer.normalize(data.scalar_obs_seq),
+            self._scalar_tokens(data.scalar_obs_seq),
             torch.ones(
                 (1, data.s_seq.shape[1], self.encoder.space_len),
                 dtype=torch.bool,

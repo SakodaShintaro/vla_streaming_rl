@@ -95,7 +95,7 @@ class SpatialTemporalEncoder(nn.Module):
         actions: torch.Tensor,  # (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
         rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)
-        scalar_obs: torch.Tensor,  # (B, T, scalar_obs_dim)
+        scalar_tokens: torch.Tensor,  # (B, T, scalar_obs_dim, C'): the scalars already as tokens
         token_keep: torch.Tensor,  # (B, T, space_len) bool: which tokens are kept
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -112,7 +112,6 @@ class SpatialTemporalEncoder(nn.Module):
 
         action_embed = get_fourier_embeds_from_coordinates(self.hidden_image_dim, actions)
         reward_embed = embed_reward(rewards, self.hidden_image_dim)  # [B, T, 1, C']
-        scalar_obs_embed = get_fourier_embeds_from_coordinates(self.hidden_image_dim, scalar_obs)
         register_token = torch.zeros(
             (B, T, 1, self.hidden_image_dim), device=images.device, dtype=images.dtype
         )
@@ -122,7 +121,7 @@ class SpatialTemporalEncoder(nn.Module):
                 image_embed,
                 action_embed,
                 reward_embed,
-                scalar_obs_embed,
+                scalar_tokens.to(image_embed.dtype),
                 register_token,
             ],
             dim=2,

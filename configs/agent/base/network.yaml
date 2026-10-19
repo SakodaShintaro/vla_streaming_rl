@@ -35,3 +35,6 @@ actor_critic:
   # 学習時に系列ごとに 0 からこの数までの一様なステップ数を引き、最新の方からその数の
   # ステップの観測（画像・報酬・スカラー）を落とす。行動は落とさない
   observation_drop_steps_max: 0
+  # スカラーをトークンにする sin/cos の周期の範囲（vla と同じ）
+  scalar_min_period: 0.5
+  scalar_max_period: 4096.0
