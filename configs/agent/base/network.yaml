@@ -26,7 +26,6 @@ vla:
 
 actor_critic:
   seq_len: 50
-  image_encoder_type: qwen  # [taesd, dinov2, siglip2, vjepa2, qwen]
   image_encoder_output_dim: 16
   disable_state_predictor: false
   encoder_block_num: 8

@@ -1,85 +1,12 @@
 # SPDX-License-Identifier: MIT
 import torch
 import torch.nn.functional as F
-from diffusers import AutoencoderTiny
 from torch import nn
-from transformers import AutoModel, AutoModelForImageTextToText, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor
 from transformers.vision_utils import (
     get_vision_interpolation_indices_and_weights,
     get_vision_position_ids,
 )
-
-IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-
-
-def resize_and_normalize(x: torch.Tensor, resolution: int) -> torch.Tensor:
-    x = F.interpolate(x, size=(resolution, resolution), mode="bilinear")
-    return (x - IMAGENET_MEAN.to(x.device)) / IMAGENET_STD.to(x.device)
-
-
-class TaesdEncoder(nn.Module):
-    def __init__(self, observation_space_shape: tuple[int]) -> None:
-        super().__init__()
-        assert observation_space_shape[0] == 3
-        self.vae = AutoencoderTiny.from_pretrained("madebyollin/taesd")
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x = x * 2.0 - 1.0  # [0, 1] -> [-1, 1]
-        return self.vae.encode(x).latents  # (B, 4, H/8, W/8)
-
-
-class Dinov2Encoder(nn.Module):
-    resolution = 224
-    patch_size = 14
-    grid_size = resolution // patch_size
-
-    def __init__(self, observation_space_shape: tuple[int]) -> None:
-        super().__init__()
-        assert observation_space_shape[0] == 3
-        self.model = AutoModel.from_pretrained("facebook/dinov2-small")
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x = resize_and_normalize(x, self.resolution)
-        tokens = self.model(pixel_values=x).last_hidden_state[:, 1:, :]  # drop CLS token
-        b, _, c = tokens.shape
-        return tokens.transpose(1, 2).reshape(b, c, self.grid_size, self.grid_size)
-
-
-class Siglip2Encoder(nn.Module):
-    resolution = 224
-    patch_size = 16
-    grid_size = resolution // patch_size
-
-    def __init__(self, observation_space_shape: tuple[int]) -> None:
-        super().__init__()
-        assert observation_space_shape[0] == 3
-        self.model = AutoModel.from_pretrained("google/siglip2-base-patch16-224").vision_model
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x = resize_and_normalize(x, self.resolution)
-        tokens = self.model(pixel_values=x).last_hidden_state  # no CLS token
-        b, _, c = tokens.shape
-        return tokens.transpose(1, 2).reshape(b, c, self.grid_size, self.grid_size)
-
-
-class Vjepa2Encoder(nn.Module):
-    resolution = 256
-    patch_size = 16
-    tubelet_size = 2
-    grid_size = resolution // patch_size
-
-    def __init__(self, observation_space_shape: tuple[int]) -> None:
-        super().__init__()
-        assert observation_space_shape[0] == 3
-        self.model = AutoModel.from_pretrained("facebook/vjepa2-vitl-fpc64-256")
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x = resize_and_normalize(x, self.resolution)
-        clip = x.unsqueeze(1).repeat(1, self.tubelet_size, 1, 1, 1)  # (B, T=tubelet_size, 3, H, W)
-        tokens = self.model(pixel_values_videos=clip).last_hidden_state  # (B, grid*grid, C)
-        b, _, c = tokens.shape
-        return tokens.transpose(1, 2).reshape(b, c, self.grid_size, self.grid_size)
 
 
 class QwenImageEncoder(nn.Module):
@@ -155,17 +82,8 @@ class QwenImageEncoder(nn.Module):
         return merged.permute(0, 3, 1, 2)  # (B, hidden_dim, grid_h, grid_w)
 
 
-IMAGE_ENCODERS = {
-    "taesd": TaesdEncoder,
-    "dinov2": Dinov2Encoder,
-    "siglip2": Siglip2Encoder,
-    "vjepa2": Vjepa2Encoder,
-    "qwen": QwenImageEncoder,
-}
-
-
 class ImageProcessor(nn.Module):
-    """A frozen pretrained image encoder.
+    """A frozen pretrained image encoder (Qwen3.5's ViT, :class:`QwenImageEncoder`).
 
     It never trains, so a replay buffer stores what it produces for a frame
     rather than the frame: the agents run ``encode`` once when a frame is
@@ -174,15 +92,11 @@ class ImageProcessor(nn.Module):
     the network.
     """
 
-    def __init__(
-        self,
-        image_shapes: list[tuple[int, ...]],
-        image_encoder_type: str,
-    ) -> None:
+    def __init__(self, image_shapes: list[tuple[int, ...]]) -> None:
         super().__init__()
         # 1ステップの観測の画像ごとの (3, H, W)。どれも同じエンコーダに通す
         assert all(shape[0] == 3 for shape in image_shapes), image_shapes
-        backbone = IMAGE_ENCODERS[image_encoder_type](image_shapes[0])
+        backbone = QwenImageEncoder(image_shapes[0])
         self.backbone = backbone.train(False).requires_grad_(False)
         # 画像ごとのエンコーダの出力の (C, H', W')
         self.output_shapes = [

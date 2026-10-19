@@ -57,7 +57,7 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         self.action_dim = action_space_shape[0]
 
-        self.image_processor = ImageProcessor(image_shapes, actor_critic_config.image_encoder_type)
+        self.image_processor = ImageProcessor(image_shapes)
         hidden_image_dim = actor_critic_config.image_encoder_output_dim
 
         assert 0.0 <= actor_critic_config.token_dropout < 1.0, actor_critic_config.token_dropout
