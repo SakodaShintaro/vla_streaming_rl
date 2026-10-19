@@ -7,6 +7,7 @@ from torch import nn
 
 from .blocks import HyperLERPBlock, HypersphericalEmbedding, NormedLinear, Scaler, SimbaBlock
 from .head_output import HeadOutput
+from .self_attention import SpatialTransformerBlock, get_fourier_embeds_from_coordinates
 from .sparse_utils import apply_one_shot_pruning
 
 
@@ -303,6 +304,72 @@ class ActionValueHead(DistributionalValueHead):
         output = self._shape_logits(v_out + sa_out)
 
         return HeadOutput(output=output, activation=torch.cat([v, sa], dim=1))
+
+
+class TokenActionValueHead(ActionValueHead):
+    """状態のトークンに評価する行動のトークンを並べ、Transformer の層で混ぜてから
+    :class:`ActionValueHead` で読む critic。
+
+    状態 (B, state_dim) は ``token_dim`` 幅のトークンを平らに並べたものとして読み戻す。行動の
+    チャンクは成分ごとに sin/cos の特徴で1トークンにする（前の行動のトークンと同じ作り方）。
+    混ぜる層は :class:`SpatialTransformerBlock` で、位置の埋め込みは 0、残差は layer scale で
+    小さく始めるので、学習の始めは「状態のトークンと行動のトークンを並べて MLP で読む」のと
+    ほぼ同じ。注意が、どの行動がどの観測のトークンと関わるかを学ぶ分だけ育つ。
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        action_dim: int,
+        horizon: int,
+        token_dim: int,
+        mixer_layers: int,
+        mixer_heads: int,
+        mixer_layer_scale_init: float,
+        hidden_dim: int,
+        block_num: int,
+        num_bins: int,
+        gamma: float,
+        multi_gammas: list[float],
+        sparsity: float,
+        detach_state: bool,
+    ) -> None:
+        assert in_channels % token_dim == 0, (in_channels, token_dim)
+        tokens_num = in_channels // token_dim + horizon * action_dim
+        super().__init__(
+            in_channels=tokens_num * token_dim,
+            action_dim=action_dim,
+            horizon=horizon,
+            hidden_dim=hidden_dim,
+            block_num=block_num,
+            num_bins=num_bins,
+            gamma=gamma,
+            multi_gammas=multi_gammas,
+            sparsity=sparsity,
+            detach_state=detach_state,
+        )
+        self.token_dim = token_dim
+        self.token_position = nn.Parameter(torch.zeros(1, tokens_num, token_dim))
+        self.token_mixer = nn.Sequential(
+            *[
+                SpatialTransformerBlock(token_dim, mixer_heads, tokens_num, mixer_layer_scale_init)
+                for _ in range(mixer_layers)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor, a: torch.Tensor) -> HeadOutput:
+        """
+        Args:
+            x: state embedding (B, state_dim), state_dim // token_dim tokens laid flat
+            a: action chunk (B, horizon, action_dim)
+        """
+        bs = a.size(0)
+        state_tokens = x.view(bs, -1, self.token_dim)
+        action_tokens = get_fourier_embeds_from_coordinates(
+            self.token_dim, a.reshape(bs, 1, -1).to(x.dtype)
+        )[:, 0]  # (B, horizon * action_dim, token_dim)
+        tokens = torch.cat([state_tokens, action_tokens], dim=1) + self.token_position
+        return super().forward(self.token_mixer(tokens).flatten(start_dim=1), a)
 
 
 class HypersphericalActionValueHead(DistributionalValueHead):

@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
   - /policy_head: diffusion
-  - /value_head: dueling
+  - /value_head: token_dueling  # [dueling, token_dueling, simbav2]
   - /prediction_head: td_jepa  # [flow_matching, td_jepa]
   - _self_
 
