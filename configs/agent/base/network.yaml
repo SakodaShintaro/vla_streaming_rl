@@ -10,9 +10,13 @@ weight_decay: 0.01
 vla:
   model_id: Qwen/Qwen3.8-27B
   load_in_4bit: true
-  # VLM の全位置の活性を全層で平均し、画像のトークンの格子（256px なら 8x8）をこの数の
-  # 四方に平均プーリングしたものを表現に入れる
+  # 画像のトークンの格子（256px なら 8x8）をこの数の四方に平均プーリングしたものを表現に入れる
   image_pool_size: 8
+  # 画像のトークンの位置の活性を平均する層の範囲 [image_layer_start, image_layer_stop)。
+  # 0 は言語モデルに入る前の埋め込み（ViT の出力そのもの）で、null は最後の層まで。
+  # ViT の特徴だけを使うなら 0 と 1。末尾の位置は常に全層で平均する
+  image_layer_start: 0
+  image_layer_stop: null
   # 表現に加える末尾の位置の数。末尾はチャットテンプレートの固定の部分
   # （"\n<|im_start|>assistant\n" の 4 トークン）で、画像と指示を読んだ後の活性を持つ
   num_last_tokens: 4

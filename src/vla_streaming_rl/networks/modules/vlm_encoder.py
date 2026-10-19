@@ -30,8 +30,9 @@ class VLMEncoder(nn.Module):
     """画像の並びと指示の文を凍結した VLM に読ませ、1ステップ分の状態を作るエンコーダ。
 
     処理は2段に分かれる。``represent`` は画像と文を1つの user ターンとして VLM に読ませ、
-    全位置の活性を全層（埋め込みと各層の出力）で平均し、画像ごとにトークンの格子を
-    ``image_pool_size`` 四方に平均プーリングしたものと、末尾の ``num_last_tokens`` 個の位置を
+    画像のトークンの位置の活性を ``[image_layer_start, image_layer_stop)`` の層（0 は言語モデルに
+    入る前の埋め込みで、ViT の出力そのもの）で平均して、画像ごとに格子を ``image_pool_size``
+    四方に平均プーリングしたものと、末尾の ``num_last_tokens`` 個の位置の活性の全層平均を
     並べた表現を返す。末尾はチャットテンプレートの固定の部分で、画像と指示を読んだ後の活性を
     持つ。VLM は凍結しているので、この表現はバッファに保存して使い回せる。
 
@@ -56,6 +57,7 @@ class VLMEncoder(nn.Module):
         self.vlm_hidden_size = self.vlm.config.text_config.hidden_size
         self.image_pool_size = vla_config.image_pool_size
         self.num_last_tokens = vla_config.num_last_tokens
+        self.image_layers = slice(vla_config.image_layer_start, vla_config.image_layer_stop)
         self.image_pad_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         self.merge_size = self.processor.image_processor.merge_size
         # 観測の画像（一人称の視点と、あれば鳥瞰図）ごとにプーリングした格子を並べる
@@ -99,9 +101,10 @@ class VLMEncoder(nn.Module):
 
     @torch.no_grad()
     def represent(self, images: list[torch.Tensor], text: str) -> torch.Tensor:
-        """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませた、全位置の活性の全層平均から、
-        画像ごとにトークンの格子を ``image_pool_size`` 四方にプーリングしたものと末尾の
-        ``num_last_tokens`` 個の位置を並べた表現 (num_positions, hidden_size)。"""
+        """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませ、画像のトークンの活性の
+        ``image_layers`` の層での平均を画像ごとに ``image_pool_size`` 四方にプーリングしたものと、
+        末尾の ``num_last_tokens`` 個の位置の活性の全層平均を並べた表現
+        (num_positions, hidden_size)。"""
         assert len(images) == self.images_num, (len(images), self.images_num)
         placeholders = IMAGE_PLACEHOLDER * len(images)
         prompt = f"{IM_START}user\n{placeholders}{text}{IM_END}\n{IM_START}assistant\n"
@@ -110,11 +113,16 @@ class VLMEncoder(nn.Module):
         ).to(self.device)
         outputs = self.vlm(**inputs, output_hidden_states=True, logits_to_keep=1)
         # 全層を一度に積まず、足し込みながら平均する
-        layer_mean = sum(depth[0].to(torch.float32) for depth in outputs.hidden_states) / len(
-            outputs.hidden_states
-        )
+        last_start = inputs["input_ids"].shape[1] - self.num_last_tokens
+        last_tokens = sum(
+            depth[0, last_start:].to(torch.float32) for depth in outputs.hidden_states
+        ) / len(outputs.hidden_states)
         # 画像のトークンは、画像の順に、それぞれ統合後の格子のラスター順に並ぶ
-        image_tokens = layer_mean[inputs["input_ids"][0] == self.image_pad_id]
+        image_position = inputs["input_ids"][0] == self.image_pad_id
+        image_layers = outputs.hidden_states[self.image_layers]
+        image_tokens = sum(
+            depth[0, image_position].to(torch.float32) for depth in image_layers
+        ) / len(image_layers)
         grids = (inputs["image_grid_thw"][:, 1:] // self.merge_size).tolist()
         pooled = [
             F.adaptive_avg_pool2d(
@@ -126,7 +134,7 @@ class VLMEncoder(nn.Module):
                 grids, image_tokens.split([h * w for h, w in grids]), strict=True
             )
         ]
-        return torch.cat([*pooled, layer_mean[-self.num_last_tokens :]])
+        return torch.cat([*pooled, last_tokens])
 
     def forward(
         self,
