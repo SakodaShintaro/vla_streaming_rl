@@ -48,7 +48,7 @@ et_lambda: 0.5
 
 replay_buffer:
   device: cpu
-  size: 20000
+  size: 200000
   # Prioritized Experience Replay（off_policy のみ）。窓を引く確率は
   # (|TD 誤差| + priority_epsilon)^priority_alpha に比例し、critic の損失は
   # 重要度の重み (N * P)^(-priority_beta)（最大で正規化）で重み付けする。

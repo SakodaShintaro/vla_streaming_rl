@@ -33,7 +33,7 @@ case ${difficulty} in
     difficulty_overrides=(
       'env_factory.train_levels=["01"]'
       'env_factory.train_variant="01"'
-      episode_limit=600
+      episode_limit=1200
     )
     ;;
   one_lap)
