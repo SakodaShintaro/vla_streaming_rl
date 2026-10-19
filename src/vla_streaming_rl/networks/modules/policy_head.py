@@ -160,11 +160,10 @@ class DiffusionPolicy(nn.Module):
         B, horizon, action_dim = action.shape
         device = action.device
 
-        # Advantage term: maximize E[Q(s, π(s))] via the dueling advantage stream.
         for param in value_head.parameters():
             param.requires_grad_(False)
-        advantage = value_head.scalar_advantage(state, action).view(-1, 1)
-        actor_loss = -advantage.mean()
+        policy_q = value_head.scalar_value(state, action).view(-1, 1)
+        actor_loss = -policy_q.mean()
         for param in value_head.parameters():
             param.requires_grad_(True)
 
@@ -196,7 +195,7 @@ class DiffusionPolicy(nn.Module):
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": dacer_loss.item(),
-            "advantage": advantage.mean().item(),
+            "policy_q": policy_q.mean().item(),
         }
         return total_loss, info_dict
 
@@ -572,15 +571,15 @@ class TanhPolicy(nn.Module):
 
         for param in value_head.parameters():
             param.requires_grad_(False)
-        advantage = value_head.scalar_advantage(state, action)
+        policy_q = value_head.scalar_value(state, action)
         for param in value_head.parameters():
             param.requires_grad_(True)
 
-        actor_loss = (temperature * log_prob - advantage).mean()
+        actor_loss = (temperature * log_prob - policy_q).mean()
         info_dict = {
             "actor_loss": actor_loss.item(),
             "dacer_loss": 0.0,
-            "advantage": advantage.mean().item(),
+            "policy_q": policy_q.mean().item(),
             "entropy": -log_prob.mean().item(),
             "temperature": temperature.item(),
             **self._distribution_report(mean.detach(), log_std.detach()),
