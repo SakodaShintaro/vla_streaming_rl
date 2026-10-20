@@ -7,6 +7,7 @@ from torch.nn import functional as F
 
 from .blocks import SimbaBlock
 from .head_output import HeadOutput
+from .self_attention import SpatialTransformerBlock, get_fourier_embeds_from_coordinates
 from .sparse_utils import apply_one_shot_pruning
 
 
@@ -131,6 +132,154 @@ class DiffusionPolicy(nn.Module):
 
         x = self.fc_out(x)
         x = torch.tanh(x)
+        return HeadOutput(output=x, activation=activation)
+
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+        bs = x.size(0)
+        noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
+
+        def predict_fn(x_t, t):
+            x_flat = x_t.view(bs, -1)
+            return self.forward(x_flat, t, x).output.view(bs, self.horizon, self.action_dim)
+
+        return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
+
+    def compute_actor_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        *,
+        value_head,
+    ) -> tuple[torch.Tensor, dict]:
+        """Advantage-maximizing actor loss + DACER2 score matching
+        (https://arxiv.org/abs/2505.23426).
+        """
+        del action_chunk
+        if self.detach_state:
+            state = state.detach()
+        action = self.get_action(state)
+        B, horizon, action_dim = action.shape
+        device = action.device
+
+        for param in value_head.parameters():
+            param.requires_grad_(False)
+        policy_q = value_head.scalar_value(state, action).view(-1, 1)
+        actor_loss = -policy_q.mean()
+        for param in value_head.parameters():
+            param.requires_grad_(True)
+
+        # DACER2 score matching: regress the policy's x-prediction onto a
+        # Q-gradient-derived velocity target, with logarithmic time weighting.
+        eps = 1e-4
+        t = torch.rand((B, 1), device=device) * (1 - eps) + eps
+        w_t = torch.exp(0.4 * t + (-1.8))
+
+        actions = action.view(B, -1).clone().detach().requires_grad_(True)
+        actions_chunk = actions.view(B, horizon, action_dim)
+        q_values = value_head.scalar_value(state, actions_chunk).unsqueeze(-1)
+        q_grad = torch.autograd.grad(q_values.sum(), actions, create_graph=True)[0]
+
+        noise = torch.randn_like(actions).clamp(-3.0, 3.0)
+        a_t = (1.0 - t) * noise + t * actions
+        with torch.no_grad():
+            v_target = (1 - t) / t * q_grad + 1 / t * actions
+            v_target = v_target / (v_target.norm(dim=1, keepdim=True) + 1e-8)
+            v_target = w_t * v_target
+            # Convert to x-space (policy outputs the clean action prediction).
+            target = a_t + (1 - t) * v_target
+
+        pred_dict = self.forward(a_t, t.squeeze(1), state)
+        pred = pred_dict.output
+        dacer_loss = F.mse_loss(pred, target)
+        total_loss = actor_loss + dacer_loss * self.dacer_loss_weight
+
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "dacer_loss": dacer_loss.item(),
+            "policy_q": policy_q.mean().item(),
+        }
+        return total_loss, info_dict
+
+
+class TokenDiffusionPolicy(nn.Module):
+    """状態のトークンに、ノイズの乗った行動のトークンと拡散の時刻のトークンを並べ、Transformer の
+    層で混ぜてから MLP で読む拡散の方策。混ぜる前後以外は :class:`DiffusionPolicy` と同じ。
+
+    状態 (B, state_dim) は ``token_dim`` 幅のトークンを平らに並べたものとして読み戻す。行動の
+    チャンクは成分ごとに sin/cos の特徴で1トークンにする（前の行動のトークンと同じ作り方）。
+    混ぜる層は :class:`SpatialTransformerBlock` で、位置の埋め込みは 0、残差は layer scale で
+    小さく始めるので、学習の始めは「トークンを並べて MLP で読む」のとほぼ同じ。
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        token_dim: int,
+        mixer_layers: int,
+        mixer_heads: int,
+        mixer_layer_scale_init: float,
+        hidden_dim: int,
+        block_num: int,
+        denoising_time: float,
+        sparsity: float,
+        horizon: int,
+        denoising_steps: int,
+        dacer_loss_weight: float,
+        detach_state: bool,
+    ) -> None:
+        super().__init__()
+        assert state_dim % token_dim == 0, (state_dim, token_dim)
+        self.detach_state = detach_state
+        time_embedding_size = 256
+        self.horizon = horizon
+        total_action_dim = action_dim * horizon
+        # 状態のトークン、行動の成分ごとのトークン、時刻のトークン
+        tokens_num = state_dim // token_dim + total_action_dim + 1
+        mixed_dim = tokens_num * token_dim
+        self.fc_in = nn.Linear(mixed_dim + total_action_dim + time_embedding_size, hidden_dim)
+        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.fc_out = nn.Linear(hidden_dim, total_action_dim)
+        nn.init.zeros_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
+        self.action_dim = action_dim
+        self.denoising_steps = denoising_steps
+        self.denoising_time = denoising_time
+        self.dacer_loss_weight = dacer_loss_weight
+        self.t_embedder = TimestepEmbedder(time_embedding_size)
+        self.sparse_mask = (
+            None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
+        )
+
+        self.token_dim = token_dim
+        self.t_token_embedder = TimestepEmbedder(token_dim)
+        self.token_position = nn.Parameter(torch.zeros(1, tokens_num, token_dim))
+        self.token_mixer = nn.Sequential(
+            *[
+                SpatialTransformerBlock(token_dim, mixer_heads, tokens_num, mixer_layer_scale_init)
+                for _ in range(mixer_layers)
+            ]
+        )
+
+    def forward(self, a: torch.Tensor, t: torch.Tensor, state: torch.Tensor) -> HeadOutput:
+        """
+        Args:
+            a: flattened action (B, horizon * action_dim)
+            t: timestep (B,)
+            state: state embedding (B, state_dim), state_dim // token_dim tokens laid flat
+        """
+        bs = a.size(0)
+        state_tokens = state.view(bs, -1, self.token_dim)
+        action_tokens = get_fourier_embeds_from_coordinates(self.token_dim, a.unsqueeze(1))[:, 0]
+        t_token = self.t_token_embedder(t).unsqueeze(1)
+        tokens = torch.cat([state_tokens, action_tokens, t_token], dim=1) + self.token_position
+        mixed = self.token_mixer(tokens).flatten(start_dim=1)
+
+        x = torch.cat([a, self.t_embedder(t), mixed], 1)
+        x = self.norm(self.fc_mid(self.fc_in(x)))
+        activation = x
+        x = torch.tanh(self.fc_out(x))
         return HeadOutput(output=x, activation=activation)
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:

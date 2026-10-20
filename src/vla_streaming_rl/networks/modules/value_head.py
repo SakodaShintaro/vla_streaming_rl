@@ -306,15 +306,17 @@ class ActionValueHead(DistributionalValueHead):
         return HeadOutput(output=output, activation=torch.cat([v, sa], dim=1))
 
 
-class TokenActionValueHead(ActionValueHead):
-    """状態のトークンに評価する行動のトークンを並べ、Transformer の層で混ぜてから
-    :class:`ActionValueHead` で読む critic。
+class TokenActionValueHead(DistributionalValueHead):
+    """状態のトークンに評価する行動のトークンを並べ、Transformer の層で混ぜてから MLP で読む critic。
 
     状態 (B, state_dim) は ``token_dim`` 幅のトークンを平らに並べたものとして読み戻す。行動の
     チャンクは成分ごとに sin/cos の特徴で1トークンにする（前の行動のトークンと同じ作り方）。
     混ぜる層は :class:`SpatialTransformerBlock` で、位置の埋め込みは 0、残差は layer scale で
     小さく始めるので、学習の始めは「状態のトークンと行動のトークンを並べて MLP で読む」のと
     ほぼ同じ。注意が、どの行動がどの観測のトークンと関わるかを学ぶ分だけ育つ。
+
+    混ぜた後は2本の MLP で読み、ロジットの上で足す。1本は混ぜたトークンだけを、もう1本は
+    混ぜたトークンと行動の値そのものを読む。
     """
 
     def __init__(
@@ -334,21 +336,43 @@ class TokenActionValueHead(ActionValueHead):
         sparsity: float,
         detach_state: bool,
     ) -> None:
+        super().__init__()
         assert in_channels % token_dim == 0, (in_channels, token_dim)
-        tokens_num = in_channels // token_dim + horizon * action_dim
-        super().__init__(
-            in_channels=tokens_num * token_dim,
-            action_dim=action_dim,
-            horizon=horizon,
-            hidden_dim=hidden_dim,
-            block_num=block_num,
-            num_bins=num_bins,
-            gamma=gamma,
-            multi_gammas=multi_gammas,
-            sparsity=sparsity,
-            detach_state=detach_state,
-        )
+        # 補助の割引率を先に、主の割引率を最後に並べる
+        gammas = list(multi_gammas) + [gamma]
+        self.detach_state = detach_state
+        self.horizon = horizon
+        self.action_dim = action_dim
         self.token_dim = token_dim
+        total_action_dim = action_dim * horizon
+        tokens_num = in_channels // token_dim + total_action_dim
+        mixed_dim = tokens_num * token_dim
+        out_dim = len(gammas) * num_bins
+
+        # 混ぜたトークンだけを読む流れ
+        self.m_fc_in = nn.Linear(mixed_dim, hidden_dim)
+        self.m_fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.m_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.m_fc_out = nn.Linear(hidden_dim, out_dim)
+
+        # 混ぜたトークンと行動の値を読む流れ
+        self.ma_fc_in = nn.Linear(mixed_dim + total_action_dim, hidden_dim)
+        self.ma_fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.ma_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.ma_fc_out = nn.Linear(hidden_dim, out_dim)
+
+        self.apply(weights_init_)
+
+        nn.init.zeros_(self.m_fc_out.weight)
+        nn.init.zeros_(self.m_fc_out.bias)
+        nn.init.zeros_(self.ma_fc_out.weight)
+        nn.init.zeros_(self.ma_fc_out.bias)
+
+        self.sparse_mask = (
+            None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
+        )
+        self._init_value_dist(num_bins, gammas)
+
         self.token_position = nn.Parameter(torch.zeros(1, tokens_num, token_dim))
         self.token_mixer = nn.Sequential(
             *[
@@ -364,12 +388,18 @@ class TokenActionValueHead(ActionValueHead):
             a: action chunk (B, horizon, action_dim)
         """
         bs = a.size(0)
+        a_flat = a.view(bs, -1)  # (B, horizon * action_dim)
         state_tokens = x.view(bs, -1, self.token_dim)
         action_tokens = get_fourier_embeds_from_coordinates(
             self.token_dim, a.reshape(bs, 1, -1).to(x.dtype)
         )[:, 0]  # (B, horizon * action_dim, token_dim)
         tokens = torch.cat([state_tokens, action_tokens], dim=1) + self.token_position
-        return super().forward(self.token_mixer(tokens).flatten(start_dim=1), a)
+        mixed = self.token_mixer(tokens).flatten(start_dim=1)
+
+        m = self.m_norm(self.m_fc_mid(self.m_fc_in(mixed)))
+        ma = self.ma_norm(self.ma_fc_mid(self.ma_fc_in(torch.cat([mixed, a_flat], dim=1))))
+        output = self._shape_logits(self.m_fc_out(m) + self.ma_fc_out(ma))
+        return HeadOutput(output=output, activation=torch.cat([m, ma], dim=1))
 
 
 class HypersphericalActionValueHead(DistributionalValueHead):
