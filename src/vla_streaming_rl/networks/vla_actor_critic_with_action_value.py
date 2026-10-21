@@ -36,11 +36,11 @@ class LossTerms:
 class VLAActorCriticWithActionValue(NetworkInterface):
     """1枚の画像と指示の文から行動を出す VLA。
 
-    毎ステップ、観測の画像と指示の文をエンコーダ（VLM）に読ませて状態を作る。過去の
+    毎ステップ、観測の画像と指示の文をエンコーダ（凍結した VLM）に読ませて状態を作る。過去の
     観測は読まない。方策ヘッドと行動価値ヘッドはその状態を読む。
 
-    VLM の ViT を学習するので、バッファには画像そのものを保存し、推論でも学習でも読み戻した
-    画像を VLM に通して状態を作る。
+    VLM は凍結して使うので、表現は観測を受け取ったときに一度だけ計算してバッファに保存する。
+    推論も学習もそれを読み戻し、VLM を通さない。
     """
 
     def __init__(
@@ -64,9 +64,6 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         self.encoder = VLMEncoder(
             image_shapes=image_shapes, action_dim=action_dim, vla_config=vla_config, device=device
         )
-        # 指示の文は学習の間ずっと変わらない。バッファには画像だけを保存するので、最初に
-        # 受け取った文を覚えておき、学習で画像を VLM に通すときにも同じ文を読ませる
-        self.instruction: str | None = None
         state_dim = self.encoder.output_dim
         self.policy_head = policy_head_factory(state_dim=state_dim, action_dim=action_dim).to(
             device
@@ -80,17 +77,12 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         return self._dummy_state.clone()
 
     def stored_image_shape(self) -> tuple[int, ...]:
-        """観測の画像を並べたもの (images_num, 3, H, W)。ViT を学習するので、表現ではなく
-        画像を保存する。"""
-        shapes = set(self.encoder.image_shapes)
-        assert len(shapes) == 1, f"images of one step must share a shape: {shapes}"
-        return (self.encoder.images_num, *shapes.pop())
+        """VLM の表現の、画像のトークンの格子と末尾の位置。射影は学習するので、その手前を
+        保存する。"""
+        return self.encoder.representation_shape()
 
     def to_stored_image(self, images: list[torch.Tensor], instruction: str) -> torch.Tensor:
-        if self.instruction is None:
-            self.instruction = instruction
-        assert instruction == self.instruction, "the instruction must not change"
-        return torch.stack(images)
+        return self.encoder.represent(images, instruction)
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
@@ -146,10 +138,11 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         scalar_obs: torch.Tensor,
         step: int,
     ) -> torch.Tensor:
-        """窓 (B, T, ...) の ``step`` 番目のステップの、保存した画像を VLM に通した表現と、
-        前の行動・報酬・スカラーの観測から状態を作る。"""
-        representation = self.encoder.represent(observations[:, step], self.instruction)
-        return self.encoder(representation, actions[:, step], rewards[:, step], scalar_obs[:, step])
+        """窓 (B, T, ...) の ``step`` 番目のステップの、保存した表現・前の行動・報酬・スカラーの
+        観測から状態を作る。"""
+        return self.encoder(
+            observations[:, step], actions[:, step], rewards[:, step], scalar_obs[:, step]
+        )
 
     def _loss_terms(self, data: ReplayBufferData) -> LossTerms:
         """リプレイバッチの損失。現在の状態はチャンクの手前のステップから、次の状態は最後の

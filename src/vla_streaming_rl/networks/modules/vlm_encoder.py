@@ -26,20 +26,19 @@ STATE_SCALAR_INDICES = [
 
 
 class VLMEncoder(nn.Module):
-    """画像の並びと指示の文を VLM に読ませ、1ステップ分の状態を作るエンコーダ。
+    """画像の並びと指示の文を凍結した VLM に読ませ、1ステップ分の状態を作るエンコーダ。
 
     処理は2段に分かれる。``represent`` は画像と文を1つの user ターンとして VLM に読ませ、
     画像のトークンの位置の活性を ``[image_layer_start, image_layer_stop)`` の層（0 は言語モデルに
     入る前の埋め込みで、ViT の出力そのもの）で平均した、画像ごとのトークンの格子と、末尾の
     ``num_last_tokens`` 個の位置の活性の全層平均を並べた表現を返す。末尾はチャットテンプレートの固定の部分で、画像と指示を読んだ後の活性を
-    持つ。VLM のうち ViT（PatchMerger まで）だけを学習し、言語モデルは凍結したまま勾配を
-    通す。ViT が学習で変わるので、表現は保存せず、学習のたびに画像から作り直す。
+    持つ。VLM は凍結しているので、この表現はバッファに保存して使い回せる。
 
     ``forward`` は保存した表現を位置ごとに ``state_out_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``state_out_dim`` 幅のトークンにした
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
     読む状態にする。前の行動と報酬のトークンと、混ぜる層は :class:`SpatialTemporalEncoder` と
-    同じ作り方にする。学習するのは ViT と射影と混ぜる層。
+    同じ作り方にする。学習するのは射影と混ぜる層。
     """
 
     def __init__(
@@ -58,17 +57,13 @@ class VLMEncoder(nn.Module):
             device=torch.device(device),
         )
         self.vlm.eval().requires_grad_(False)
-        # ViT だけを学習する。bf16 のままでは小さい学習率の更新が丸めで消えるので float32 に
-        # する。出力は言語モデルの埋め込みの型に揃えてから入る
-        self.vlm.model.visual.float().requires_grad_(True)
         self.vlm_hidden_size = self.vlm.config.text_config.hidden_size
         self.num_last_tokens = vla_config.num_last_tokens
         self.image_layers = slice(vla_config.image_layer_start, vla_config.image_layer_stop)
         self.image_pad_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         # 観測の画像（一人称の視点と、あれば鳥瞰図）ごとのトークンの格子を並べる。格子の
         # 大きさは画像の大きさからプロセッサが決める（256px なら統合後 8x8）
-        self.image_shapes = [tuple(shape) for shape in image_shapes]
-        self.images_num = len(self.image_shapes)
+        self.images_num = len(image_shapes)
         image_processor = self.processor.image_processor
         image_tokens_num = sum(
             int(
@@ -77,7 +72,7 @@ class VLMEncoder(nn.Module):
                 ][0].prod()
             )
             // image_processor.merge_size**2
-            for shape in self.image_shapes
+            for shape in image_shapes
         )
         self.num_positions = image_tokens_num + self.num_last_tokens
         self.state_out_proj = nn.Linear(self.vlm_hidden_size, vla_config.state_out_dim).to(device)
@@ -112,34 +107,34 @@ class VLMEncoder(nn.Module):
             ]
         ).to(device)
 
-    def represent(self, images: torch.Tensor, text: str) -> torch.Tensor:
-        """[0, 1] の画像の並び (B, images_num, 3, H, W) と文を VLM に読ませ、画像のトークンの
-        活性の ``image_layers`` の層での平均と、末尾の ``num_last_tokens`` 個の位置の活性の
-        全層平均を並べた表現 (B, num_positions, hidden_size)。どのサンプルも同じ文と同じ大きさの画像なので、
-        詰め物なしで同じ長さの列になる。"""
-        batch_size = images.shape[0]
-        assert images.shape[1] == self.images_num, (images.shape, self.images_num)
-        placeholders = IMAGE_PLACEHOLDER * self.images_num
+    def representation_shape(self) -> tuple[int, ...]:
+        """``represent`` が返す表現の形。射影は学習するので、その手前を保存する。"""
+        return (self.num_positions, self.vlm_hidden_size)
+
+    @torch.no_grad()
+    def represent(self, images: list[torch.Tensor], text: str) -> torch.Tensor:
+        """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませ、画像のトークンの活性の
+        ``image_layers`` の層での平均と、末尾の ``num_last_tokens`` 個の位置の活性の全層平均を
+        並べた表現 (num_positions, hidden_size)。"""
+        assert len(images) == self.images_num, (len(images), self.images_num)
+        placeholders = IMAGE_PLACEHOLDER * len(images)
         prompt = f"{IM_START}user\n{placeholders}{text}{IM_END}\n{IM_START}assistant\n"
         inputs = self.processor(
-            text=[prompt] * batch_size,
-            images=list(images.flatten(end_dim=1)),
-            return_tensors="pt",
-            do_rescale=False,
+            text=[prompt], images=list(images), return_tensors="pt", do_rescale=False
         ).to(self.device)
         outputs = self.vlm(**inputs, output_hidden_states=True, logits_to_keep=1)
         # 全層を一度に積まず、足し込みながら平均する
         last_start = inputs["input_ids"].shape[1] - self.num_last_tokens
         last_tokens = sum(
-            depth[:, last_start:].to(torch.float32) for depth in outputs.hidden_states
+            depth[0, last_start:].to(torch.float32) for depth in outputs.hidden_states
         ) / len(outputs.hidden_states)
         # 画像のトークンは、画像の順に、それぞれ統合後の格子のラスター順に並ぶ
         image_position = inputs["input_ids"][0] == self.image_pad_id
         image_layers = outputs.hidden_states[self.image_layers]
         image_tokens = sum(
-            depth[:, image_position].to(torch.float32) for depth in image_layers
+            depth[0, image_position].to(torch.float32) for depth in image_layers
         ) / len(image_layers)
-        return torch.cat([image_tokens, last_tokens], dim=1)
+        return torch.cat([image_tokens, last_tokens])
 
     def forward(
         self,
@@ -148,7 +143,7 @@ class VLMEncoder(nn.Module):
         rewards: torch.Tensor,
         scalar_obs: torch.Tensor,
     ) -> torch.Tensor:
-        """``represent`` の表現 (B, num_positions, hidden_size) を射影したものに、同じステップの
+        """保存した表現 (B, num_positions, hidden_size) を射影したものに、同じステップの
         前の行動 (B, action_dim)、報酬 (B, 1)、スカラーの観測 (B, SCALAR_OBS_DIM) をそれぞれ
         トークンにしたものを並べ、ヘッドが読む状態 (B, output_dim) にする。
 
