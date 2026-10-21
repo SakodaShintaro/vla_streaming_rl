@@ -49,7 +49,7 @@ def build_network(
 
         # 4 ビットに量子化した VLM を含みうるので .to(device) はせず、内部で cuda に置く
         network = VLAActorCriticWithActionValue(
-            images_num=len(image_shapes),
+            image_shapes=image_shapes,
             action_space_shape=action_space_shape,
             value_head_factory=value_head_factory,
             policy_head_factory=policy_head_factory,
