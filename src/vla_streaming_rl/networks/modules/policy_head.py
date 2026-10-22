@@ -24,7 +24,9 @@ def _euler_denoise(
             Velocity is derived as v = (x_1_pred - x_t) / (1 - t).
 
     Returns:
-        tanh(x_T), same shape as noise
+        x_T を [-1, 1] に切ったもの, same shape as noise. 予測が有界なので tanh は掛けない
+        （掛けると予測の範囲がさらに縮み、端で勾配が消える）。ノイズの分だけはみ出す行動を
+        切り、critic が学習したことのない範囲の行動を評価しないようにする
     """
     x_t = noise
     dt = denoising_time / denoising_steps
@@ -36,7 +38,7 @@ def _euler_denoise(
         v = (pred - x_t) / denom
         x_t = x_t + dt * v
         time_val += dt
-    return torch.tanh(x_t)
+    return x_t.clamp(-1.0, 1.0)
 
 
 class TimestepEmbedder(nn.Module):
