@@ -39,7 +39,7 @@ normalizing_by_return: false
 # 学習に使う報酬の倍率。running: 見てきた報酬の標準偏差で割り ±10 で切る（倍率は学習中に動く）。
 # fixed: fixed_reward_scale を掛けるだけで切らない（倍率は学習中に変わらない）
 reward_scale_mode: fixed
-fixed_reward_scale: 5.0
+fixed_reward_scale: 1.0
 save_interval: 100
 print_interval: 5
 debug: false
@@ -55,4 +55,4 @@ replay_buffer:
   # priority_alpha: 0 で一様に引く（重みはすべて 1）
   priority_alpha: 0.6
   priority_beta: 0.4
-  priority_epsilon: 0.01
+  priority_epsilon: 0.002
