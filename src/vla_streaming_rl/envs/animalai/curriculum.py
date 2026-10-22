@@ -149,25 +149,13 @@ def training_levels(mode: str, variant: str, train_levels: list[str]) -> list[st
 
 
 def _training_arenas(variant: str, levels: list[str]) -> list[Arena]:
-    """The training set: the `variant` copy of every task of each of `levels`,
-    one block of arenas per entry, in the order the entries are given.
-
-    `levels` narrowed below every level is for looking at some levels on their
-    own -- what a run scores on levels 01 and 02 without waiting for a
-    curriculum to reach them. A repeated entry repeats its block, so
-    `["01", "01"]` sweeps level 01 twice in the sequential mode and doubles
-    its draw weight in the random mode. The curriculum modes ignore it: their
-    stages are the levels, and hiding levels from them would leave the stage
-    numbers meaning something else.
-    """
-    assert len(levels) > 0, "levels must name at least one level"
-    available = _all_levels(variant)
-    assert all(level in available for level in levels), (
-        f"levels {list(levels)} names a level with no arena at variant {variant!r}; "
-        f"available: {available}"
-    )
+    assert len(levels) > 0, "levels must name at least one level or task"
     arenas = _variant_arenas(variant)
-    return [arena for level in levels for arena in arenas if arena.level == level]
+    for entry in levels:
+        assert any(entry in (arena.level, arena.task) for arena in arenas), (
+            f"{entry!r} in levels names no level or task with an arena at variant {variant!r}"
+        )
+    return [arena for entry in levels for arena in arenas if entry in (arena.level, arena.task)]
 
 
 def _training_stages(variant: str) -> list[list[Arena]]:
