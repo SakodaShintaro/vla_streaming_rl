@@ -257,24 +257,16 @@ class ActionValueHead(DistributionalValueHead):
         mid_dim = in_channels + total_action_dim
         out_dim = len(gammas) * num_bins
 
-        # Value stream: V(s) - depends only on state
-        self.v_fc_in = nn.Linear(in_channels, hidden_dim)
-        self.v_fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
-        self.v_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.v_fc_out = nn.Linear(hidden_dim, out_dim)
-
-        # Advantage stream: A(s,a) - depends on state and action
-        self.a_fc_in = nn.Linear(mid_dim, hidden_dim)
-        self.a_fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
-        self.a_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.a_fc_out = nn.Linear(hidden_dim, out_dim)
+        # 状態と行動をつないで1本の MLP で読む
+        self.fc_in = nn.Linear(mid_dim, hidden_dim)
+        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.fc_out = nn.Linear(hidden_dim, out_dim)
 
         self.apply(weights_init_)
 
-        nn.init.zeros_(self.v_fc_out.weight)
-        nn.init.zeros_(self.v_fc_out.bias)
-        nn.init.zeros_(self.a_fc_out.weight)
-        nn.init.zeros_(self.a_fc_out.bias)
+        nn.init.zeros_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
 
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
@@ -290,23 +282,10 @@ class ActionValueHead(DistributionalValueHead):
         bs = a.size(0)
         a_flat = a.view(bs, -1)  # (B, horizon * action_dim)
 
-        # 状態だけの流れ
-        v = self.v_fc_in(x)
-        v = self.v_fc_mid(v)
-        v = self.v_norm(v)
-        v_out = self.v_fc_out(v)  # (B, num_gammas * num_bins)
-
-        # 状態と行動の流れ
         xa = torch.cat([x, a_flat], dim=1)
-        sa = self.a_fc_in(xa)
-        sa = self.a_fc_mid(sa)
-        sa = self.a_norm(sa)
-        sa_out = self.a_fc_out(sa)  # (B, num_gammas * num_bins)
-
-        # 2つの流れをロジットの上で足して Q にする
-        output = self._shape_logits(v_out + sa_out)
-
-        return HeadOutput(output=output, activation=torch.cat([v, sa], dim=1))
+        h = self.norm(self.fc_mid(self.fc_in(xa)))
+        output = self._shape_logits(self.fc_out(h))  # (B, num_gammas, num_bins)
+        return HeadOutput(output=output, activation=h)
 
 
 class TokenActionValueHead(DistributionalValueHead):
@@ -318,8 +297,7 @@ class TokenActionValueHead(DistributionalValueHead):
     小さく始めるので、学習の始めは「状態のトークンと行動のトークンを並べて MLP で読む」のと
     ほぼ同じ。注意が、どの行動がどの観測のトークンと関わるかを学ぶ分だけ育つ。
 
-    混ぜた後は2本の MLP で読み、ロジットの上で足す。1本は混ぜたトークンだけを、もう1本は
-    混ぜたトークンと行動の値そのものを読む。
+    混ぜた後は、混ぜたトークンと行動の値そのものをつないで1本の MLP で読む。
     """
 
     def __init__(
@@ -352,24 +330,16 @@ class TokenActionValueHead(DistributionalValueHead):
         mixed_dim = tokens_num * token_dim
         out_dim = len(gammas) * num_bins
 
-        # 混ぜたトークンだけを読む流れ
-        self.m_fc_in = nn.Linear(mixed_dim, hidden_dim)
-        self.m_fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
-        self.m_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.m_fc_out = nn.Linear(hidden_dim, out_dim)
-
-        # 混ぜたトークンと行動の値を読む流れ
-        self.ma_fc_in = nn.Linear(mixed_dim + total_action_dim, hidden_dim)
-        self.ma_fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
-        self.ma_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.ma_fc_out = nn.Linear(hidden_dim, out_dim)
+        # 混ぜたトークンと行動の値をつないで読む
+        self.fc_in = nn.Linear(mixed_dim + total_action_dim, hidden_dim)
+        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.fc_out = nn.Linear(hidden_dim, out_dim)
 
         self.apply(weights_init_)
 
-        nn.init.zeros_(self.m_fc_out.weight)
-        nn.init.zeros_(self.m_fc_out.bias)
-        nn.init.zeros_(self.ma_fc_out.weight)
-        nn.init.zeros_(self.ma_fc_out.bias)
+        nn.init.zeros_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
 
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
@@ -399,10 +369,9 @@ class TokenActionValueHead(DistributionalValueHead):
         tokens = torch.cat([state_tokens, action_tokens], dim=1) + self.token_position
         mixed = self.token_mixer(tokens).flatten(start_dim=1)
 
-        m = self.m_norm(self.m_fc_mid(self.m_fc_in(mixed)))
-        ma = self.ma_norm(self.ma_fc_mid(self.ma_fc_in(torch.cat([mixed, a_flat], dim=1))))
-        output = self._shape_logits(self.m_fc_out(m) + self.ma_fc_out(ma))
-        return HeadOutput(output=output, activation=torch.cat([m, ma], dim=1))
+        h = self.norm(self.fc_mid(self.fc_in(torch.cat([mixed, a_flat], dim=1))))
+        output = self._shape_logits(self.fc_out(h))
+        return HeadOutput(output=output, activation=h)
 
 
 class HypersphericalActionValueHead(DistributionalValueHead):
