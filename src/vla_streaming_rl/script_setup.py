@@ -15,6 +15,7 @@ def setup_runtime() -> None:
     before the heavy imports, which is why torch is imported lazily here."""
     os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts=false"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "false"
     warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
     warnings.filterwarnings("ignore", message=".*local_dir_use_symlinks.*")
     warnings.filterwarnings("ignore", message=".*Attempting to run cuBLAS.*")

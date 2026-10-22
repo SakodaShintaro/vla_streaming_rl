@@ -11,7 +11,6 @@ shift 3
 cd $(dirname $0)
 
 export GRPC_VERBOSITY=ERROR
-export GRPC_ENABLE_FORK_SUPPORT=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Fetch the Unity player this run needs, which is a no-op once it is installed.
