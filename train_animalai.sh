@@ -2,8 +2,9 @@
 set -eux
 
 # Usage: ./train_animalai.sh <difficulty> <agent> <exp_name> [hydra overrides...]
-#   difficulty: easy   -> level 01 の variant 01 だけ（簡易な検証用）
-#               normal -> configs/env/animalai.yaml のデフォルト通り
+#   difficulty: easy    -> level 01 の variant 01 だけ（簡易な検証用）
+#               hardest -> 01-30-01 だけ（いちばん解けていないアリーナに集中する）
+#               normal  -> configs/env/animalai.yaml のデフォルト通り
 difficulty=${1}
 agent=${2}
 exp_name=${3}
@@ -43,11 +44,18 @@ case ${difficulty} in
       episode_limit=30
     )
     ;;
+  1301)
+    difficulty_overrides=(
+      'env_factory.train_levels=["13-01"]'
+      'env_factory.train_variant="01"'
+      episode_limit=300
+    )
+    ;;
   normal)
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301 or normal)" >&2
     exit 1
     ;;
 esac
@@ -57,5 +65,6 @@ uv run python scripts/train.py \
   env=animalai \
   exp_name=${exp_name} \
   resume_dir=null \
+  "wandb_group='${difficulty}'" \
   "${difficulty_overrides[@]}" \
   "$@"
