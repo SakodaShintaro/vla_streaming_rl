@@ -1,9 +1,6 @@
 # @package _global_
 defaults:
   - base/network
-  # 状態のトークンの幅が VLA と違うので、行動のトークンと混ぜない critic と方策を使う
-  - override /value_head: dueling
-  - override /policy_head: diffusion
   - _self_
 
 agent_type: off_policy

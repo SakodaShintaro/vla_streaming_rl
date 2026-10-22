@@ -3,8 +3,6 @@ _partial_: true
 horizon: ${horizon}
 gamma: ${gamma}
 multi_gammas: ${multi_gammas}
-# 状態のトークンの幅（VLA の位置ごとの射影の幅）と、行動のトークンと混ぜる層
-token_dim: ${vla.state_out_dim}
 mixer_layers: 2
 mixer_heads: 4
 mixer_layer_scale_init: 0.0001

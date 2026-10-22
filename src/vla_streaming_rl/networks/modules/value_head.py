@@ -235,6 +235,7 @@ class ActionValueHead(DistributionalValueHead):
         self,
         in_channels: int,
         action_dim: int,
+        token_dim: int,
         horizon: int,
         hidden_dim: int,
         block_num: int,
@@ -245,6 +246,8 @@ class ActionValueHead(DistributionalValueHead):
         detach_state: bool,
     ) -> None:
         super().__init__()
+        # 状態をトークンとしては読まないので、トークンの幅は使わない
+        del token_dim
         # 補助の割引率を先に、主の割引率を最後に並べる
         gammas = list(multi_gammas) + [gamma]
         self.detach_state = detach_state
@@ -434,6 +437,7 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         self,
         in_channels: int,
         action_dim: int,
+        token_dim: int,
         horizon: int,
         hidden_dim: int,
         block_num: int,
@@ -443,6 +447,8 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         detach_state: bool,
     ) -> None:
         super().__init__()
+        # 状態をトークンとしては読まないので、トークンの幅は使わない
+        del token_dim
         # 補助の割引率を先に、主の割引率を最後に並べる
         gammas = list(multi_gammas) + [gamma]
         self.detach_state = detach_state

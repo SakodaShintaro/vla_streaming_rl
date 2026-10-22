@@ -19,9 +19,9 @@ vla:
   # （"\n<|im_start|>assistant\n" の 4 トークン）で、画像と指示を読んだ後の活性を持つ
   num_last_tokens: 4
   # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする。状態の幅は
-  # (画像のトークンの数 + num_last_tokens + スカラーの数) * state_out_dim。画像のトークンは
+  # (画像のトークンの数 + num_last_tokens + スカラーの数) * token_dim。画像のトークンは
   # 256px の画像1枚で 8x8
-  state_out_dim: 64
+  token_dim: 64
   # スカラーをトークンにする sin/cos の周期の範囲。最短の周期は残りの収益の 1 と 2 を分け、
   # 最長の周期は episode_step などの最大の値を1周期に収める
   scalar_min_period: 0.5
@@ -34,7 +34,9 @@ vla:
 
 actor_critic:
   seq_len: 50
-  image_encoder_output_dim: 16
+  # 1ステップのトークン（画像・前の行動・報酬・スカラー・register）の幅。状態の幅は
+  # トークンの数 * token_dim
+  token_dim: 16
   disable_state_predictor: false
   encoder_block_num: 8
   temporal_model_type: gdn

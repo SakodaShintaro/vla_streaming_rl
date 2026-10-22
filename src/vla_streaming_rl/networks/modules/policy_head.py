@@ -85,6 +85,7 @@ class DiffusionPolicy(nn.Module):
         self,
         state_dim: int,
         action_dim: int,
+        token_dim: int,
         hidden_dim: int,
         block_num: int,
         denoising_time: float,
@@ -95,6 +96,8 @@ class DiffusionPolicy(nn.Module):
         detach_state: bool,
     ) -> None:
         super().__init__()
+        # 状態をトークンとしては読まないので、トークンの幅は使わない
+        del token_dim
         self.detach_state = detach_state
         time_embedding_size = 256
         self.horizon = horizon
@@ -361,6 +364,7 @@ class CFGDiffusionPolicy(nn.Module):
         self,
         state_dim: int,
         action_dim: int,
+        token_dim: int,
         hidden_dim: int,
         block_num: int,
         denoising_time: float,
@@ -372,6 +376,8 @@ class CFGDiffusionPolicy(nn.Module):
         detach_state: bool,
     ) -> None:
         super().__init__()
+        # 状態をトークンとしては読まないので、トークンの幅は使わない
+        del token_dim
         self.detach_state = detach_state
         self.cfgrl_beta = cfgrl_beta
         self.condition_drop_prob = condition_drop_prob
@@ -512,6 +518,7 @@ class IMLEPolicy(nn.Module):
         self,
         state_dim: int,
         action_dim: int,
+        token_dim: int,
         hidden_dim: int,
         block_num: int,
         horizon: int,
@@ -520,6 +527,8 @@ class IMLEPolicy(nn.Module):
         detach_state: bool,
     ) -> None:
         super().__init__()
+        # 状態をトークンとしては読まないので、トークンの幅は使わない
+        del token_dim
         self.detach_state = detach_state
         self.horizon = horizon
         self.action_dim = action_dim
@@ -625,6 +634,7 @@ class TanhPolicy(nn.Module):
         self,
         state_dim: int,
         action_dim: int,
+        token_dim: int,
         hidden_dim: int,
         block_num: int,
         horizon: int,
@@ -635,6 +645,8 @@ class TanhPolicy(nn.Module):
         detach_state: bool,
     ) -> None:
         super().__init__()
+        # 状態をトークンとしては読まないので、トークンの幅は使わない
+        del token_dim
         self.detach_state = detach_state
         assert init_temperature > 0.0, init_temperature
         assert temperature_lr > 0.0, temperature_lr

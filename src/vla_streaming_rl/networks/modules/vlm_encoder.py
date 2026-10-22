@@ -34,8 +34,8 @@ class VLMEncoder(nn.Module):
     ``num_last_tokens`` 個の位置の活性の全層平均を並べた表現を返す。末尾はチャットテンプレートの固定の部分で、画像と指示を読んだ後の活性を
     持つ。VLM は凍結しているので、この表現はバッファに保存して使い回せる。
 
-    ``forward`` は保存した表現を位置ごとに ``state_out_dim`` へ射影し、同じステップの前の行動・
-    報酬・スカラーの観測（global_step を除く）をそれぞれ ``state_out_dim`` 幅のトークンにした
+    ``forward`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
+    報酬・スカラーの観測（global_step を除く）をそれぞれ ``token_dim`` 幅のトークンにした
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
     読む状態にする。前の行動と報酬のトークンと、混ぜる層は :class:`SpatialTemporalEncoder` と
     同じ作り方にする。学習するのは射影と混ぜる層。
@@ -75,30 +75,30 @@ class VLMEncoder(nn.Module):
             for shape in image_shapes
         )
         self.num_positions = image_tokens_num + self.num_last_tokens
-        self.state_out_proj = nn.Linear(self.vlm_hidden_size, vla_config.state_out_dim).to(device)
+        self.state_out_proj = nn.Linear(self.vlm_hidden_size, vla_config.token_dim).to(device)
         # スカラーをトークンにする sin/cos の角周波数。周期を scalar_max_period から
-        # scalar_min_period まで対数等間隔にとり、sin と cos で state_out_dim 幅にする
-        assert vla_config.state_out_dim % 2 == 0, vla_config.state_out_dim
+        # scalar_min_period まで対数等間隔にとり、sin と cos で token_dim 幅にする
+        assert vla_config.token_dim % 2 == 0, vla_config.token_dim
         periods = torch.logspace(
             math.log10(vla_config.scalar_max_period),
             math.log10(vla_config.scalar_min_period),
-            vla_config.state_out_dim // 2,
+            vla_config.token_dim // 2,
         )
         self.register_buffer("scalar_frequencies", (2.0 * math.pi / periods).to(device))
-        self.state_out_dim = vla_config.state_out_dim
+        self.token_dim = vla_config.token_dim
         # 表現の位置、前の行動の成分ごと、報酬、スカラーの観測ごとに1トークン
         tokens_num = self.num_positions + action_dim + 1 + len(STATE_SCALAR_INDICES)
-        self.output_dim = tokens_num * vla_config.state_out_dim
+        self.output_dim = tokens_num * vla_config.token_dim
         # ヘッドに渡す前に、トークンどうしを Transformer の層で混ぜる
         # 位置の埋め込みは 0、残差は layer scale で小さく始めるので、
         # 学習の始めは混ぜないのとほぼ同じ。層の数が 0 なら混ぜない
         self.token_position = nn.Parameter(
-            torch.zeros(1, tokens_num, vla_config.state_out_dim, device=device)
+            torch.zeros(1, tokens_num, vla_config.token_dim, device=device)
         )
         self.token_mixer = nn.Sequential(
             *[
                 SpatialTransformerBlock(
-                    vla_config.state_out_dim,
+                    vla_config.token_dim,
                     vla_config.token_mixer_heads,
                     tokens_num,
                     vla_config.token_mixer_layer_scale_init,
@@ -154,9 +154,9 @@ class VLMEncoder(nn.Module):
         projected = self.state_out_proj(representation)
         device = projected.device
         action_tokens = get_fourier_embeds_from_coordinates(
-            self.state_out_dim, actions.to(device, torch.float32).unsqueeze(1)
-        )[:, 0]  # (B, action_dim, state_out_dim)
-        reward_token = embed_reward(rewards.to(device, torch.float32), self.state_out_dim)
+            self.token_dim, actions.to(device, torch.float32).unsqueeze(1)
+        )[:, 0]  # (B, action_dim, token_dim)
+        reward_token = embed_reward(rewards.to(device, torch.float32), self.token_dim)
         scalars = scalar_obs.to(device, torch.float32)[:, STATE_SCALAR_INDICES]
         angles = scalars.unsqueeze(-1) * self.scalar_frequencies
         scalar_tokens = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)

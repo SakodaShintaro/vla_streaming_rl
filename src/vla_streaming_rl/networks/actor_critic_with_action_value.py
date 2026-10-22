@@ -57,7 +57,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         self.action_dim = action_space_shape[0]
 
         self.image_processor = ImageProcessor(image_shapes)
-        hidden_image_dim = actor_critic_config.image_encoder_output_dim
+        token_dim = actor_critic_config.token_dim
 
         assert 0.0 <= actor_critic_config.token_dropout < 1.0, actor_critic_config.token_dropout
         self.token_dropout = actor_critic_config.token_dropout
@@ -71,17 +71,17 @@ class ActorCriticWithActionValue(NetworkInterface):
         # トークンにする。周期を scalar_max_period から scalar_min_period まで対数等間隔にとり、
         # sin と cos でトークンの幅にする
         self.scalar_obs_dim = len(STATE_SCALAR_INDICES)
-        assert hidden_image_dim % 2 == 0, hidden_image_dim
+        assert token_dim % 2 == 0, token_dim
         periods = torch.logspace(
             math.log10(actor_critic_config.scalar_max_period),
             math.log10(actor_critic_config.scalar_min_period),
-            hidden_image_dim // 2,
+            token_dim // 2,
         )
         self.register_buffer("scalar_frequencies", 2.0 * math.pi / periods)
 
         self.encoder = SpatialTemporalEncoder(
             image_features_shapes=self.image_processor.output_shapes,
-            image_latent_dim=hidden_image_dim,
+            image_latent_dim=token_dim,
             seq_len=self.seq_len,
             n_layer=actor_critic_config.encoder_block_num,
             action_dim=self.action_dim,
@@ -92,11 +92,15 @@ class ActorCriticWithActionValue(NetworkInterface):
 
         self.horizon = horizon
         self.policy_head = policy_head_factory(
-            state_dim=self.encoder.output_dim, action_dim=self.action_dim
+            state_dim=self.encoder.output_dim,
+            action_dim=self.action_dim,
+            token_dim=token_dim,
         )
 
         self.value_head = value_head_factory(
-            in_channels=self.encoder.output_dim, action_dim=self.action_dim
+            in_channels=self.encoder.output_dim,
+            action_dim=self.action_dim,
+            token_dim=token_dim,
         )
         self.disable_state_predictor = actor_critic_config.disable_state_predictor
         # 次状態の予測を切るときは予測器そのものを作らない。作ると使わない重みが
@@ -105,7 +109,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             None
             if self.disable_state_predictor
             else prediction_head_factory(
-                image_latent_dim=hidden_image_dim,
+                image_latent_dim=token_dim,
                 state_dim=self.encoder.output_dim,
                 action_dim=self.action_dim,
             )

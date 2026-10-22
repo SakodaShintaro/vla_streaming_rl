@@ -65,12 +65,12 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             image_shapes=image_shapes, action_dim=action_dim, vla_config=vla_config, device=device
         )
         state_dim = self.encoder.output_dim
-        self.policy_head = policy_head_factory(state_dim=state_dim, action_dim=action_dim).to(
-            device
-        )
-        self.value_head = value_head_factory(in_channels=state_dim, action_dim=action_dim).to(
-            device
-        )
+        self.policy_head = policy_head_factory(
+            state_dim=state_dim, action_dim=action_dim, token_dim=self.encoder.token_dim
+        ).to(device)
+        self.value_head = value_head_factory(
+            in_channels=state_dim, action_dim=action_dim, token_dim=self.encoder.token_dim
+        ).to(device)
         self._dummy_state = torch.zeros(1, 1, 1)
 
     def init_state(self) -> torch.Tensor:
