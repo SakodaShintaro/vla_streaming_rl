@@ -8,6 +8,8 @@ from pathlib import Path
 import imageio
 import numpy as np
 
+from vla_streaming_rl.scalar_obs import SCALAR_OBS_NAMES, read_scalar_obs
+
 
 @dataclass
 class EpisodeRecord:
@@ -20,6 +22,8 @@ class EpisodeRecord:
     observations: list[np.ndarray]
     texts: list[dict[str, str]]
     xyzs: list[tuple[float, float, float]]
+    # エージェントが画像と並べて読むスカラーの観測（SCALAR_OBS_NAMES の並び）
+    scalar_obs: list[np.ndarray]
     # 位置を記録するか。Animal-AI はアリーナの中の位置を毎ステップ出すが、出さない環境では
     # xyzs は空のまま
     log_position: bool
@@ -36,6 +40,7 @@ class EpisodeRecord:
             observations=[obs["image"].copy()],
             texts=[texts],
             xyzs=[],
+            scalar_obs=[],
             log_position="agent_xyz" in reset_info,
         )
 
@@ -55,6 +60,7 @@ class EpisodeRecord:
         self.observations.append(obs["image"].copy())
         if self.log_position:
             self.xyzs.append(info["agent_xyz"])
+        self.scalar_obs.append(read_scalar_obs(obs))
         self.frames.append(frame)
         self.texts.append(texts)
 
@@ -128,9 +134,9 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
 
     save_episode_texts(episode_log_dir, record.texts)
 
-    # One row per step: the action taken, the reward it drew, and where the
-    # agent stood after it, so an episode's trajectory can be drawn from the
-    # run rather than re-simulated. ``xyzs`` is empty for an env that reports
+    # One row per step: the action taken, the reward it drew, where the
+    # agent stood after it and the scalar observation it came back with, so an
+    # episode's trajectory can be drawn from the run rather than re-simulated. ``xyzs`` is empty for an env that reports
     # no position, and the x/y/z columns are then left out rather than filled
     # with a stand-in.
     columns = [f"action{i}" for i in range(len(record.actions[0]))] + ["reward"]
@@ -141,6 +147,12 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
     if record.xyzs:
         columns = columns + ["x", "y", "z"]
         rows = [row + [f"{float(v):.4f}" for v in xyz] for row, xyz in zip(rows, record.xyzs)]
+    # 行動を取ったあとに返った観測のスカラー
+    columns = columns + list(SCALAR_OBS_NAMES)
+    rows = [
+        row + [f"{float(v):.6f}" for v in scalar_obs]
+        for row, scalar_obs in zip(rows, record.scalar_obs, strict=True)
+    ]
 
     with open(episode_log_dir / "log.tsv", "w", encoding="utf-8") as f:
         f.write("step\t" + "\t".join(columns) + "\n")
