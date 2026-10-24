@@ -37,7 +37,13 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
     EnvironmentParametersChannel,
 )
 
-from vla_streaming_rl.envs.animalai.curriculum import Arena, ArenaSelector, read_pass_mark
+from vla_streaming_rl.envs.animalai.curriculum import (
+    Arena,
+    ArenaSelector,
+    read_blackouts,
+    read_frozen_steps,
+    read_pass_mark,
+)
 from vla_streaming_rl.envs.animalai.render import (
     RENDER_SIZE_PX,
     draw_header,
@@ -75,6 +81,29 @@ def with_agent_skin(arena_yaml: str) -> str:
         + "      positions:\n      - !Vector3 {x: -1, y: 0, z: -1}\n      rotations: [-1]\n"
         + skin_line
     )
+
+
+# 暗転と停止は Python の側で行う項目。Unity の実装は、暗転の黒い画像がエージェントのカメラに
+# 映らず、停止は秒で数えてリセットをまたぐと解除されないことがあるので、Unity には送らない
+_PYTHON_SIDE_KEYS = ("blackouts:", "frozenAgentDelays:")
+
+
+def without_python_side_keys(arena_yaml: str) -> str:
+    """アリーナの yaml から、Python の側で行う暗転と停止の行を取り除いたもの。"""
+    return "".join(
+        line
+        for line in arena_yaml.splitlines(keepends=True)
+        if not line.lstrip().startswith(_PYTHON_SIDE_KEYS)
+    )
+
+
+def lights_on(blackouts: list[int], step: int) -> bool:
+    """エピソードの ``step`` ステップ目の観測が明るいか。``blackouts`` は Unity と同じ決まりで、
+    並べたステップを過ぎるたびに明暗が切り替わり、負の値1つならその間隔でくり返す。"""
+    if len(blackouts) == 1 and blackouts[0] < 0:
+        return (step // -blackouts[0]) % 2 == 0
+    assert all(b >= 0 for b in blackouts), blackouts
+    return sum(1 for b in blackouts if b <= step) % 2 == 0
 
 
 def _aai_environment_class(extra_args: list[str]) -> type:
@@ -188,6 +217,9 @@ class AnimalAIEnv(gym.Env):
         self.episode_step = 0
         self.arena_name: str = ""
         self.pass_mark: float = 0.0
+        # このエピソードの暗転の切り替えと、始めに止めておくステップ数
+        self._blackouts: list[int] = []
+        self._frozen_steps = 0
         self._arena: Arena | None = None
         self._episode_return = 0.0
         # (x, y, z) agent position in arena coords; populated each step from
@@ -338,6 +370,8 @@ class AnimalAIEnv(gym.Env):
         images = {"image": self._latest_image}
         if self.topdown_observation:
             images["topdown_image"] = self._latest_topdown_image
+        if not lights_on(self._blackouts, self.episode_step):
+            images = {name: np.zeros_like(image) for name, image in images.items()}
         return images
 
     def _build_info(self, shaped_reward: float) -> dict:
@@ -373,9 +407,12 @@ class AnimalAIEnv(gym.Env):
 
         self.arena_name = self._arena.name
         self.pass_mark = read_pass_mark(self._arena.path)
-        # yaml のパスではなく、自キャラクターの見た目を足した中身を送る
+        self._blackouts = read_blackouts(self._arena.path)
+        self._frozen_steps = read_frozen_steps(self._arena.path)
+        # yaml のパスではなく、暗転と停止の行を除き、自キャラクターの見た目を足した中身を送る
+        arena_yaml = without_python_side_keys(self._arena.path.read_text())
         self._aai.arenas_parameters_side_channel.send_raw_data(
-            bytearray(with_agent_skin(self._arena.path.read_text()), encoding="utf-8")
+            bytearray(with_agent_skin(arena_yaml), encoding="utf-8")
         )
         self._aai.reset()
         self.episode_step = 0
@@ -388,6 +425,9 @@ class AnimalAIEnv(gym.Env):
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict]:
         self.global_step += 1
         a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0).reshape(1, 2)
+        # 始めの ``_frozen_steps`` ステップは止めておく
+        if self.episode_step < self._frozen_steps:
+            a = np.zeros_like(a)
         # Both halves go out every step; which one Unity obeys was fixed at
         # launch by CONTINUOUS_ACTIONS_KEY. The slice is empty for an official
         # binary, which has no continuous actions to fill.

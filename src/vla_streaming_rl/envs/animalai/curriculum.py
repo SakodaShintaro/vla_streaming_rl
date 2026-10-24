@@ -78,6 +78,24 @@ def read_pass_mark(yaml_path: Path) -> float:
     return float(_load_arena_yaml(yaml_path).get("pass_mark", 0))
 
 
+def read_blackouts(yaml_path: Path) -> list[int]:
+    """アリーナの ``blackouts``（明暗を切り替えるステップの並び。負の値1つならその間隔で
+    くり返す）。書いていなければ空で、ずっと明るい。"""
+    arena = _load_arena_yaml(yaml_path)
+    return [int(v) for v in arena["blackouts"]] if "blackouts" in arena else []
+
+
+def read_frozen_steps(yaml_path: Path) -> int:
+    """Agent の項目の ``frozenAgentDelays``。Unity では秒だが、ここではエピソードの始めに
+    止めておくステップ数として読む。書いていなければ 0。"""
+    items = _load_arena_yaml(yaml_path)["items"]
+    agents = [item for item in items if item["name"] == "Agent"]
+    assert len(agents) <= 1, agents
+    if len(agents) == 0 or "frozenAgentDelays" not in agents[0]:
+        return 0
+    return int(agents[0]["frozenAgentDelays"][0])
+
+
 @dataclass(frozen=True)
 class Arena:
     """One arena yaml plus the label it is reported under (info, logs, render).

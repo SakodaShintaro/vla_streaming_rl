@@ -3,7 +3,8 @@ set -eux
 
 # Usage: ./train_animalai.sh <difficulty> <agent> <exp_name> [hydra overrides...]
 #   difficulty: easy    -> level 01 の variant 01 だけ（簡易な検証用）
-#               hardest -> 01-30-01 だけ（いちばん解けていないアリーナに集中する）
+#               1301    -> 13-01-01 だけ
+#               14      -> 暗転の課題 14-01-01（最初の 1 ステップだけ見える）
 #               normal  -> configs/env/animalai.yaml のデフォルト通り
 difficulty=${1}
 agent=${2}
@@ -51,11 +52,21 @@ case ${difficulty} in
       episode_limit=1200
     )
     ;;
+  14)
+    # 暗転の課題（scripts/make_blackout_arenas.py で作る 14-01-01）
+    difficulty_overrides=(
+      'env_factory.train_levels=["14"]'
+      'env_factory.train_variant="01"'
+      episode_limit=1200
+      # 1 エピソードは最大 100 ステップなので、最初に見た 1 枚が窓から外れないようにする
+      actor_critic.seq_len=100
+    )
+    ;;
   normal)
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301 or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14 or normal)" >&2
     exit 1
     ;;
 esac
