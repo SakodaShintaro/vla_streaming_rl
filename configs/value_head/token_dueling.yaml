@@ -8,6 +8,6 @@ mixer_heads: 4
 mixer_layer_scale_init: 0.0001
 hidden_dim: 1024
 block_num: 1
-num_bins: 1
+num_bins: 101
 sparsity: ${sparsity}
 detach_state: false

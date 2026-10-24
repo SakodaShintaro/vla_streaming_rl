@@ -10,6 +10,10 @@ from .head_output import HeadOutput
 from .self_attention import SpatialTransformerBlock, get_fourier_embeds_from_coordinates
 from .sparse_utils import apply_one_shot_pruning
 
+# 分布の critic のビンが覆う値の範囲の半幅。報酬の倍率 1 の 13-01 では、黄色 4 個（1.5 ずつ）と
+# 合格の緑（2.5）で収益の上限が 8.5 なので、それを覆う幅にする
+DISTRIBUTIONAL_VALUE_RANGE = 10.0
+
 
 class DistributionalValueHead(nn.Module):
     """Base for value heads: owns the HL-Gauss categorical-critic machinery so
@@ -53,6 +57,9 @@ class DistributionalValueHead(nn.Module):
         # the scalar (``num_bins == 1``) critic.
         self.register_buffer("value_ranges", torch.ones(self.num_gammas))
         if num_bins > 1:
+            # 範囲が学習の途中で広がると、ビンは [-1, 1] に固定なので全状態の値が一斉に
+            # 引き伸ばされる。初めから収益の上限を覆う幅にして、広がらないようにする
+            self.value_ranges.fill_(DISTRIBUTIONAL_VALUE_RANGE)
             # Fixed canonical support; per-gamma scale handled by value_ranges.
             self.hl_gauss_loss = HLGaussLoss(
                 min_value=-1.0,
