@@ -12,9 +12,10 @@ class SpatialTemporalEncoder(nn.Module):
 
     Every input the network has becomes tokens on a single axis -- the patch
     grid of every image, one after another, the previous action a token per
-    component, the reward, the interoceptive scalars and a register -- and
-    :class:`SpatialTemporalTransformer` mixes them across that axis and across
-    the window. The last step's whole axis is the state the heads read.
+    component, the reward, the interoceptive scalars and the registers -- and
+    :class:`SpatialTemporalTransformer` mixes them across that axis and, for
+    the registers alone, across the window. The last step's whole axis is the
+    state the heads read.
     """
 
     def __init__(
@@ -25,11 +26,15 @@ class SpatialTemporalEncoder(nn.Module):
         n_layer: int,
         action_dim: int,
         scalar_obs_dim: int,
+        register_num: int,
         temporal_model_type: str,
         layer_scale_init: float,
     ) -> None:
         super().__init__()
         self.n_layer = n_layer
+        # 時間方向の記憶を持つのは register だけ。他のトークンは各ステップの中で register と
+        # 混ざるだけで、過去のステップのトークンは読まない
+        self.register_num = register_num
 
         # The frozen encoder's (C, H, W) grid of each image, projected here to the
         # token width and read as [B, H * W, C'] tokens. 画像はどれも同じエンコーダの
@@ -49,7 +54,7 @@ class SpatialTemporalEncoder(nn.Module):
             + action_dim  # previous action, one token per component
             + 1  # reward
             + scalar_obs_dim  # interoceptive scalars
-            + 1  # register
+            + register_num  # registers, the only tokens mixed across time
         )
 
         self.spatial_temporal = SpatialTemporalTransformer(
@@ -59,6 +64,7 @@ class SpatialTemporalEncoder(nn.Module):
             hidden_dim=self.hidden_image_dim,
             n_head=1,
             temporal_model_type=temporal_model_type,
+            register_num=register_num,
             layer_scale_init=layer_scale_init,
         )
         self.spatial_temporal.compile(mode="reduce-overhead")
@@ -71,8 +77,8 @@ class SpatialTemporalEncoder(nn.Module):
         state_size = self.spatial_temporal.spatial_temporal_blocks[
             0
         ].tempo_block.get_rnn_state_size()
-        # [1, space_len, state_size, n_layer] (batch size 1)
-        return torch.zeros(1, self.space_len, state_size, self.n_layer)
+        # [1, register_num, state_size, n_layer] (batch size 1)
+        return torch.zeros(1, self.register_num, state_size, self.n_layer)
 
     def image_tokens(self, images: torch.Tensor) -> torch.Tensor:
         """保存した形の画像 (..., sum(image_features_sizes)) を射影したトークン
@@ -94,26 +100,28 @@ class SpatialTemporalEncoder(nn.Module):
         images: torch.Tensor,  # (B, T, sum(image_features_sizes)): the frozen encoder's output
         actions: torch.Tensor,  # (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
-        rnn_state: torch.Tensor,  # (B, space_len, state_size, n_layer)
+        rnn_state: torch.Tensor,  # (B, register_num, state_size, n_layer)
         scalar_tokens: torch.Tensor,  # (B, T, scalar_obs_dim, C'): the scalars already as tokens
         token_keep: torch.Tensor,  # (B, T, space_len) bool: which tokens are kept
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             encoded features: (B, output_dim)
-            rnn_state: (B, space_len, state_size, n_layer)
+            rnn_state: (B, register_num, state_size, n_layer)
         """
         B, T = images.shape[:2]
 
-        # External [B, space_len, state_size, n_layer] -> internal [1, B*space_len, ...]
-        rnn_state_internal = rnn_state.reshape(1, B * self.space_len, -1, self.n_layer)
+        # External [B, register_num, state_size, n_layer] -> internal [1, B*register_num, ...]
+        rnn_state_internal = rnn_state.reshape(1, B * self.register_num, -1, self.n_layer)
 
         image_embed = self.image_tokens(images)  # [B, T, S, C']
 
         action_embed = get_fourier_embeds_from_coordinates(self.hidden_image_dim, actions)
         reward_embed = embed_reward(rewards, self.hidden_image_dim)  # [B, T, 1, C']
         register_token = torch.zeros(
-            (B, T, 1, self.hidden_image_dim), device=images.device, dtype=images.dtype
+            (B, T, self.register_num, self.hidden_image_dim),
+            device=images.device,
+            dtype=images.dtype,
         )
 
         all_embed = torch.cat(
@@ -132,7 +140,7 @@ class SpatialTemporalEncoder(nn.Module):
             all_embed, rnn_state_internal
         )
         # CUDA グラフの出力は次の再生で上書きされるので、持ち越す状態は複製しておく
-        rnn_state = rnn_state_internal.reshape(B, self.space_len, -1, self.n_layer).clone()
+        rnn_state = rnn_state_internal.reshape(B, self.register_num, -1, self.n_layer).clone()
 
         # The last step's whole space axis is the state.
         state = self.output_norm(spatial_temporal_output[:, -1, :, :])

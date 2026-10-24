@@ -86,6 +86,7 @@ class ActorCriticWithActionValue(NetworkInterface):
             n_layer=actor_critic_config.encoder_block_num,
             action_dim=self.action_dim,
             scalar_obs_dim=self.scalar_obs_dim,
+            register_num=actor_critic_config.register_num,
             temporal_model_type=actor_critic_config.temporal_model_type,
             layer_scale_init=actor_critic_config.layer_scale_init,
         )
@@ -121,7 +122,7 @@ class ActorCriticWithActionValue(NetworkInterface):
                 torch.ones(self.encoder.image_tokens_num, dtype=torch.bool),  # 画像
                 torch.zeros(self.action_dim, dtype=torch.bool),  # 前の行動
                 torch.ones(1 + self.scalar_obs_dim, dtype=torch.bool),  # 報酬とスカラー
-                torch.zeros(1, dtype=torch.bool),  # register
+                torch.zeros(actor_critic_config.register_num, dtype=torch.bool),  # register
             ]
         )
         self.register_buffer("observation_token", observation_token, persistent=False)

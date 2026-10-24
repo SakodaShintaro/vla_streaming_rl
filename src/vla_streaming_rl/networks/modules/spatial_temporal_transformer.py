@@ -16,9 +16,12 @@ class SpatialTemporalBlock(nn.Module):
         temporal_model_type: str,
         tempo_len: int,
         space_len: int,
+        register_num: int,
         layer_scale_init: float,
     ) -> None:
         super().__init__()
+        # 時間方向に混ぜるのは、空間の軸の末尾の register_num 個のトークン（register）だけ
+        self.register_num = register_num
 
         if temporal_model_type == "mamba":
             self.tempo_block = MambaBlock(hidden_dim, layer_scale_init)
@@ -42,16 +45,19 @@ class SpatialTemporalBlock(nn.Module):
         """
         Args:
             x: [B, T, S, C]
-            rnn_state: [1, B*S, C] temporal block state
+            rnn_state: [1, B*R, C] temporal block state of the R registers
 
         Returns:
             x: [B, T, S, C]
-            rnn_state: [1, B*S, C] updated temporal block state
+            rnn_state: [1, B*R, C] updated temporal block state
         """
         b, t, s, c = x.shape
-        x = rearrange(x, "b t s c -> (b s) t c")
-        x, rnn_state = self.tempo_block(x, rnn_state)
-        x = rearrange(x, "(b s) t c -> (b t) s c", b=b, s=s, t=t)
+        r = self.register_num
+        registers = rearrange(x[:, :, s - r :], "b t r c -> (b r) t c")
+        registers, rnn_state = self.tempo_block(registers, rnn_state)
+        registers = rearrange(registers, "(b r) t c -> b t r c", b=b, r=r)
+        x = torch.cat([x[:, :, : s - r], registers], dim=2)
+        x = rearrange(x, "b t s c -> (b t) s c")
         x = self.space_block(x)
         x = rearrange(x, "(b t) s c -> b t s c", b=b, t=t)
         return x, rnn_state
@@ -66,6 +72,7 @@ class SpatialTemporalTransformer(nn.Module):
         hidden_dim: int,
         n_head: int,
         temporal_model_type: str,
+        register_num: int,
         layer_scale_init: float,
     ) -> None:
         super().__init__()
@@ -86,6 +93,7 @@ class SpatialTemporalTransformer(nn.Module):
                     temporal_model_type,
                     tempo_len,
                     space_len,
+                    register_num,
                     layer_scale_init,
                 )
                 for _ in range(self.n_layer)
@@ -111,12 +119,12 @@ class SpatialTemporalTransformer(nn.Module):
 
         Args:
             x: [B, T, S, C]
-            rnn_state: [1, B*S, state_size, n_layer]
+            rnn_state: [1, B*R, state_size, n_layer], R being the registers
                 state_size depends on temporal_model_type (C for GRU/Transformer/Mamba, cache_size for GDN)
 
         Returns:
             out: [B, T, S, C]
-            rnn_state: [1, B*S, state_size, n_layer]
+            rnn_state: [1, B*R, state_size, n_layer]
         """
         B, T, S, C = x.shape
 
@@ -129,7 +137,7 @@ class SpatialTemporalTransformer(nn.Module):
             out, new_state = self.spatial_temporal_blocks[i](out, rnn_state[:, :, :, i])
             new_layer_states.append(new_state)
 
-        # Combine each layer's state: n_layer of [1, B*S, state_size] -> [1, B*S, state_size, n_layer]
+        # Combine each layer's state: n_layer of [1, B*R, state_size] -> [1, B*R, state_size, n_layer]
         rnn_state = torch.stack(new_layer_states, dim=-1)
 
         return out, rnn_state
