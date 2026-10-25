@@ -42,7 +42,7 @@ actor_critic:
   # 時間方向に混ぜる register のトークンの数。時間方向の記憶はこのトークンだけが持つ
   register_num: 8
   temporal_model_type: gdn
-  layer_scale_init: 0.0001
+  layer_scale_init: 0.1
   token_dropout: 0.0
   # 学習時に系列ごとに 0 からこの数までの一様なステップ数を引き、最新の方からその数の
   # ステップの観測（画像・報酬・スカラー）を落とす。行動は落とさない
