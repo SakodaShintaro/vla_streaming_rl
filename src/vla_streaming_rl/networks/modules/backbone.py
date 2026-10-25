@@ -23,7 +23,8 @@ class SpatialTemporalEncoder(nn.Module):
         image_features_shapes: list[tuple[int, int, int]],
         image_latent_dim: int,
         seq_len: int,
-        n_layer: int,
+        spatial_block_num: int,
+        temporal_block_num: int,
         action_dim: int,
         scalar_obs_dim: int,
         register_num: int,
@@ -31,9 +32,9 @@ class SpatialTemporalEncoder(nn.Module):
         layer_scale_init: float,
     ) -> None:
         super().__init__()
-        self.n_layer = n_layer
-        # 時間方向の記憶を持つのは register だけ。他のトークンは各ステップの中で register と
-        # 混ざるだけで、過去のステップのトークンは読まない
+        self.temporal_block_num = temporal_block_num
+        # 時間方向の記憶を持つのは register だけ。他のトークンは各ステップの中で混ざるだけで、
+        # 過去のステップは読まない
         self.register_num = register_num
 
         # The frozen encoder's (C, H, W) grid of each image, projected here to the
@@ -58,7 +59,8 @@ class SpatialTemporalEncoder(nn.Module):
         )
 
         self.spatial_temporal = SpatialTemporalTransformer(
-            n_layer=n_layer,
+            spatial_block_num=spatial_block_num,
+            temporal_block_num=temporal_block_num,
             space_len=self.space_len,
             tempo_len=seq_len,
             hidden_dim=self.hidden_image_dim,
@@ -74,11 +76,9 @@ class SpatialTemporalEncoder(nn.Module):
         self.output_dim = self.hidden_image_dim * self.space_len
 
     def init_state(self) -> torch.Tensor:
-        state_size = self.spatial_temporal.spatial_temporal_blocks[
-            0
-        ].tempo_block.get_rnn_state_size()
-        # [1, register_num, state_size, n_layer] (batch size 1)
-        return torch.zeros(1, self.register_num, state_size, self.n_layer)
+        state_size = self.spatial_temporal.temporal_blocks[0].get_rnn_state_size()
+        # [1, register_num, state_size, temporal_block_num] (batch size 1)
+        return torch.zeros(1, self.register_num, state_size, self.temporal_block_num)
 
     def image_tokens(self, images: torch.Tensor) -> torch.Tensor:
         """保存した形の画像 (..., sum(image_features_sizes)) を射影したトークン
@@ -100,19 +100,22 @@ class SpatialTemporalEncoder(nn.Module):
         images: torch.Tensor,  # (B, T, sum(image_features_sizes)): the frozen encoder's output
         actions: torch.Tensor,  # (B, T, action_dim)
         rewards: torch.Tensor,  # (B, T, 1)
-        rnn_state: torch.Tensor,  # (B, register_num, state_size, n_layer)
+        rnn_state: torch.Tensor,  # (B, register_num, state_size, temporal_block_num)
         scalar_tokens: torch.Tensor,  # (B, T, scalar_obs_dim, C'): the scalars already as tokens
         token_keep: torch.Tensor,  # (B, T, space_len) bool: which tokens are kept
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             encoded features: (B, output_dim)
-            rnn_state: (B, register_num, state_size, n_layer)
+            rnn_state: (B, register_num, state_size, temporal_block_num)
         """
         B, T = images.shape[:2]
 
-        # External [B, register_num, state_size, n_layer] -> internal [1, B*register_num, ...]
-        rnn_state_internal = rnn_state.reshape(1, B * self.register_num, -1, self.n_layer)
+        # External [B, register_num, state_size, temporal_block_num]
+        # -> internal [1, B*register_num, ...]
+        rnn_state_internal = rnn_state.reshape(
+            1, B * self.register_num, -1, self.temporal_block_num
+        )
 
         image_embed = self.image_tokens(images)  # [B, T, S, C']
 
@@ -140,7 +143,9 @@ class SpatialTemporalEncoder(nn.Module):
             all_embed, rnn_state_internal
         )
         # CUDA グラフの出力は次の再生で上書きされるので、持ち越す状態は複製しておく
-        rnn_state = rnn_state_internal.reshape(B, self.register_num, -1, self.n_layer).clone()
+        rnn_state = rnn_state_internal.reshape(
+            B, self.register_num, -1, self.temporal_block_num
+        ).clone()
 
         # The last step's whole space axis is the state.
         state = self.output_norm(spatial_temporal_output[:, -1, :, :])

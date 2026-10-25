@@ -38,7 +38,10 @@ actor_critic:
   # トークンの数 * token_dim
   token_dim: 64
   disable_state_predictor: false
-  encoder_block_num: 8
+  # 空間方向のブロックで各ステップの全トークンを混ぜ切ってから、register だけに時間方向の
+  # ブロックを重ねる
+  spatial_block_num: 8
+  temporal_block_num: 4
   # 時間方向に混ぜる register のトークンの数。時間方向の記憶はこのトークンだけが持つ
   register_num: 8
   temporal_model_type: gdn
