@@ -84,3 +84,8 @@ env_factory:
   #   return, enough to drop a passing score back under the mark. Applies to
   #   eval too, so the Testbed score is not the 2019 competition's.
   end_at_pass_mark: true
+  # - blink_dark_steps_increment: 正なら記憶の課題に作り変える。始めの 10 ステップは明るく
+  #   見えていて動けず、その後は n ステップの暗転と 1 ステップだけ明るい観測をくり返す。n は
+  #   アリーナごとに 0 から始め、そのアリーナをクリアするたびにこの数だけ増やす（wandb の
+  #   blink_dark_steps/<アリーナ>）。アリーナの yaml の暗転と停止は使わない。0 なら何も変えない
+  blink_dark_steps_increment: 0

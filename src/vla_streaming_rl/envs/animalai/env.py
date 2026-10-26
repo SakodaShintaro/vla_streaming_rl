@@ -106,6 +106,19 @@ def lights_on(blackouts: list[int], step: int) -> bool:
     return sum(1 for b in blackouts if b <= step) % 2 == 0
 
 
+# 点滅の課題（``blink_dark_steps_increment`` が正）で、エピソードの始めに明るいまま止めておくステップ数
+BLINK_FROZEN_STEPS = 10
+
+
+def blink_lights_on(dark_steps: int, step: int) -> bool:
+    """点滅の課題で、エピソードの ``step`` ステップ目の観測が明るいか。始めの
+    ``BLINK_FROZEN_STEPS`` ステップは明るく、その後は ``dark_steps`` ステップの暗転と 1 ステップの
+    明るい観測をくり返す。``dark_steps`` が 0 ならずっと明るい。"""
+    if step < BLINK_FROZEN_STEPS:
+        return True
+    return (step - BLINK_FROZEN_STEPS) % (dark_steps + 1) == dark_steps
+
+
 def _aai_environment_class(extra_args: list[str]) -> type:
     """`AnimalAIEnvironment` subclass that actually passes `extra_args` to Unity.
 
@@ -169,6 +182,7 @@ class AnimalAIEnv(gym.Env):
         topdown_observation: bool,
         colored_walls: bool,
         end_at_pass_mark: bool,
+        blink_dark_steps_increment: int,
         selector: ArenaSelector,
     ):
         super().__init__()
@@ -180,6 +194,14 @@ class AnimalAIEnv(gym.Env):
         self.topdown_observation = topdown_observation
         self.colored_walls = colored_walls
         self.end_at_pass_mark = end_at_pass_mark
+        # 点滅の課題。アリーナごとに暗転のステップ数 n を 0 から始め、クリアするたびに
+        # blink_dark_steps_increment だけ増やす。0 なら点滅の課題にしない
+        assert blink_dark_steps_increment >= 0, blink_dark_steps_increment
+        self.blink_dark_steps_increment = blink_dark_steps_increment
+        self.blink_memory = blink_dark_steps_increment > 0
+        self._blink_dark_steps = {arena.name: 0 for arena in selector.arenas}
+        # このエピソードの n。クリアで増えた値は次のエピソードから使う
+        self._episode_dark_steps = 0
         self.selector = selector
 
         self.binary_path = str(Path(binary_path).expanduser())
@@ -247,11 +269,21 @@ class AnimalAIEnv(gym.Env):
         self.global_step = int(global_step)
 
     def get_curriculum_state(self) -> dict:
-        return self.selector.state()
+        state = self.selector.state()
+        # 点滅の課題の進み具合も再開に要るので、カリキュラムの進み具合と一緒に書く
+        state["progress"]["blink_dark_steps"] = dict(self._blink_dark_steps)
+        return state
 
     def set_curriculum_state(
         self, arena_attempts: dict, arena_successes: dict, progress: dict
     ) -> None:
+        self._blink_dark_steps.update(
+            {
+                name: int(n)
+                for name, n in progress["blink_dark_steps"].items()
+                if name in self._blink_dark_steps
+            }
+        )
         self.selector.load_state(arena_attempts, arena_successes, progress)
 
     def _ensure_started(self):
@@ -370,7 +402,12 @@ class AnimalAIEnv(gym.Env):
         images = {"image": self._latest_image}
         if self.topdown_observation:
             images["topdown_image"] = self._latest_topdown_image
-        if not lights_on(self._blackouts, self.episode_step):
+        lit = (
+            blink_lights_on(self._episode_dark_steps, self.episode_step)
+            if self.blink_memory
+            else lights_on(self._blackouts, self.episode_step)
+        )
+        if not lit:
             images = {name: np.zeros_like(image) for name, image in images.items()}
         return images
 
@@ -390,6 +427,9 @@ class AnimalAIEnv(gym.Env):
             "topdown_image": self._latest_topdown_image,
         }
         info.update(self.selector.info(self.global_step))
+        if self.blink_memory:
+            # このアリーナで今いる暗転のステップ数。終わったエピソードでは、クリアで増えた後の値
+            info["blink_dark_steps"] = self._blink_dark_steps[self.arena_name]
         return info
 
     def reset(self, seed: int | None, options: dict | None) -> tuple[dict, dict]:
@@ -409,6 +449,11 @@ class AnimalAIEnv(gym.Env):
         self.pass_mark = read_pass_mark(self._arena.path)
         self._blackouts = read_blackouts(self._arena.path)
         self._frozen_steps = read_frozen_steps(self._arena.path)
+        if self.blink_memory:
+            # 点滅の課題はアリーナの暗転と停止を置き換えるので、アリーナには書いていないものに限る
+            assert self._blackouts == [] and self._frozen_steps == 0, self.arena_name
+            self._frozen_steps = BLINK_FROZEN_STEPS
+            self._episode_dark_steps = self._blink_dark_steps[self._arena.name]
         # yaml のパスではなく、暗転と停止の行を除き、自キャラクターの見た目を足した中身を送る
         arena_yaml = without_python_side_keys(self._arena.path.read_text())
         self._aai.arenas_parameters_side_channel.send_raw_data(
@@ -467,6 +512,8 @@ class AnimalAIEnv(gym.Env):
         if done:
             # Before _build_info, so the selector reports post-episode progress.
             self.selector.on_episode_end(self._arena, success)
+            if self.blink_memory and success:
+                self._blink_dark_steps[self.arena_name] += self.blink_dark_steps_increment
         info = self._build_info(shaped_reward)
         if done:
             info["success"] = bool(success)
@@ -486,6 +533,8 @@ class AnimalAIEnv(gym.Env):
             f"{self.arena_name}  {successes}/{attempts}",
             self.selector.status(self.global_step),
         ]
+        if self.blink_memory:
+            header_lines.append(f"dark steps: {self._blink_dark_steps[self.arena_name]}")
         panes = [draw_header(header_lines, RENDER_SIZE_PX)]
         if self._latest_topdown_image is not None and not self.topdown_observation:
             panes.append(fit_square(self._latest_topdown_image, RENDER_SIZE_PX))

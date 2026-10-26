@@ -28,6 +28,7 @@ def make_animalai_env(
     topdown_observation: bool,
     colored_walls: bool,
     end_at_pass_mark: bool,
+    blink_dark_steps_increment: int,
     seed: int,
 ) -> gym.Env:
     from vla_streaming_rl.envs.animalai.curriculum import build_selector
@@ -55,6 +56,7 @@ def make_animalai_env(
         topdown_observation=topdown_observation,
         colored_walls=colored_walls,
         end_at_pass_mark=end_at_pass_mark,
+        blink_dark_steps_increment=blink_dark_steps_increment,
         selector=selector,
     )
 

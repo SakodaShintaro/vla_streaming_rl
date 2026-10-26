@@ -5,6 +5,7 @@ set -eux
 #   difficulty: easy    -> level 01 の variant 01 だけ（簡易な検証用）
 #               1301    -> 13-01-01 だけ
 #               14      -> 暗転の課題 14-01-01（最初の 1 ステップだけ見える）
+#               blink   -> level 01 を点滅の記憶の課題にしたもの（env_factory.blink_dark_steps_increment）
 #               normal  -> configs/env/animalai.yaml のデフォルト通り
 difficulty=${1}
 agent=${2}
@@ -62,11 +63,21 @@ case ${difficulty} in
       actor_critic.seq_len=100
     )
     ;;
+  blink)
+    # 点滅の記憶の課題に作り変えたレベル 01（configs/env/animalai.yaml の blink_dark_steps_increment）
+    difficulty_overrides=(
+      'env_factory.train_levels=["01"]'
+      'env_factory.train_variant="01"'
+      env_factory.blink_dark_steps_increment=1
+      episode_limit=1200
+      actor_critic.seq_len=100
+    )
+    ;;
   normal)
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14 or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, blink or normal)" >&2
     exit 1
     ;;
 esac
