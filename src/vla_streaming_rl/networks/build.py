@@ -36,6 +36,7 @@ def build_network(
             action_space_shape=action_space_shape,
             value_head_factory=value_head_factory,
             critic_loss_weight=args.critic_loss_weight,
+            q_lambda=args.q_lambda,
             prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
             actor_critic_config=args.actor_critic,
             horizon=args.horizon,

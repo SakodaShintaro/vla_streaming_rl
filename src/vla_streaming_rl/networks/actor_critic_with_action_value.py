@@ -20,6 +20,9 @@ from vla_streaming_rl.networks.modules.value_head import DistributionalValueHead
 from vla_streaming_rl.networks.modules.vlm_encoder import STATE_SCALAR_INDICES
 from vla_streaming_rl.replay_buffer import ReplayBufferData
 
+# 窓の優先度で |TD 誤差| の最大にかける重み（R2D2, Kapturowski et al. 2019 の η）
+PRIORITY_ETA = 0.9
+
 
 @dataclass
 class LossTerms:
@@ -35,6 +38,8 @@ class LossTerms:
     next_action: torch.Tensor
     next_critic_output: torch.Tensor
     td_error: torch.Tensor
+    # 窓の最後の遷移の TD 誤差（Eligibility trace が使う）
+    last_delta: float
 
 
 class ActorCriticWithActionValue(NetworkInterface):
@@ -45,6 +50,7 @@ class ActorCriticWithActionValue(NetworkInterface):
         action_space_shape: tuple[int],
         value_head_factory: Callable[[int, int], DistributionalValueHead],
         critic_loss_weight: float,
+        q_lambda: float,
         prediction_head_factory,
         actor_critic_config: DictConfig,
         horizon: int,
@@ -53,6 +59,8 @@ class ActorCriticWithActionValue(NetworkInterface):
         super().__init__()
         self.seq_len = actor_critic_config.seq_len
         self.critic_loss_weight = critic_loss_weight
+        assert 0.0 <= q_lambda <= 1.0, q_lambda
+        self.q_lambda = q_lambda
 
         self.action_dim = action_space_shape[0]
 
@@ -195,7 +203,8 @@ class ActorCriticWithActionValue(NetworkInterface):
                 dtype=torch.bool,
                 device=data.s_seq.device,
             ),
-        )  # (B, state_dim)
+        )
+        x = x[:, -1]  # (B, state_dim)
 
         # Get action chunk from policy_head
         action = self.policy_head.get_action(x)  # (B, horizon, action_dim)
@@ -284,49 +293,73 @@ class ActorCriticWithActionValue(NetworkInterface):
                 # Actor-only loss (no critic component)
                 actor_entropy_loss=terms.actor_loss,
                 neg_value=neg_value_detached,
-                delta=terms.info["losses/delta"],
+                delta=terms.last_delta,
             ),
         )
 
     def _loss_terms(self, data: ReplayBufferData) -> LossTerms:
-        """リプレイバッチの損失。現在の状態はチャンクの手前までの窓から、次の状態は
-        チャンクの分だけ進めた窓から作る。"""
-        # Bootstrap value: Q(s', μ(s')) on the next-state window, no grad.
-        # ターゲットは観測を落とさない次状態から作る
+        """リプレイバッチの損失。窓の各ステップ t の状態から、次の行に保存した行動・報酬・終端
+        への遷移をすべて学習する（R2D2 と同じく窓全体で学習する）。critic の目標は Peng の
+        Q(λ) で、窓の中の後の報酬を直接取り込む。"""
+        assert self.horizon == 1, f"the per-step λ-return needs horizon 1; got {self.horizon}"
+        # 目標は観測を落とさない窓全体から、勾配なしで作る。時間方向の層は因果的なので、
+        # ステップ t の状態は学習の側と同じものになる
         with torch.no_grad():
-            next_state, next_rnn_state = self.encoder(*self._window(data, self.horizon, None, 0))
-            next_action = self.policy_head.get_action(next_state)
-            next_critic_output = self.value_head(next_state, next_action).output
-        target_value = self.value_head.compute_target_value(
-            next_critic_output, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
-        )
+            target_states, next_rnn_state = self.encoder(*self._window(data, 0, None, 0))
+            next_states = target_states[:, 1:]  # (B, T-1, state_dim)
+            batch_size, steps = next_states.shape[:2]
+            next_actions = self.policy_head.get_action(next_states.flatten(0, 1))
+            next_critic_output = self.value_head(next_states.flatten(0, 1), next_actions).output
+            next_critic_output = next_critic_output.view(
+                batch_size, steps, *next_critic_output.shape[1:]
+            )
+            next_actions = next_actions.view(batch_size, steps, *next_actions.shape[1:])
+        target_value = self.value_head.compute_lambda_target(
+            next_critic_output, data.rewards[:, 1:, 0], data.dones[:, 1:, 0], self.q_lambda
+        )  # (B, T-1, num_gammas)
 
-        state, _ = self.encoder(
-            *self._window(data, 0, -self.horizon, self.observation_drop_steps_max)
-        )
-        action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
-        critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
-            state, action_chunk, target_value, data.weights
+        states, _ = self.encoder(
+            *self._window(data, 0, -1, self.observation_drop_steps_max)
+        )  # (B, T-1, state_dim)
+        # 終端の観測の行からの遷移は次のエピソードの行動につながるので学習しない
+        valid = data.dones[:, :-1, 0] == 0  # (B, T-1)
+        action_chunks = data.actions[:, 1:].unsqueeze(2)  # (B, T-1, horizon, action_dim)
+        weights = data.weights.unsqueeze(1).expand(-1, steps)
+        critic_loss, critic_info, deltas = self.value_head.compute_critic_loss(
+            states[valid], action_chunks[valid], target_value[valid], weights[valid]
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
-            state, action_chunk, value_head=self.value_head
+            states[valid], action_chunks[valid], value_head=self.value_head
         )
+        delta_grid = torch.zeros_like(weights)
+        delta_grid[valid] = deltas
+        # 窓の優先度は R2D2 と同じく、遷移の |TD 誤差| の最大と平均を混ぜたもの
+        abs_grid = delta_grid.abs()
+        td_error = PRIORITY_ETA * abs_grid.amax(dim=1) + (1.0 - PRIORITY_ETA) * (
+            abs_grid.sum(dim=1) / valid.sum(dim=1)
+        )
+
+        # 予測の損失・Eligibility trace・推論は、これまでどおり窓の最後の遷移で扱う
+        state = states[:, -1]
+        next_state = target_states[:, -1]
+        next_action = next_actions[:, -1]
         seq_loss, seq_info = self._prediction_loss(state, data, next_state, next_action)
         info = {
             f"losses/{key}": value
             for key, value in {**critic_info, **actor_info, **seq_info}.items()
         }
-        info.update(self._state_grad_info(state, critic_loss, seq_loss))
+        info.update(self._state_grad_info(states, critic_loss, seq_loss))
         return LossTerms(
             total_loss=self.critic_loss_weight * critic_loss + actor_loss + seq_loss,
             # 将来の状態の予測の損失は actor 側に入れる
             actor_loss=actor_loss + seq_loss,
             info=info,
             state=state,
-            action_chunk=action_chunk,
+            action_chunk=data.actions[:, -self.horizon :],
             next_state=next_state,
             next_rnn_state=next_rnn_state,
             next_action=next_action,
-            next_critic_output=next_critic_output,
+            next_critic_output=next_critic_output[:, -1],
             td_error=td_error,
+            last_delta=delta_grid[:, -1].mean().item(),
         )

@@ -45,6 +45,9 @@ print_interval: 5
 debug: false
 use_eligibility_trace: true
 et_lambda: 0.5
+# off-policy の STD の critic の目標に使う Peng の Q(λ) の λ。0 で 1 ステップの TD、1 で
+# 窓の終わりまでの収益（途中の行動は補正しない）
+q_lambda: 0.9
 
 replay_buffer:
   device: cpu

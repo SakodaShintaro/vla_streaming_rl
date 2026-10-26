@@ -5,6 +5,6 @@ gamma: ${gamma}
 multi_gammas: ${multi_gammas}
 hidden_dim: 1024
 block_num: 1
-num_bins: 1
+num_bins: 101
 sparsity: ${sparsity}
 detach_state: false

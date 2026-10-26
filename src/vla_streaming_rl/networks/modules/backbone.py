@@ -14,8 +14,8 @@ class SpatialTemporalEncoder(nn.Module):
     grid of every image, one after another, the previous action a token per
     component, the reward, the interoceptive scalars and the registers -- and
     :class:`SpatialTemporalTransformer` mixes them across that axis and, for
-    the registers alone, across the window. The last step's whole axis is the
-    state the heads read.
+    the registers alone, across the window. Each step's registers are the
+    state the heads read at that step.
     """
 
     def __init__(
@@ -71,9 +71,11 @@ class SpatialTemporalEncoder(nn.Module):
         )
         self.spatial_temporal.compile(mode="reduce-overhead")
 
-        # 残差の大きさはトークンの種類ごとに大きく違うので、ヘッドに渡す前にトークンごとに揃える
+        # ヘッドに渡す前に register をトークンごとに揃える
         self.output_norm = nn.LayerNorm(self.hidden_image_dim)
-        self.output_dim = self.hidden_image_dim * self.space_len
+        # ヘッドが読むのは最後のステップの register だけ。観測のトークンの情報も register を
+        # 通してしか状態に入らない
+        self.output_dim = self.hidden_image_dim * self.register_num
 
     def init_state(self) -> torch.Tensor:
         state_size = self.spatial_temporal.temporal_blocks[0].get_rnn_state_size()
@@ -106,7 +108,7 @@ class SpatialTemporalEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
-            encoded features: (B, output_dim)
+            encoded features: (B, T, output_dim), the state at every step of the window
             rnn_state: (B, register_num, state_size, temporal_block_num)
         """
         B, T = images.shape[:2]
@@ -147,6 +149,7 @@ class SpatialTemporalEncoder(nn.Module):
             B, self.register_num, -1, self.temporal_block_num
         ).clone()
 
-        # The last step's whole space axis is the state.
-        state = self.output_norm(spatial_temporal_output[:, -1, :, :])
-        return state.flatten(start_dim=1), rnn_state
+        # Each step's registers are the state at that step. 時間方向の層は因果的なので、
+        # ステップ t の状態はステップ t までしか読まない
+        state = self.output_norm(spatial_temporal_output[:, :, -self.register_num :, :])
+        return state.flatten(start_dim=2), rnn_state

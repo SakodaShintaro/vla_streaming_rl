@@ -186,6 +186,35 @@ class DistributionalValueHead(nn.Module):
             continuing = continuing * (1 - chunk_dones[:, i].view(batch_size, 1))
         return discounted_reward + continuing * gamma_power.unsqueeze(0) * next_q
 
+    @torch.no_grad()
+    def compute_lambda_target(
+        self,
+        next_output: torch.Tensor,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        q_lambda: float,
+    ) -> torch.Tensor:
+        """Peng の Q(λ)（Peng & Williams 1996; Kozuno et al. 2021）の目標 ``(B, T, num_gammas)``。
+
+        遷移 t の報酬と終端が ``rewards[:, t]``・``dones[:, t]`` ``(B, T)``、その次の状態で
+        今の方策が選ぶ行動の Q が ``next_output`` ``(B, T, num_gammas, num_bins)``。後ろから
+        ``G_t = r_t + γ (1 - d_t) [(1 - λ) Q(s_{t+1}, π(s_{t+1})) + λ G_{t+1}]`` と遡り、
+        最後の遷移は 1 ステップの TD にする。重要度の比で切らないので、確率密度を出せない
+        方策でも使える。
+        """
+        assert self.horizon == 1, f"the λ-return needs horizon 1; got {self.horizon}"
+        batch_size, steps = rewards.shape
+        next_q = self.to_values(next_output.flatten(0, 1)).view(batch_size, steps, -1)
+        gammas = self.gammas_tensor.to(rewards.device)  # (G,)
+        targets = torch.empty_like(next_q)
+        bootstrap = next_q[:, -1]
+        for t in reversed(range(steps)):
+            if t < steps - 1:
+                bootstrap = (1.0 - q_lambda) * next_q[:, t] + q_lambda * targets[:, t + 1]
+            continuing = (1.0 - dones[:, t]).unsqueeze(-1) * gammas  # (B, G)
+            targets[:, t] = rewards[:, t].unsqueeze(-1) + continuing * bootstrap
+        return targets
+
     def compute_critic_loss(
         self,
         state: torch.Tensor,
