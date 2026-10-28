@@ -202,6 +202,9 @@ def build_episode_log(
         if arena_name:
             data_dict[f"success/{arena_name}"] = success
             data_dict[f"episodic_return/{arena_name}"] = score
+        if "blink_dark_steps" in env_info:
+            # 点滅の課題で、このアリーナがどこまで暗転を伸ばせたか
+            data_dict[f"blink_dark_steps/{arena_name}"] = env_info["blink_dark_steps"]
         if mode in ("sequential", "random"):
             data_dict["cleared_count"] = env_info["cleared_count"]
             data_dict["round_index"] = env_info["round_index"]
