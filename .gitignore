@@ -7,3 +7,4 @@ outputs/
 *.egg-info
 cache
 CLAUDE.md
+.claude/
