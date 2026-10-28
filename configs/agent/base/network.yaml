@@ -36,16 +36,11 @@ actor_critic:
   seq_len: 50
   # 1ステップのトークン（画像・前の行動・報酬・スカラー・register）の幅。状態の幅は
   # トークンの数 * token_dim
-  token_dim: 64
+  token_dim: 16
   disable_state_predictor: false
-  # 空間方向のブロックで各ステップの全トークンを混ぜ切ってから、register だけに時間方向の
-  # ブロックを重ねる
-  spatial_block_num: 8
-  temporal_block_num: 4
-  # 時間方向に混ぜる register のトークンの数。時間方向の記憶はこのトークンだけが持つ
-  register_num: 8
+  encoder_block_num: 8
   temporal_model_type: gdn
-  layer_scale_init: 0.1
+  layer_scale_init: 0.0001
   token_dropout: 0.0
   # 学習時に系列ごとに 0 からこの数までの一様なステップ数を引き、最新の方からその数の
   # ステップの観測（画像・報酬・スカラー）を落とす。行動は落とさない

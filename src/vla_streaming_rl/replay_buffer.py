@@ -23,9 +23,7 @@ class ReplayBufferData:
     observations: torch.Tensor  # (B, T, obs_shape) image only
     rewards: torch.Tensor  # (B, T)
     dones: torch.Tensor  # (B, T)
-    rnn_state: (
-        torch.Tensor
-    )  # (B, min(T, horizon + 1), register_num, state_size, temporal_block_num)
+    rnn_state: torch.Tensor  # (B, min(T, horizon + 1), space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
     scalar_obs: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
     # 窓の先頭の行。学習の後に、その窓の TD 誤差で優先度を更新するのに使う
