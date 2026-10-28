@@ -1,8 +1,8 @@
-"""Summarize last_round_success_rate (max / mean over closed rounds) of an Animal-AI run.
+"""Summarize last_round_success_rate (max / mean / mean of the last 5 rounds) over closed rounds of an Animal-AI run.
 
 Usage:
-    uv run python local/round_success_summary.py tsv <result_dir>
-    uv run python local/round_success_summary.py wandb <run_id>
+    uv run python ralph/round_success_summary.py tsv <result_dir>
+    uv run python ralph/round_success_summary.py wandb <run_id>
 
 tsv reads <result_dir>/log_episode.tsv. Its columns are fixed by the first episode,
 which has no last_round_success_rate, so the closed rounds are taken as the rows
