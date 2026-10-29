@@ -250,8 +250,9 @@ class ChunkGatedDeltaNetLayer(nn.Module):
     状態（再帰の行列と短い畳み込みの直前の入力）は平らなテンソルで出し入れする。長い系列も
     チャンクに分けて解くので、トークンを何千も並べた系列を通せる。
 
-    ``attention_mask`` (B, T) の 0 の位置は読まない。0 は系列の先頭にだけ置き、そこから
-    状態を始め直す系列は、渡す状態も 0 にしておく。
+    系列ごとに ``start`` の位置から状態を 0 に戻して読み直す。各系列を ``start`` の前と後の
+    2本に分けて詰めて通すので、形はいつも同じになる。詰めた長さが変わると Triton の
+    カーネルが作り直されて、1回に数十秒かかる。
 
     Args:
         hidden_dim: Hidden dimension
@@ -314,18 +315,27 @@ class ChunkGatedDeltaNetLayer(nn.Module):
         self,
         x: torch.Tensor,  # [B, T, C]
         rnn_state: torch.Tensor,  # [B, cache_size]
-        attention_mask: torch.Tensor,  # [B, T] bool
+        start: torch.Tensor,  # [B] long
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cache = self._unflatten_cache(rnn_state, x.dtype)
+        B, T, C = x.shape
+        # 前の1本は渡した状態から、後の1本は start が 0 なら渡した状態から、そうでなければ
+        # 0 から始める
+        lengths = torch.stack([start, T - start], dim=1).flatten()
+        cu_seqlens = F.pad(lengths.cumsum(dim=0), (1, 0)).to(torch.int32)
+        restart = (start == 0).unsqueeze(-1).to(rnn_state.dtype)
+        initial_state = torch.stack([rnn_state, rnn_state * restart], dim=1).flatten(0, 1)
+        cache = self._unflatten_cache(initial_state, x.dtype)
         output, _, cache = self.gdn(
-            x, attention_mask=attention_mask, past_key_values=cache, use_cache=True
+            x.reshape(1, B * T, C), past_key_values=cache, use_cache=True, cu_seqlens=cu_seqlens
         )
-        return output, self._flatten_cache(cache)
+        final_state = self._flatten_cache(cache).view(B, 2, -1)[:, 1]
+        return output.view(B, T, -1), final_state
 
 
 class GatedDeltaNetStream(nn.Module):
     """
     :class:`ChunkGatedDeltaNetLayer` を ``n_layer`` 段重ねた、1本の因果的な系列を読む幹。
+    系列ごとに ``start`` の位置から状態を 0 に戻して読み直す。
 
     各段は Norm -> GatedDeltaNet -> 残差、Norm -> MLP -> 残差。状態は段ごとの平らな状態を
     並べた [B, n_layer, cache_size]。
@@ -359,13 +369,11 @@ class GatedDeltaNetStream(nn.Module):
         self,
         x: torch.Tensor,  # [B, T, C]
         rnn_state: torch.Tensor,  # [B, n_layer, cache_size]
-        attention_mask: torch.Tensor,  # [B, T] bool
+        start: torch.Tensor,  # [B] long
     ) -> tuple[torch.Tensor, torch.Tensor]:
         new_states = []
         for i, temporal in enumerate(self.temporals):
-            temporal_output, new_state = temporal(
-                self.temporal_norms[i](x), rnn_state[:, i], attention_mask
-            )
+            temporal_output, new_state = temporal(self.temporal_norms[i](x), rnn_state[:, i], start)
             x = x + temporal_output
             x = x + self.mlps[i](self.mlp_norms[i](x))
             new_states.append(new_state)

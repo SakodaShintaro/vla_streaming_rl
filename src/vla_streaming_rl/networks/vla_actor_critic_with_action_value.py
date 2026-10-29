@@ -206,17 +206,16 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         ``rnn_state`` (B, trunk_layers, cache_size) から幹に通す。各ステップのクエリの位置の
         出力 (B, T, num_queries, token_dim) と、窓を読んだ後の状態を返す。
 
-        ``episode_rows`` (B, T) は窓の最後のステップと同じエピソードのステップ。それより前の
-        ステップは読まず、そうしたステップのある系列は状態を 0 から始める。"""
+        ``episode_rows`` (B, T) は窓の最後のステップと同じエピソードのステップ。そうでない
+        ステップは窓の先頭に並ぶので、その後ろから状態を 0 に戻して読み直す。"""
         tokens = self.encoder(
             observations, actions, rewards, scalar_obs, observation_dropout, modality_dropout
         )
         B, T = tokens.shape[:2]
         stream = torch.cat([tokens, self.queries.expand(B, T, -1, -1)], dim=2)
         step_len = stream.shape[2]
-        attention_mask = episode_rows.unsqueeze(-1).expand(B, T, step_len).reshape(B, -1)
-        rnn_state = rnn_state * episode_rows[:, :1, None]
-        output, rnn_state = self.trunk(stream.flatten(1, 2), rnn_state, attention_mask)
+        start = (~episode_rows).sum(dim=1) * step_len
+        output, rnn_state = self.trunk(stream.flatten(1, 2), rnn_state, start)
         queries = output.reshape(B, T, step_len, -1)[:, :, -self.num_queries :]
         return self.output_norm(queries), rnn_state
 
