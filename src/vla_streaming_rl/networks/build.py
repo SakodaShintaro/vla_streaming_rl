@@ -55,6 +55,7 @@ def build_network(
             policy_head_factory=policy_head_factory,
             horizon=args.horizon,
             critic_loss_weight=args.critic_loss_weight,
+            reset_on_episode_end=args.reset_on_episode_end,
             vla_config=args.vla,
         )
 

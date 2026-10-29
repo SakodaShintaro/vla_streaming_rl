@@ -18,19 +18,43 @@ vla:
   # 表現に加える末尾の位置の数。末尾はチャットテンプレートの固定の部分
   # （"\n<|im_start|>assistant\n" の 4 トークン）で、画像と指示を読んだ後の活性を持つ
   num_last_tokens: 4
-  # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする。状態の幅は
-  # (画像のトークンの数 + num_last_tokens + スカラーの数) * token_dim。画像のトークンは
-  # 256px の画像1枚で 8x8
+  # 位置ごとに射影する幅で、幹の幅。スカラーの観測も1つずつこの幅のトークンにする。
+  # 画像のトークンは 256px の画像1枚で 8x8
   token_dim: 64
   # スカラーをトークンにする sin/cos の周期の範囲。最短の周期は残りの収益の 1 と 2 を分け、
   # 最長の周期は episode_step などの最大の値を1周期に収める
   scalar_min_period: 0.5
   scalar_max_period: 4096.0
-  # ヘッドに渡す前にトークンどうしを混ぜる Transformer の層の数（0 なら混ぜない）、注意の
-  # ヘッドの数、残差の layer scale の初期値
+  # 幹に渡す前にステップの中のトークンどうしを混ぜる Transformer の層の数（0 なら混ぜない）、
+  # 注意のヘッドの数、残差の layer scale の初期値
   token_mixer_layers: 2
   token_mixer_heads: 4
   token_mixer_layer_scale_init: 0.0001
+  # 指示の文だけを VLM に読ませて取り出す層（0 は埋め込み、-1 は最後の層）と、層ごとに文の
+  # トークンを順に分けて平均する区間の数。指示のトークンは 層の数 * 区間の数
+  instruction_layers: [1, -1]
+  instruction_segments: 8
+  # 学習でバッファから読む窓のステップ数（これに horizon を足した長さを読む）。窓の先頭に
+  # 保存した再帰状態から窓を通し、窓の中で時間を遡って逆伝播する
+  seq_len: 16
+  # 各ステップの観測のトークンの後ろに並べる、学習するクエリのトークンの数。ヘッドはクエリの
+  # 位置の出力だけを読むので、状態の幅は num_queries * token_dim
+  num_queries: 8
+  # 全ステップのトークンを1本の系列にして読む GatedDeltaNet の幹の層の数とヘッドの数。
+  # 幅は token_dim、ヘッドの次元は token_dim / trunk_heads
+  trunk_layers: 6
+  trunk_heads: 1
+  # 学習で、ステップごとに前の行動以外の観測をすべて落とす確率と、入力の種類（画像ごと、
+  # 末尾、指示、報酬、スカラー）ごとに落とす確率。落とした位置は学習する欠損のトークンにする
+  observation_dropout: 0.15
+  modality_dropout: 0.1
+  # 最後のクエリの出力から、何ステップ先の画像の今の画像からの変化を予測するか。的は VLM の
+  # 画像のトークンを画像ごとに forecast_pool x forecast_pool に縮めて正規化したもの。
+  # 予測の損失は forecast_loss_weight を掛けて足す
+  forecast_steps: [5, 10]
+  forecast_pool: 4
+  forecast_hidden_dim: 256
+  forecast_loss_weight: 0.5
 
 actor_critic:
   seq_len: 50

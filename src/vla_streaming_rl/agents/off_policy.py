@@ -38,6 +38,7 @@ class OffPolicyAgent(Agent):
         max_grad_norm: float,
         use_done: bool,
         seq_len: int,
+        infer_len: int,
         horizon: int,
         actor_lr: float,
         critic_lr: float,
@@ -66,6 +67,7 @@ class OffPolicyAgent(Agent):
             priority_beta=priority_beta,
             priority_epsilon=priority_epsilon,
             seq_len=seq_len,
+            infer_len=infer_len,
             horizon=horizon,
             normalizing_by_return=normalizing_by_return,
             reward_scaler=reward_scaler,
@@ -122,13 +124,17 @@ class OffPolicyAgent(Agent):
     ) -> StepResult:
         metrics = self._observe(obs, reward, terminated, truncated, info)
         warmup = global_step < self.learning_starts
+        # チャンクの途中でも毎ティック推論して再帰状態を進める。バッファの各行には、その行の
+        # 直前までを読んだ状態が入る
+        infer_result = self._infer(warmup)
         if not warmup and self._has_chunk_left():
+            self.rnn_state = infer_result.rnn_state
             return self._continue_chunk(metrics)
-        return self._start_chunk(self._infer(warmup), metrics)
+        return self._start_chunk(infer_result, metrics)
 
     def _infer(self, warmup: bool) -> InferResult:
         """バッファの最新の窓から、ネットワークに推論させる。"""
-        latest_data = self.rb.get_latest(self.seq_len)
+        latest_data = self.rb.get_latest(self.infer_len)
         # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
         return self.network.infer(
             InferInput(

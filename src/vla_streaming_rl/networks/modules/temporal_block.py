@@ -4,6 +4,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from fla.layers import GatedDeltaNet
+from fla.models.utils import FLACache
 from mamba_ssm.modules.mamba2 import Mamba2
 
 from .self_attention import SelfAttention
@@ -239,6 +241,135 @@ class GatedDeltaNetLayer(nn.Module):
             [S.reshape(B, -1), qkv[:, -(self.conv_size - 1) :].reshape(B, -1)], dim=-1
         )
         return output, new_state.unsqueeze(0)
+
+
+class ChunkGatedDeltaNetLayer(nn.Module):
+    """
+    Temporal processing layer using fla's GatedDeltaNet (chunked kernels).
+
+    状態（再帰の行列と短い畳み込みの直前の入力）は平らなテンソルで出し入れする。長い系列も
+    チャンクに分けて解くので、トークンを何千も並べた系列を通せる。
+
+    ``attention_mask`` (B, T) の 0 の位置は読まない。0 は系列の先頭にだけ置き、そこから
+    状態を始め直す系列は、渡す状態も 0 にしておく。
+
+    Args:
+        hidden_dim: Hidden dimension
+        num_heads: Number of heads. The head dimension is hidden_dim // num_heads
+    """
+
+    def __init__(self, hidden_dim: int, num_heads: int) -> None:
+        super().__init__()
+        assert hidden_dim % num_heads == 0, (hidden_dim, num_heads)
+        head_dim = hidden_dim // num_heads
+        head_v_dim = 2 * head_dim
+        # layer_idx を渡さないと、fla はキャッシュを読み書きしない
+        self.gdn = GatedDeltaNet(
+            hidden_size=hidden_dim,
+            expand_v=2,
+            head_dim=head_dim,
+            num_heads=num_heads,
+            mode="chunk",
+            layer_idx=0,
+        )
+
+        # recurrent_state: [B, num_heads, head_v_dim, head_dim]（fla は v を先に置く）
+        self.recurrent_state_shape = (num_heads, head_v_dim, head_dim)
+        self.recurrent_state_size = math.prod(self.recurrent_state_shape)
+        # conv_state: q, k, v の ShortConvolution の状態 [B, dim, conv_size]
+        conv_size = self.gdn.conv_size
+        self.conv_state_shapes = [
+            (num_heads * head_dim, conv_size),
+            (num_heads * head_dim, conv_size),
+            (num_heads * head_v_dim, conv_size),
+        ]
+        self.conv_state_sizes = [math.prod(shape) for shape in self.conv_state_shapes]
+        self.cache_size = self.recurrent_state_size + sum(self.conv_state_sizes)
+
+    def get_rnn_state_size(self) -> int:
+        """Return GatedDeltaNet cache size"""
+        return self.cache_size
+
+    def _flatten_cache(self, cache: FLACache) -> torch.Tensor:
+        """FLACache を [B, cache_size] にまとめる"""
+        state = cache[0]
+        batch_size = state["recurrent_state"].shape[0]
+        parts = [state["recurrent_state"], *state["conv_state"]]
+        return torch.cat([part.reshape(batch_size, -1).float() for part in parts], dim=-1)
+
+    def _unflatten_cache(self, cache_flat: torch.Tensor, dtype: torch.dtype) -> FLACache:
+        """[B, cache_size] を FLACache に戻す。0 の状態はキャッシュのない状態と同じ計算になる"""
+        batch_size = cache_flat.shape[0]
+        sizes = [self.recurrent_state_size, *self.conv_state_sizes]
+        shapes = [self.recurrent_state_shape, *self.conv_state_shapes]
+        recurrent_state, *conv_state = [
+            part.reshape(batch_size, *shape).to(dtype).contiguous()
+            for part, shape in zip(cache_flat.split(sizes, dim=-1), shapes, strict=True)
+        ]
+        cache = FLACache()
+        cache.update(recurrent_state=recurrent_state, conv_state=tuple(conv_state), layer_idx=0)
+        return cache
+
+    def forward(
+        self,
+        x: torch.Tensor,  # [B, T, C]
+        rnn_state: torch.Tensor,  # [B, cache_size]
+        attention_mask: torch.Tensor,  # [B, T] bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache = self._unflatten_cache(rnn_state, x.dtype)
+        output, _, cache = self.gdn(
+            x, attention_mask=attention_mask, past_key_values=cache, use_cache=True
+        )
+        return output, self._flatten_cache(cache)
+
+
+class GatedDeltaNetStream(nn.Module):
+    """
+    :class:`ChunkGatedDeltaNetLayer` を ``n_layer`` 段重ねた、1本の因果的な系列を読む幹。
+
+    各段は Norm -> GatedDeltaNet -> 残差、Norm -> MLP -> 残差。状態は段ごとの平らな状態を
+    並べた [B, n_layer, cache_size]。
+
+    Args:
+        hidden_dim: Hidden dimension
+        num_heads: Number of heads of each GatedDeltaNet
+        n_layer: Number of layers
+    """
+
+    def __init__(self, hidden_dim: int, num_heads: int, n_layer: int) -> None:
+        super().__init__()
+        self.temporal_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(n_layer)])
+        self.temporals = nn.ModuleList(
+            [ChunkGatedDeltaNetLayer(hidden_dim, num_heads) for _ in range(n_layer)]
+        )
+        self.mlp_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(n_layer)])
+        self.mlps = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(hidden_dim, 4 * hidden_dim, bias=False),
+                    nn.GELU(),
+                    nn.Linear(4 * hidden_dim, hidden_dim, bias=False),
+                )
+                for _ in range(n_layer)
+            ]
+        )
+        self.state_shape = (n_layer, self.temporals[0].get_rnn_state_size())
+
+    def forward(
+        self,
+        x: torch.Tensor,  # [B, T, C]
+        rnn_state: torch.Tensor,  # [B, n_layer, cache_size]
+        attention_mask: torch.Tensor,  # [B, T] bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        new_states = []
+        for i, temporal in enumerate(self.temporals):
+            temporal_output, new_state = temporal(
+                self.temporal_norms[i](x), rnn_state[:, i], attention_mask
+            )
+            x = x + temporal_output
+            x = x + self.mlps[i](self.mlp_norms[i](x))
+            new_states.append(new_state)
+        return x, torch.stack(new_states, dim=1)
 
 
 class IdentityLayer(nn.Module):

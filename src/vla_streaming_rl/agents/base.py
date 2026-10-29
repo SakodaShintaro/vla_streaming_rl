@@ -84,6 +84,7 @@ class Agent(ABC):
         priority_beta: float,
         priority_epsilon: float,
         seq_len: int,
+        infer_len: int,
         horizon: int,
         normalizing_by_return: bool,
         reward_scaler: RewardScaler | FixedRewardScaler,
@@ -98,6 +99,8 @@ class Agent(ABC):
         self.actor_optimizer = actor_optimizer
         self.critic_optimizer = critic_optimizer
         self.seq_len = seq_len
+        # 推論に読む窓の長さ。窓の先頭に保存した再帰状態から読む
+        self.infer_len = infer_len
         self.horizon = horizon
         self.normalizing_by_return = normalizing_by_return
         self.use_done = use_done

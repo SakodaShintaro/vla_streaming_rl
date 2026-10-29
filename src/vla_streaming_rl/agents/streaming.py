@@ -36,6 +36,7 @@ class StreamingAgent(Agent):
         max_grad_norm: float,
         use_done: bool,
         seq_len: int,
+        infer_len: int,
         horizon: int,
         use_eligibility_trace: bool,
         actor_lr: float,
@@ -70,6 +71,7 @@ class StreamingAgent(Agent):
             priority_beta=0.0,
             priority_epsilon=1.0,
             seq_len=seq_len,
+            infer_len=infer_len,
             horizon=horizon,
             normalizing_by_return=normalizing_by_return,
             reward_scaler=reward_scaler,
@@ -151,13 +153,14 @@ class StreamingAgent(Agent):
 
     def _act(self, metrics: dict) -> StepResult:
         """Start a chunk from the newest state window, with no learning step."""
-        latest_data = self.rb.get_latest(self.seq_len)
+        latest_data = self.rb.get_latest(self.infer_len)
+        # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
         infer_result = self.network.infer(
             InferInput(
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=self.reward_scaler.normalize(latest_data.rewards),
-                rnn_state=self.rnn_state,
+                rnn_state=latest_data.rnn_state[:, 0],
                 scalar_obs_seq=latest_data.scalar_obs,
                 warmup=False,
             )

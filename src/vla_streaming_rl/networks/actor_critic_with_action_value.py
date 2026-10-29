@@ -52,6 +52,8 @@ class ActorCriticWithActionValue(NetworkInterface):
     ) -> None:
         super().__init__()
         self.seq_len = actor_critic_config.seq_len
+        # 推論も学習と同じ長さの窓を、その先頭に保存した状態から読む
+        self.infer_len = self.seq_len
         self.critic_loss_weight = critic_loss_weight
 
         self.action_dim = action_space_shape[0]
