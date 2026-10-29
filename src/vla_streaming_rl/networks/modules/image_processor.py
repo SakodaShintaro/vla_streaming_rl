@@ -8,24 +8,40 @@ from transformers.vision_utils import (
 )
 
 
-class QwenImageEncoder(nn.Module):
-    """Runs Qwen3.5's ViT on a single image per batch element (sequence length 1).
+class ImageProcessor(nn.Module):
+    """A frozen pretrained image encoder: Qwen3.5's ViT run on a single image per
+    batch element (sequence length 1).
 
     No temporal attention (there is only one frame), so this is just the
     original ViT forward pass: patch_embed + pos_embed, ViT blocks, PatchMerger.
     画像は VLA と同じく観測の大きさのまま入れ、大きさの調整はプロセッサに任せる。
+
+    It never trains, so a replay buffer stores what it produces for a frame
+    rather than the frame: the agents run ``encode`` once when a frame is
+    collected, and a learning step reads ``output_shapes`` tensors back. The
+    trainable layer on top, projecting to the network's token width, belongs to
+    the network.
     """
 
     model_id = "Qwen/Qwen3.5-0.8B"
 
-    def __init__(self) -> None:
+    def __init__(self, image_shapes: list[tuple[int, ...]]) -> None:
         super().__init__()
-        self.visual = AutoModelForImageTextToText.from_pretrained(
+        # 1ステップの観測の画像ごとの (3, H, W)。どれも同じエンコーダに通す
+        assert all(shape[0] == 3 for shape in image_shapes), image_shapes
+        visual = AutoModelForImageTextToText.from_pretrained(
             self.model_id, dtype=torch.float32
         ).model.visual
+        self.visual = visual.train(False).requires_grad_(False)
         self.image_processor = AutoProcessor.from_pretrained(self.model_id).image_processor
+        # 画像ごとのエンコーダの出力の (C, H', W')
+        self.output_shapes = [
+            tuple(self.encode(torch.zeros(1, *shape)).size()[1:]) for shape in image_shapes
+        ]
 
+    @torch.no_grad()
     def encode(self, x: torch.Tensor) -> torch.Tensor:
+        # (B, 3, H, W) -> (B, C, H', W'): one cell per patch of the encoder's grid
         batch_size = x.size(0)
         img_out = self.image_processor(
             images=x, return_tensors="pt", do_rescale=False, device=x.device
@@ -75,30 +91,3 @@ class QwenImageEncoder(nn.Module):
         grid_w = int(image_grid_thw[0, 2].item()) // merge_size
         merged = merged.view(batch_size, grid_h, grid_w, hidden_dim)
         return merged.permute(0, 3, 1, 2)  # (B, hidden_dim, grid_h, grid_w)
-
-
-class ImageProcessor(nn.Module):
-    """A frozen pretrained image encoder (Qwen3.5's ViT, :class:`QwenImageEncoder`).
-
-    It never trains, so a replay buffer stores what it produces for a frame
-    rather than the frame: the agents run ``encode`` once when a frame is
-    collected, and a learning step reads ``output_shapes`` tensors back. The
-    trainable layer on top, projecting to the network's token width, belongs to
-    the network.
-    """
-
-    def __init__(self, image_shapes: list[tuple[int, ...]]) -> None:
-        super().__init__()
-        # 1ステップの観測の画像ごとの (3, H, W)。どれも同じエンコーダに通す
-        assert all(shape[0] == 3 for shape in image_shapes), image_shapes
-        backbone = QwenImageEncoder()
-        self.backbone = backbone.train(False).requires_grad_(False)
-        # 画像ごとのエンコーダの出力の (C, H', W')
-        self.output_shapes = [
-            tuple(self.encode(torch.zeros(1, *shape)).size()[1:]) for shape in image_shapes
-        ]
-
-    @torch.no_grad()
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        # (B, 3, H, W) -> (B, C, H', W'): one cell per patch of the encoder's grid
-        return self.backbone.encode(x)
