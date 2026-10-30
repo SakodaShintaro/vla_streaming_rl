@@ -18,7 +18,6 @@ from vla_streaming_rl.scalar_obs import SCALAR_OBS_NAMES
 
 # VLM のチャットテンプレートの書式
 IM_START = "<|im_start|>"
-IM_END = "<|im_end|>"
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 
 # 状態に数値のまま入れるスカラーの観測の、SCALAR_OBS_NAMES での位置。global_step は
@@ -33,17 +32,14 @@ class VLMEncoder(nn.Module):
 
     処理は2段に分かれる。``represent`` はこのステップの画像を VLM に読ませ、画像のトークンの
     位置の活性を ``[image_layer_start, image_layer_stop)`` の層（0 は言語モデルに入る前の
-    埋め込みで、ViT の出力そのもの）で平均した、画像ごとのトークンの格子と、末尾の
-    ``num_last_tokens`` 個の位置の活性の全層平均を並べた表現を返す。末尾はチャットテンプレートの
-    固定の部分で、画像までを読んだ後の活性を持つ。VLM は凍結しているので、この表現は
-    バッファに保存して使い回せる。
+    埋め込みで、ViT の出力そのもの）で平均した、画像ごとのトークンの格子を並べた表現を返す。
+    VLM は凍結しているので、この表現はバッファに保存して使い回せる。
 
     VLM はエピソードを1本の user ターンとして読み続ける。先頭に指示の文を置き、ステップごとにスカラーの観測（global_step を除く）を書いた文と画像を
     キャッシュ（GDN の層の再帰状態と、full attention の層の KV）に積み、エピソードの始めで
     空にする。GDN の層の状態はエピソードの間ずっと持ち越す。full attention の層の KV は、
     指示の文（attention sink として常に残す）と直近の ``stream_window_steps`` ステップの分だけ
-    残し、それより古いステップの分は捨てる。チャットテンプレートの末尾は毎ステップ最新の画像の
-    後ろに一時的につないで読み、読んだ後はキャッシュから外す。表現はそれまでのステップを反映する。
+    残し、それより古いステップの分は捨てる。表現はそれまでのステップを反映する。
 
     ``forward`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``token_dim`` 幅のトークンにした
@@ -68,7 +64,6 @@ class VLMEncoder(nn.Module):
         )
         self.vlm.eval().requires_grad_(False)
         self.vlm_hidden_size = self.vlm.config.text_config.hidden_size
-        self.num_last_tokens = vla_config.num_last_tokens
         assert vla_config.stream_window_steps >= 1, vla_config.stream_window_steps
         self.stream_window_steps = vla_config.stream_window_steps
         self._reset_stream()
@@ -78,7 +73,7 @@ class VLMEncoder(nn.Module):
         # 大きさは画像の大きさからプロセッサが決める（256px なら統合後 8x8）
         self.images_num = len(image_shapes)
         image_processor = self.processor.image_processor
-        image_tokens_num = sum(
+        self.num_positions = sum(
             int(
                 image_processor(images=[torch.zeros(shape)], return_tensors="pt", do_rescale=False)[
                     "image_grid_thw"
@@ -87,7 +82,6 @@ class VLMEncoder(nn.Module):
             // image_processor.merge_size**2
             for shape in image_shapes
         )
-        self.num_positions = image_tokens_num + self.num_last_tokens
         self.state_out_proj = nn.Linear(self.vlm_hidden_size, vla_config.token_dim).to(device)
         # スカラーをトークンにする sin/cos の角周波数。周期を scalar_max_period から
         # scalar_min_period まで対数等間隔にとり、sin と cos で token_dim 幅にする
@@ -129,8 +123,7 @@ class VLMEncoder(nn.Module):
         self, images: list[torch.Tensor], scalar_obs: np.ndarray, text: str, reset_state: bool
     ) -> torch.Tensor:
         """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませ、画像のトークンの活性の
-        ``image_layers`` の層での平均と、末尾の ``num_last_tokens`` 個の位置の活性の全層平均を
-        並べた表現 (num_positions, hidden_size)。``reset_state`` ならエピソードの流れを空にして
+        ``image_layers`` の層での平均の表現 (num_positions, hidden_size)。``reset_state`` ならエピソードの流れを空にして
         から、スカラーの観測 (SCALAR_OBS_DIM,) を書いた文と画像を流れに積む。"""
         assert len(images) == self.images_num, (len(images), self.images_num)
         if reset_state:
@@ -191,8 +184,7 @@ class VLMEncoder(nn.Module):
     def _represent_stream(
         self, images: list[torch.Tensor], scalar_obs: np.ndarray, text: str
     ) -> torch.Tensor:
-        """このステップのスカラーの観測の文と画像をエピソードの流れに積み、続けて
-        チャットテンプレートの末尾を一時的に読ませる。"""
+        """このステップのスカラーの観測の文と画像をエピソードの流れに積む。"""
         if self.stream_next_position == 0:
             self._read_prompt(text)
         scalars = ", ".join(
@@ -230,43 +222,7 @@ class VLMEncoder(nn.Module):
         if len(self.stream_step_lens) > self.stream_window_steps:
             self._drop_oldest_step()
 
-        # 末尾は読んだ後でキャッシュから外す。GDN の層の状態は読む前のものを書き戻し、
-        # full attention の層の KV はこの分を切り落とす
-        tail_ids = self.processor.tokenizer(
-            f"{IM_END}\n{IM_START}assistant\n", return_tensors="pt"
-        )["input_ids"].to(self.device)
-        tail_len = tail_ids.shape[1]
-        assert tail_len >= self.num_last_tokens, (tail_len, self.num_last_tokens)
-        tail_positions = self._text_positions(tail_len)
-        linear_layers = [
-            layer
-            for layer in self.stream_cache.layers
-            if isinstance(layer, LinearAttentionCacheLayerMixin)
-        ]
-        saved_states = [
-            (layer.conv_states[0].clone(), layer.recurrent_states[0].clone())
-            for layer in linear_layers
-        ]
-        tail_outputs = self.vlm(
-            input_ids=tail_ids,
-            position_ids=tail_positions,
-            past_key_values=self.stream_cache,
-            use_cache=True,
-            output_hidden_states=True,
-            logits_to_keep=1,
-        )
-        for layer, (conv_state, recurrent_state) in zip(linear_layers, saved_states, strict=True):
-            layer.conv_states[0].copy_(conv_state)
-            layer.recurrent_states[0].copy_(recurrent_state)
-        for layer in self.stream_cache.layers:
-            if not isinstance(layer, LinearAttentionCacheLayerMixin):
-                layer.crop(-tail_len)
-
-        last_tokens = sum(
-            depth[0, -self.num_last_tokens :].to(torch.float32)
-            for depth in tail_outputs.hidden_states
-        ) / len(tail_outputs.hidden_states)
-        return torch.cat([self._image_tokens(inputs["input_ids"], step_outputs), last_tokens])
+        return self._image_tokens(inputs["input_ids"], step_outputs)
 
     def forward(
         self,

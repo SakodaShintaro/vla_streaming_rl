@@ -11,14 +11,11 @@ vla:
   load_in_4bit: false
   # 画像のトークンの位置の活性を平均する層の範囲 [image_layer_start, image_layer_stop)。
   # 0 は言語モデルに入る前の埋め込み（ViT の出力そのもの）で、null は最後の層まで。
-  # ViT の特徴だけを使うなら 0 と 1。末尾の位置は常に全層で平均する
+  # ViT の特徴だけを使うなら 0 と 1
   image_layer_start: 0
   image_layer_stop: null
-  # 表現に加える末尾の位置の数。末尾はチャットテンプレートの固定の部分
-  # （"\n<|im_start|>assistant\n" の 4 トークン）で、画像と指示を読んだ後の活性を持つ
-  num_last_tokens: 4
   # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする。状態の幅は
-  # (画像のトークンの数 + num_last_tokens + スカラーの数) * token_dim。画像のトークンは
+  # (画像のトークンの数 + スカラーの数) * token_dim。画像のトークンは
   # 256px の画像1枚で 8x8
   token_dim: 64
   # スカラーをトークンにする sin/cos の周期の範囲。最短の周期は残りの収益の 1 と 2 を分け、

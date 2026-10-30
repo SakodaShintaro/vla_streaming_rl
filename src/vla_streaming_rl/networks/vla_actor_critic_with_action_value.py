@@ -79,7 +79,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         return self._dummy_state.clone()
 
     def stored_image_shape(self) -> tuple[int, ...]:
-        """VLM の表現の、画像のトークンの格子と末尾の位置。射影は学習するので、その手前を
+        """VLM の表現の、画像のトークンの格子。射影は学習するので、その手前を
         保存する。"""
         return self.encoder.representation_shape()
 
