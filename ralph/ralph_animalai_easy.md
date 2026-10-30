@@ -50,7 +50,7 @@ Git 管理しないもの（`results/ralph_animalai_easy/`）:
 
 ## 変えてよいもの・いけないもの
 
-- 試す値はコマンドラインの上書きではなく yaml のデフォルトに書く（コミットが実行と一致するように）。`configs/agent/vla_off_policy.yaml` に書くのを第一にする（`configs/default.yaml` や `configs/agent/base/network.yaml` を変えると他の agent や env にも効いてしまう）
+- 試す値はコマンドラインの上書きではなく yaml のデフォルトに書く（コミットが実行と一致するように）。`configs/agent/vla_off_policy.yaml` に書くのを第一にする（`configs/default.yaml` や `configs/agent/common.yaml` を変えると他の agent や env にも効いてしまう）
 - `src/vla_streaming_rl/` の学習側のコード（agent、network、replay buffer など）は変えてよい。新しい仕組みを足すときは config のキーで切り替え、default.yaml の値は今の挙動のままにして vla_off_policy.yaml で有効にする。頼まれていないリファクタや整理はしない
 - 変えてはいけない: `train_animalai.sh`、`scripts/train.py` の記録と集計、`src/vla_streaming_rl/envs/`、`configs/env/`、`episode_limit`、アリーナ、pass mark、`ralph/round_success_summary.py`。指標を良く見せるだけの変更は禁止
 - main ブランチには触らない。push しない
