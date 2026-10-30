@@ -26,23 +26,7 @@ def build_network(
 
     policy_head_factory = hydra.utils.instantiate(args.policy_head)
 
-    if args.network_class == "actor_critic_with_action_value":
-        from vla_streaming_rl.networks.actor_critic_with_action_value import (
-            ActorCriticWithActionValue,
-        )
-
-        network = ActorCriticWithActionValue(
-            image_shapes=image_shapes,
-            action_space_shape=action_space_shape,
-            value_head_factory=value_head_factory,
-            critic_loss_weight=args.critic_loss_weight,
-            prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
-            actor_critic_config=args.actor_critic,
-            horizon=args.horizon,
-            policy_head_factory=policy_head_factory,
-        ).to(device)
-
-    elif args.network_class == "vla_actor_critic_with_action_value":
+    if args.network_class == "vla_actor_critic_with_action_value":
         from vla_streaming_rl.networks.vla_actor_critic_with_action_value import (
             VLAActorCriticWithActionValue,
         )

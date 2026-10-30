@@ -59,8 +59,6 @@ case ${difficulty} in
       'env_factory.train_levels=["14"]'
       'env_factory.train_variant="01"'
       episode_limit=1200
-      # 1 エピソードは最大 100 ステップなので、最初に見た 1 枚が窓から外れないようにする
-      actor_critic.seq_len=100
     )
     ;;
   blink)
@@ -70,7 +68,6 @@ case ${difficulty} in
       'env_factory.train_variant="01"'
       env_factory.blink_dark_steps_increment=1
       episode_limit=1200
-      actor_critic.seq_len=100
     )
     ;;
   normal)

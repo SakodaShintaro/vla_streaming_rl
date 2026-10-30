@@ -2,7 +2,6 @@
 defaults:
   - /policy_head: token_diffusion
   - /value_head: token_dueling  # [dueling, token_dueling, simbav2]
-  - /prediction_head: td_jepa  # [flow_matching, td_jepa]
   - _self_
 
 weight_decay: 0.01
@@ -32,19 +31,3 @@ vla:
   token_mixer_heads: 4
   token_mixer_layer_scale_init: 0.0001
 
-actor_critic:
-  seq_len: 50
-  # 1ステップのトークン（画像・前の行動・報酬・スカラー・register）の幅。状態の幅は
-  # トークンの数 * token_dim
-  token_dim: 16
-  disable_state_predictor: false
-  encoder_block_num: 8
-  temporal_model_type: gdn
-  layer_scale_init: 0.0001
-  token_dropout: 0.0
-  # 学習時に系列ごとに 0 からこの数までの一様なステップ数を引き、最新の方からその数の
-  # ステップの観測（画像・報酬・スカラー）を落とす。行動は落とさない
-  observation_drop_steps_max: 0
-  # スカラーをトークンにする sin/cos の周期の範囲（vla と同じ）
-  scalar_min_period: 0.5
-  scalar_max_period: 4096.0

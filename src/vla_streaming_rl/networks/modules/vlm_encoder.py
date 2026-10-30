@@ -37,8 +37,7 @@ class VLMEncoder(nn.Module):
     ``forward`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``token_dim`` 幅のトークンにした
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
-    読む状態にする。前の行動と報酬のトークンと、混ぜる層は :class:`SpatialTemporalEncoder` と
-    同じ作り方にする。学習するのは射影と混ぜる層。
+    読む状態にする。学習するのは射影と混ぜる層。
     """
 
     def __init__(
