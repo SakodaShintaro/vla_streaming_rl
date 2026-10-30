@@ -14,6 +14,7 @@ part of the public surface.
 import abc
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -109,9 +110,16 @@ class NetworkInterface(nn.Module, abc.ABC):
         pre-encodes it into (see ``to_stored_image``)."""
 
     @abc.abstractmethod
-    def to_stored_image(self, images: list[torch.Tensor], instruction: str) -> torch.Tensor:
+    def to_stored_image(
+        self,
+        images: list[torch.Tensor],
+        scalar_obs: np.ndarray,
+        instruction: str,
+        reset_state: bool,
+    ) -> torch.Tensor:
         """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）と方策が読む指示の文を、まとめて
-        保存する形、``stored_image_shape`` の形。"""
+        保存する形、``stored_image_shape`` の形。エージェントは毎ステップ順に呼び、
+        ``reset_state`` は再帰状態を初期化するステップ（エピソードの始め）で真。"""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:

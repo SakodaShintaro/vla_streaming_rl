@@ -188,8 +188,9 @@ class Agent(ABC):
         episode_done = terminated or truncated
         # A terminal observation still belongs to the episode that ended, so the
         # recurrent state is reset on the tick after it rather than on it.
+        reset_state = self._previous_done and self.reset_on_episode_end
         if self._previous_done:
-            if self.reset_on_episode_end:
+            if reset_state:
                 self.rnn_state = self.network.init_state().to(self.device)
             # A chunk begun on the terminal frame would otherwise run into the
             # new episode; the first action of an episode comes from its own frame.
@@ -213,7 +214,7 @@ class Agent(ABC):
         scalar_obs = read_scalar_obs(obs)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            self.network.to_stored_image(images, self.instruction),
+            self.network.to_stored_image(images, scalar_obs, self.instruction, reset_state),
             shaped_reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),

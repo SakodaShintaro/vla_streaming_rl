@@ -2,6 +2,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from omegaconf import DictConfig
 
@@ -36,8 +37,9 @@ class LossTerms:
 class VLAActorCriticWithActionValue(NetworkInterface):
     """1枚の画像と指示の文から行動を出す VLA。
 
-    毎ステップ、観測の画像と指示の文をエンコーダ（凍結した VLM）に読ませて状態を作る。過去の
-    観測は読まない。方策ヘッドと行動価値ヘッドはその状態を読む。
+    毎ステップ、観測の画像とスカラーの観測をエンコーダ（凍結した VLM）に読ませて状態を作る。
+    VLM は指示の文から始まるエピソードの流れを読み続けるので、過去の観測は VLM が自分の
+    キャッシュに持ち越した分として反映される。方策ヘッドと行動価値ヘッドはその状態を読む。
 
     VLM は凍結して使うので、表現は観測を受け取ったときに一度だけ計算してバッファに保存する。
     推論も学習もそれを読み戻し、VLM を通さない。
@@ -81,8 +83,14 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         保存する。"""
         return self.encoder.representation_shape()
 
-    def to_stored_image(self, images: list[torch.Tensor], instruction: str) -> torch.Tensor:
-        return self.encoder.represent(images, instruction)
+    def to_stored_image(
+        self,
+        images: list[torch.Tensor],
+        scalar_obs: np.ndarray,
+        instruction: str,
+        reset_state: bool,
+    ) -> torch.Tensor:
+        return self.encoder.represent(images, scalar_obs, instruction, reset_state)
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:

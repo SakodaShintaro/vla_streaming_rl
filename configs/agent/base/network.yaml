@@ -30,4 +30,7 @@ vla:
   token_mixer_layers: 2
   token_mixer_heads: 4
   token_mixer_layer_scale_init: 0.0001
-
+  # VLM は指示の文に続けて、ステップごとのスカラーの観測の文と画像を1本の流れとして読み続ける。
+  # full attention の層の KV に残す直近のステップの数。指示の文は sink として
+  # 常に残す。GDN の層の再帰状態は窓に関係なくエピソードの間ずっと持ち越す
+  stream_window_steps: 1
