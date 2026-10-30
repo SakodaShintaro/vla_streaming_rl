@@ -8,6 +8,3 @@ network_class: vla_actor_critic_with_action_value
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
-vla:
-  model_id: Qwen/Qwen3.5-0.8B
-  load_in_4bit: false
