@@ -15,6 +15,10 @@ ENV_INSTRUCTIONS = {
         "spheres and red zones are penalties that end the episode as a failure, never "
         "touch them. "
         "A sphere's reward equals its size: between goals the bigger one is worth more. "
+        "The arena is cleared only if episode_return reaches pass_mark by the time the "
+        "episode ends; remaining_return is how much is still missing. While "
+        "remaining_return is above the reward of a green sphere, collect yellow spheres "
+        "first and touch a green one only after that. "
         "Turn until the target is at the center of the view, then move forward "
         "with keeping it centered."
     ),
