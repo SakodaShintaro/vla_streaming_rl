@@ -24,6 +24,12 @@ env_factory:
   #     random  : no curriculum. The whole training set in laps, each lap a
   #               fresh shuffle drawn without replacement, with nothing
   #               withheld (steps_per_stage is ignored).
+  #     life    : the training set (train_levels at train_variant) as the stages
+  #               of a game, in label order. A game starts at the first stage
+  #               with `lives` lives; a success moves on to the next stage, a
+  #               failure retries the same stage at the cost of a life, and a
+  #               failure with no life left (or a success on the last stage)
+  #               starts a new game from the first stage.
   #     eval    : run each external/animal-ai/configs/competition/ arena of
   #               eval_levels and eval_variants once, in order (with every level
   #               and variant, the paper's 900-arena Testbed protocol).
@@ -49,6 +55,9 @@ env_factory:
   eval_variants: ["01"]
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 20_000
+  # - lives ("life"): how many failed retries a game allows before it starts
+  #   over from the first stage.
+  lives: 3
   binary_path: ~/animalai_env/4.3.2_alpha3/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
   #     false : discretize to the official MultiDiscrete([3, 3]) branches with a

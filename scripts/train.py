@@ -214,6 +214,15 @@ def build_episode_log(
                 data_dict["last_round_success_rate"] = env_info["last_round_success_rate"]
                 for level, rate in env_info["last_round_level_success_rate"].items():
                     data_dict[f"last_round_success_rate/{level}"] = rate
+        if mode == "life":
+            data_dict["cleared_count"] = env_info["cleared_count"]
+            data_dict["stage"] = env_info["stage"]
+            data_dict["lives_left"] = env_info["lives_left"]
+            data_dict["max_stage_reached"] = env_info["max_stage_reached"]
+            data_dict["games_ended"] = env_info["games_ended"]
+            # ゲームを終えたエピソードでだけ、そのゲームで成功したステージの数を記録する
+            if env_info["game_ended"]:
+                data_dict["game_stages_cleared"] = env_info["game_stages_cleared"]
     if len(state.score_list) >= eval_range:
         data_dict["recent_average_score"] = float(np.mean(state.score_list))
     return data_dict

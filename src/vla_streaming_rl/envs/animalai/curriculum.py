@@ -13,6 +13,9 @@ field (see `build_selector`):
               label order (`RoundSelector`).
   - "random"  no curriculum: the whole training set in laps, each lap a fresh
               shuffle drawn without replacement (`RoundSelector`).
+  - "life"    the training set as the stages of a game played with lives, in
+              label order: advance on success, retry on failure while a life is
+              left, otherwise start over from the first stage (`LifeSelector`).
   - "eval"    every configs/competition/ arena of `eval_levels` and
               `eval_variants` once, in order -- with every level and variant,
               the 900-arena Testbed sweep (`SequentialSelector`, which ends
@@ -161,7 +164,7 @@ def _all_levels(variant: str) -> list[str]:
 def training_levels(mode: str, variant: str, train_levels: list[str]) -> list[str]:
     """The levels a run in `mode` trains on: `train_levels` for the sweep modes,
     every level for the curriculum modes, whose stages are the levels."""
-    if mode in ("sequential", "random"):
+    if mode in ("sequential", "random", "life"):
         return list(train_levels)
     return _all_levels(variant)
 
@@ -488,6 +491,100 @@ class RoundSelector(ArenaSelector):
         self._queue = [name for name in progress["queue"] if name in known]
 
 
+class LifeSelector(ArenaSelector):
+    """ステージ制のゲームのように、アリーナをラベル順のステージとして1つずつ進める。
+
+    ゲームはライフ `lives` 個で最初のステージから始まる。成功したら次のステージへ進み、
+    失敗したらライフが1以上なら1減らして同じステージに再挑戦し、0ならゲームオーバーで
+    最初のステージからライフ `lives` 個でやり直す。最後のステージに成功したときもゲームを
+    終えて最初からやり直す。train.py の episode_limit か step_limit が学習を終える。
+    """
+
+    def __init__(self, arenas: list[Arena], lives: int):
+        super().__init__(arenas)
+        assert lives >= 0, lives
+        self.lives = lives
+        self._stage_index = 0
+        self._lives_left = lives
+        # 1つのゲームで到達した最も先のステージ（0 始まり）。全ステージに成功したゲームは
+        # len(arenas) とする
+        self._max_stage_index = 0
+        self._games_ended = 0
+        # info() は on_episode_end の後に読まれるので、ゲームを終えたエピソードかと、
+        # そのゲームで成功したステージの数を覚えておく
+        self._game_ended = False
+        self._game_stages_cleared = 0
+
+    def next_arena(self, global_step: int) -> Arena:
+        del global_step
+        return self.arenas[self._stage_index]
+
+    def _end_game(self, stages_cleared: int) -> None:
+        self._game_ended = True
+        self._game_stages_cleared = stages_cleared
+        self._games_ended += 1
+        self._stage_index = 0
+        self._lives_left = self.lives
+
+    def on_episode_end(self, arena: Arena, success: bool) -> None:
+        super().on_episode_end(arena, success)
+        assert arena.name == self.arenas[self._stage_index].name, (
+            arena.name,
+            self.arenas[self._stage_index].name,
+        )
+        self._game_ended = False
+        if success:
+            self._stage_index += 1
+            self._max_stage_index = max(self._max_stage_index, self._stage_index)
+            if self._stage_index == len(self.arenas):
+                self._end_game(len(self.arenas))
+        elif self._lives_left >= 1:
+            self._lives_left -= 1
+        else:
+            self._end_game(self._stage_index)
+
+    def info(self, global_step: int) -> dict:
+        del global_step
+        return {
+            # 次のエピソードで挑むステージと、その時点で残っているライフ
+            "stage": self._stage_index + 1,
+            "lives_left": self._lives_left,
+            # これまでのゲームで到達した最も先のステージ。全ステージに成功していれば
+            # ステージの数 + 1
+            "max_stage_reached": self._max_stage_index + 1,
+            "games_ended": self._games_ended,
+            "game_ended": self._game_ended,
+            "game_stages_cleared": self._game_stages_cleared,
+            "cleared_count": self.cleared_count(),
+        }
+
+    def status(self, global_step: int) -> str:
+        del global_step
+        return (
+            f"stage:{self._stage_index + 1}/{len(self.arenas)}"
+            f"  lives:{self._lives_left}"
+            f"  best:{self._max_stage_index + 1}"
+            f"  game:{self._games_ended + 1}"
+        )
+
+    def progress_state(self) -> dict:
+        return {
+            "stage_index": self._stage_index,
+            "lives_left": self._lives_left,
+            "max_stage_index": self._max_stage_index,
+            "games_ended": self._games_ended,
+        }
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
+        """ゲームの途中から再開する。ステージとライフは各アリーナの回数からは戻せない。"""
+        super().load_state(arena_attempts, arena_successes, progress)
+        self._stage_index = int(progress["stage_index"])
+        self._lives_left = int(progress["lives_left"])
+        self._max_stage_index = int(progress["max_stage_index"])
+        self._games_ended = int(progress["games_ended"])
+        assert self._stage_index < len(self.arenas), (self._stage_index, len(self.arenas))
+
+
 class SequentialSelector(ArenaSelector):
     """Every arena of `arenas` once, in label order, then `is_exhausted`.
 
@@ -538,6 +635,7 @@ def build_selector(
     eval_levels: list[str],
     eval_variants: list[str],
     steps_per_stage: int,
+    lives: int,
     seed: int,
 ) -> ArenaSelector:
     """Build the arena selector named by `mode` (see the module docstring).
@@ -559,6 +657,9 @@ def build_selector(
         ),
         "random": lambda: RoundSelector(
             arenas=_training_arenas(train_variant, train_levels), shuffle=True, seed=seed
+        ),
+        "life": lambda: LifeSelector(
+            arenas=_training_arenas(train_variant, train_levels), lives=lives
         ),
         "eval": lambda: SequentialSelector(arenas=_eval_arenas(eval_levels, eval_variants)),
     }

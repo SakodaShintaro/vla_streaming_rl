@@ -6,6 +6,8 @@ set -eux
 #               1301    -> 13-01-01 だけ
 #               14      -> 暗転の課題 14-01-01（最初の 1 ステップだけ見える）
 #               blink   -> level 01 を点滅の記憶の課題にしたもの（env_factory.blink_dark_steps_increment）
+#               life    -> ライフ制のステージ（env_factory.mode=life）。レベルと版とライフの数は
+#                          configs/env/animalai.yaml のデフォルト通り
 #               normal  -> configs/env/animalai.yaml のデフォルト通り
 difficulty=${1}
 agent=${2}
@@ -70,11 +72,18 @@ case ${difficulty} in
       episode_limit=1200
     )
     ;;
+  life)
+    # ライフ制のステージ（configs/env/animalai.yaml の mode の life）
+    difficulty_overrides=(
+      env_factory.mode=life
+      episode_limit=1000
+    )
+    ;;
   normal)
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, blink or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, blink, life or normal)" >&2
     exit 1
     ;;
 esac
