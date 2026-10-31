@@ -76,7 +76,7 @@ case ${difficulty} in
     # ライフ制のステージ（configs/env/animalai.yaml の mode の life）
     difficulty_overrides=(
       env_factory.mode=life
-      episode_limit=1000
+      episode_limit=2000
     )
     ;;
   normal)
