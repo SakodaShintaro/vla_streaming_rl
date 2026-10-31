@@ -33,8 +33,8 @@ multi_gammas: []
 horizon: 1
 learning_starts: 2000
 critic_loss_weight: 1.0
-use_done: true
-reset_on_episode_end: true
+use_done: false
+reset_on_episode_end: false
 normalizing_by_return: false
 # 学習に使う報酬の倍率。running: 見てきた報酬の標準偏差で割り ±10 で切る（倍率は学習中に動く）。
 # fixed: fixed_reward_scale を掛けるだけで切らない（倍率は学習中に変わらない）
