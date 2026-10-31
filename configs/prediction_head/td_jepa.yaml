@@ -1,0 +1,10 @@
+_target_: vla_streaming_rl.networks.modules.prediction_head.LatentTDPredictionHead
+_partial_: true
+horizon: ${horizon}
+predictor_hidden_dim: 512
+predictor_block_num: 2
+detach_predictor: false
+# 行動チャンク1つあたりの割引率
+gamma: 0.8
+td_loss_weight: 10.0
+idm_loss_weight: 1.0

@@ -2,6 +2,7 @@
 defaults:
   - /policy_head: token_diffusion
   - /value_head: token_dueling  # [dueling, token_dueling, simbav2]
+  - /prediction_head: td_jepa
   - _self_
 
 weight_decay: 0.01
@@ -9,6 +10,8 @@ weight_decay: 0.01
 vla:
   model_id: Qwen/Qwen3.5-0.8B
   load_in_4bit: false
+  # 状態から将来の状態を予測する補助の損失（prediction_head）を入れるか
+  use_state_predictor: true
   # 画像のトークンの位置の活性を平均する層の範囲 [image_layer_start, image_layer_stop)。
   # 0 は言語モデルに入る前の埋め込み（ViT の出力そのもの）で、null は最後の層まで。
   # ViT の特徴だけを使うなら 0 と 1

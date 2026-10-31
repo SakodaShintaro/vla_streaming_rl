@@ -59,9 +59,12 @@ class InferResult:
 
 @dataclass
 class EligibilityTraceInfo:
-    """Critic-update quantities for eligibility-trace training."""
+    """eligibility trace で学習するときの更新に使う量。``actor_loss`` と
+    ``state_prediction_loss`` は通常どおり backward し、``neg_value`` は value head だけに
+    勾配を流してトレースに積み、``delta`` を掛けて critic を更新する。"""
 
-    actor_entropy_loss: torch.Tensor
+    actor_loss: torch.Tensor
+    state_prediction_loss: torch.Tensor
     neg_value: torch.Tensor
     delta: torch.Tensor
 

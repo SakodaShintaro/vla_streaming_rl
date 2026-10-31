@@ -15,6 +15,7 @@ from .interface import (
     LossResult,
     NetworkInterface,
 )
+from .modules.prediction_head import LatentTDPredictionHead
 from .modules.value_head import DistributionalValueHead
 from .modules.vlm_encoder import VLMEncoder
 
@@ -25,6 +26,7 @@ class LossTerms:
 
     total_loss: torch.Tensor
     actor_loss: torch.Tensor
+    state_prediction_loss: torch.Tensor
     info: dict
     state: torch.Tensor
     action_chunk: torch.Tensor
@@ -52,6 +54,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         action_space_shape: tuple[int],
         value_head_factory: Callable[[int, int], DistributionalValueHead],
         policy_head_factory,
+        prediction_head_factory: Callable[..., LatentTDPredictionHead],
         horizon: int,
         critic_loss_weight: float,
         vla_config: DictConfig,
@@ -73,6 +76,14 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         self.value_head = value_head_factory(
             in_channels=state_dim, action_dim=action_dim, token_dim=self.encoder.token_dim
         ).to(device)
+        self.use_state_predictor = vla_config.use_state_predictor
+        # 予測を切るときは予測器そのものを作らない。作ると使わない重みが optimizer に入り、
+        # weight decay だけを受け続ける
+        self.prediction_head = (
+            prediction_head_factory(state_dim=state_dim, action_dim=action_dim).to(device)
+            if self.use_state_predictor
+            else None
+        )
         self._dummy_state = torch.zeros(1, 1, 1)
 
     def init_state(self) -> torch.Tensor:
@@ -128,7 +139,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             infer_result=infer_result,
             loss_result=LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error),
             et_info=EligibilityTraceInfo(
-                actor_entropy_loss=terms.actor_loss,
+                actor_loss=terms.actor_loss,
+                state_prediction_loss=terms.state_prediction_loss,
                 neg_value=neg_value_detached,
                 delta=terms.info["losses/delta"],
             ),
@@ -152,6 +164,24 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             observations[:, step], actions[:, step], rewards[:, step], scalar_obs[:, step]
         )
 
+    def _prediction_loss(
+        self,
+        state: torch.Tensor,
+        data: ReplayBufferData,
+        next_state: torch.Tensor,
+        next_action: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        """将来の状態の予測の損失。予測を切っているときは予測器がないので 0。"""
+        if not self.use_state_predictor:
+            return torch.zeros((), device=state.device), {}
+        return self.prediction_head.compute_loss(
+            state,
+            data.actions[:, -self.horizon :],
+            next_state,
+            next_action,
+            data.dones[:, -self.horizon :],
+        )
+
     def _loss_terms(self, data: ReplayBufferData) -> LossTerms:
         """リプレイバッチの損失。現在の状態はチャンクの手前のステップから、次の状態は最後の
         ステップから作る。"""
@@ -171,10 +201,17 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state, action_chunk, value_head=self.value_head
         )
-        info = {f"losses/{key}": value for key, value in {**critic_info, **actor_info}.items()}
+        state_prediction_loss, state_prediction_info = self._prediction_loss(
+            state, data, next_state, next_action
+        )
+        info = {
+            f"losses/{key}": value
+            for key, value in {**critic_info, **actor_info, **state_prediction_info}.items()
+        }
         return LossTerms(
-            total_loss=self.critic_loss_weight * critic_loss + actor_loss,
+            total_loss=self.critic_loss_weight * critic_loss + actor_loss + state_prediction_loss,
             actor_loss=actor_loss,
+            state_prediction_loss=state_prediction_loss,
             info=info,
             state=state,
             action_chunk=action_chunk,

@@ -114,8 +114,11 @@ class StreamingAgent(Agent):
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
         if self.use_eligibility_trace:
-            # Actor: backward actor-only loss → encoder + actor grads.
-            result.et_info.actor_entropy_loss.backward(retain_graph=True)
+            # actor と将来の状態の予測の損失の勾配は、value head 以外（エンコーダ、actor、
+            # 予測器）に流す
+            (result.et_info.actor_loss + result.et_info.state_prediction_loss).backward(
+                retain_graph=True
+            )
             # Critic: backward -V(s) → value_head grads only (detached from encoder).
             result.et_info.neg_value.backward()
             nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
