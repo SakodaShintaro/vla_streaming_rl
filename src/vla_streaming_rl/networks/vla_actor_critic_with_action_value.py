@@ -192,10 +192,14 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         window = (data.observations, data.actions, data.rewards, data.scalar_obs)
         with torch.no_grad():
             next_state = self._state(*window, -1)
-            next_action = self.policy_head.get_action(next_state)
+            # TD の目標は割引率ごとに、その割引率の方策の次の行動で作る。最後が主の割引率の
+            # 方策の行動で、推論の結果と状態の予測にはそれを使う
+            next_gamma_actions = self.policy_head.get_gamma_actions(next_state)
+            next_action = next_gamma_actions[:, -1]
             next_critic_output = self.value_head(next_state, next_action).output
+            next_q = self.value_head.gamma_values(next_state, next_gamma_actions)
         target_value = self.value_head.compute_target_value(
-            next_critic_output, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
+            next_q, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
         )
         state = self._state(*window, -self.horizon - 1)
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)

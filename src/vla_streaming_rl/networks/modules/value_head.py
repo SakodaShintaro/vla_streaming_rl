@@ -24,10 +24,12 @@ class DistributionalValueHead(nn.Module):
     action value for ``num_gammas`` discount factors at once from a *shared
     trunk* — the final layer emits ``num_gammas * num_bins`` logits, reshaped to
     ``(B, num_gammas, num_bins)``. The extra gammas are an auxiliary prediction
-    task that enriches the representation; the actor / rollout maximize the mean
-    over gammas (so :meth:`to_value` averages), while the critic is trained on a
-    *per-gamma* TD target (:meth:`to_values`, :meth:`value_loss`). With
-    ``num_gammas == 1`` the logits keep the same ``(B, 1, num_bins)`` shape.
+    task that enriches the representation. The policy head keeps one policy per
+    gamma: policy g maximizes Q_g and gamma g's TD target bootstraps from policy
+    g's action (:meth:`gamma_values`), and the rollout runs the primary gamma's
+    policy. :meth:`to_value` (the mean over gammas) is what the logging and the
+    eligibility trace read. With ``num_gammas == 1`` the logits keep the same
+    ``(B, 1, num_bins)`` shape.
 
     With ``num_bins > 1`` the head emits categorical logits and holds an
     :class:`HLGaussLoss` (Gaussian-histogram cross-entropy, the repo's drop-in
@@ -106,6 +108,16 @@ class DistributionalValueHead(nn.Module):
         """
         return self.to_value(self(x, a).output)
 
+    def gamma_values(self, x: torch.Tensor, gamma_actions: torch.Tensor) -> torch.Tensor:
+        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim) を、それぞれの割引率の
+        価値で評価した値 (B, num_gammas)。割引率 g の行動は割引率 g の価値でだけ読む。"""
+        bs, num_gammas = gamma_actions.shape[:2]
+        assert num_gammas == self.num_gammas, (num_gammas, self.num_gammas)
+        values = self.to_values(
+            self(x.repeat_interleave(num_gammas, dim=0), gamma_actions.flatten(0, 1)).output
+        )  # (B * num_gammas, num_gammas)
+        return values.view(bs, num_gammas, num_gammas).diagonal(dim1=1, dim2=2)
+
     def value_report(self, logits: torch.Tensor) -> dict[str, float]:
         """Per-sample value diagnostics for inference / rollout logging.
 
@@ -169,11 +181,12 @@ class DistributionalValueHead(nn.Module):
     @torch.no_grad()
     def compute_target_value(
         self,
-        next_output: torch.Tensor,
+        next_q: torch.Tensor,
         chunk_rewards: torch.Tensor,
         chunk_dones: torch.Tensor,
     ) -> torch.Tensor:
-        next_q = self.to_values(next_output)  # (B, num_gammas)
+        """割引率ごとの TD の目標 (B, num_gammas)。``next_q`` は次の状態での割引率ごとの
+        価値 (B, num_gammas)（:meth:`gamma_values`）。"""
         batch_size = chunk_rewards.size(0)
         gammas = self.gammas_tensor.to(chunk_rewards.device)  # (G,)
         discounted_reward = torch.zeros(batch_size, self.num_gammas, device=chunk_rewards.device)

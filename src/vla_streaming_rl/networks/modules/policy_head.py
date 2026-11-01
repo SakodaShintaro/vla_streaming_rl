@@ -41,6 +41,29 @@ def _euler_denoise(
     return x_t.clamp(-1.0, 1.0)
 
 
+# 割引率の特徴の幅（状態をトークンとして読まない方策で、入力につなぐ分）
+GAMMA_EMBEDDING_SIZE = 64
+
+
+def _gamma_features(embed_dim: int, gamma: float, multi_gammas: list[float]) -> torch.Tensor:
+    """割引率ごとの方策を条件づける特徴 (num_gammas, embed_dim)（AMAGO の multi-gamma）。
+    補助の割引率を先に、主の割引率を最後に並べる（価値ヘッドと同じ並び）。実効の地平
+    1/(1-γ) の log を sin/cos の特徴にしたもの。"""
+    gammas = torch.tensor(list(multi_gammas) + [gamma], dtype=torch.float32)
+    horizon_feature = torch.log1p(1.0 / (1.0 - gammas))
+    return get_fourier_embeds_from_coordinates(embed_dim, horizon_feature.view(-1, 1))[:, 0, 0]
+
+
+def _repeat_over_gammas(
+    x: torch.Tensor, gamma_features: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``x`` (B, ...) を割引率の数だけ並べた (B * num_gammas, ...) と、各行の割引率の特徴
+    (B * num_gammas, ...)。行は ``x`` の行ごとに割引率の並びで続く。"""
+    num_gammas = gamma_features.size(0)
+    feature_repeats = (x.size(0),) + (1,) * (gamma_features.dim() - 1)
+    return x.repeat_interleave(num_gammas, dim=0), gamma_features.repeat(*feature_repeats)
+
+
 class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
@@ -83,6 +106,10 @@ class TimestepEmbedder(nn.Module):
 
 
 class DiffusionPolicy(nn.Module):
+    """方策は割引率ごとに持つ（AMAGO の multi-gamma）。割引率の特徴を入力につないで条件づけ、
+    1つのネットワークで割引率ごとの行動を出す。割引率 g の方策は割引率 g の価値を最大にする
+    ように学習し、環境で実行するのは主の割引率の方策の行動だけ。"""
+
     def __init__(
         self,
         state_dim: int,
@@ -96,6 +123,8 @@ class DiffusionPolicy(nn.Module):
         denoising_steps: int,
         dacer_loss_weight: float,
         detach_state: bool,
+        gamma: float,
+        multi_gammas: list[float],
     ) -> None:
         super().__init__()
         # 状態をトークンとしては読まないので、トークンの幅は使わない
@@ -104,7 +133,9 @@ class DiffusionPolicy(nn.Module):
         time_embedding_size = 256
         self.horizon = horizon
         total_action_dim = action_dim * horizon
-        self.fc_in = nn.Linear(state_dim + total_action_dim + time_embedding_size, hidden_dim)
+        self.fc_in = nn.Linear(
+            state_dim + total_action_dim + time_embedding_size + GAMMA_EMBEDDING_SIZE, hidden_dim
+        )
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.fc_out = nn.Linear(hidden_dim, total_action_dim)
@@ -118,16 +149,23 @@ class DiffusionPolicy(nn.Module):
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
+        self.register_buffer(
+            "gamma_features", _gamma_features(GAMMA_EMBEDDING_SIZE, gamma, multi_gammas)
+        )
+        self.num_gammas = self.gamma_features.size(0)
 
-    def forward(self, a: torch.Tensor, t: torch.Tensor, state: torch.Tensor) -> HeadOutput:
+    def forward(
+        self, a: torch.Tensor, t: torch.Tensor, state: torch.Tensor, gamma_feature: torch.Tensor
+    ) -> HeadOutput:
         """
         Args:
             a: flattened action (B, horizon * action_dim)
             t: timestep (B,)
             state: state embedding (B, state_dim)
+            gamma_feature: その行の方策の割引率の特徴 (B, GAMMA_EMBEDDING_SIZE)
         """
         t = self.t_embedder(t)
-        x = torch.cat([a, t, state], 1)
+        x = torch.cat([a, t, state, gamma_feature], 1)
         x = self.fc_in(x)
 
         x = self.fc_mid(x)
@@ -139,15 +177,29 @@ class DiffusionPolicy(nn.Module):
         x = torch.tanh(x)
         return HeadOutput(output=x, activation=activation)
 
-    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+    def _denoise(self, x: torch.Tensor, gamma_feature: torch.Tensor) -> torch.Tensor:
+        """状態 (B, state_dim) と割引率の特徴 (B, GAMMA_EMBEDDING_SIZE) の行ごとの行動
+        (B, horizon, action_dim)。"""
         bs = x.size(0)
         noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
 
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            return self.forward(x_flat, t, x).output.view(bs, self.horizon, self.action_dim)
+            return self.forward(x_flat, t, x, gamma_feature).output.view(
+                bs, self.horizon, self.action_dim
+            )
 
         return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
+
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
+
+    def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
+        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        return self._denoise(*_repeat_over_gammas(x, self.gamma_features)).view(
+            x.size(0), self.num_gammas, self.horizon, self.action_dim
+        )
 
     def compute_actor_loss(
         self,
@@ -158,42 +210,48 @@ class DiffusionPolicy(nn.Module):
     ) -> tuple[torch.Tensor, dict]:
         """Advantage-maximizing actor loss + DACER2 score matching
         (https://arxiv.org/abs/2505.23426).
+
+        割引率ごとの方策の行動を、それぞれの割引率の価値で評価して最大にする。
         """
         del action_chunk
         if self.detach_state:
             state = state.detach()
-        action = self.get_action(state)
-        B, horizon, action_dim = action.shape
+        action = self.get_gamma_actions(state)
+        B, G, horizon, action_dim = action.shape
         device = action.device
 
         for param in value_head.parameters():
             param.requires_grad_(False)
-        policy_q = value_head.scalar_value(state, action).view(-1, 1)
+        policy_q = value_head.gamma_values(state, action)  # (B, G)
         actor_loss = -policy_q.mean()
         for param in value_head.parameters():
             param.requires_grad_(True)
 
         # DACER2 score matching: regress the policy's x-prediction onto a
         # Q-gradient-derived velocity target, with logarithmic time weighting.
+        # 行は状態ごとに割引率の並びで続く (B * G, ...)
         eps = 1e-4
-        t = torch.rand((B, 1), device=device) * (1 - eps) + eps
+        t = torch.rand((B * G, 1), device=device) * (1 - eps) + eps
         w_t = torch.exp(0.4 * t + (-1.8))
 
-        actions = action.view(B, -1).clone().detach().requires_grad_(True)
-        actions_chunk = actions.view(B, horizon, action_dim)
-        q_values = value_head.scalar_value(state, actions_chunk).unsqueeze(-1)
+        actions = action.view(B, G, -1).clone().detach().requires_grad_(True)
+        q_values = value_head.gamma_values(state, actions.view(B, G, horizon, action_dim))
         q_grad = torch.autograd.grad(q_values.sum(), actions, create_graph=True)[0]
+        q_grad = q_grad.view(B * G, -1)
+        flat_actions = actions.detach().view(B * G, -1)
 
-        noise = torch.randn_like(actions).clamp(-3.0, 3.0)
-        a_t = (1.0 - t) * noise + t * actions
+        noise = torch.randn_like(flat_actions).clamp(-3.0, 3.0)
+        a_t = (1.0 - t) * noise + t * flat_actions
         with torch.no_grad():
-            v_target = (1 - t) / t * q_grad + 1 / t * actions
+            v_target = (1 - t) / t * q_grad + 1 / t * flat_actions
             v_target = v_target / (v_target.norm(dim=1, keepdim=True) + 1e-8)
             v_target = w_t * v_target
             # Convert to x-space (policy outputs the clean action prediction).
             target = a_t + (1 - t) * v_target
 
-        pred_dict = self.forward(a_t, t.squeeze(1), state)
+        pred_dict = self.forward(
+            a_t, t.squeeze(1), *_repeat_over_gammas(state, self.gamma_features)
+        )
         pred = pred_dict.output
         dacer_loss = F.mse_loss(pred, target)
         total_loss = actor_loss + dacer_loss * self.dacer_loss_weight
@@ -214,6 +272,10 @@ class TokenDiffusionPolicy(nn.Module):
     チャンクは成分ごとに sin/cos の特徴で1トークンにする（前の行動のトークンと同じ作り方）。
     混ぜる層は :class:`SpatialTransformerBlock` で、位置の埋め込みは 0、残差は layer scale で
     小さく始めるので、学習の始めは「トークンを並べて MLP で読む」のとほぼ同じ。
+
+    方策は割引率ごとに持つ（AMAGO の multi-gamma）。割引率のトークンを並べて条件づけ、1つの
+    ネットワークで割引率ごとの行動を出す。割引率 g の方策は割引率 g の価値を最大にするように
+    学習し、環境で実行するのは主の割引率の方策の行動だけ。
     """
 
     def __init__(
@@ -232,6 +294,8 @@ class TokenDiffusionPolicy(nn.Module):
         denoising_steps: int,
         dacer_loss_weight: float,
         detach_state: bool,
+        gamma: float,
+        multi_gammas: list[float],
     ) -> None:
         super().__init__()
         assert state_dim % token_dim == 0, (state_dim, token_dim)
@@ -239,8 +303,8 @@ class TokenDiffusionPolicy(nn.Module):
         time_embedding_size = 256
         self.horizon = horizon
         total_action_dim = action_dim * horizon
-        # 状態のトークン、行動の成分ごとのトークン、時刻のトークン
-        tokens_num = state_dim // token_dim + total_action_dim + 1
+        # 状態のトークン、行動の成分ごとのトークン、時刻のトークン、割引率のトークン
+        tokens_num = state_dim // token_dim + total_action_dim + 2
         mixed_dim = tokens_num * token_dim
         self.fc_in = nn.Linear(mixed_dim + total_action_dim + time_embedding_size, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
@@ -259,6 +323,11 @@ class TokenDiffusionPolicy(nn.Module):
 
         self.token_dim = token_dim
         self.t_token_embedder = TimestepEmbedder(token_dim)
+        # 割引率のトークン (num_gammas, 1, token_dim)
+        self.register_buffer(
+            "gamma_tokens", _gamma_features(token_dim, gamma, multi_gammas).unsqueeze(1)
+        )
+        self.num_gammas = self.gamma_tokens.size(0)
         self.token_position = nn.Parameter(torch.zeros(1, tokens_num, token_dim))
         self.token_mixer = nn.Sequential(
             *[
@@ -267,18 +336,24 @@ class TokenDiffusionPolicy(nn.Module):
             ]
         )
 
-    def forward(self, a: torch.Tensor, t: torch.Tensor, state: torch.Tensor) -> HeadOutput:
+    def forward(
+        self, a: torch.Tensor, t: torch.Tensor, state: torch.Tensor, gamma_token: torch.Tensor
+    ) -> HeadOutput:
         """
         Args:
             a: flattened action (B, horizon * action_dim)
             t: timestep (B,)
             state: state embedding (B, state_dim), state_dim // token_dim tokens laid flat
+            gamma_token: その行の方策の割引率のトークン (B, 1, token_dim)
         """
         bs = a.size(0)
         state_tokens = state.view(bs, -1, self.token_dim)
         action_tokens = get_fourier_embeds_from_coordinates(self.token_dim, a.unsqueeze(1))[:, 0]
         t_token = self.t_token_embedder(t).unsqueeze(1)
-        tokens = torch.cat([state_tokens, action_tokens, t_token], dim=1) + self.token_position
+        tokens = (
+            torch.cat([state_tokens, action_tokens, t_token, gamma_token], dim=1)
+            + self.token_position
+        )
         mixed = self.token_mixer(tokens).flatten(start_dim=1)
 
         x = torch.cat([a, self.t_embedder(t), mixed], 1)
@@ -287,15 +362,29 @@ class TokenDiffusionPolicy(nn.Module):
         x = torch.tanh(self.fc_out(x))
         return HeadOutput(output=x, activation=activation)
 
-    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+    def _denoise(self, x: torch.Tensor, gamma_token: torch.Tensor) -> torch.Tensor:
+        """状態 (B, state_dim) と割引率のトークン (B, 1, token_dim) の行ごとの行動
+        (B, horizon, action_dim)。"""
         bs = x.size(0)
         noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
 
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            return self.forward(x_flat, t, x).output.view(bs, self.horizon, self.action_dim)
+            return self.forward(x_flat, t, x, gamma_token).output.view(
+                bs, self.horizon, self.action_dim
+            )
 
         return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
+
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        return self._denoise(x, self.gamma_tokens[-1:].expand(x.size(0), -1, -1))
+
+    def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
+        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        return self._denoise(*_repeat_over_gammas(x, self.gamma_tokens)).view(
+            x.size(0), self.num_gammas, self.horizon, self.action_dim
+        )
 
     def compute_actor_loss(
         self,
@@ -306,42 +395,46 @@ class TokenDiffusionPolicy(nn.Module):
     ) -> tuple[torch.Tensor, dict]:
         """Advantage-maximizing actor loss + DACER2 score matching
         (https://arxiv.org/abs/2505.23426).
+
+        割引率ごとの方策の行動を、それぞれの割引率の価値で評価して最大にする。
         """
         del action_chunk
         if self.detach_state:
             state = state.detach()
-        action = self.get_action(state)
-        B, horizon, action_dim = action.shape
+        action = self.get_gamma_actions(state)
+        B, G, horizon, action_dim = action.shape
         device = action.device
 
         for param in value_head.parameters():
             param.requires_grad_(False)
-        policy_q = value_head.scalar_value(state, action).view(-1, 1)
+        policy_q = value_head.gamma_values(state, action)  # (B, G)
         actor_loss = -policy_q.mean()
         for param in value_head.parameters():
             param.requires_grad_(True)
 
         # DACER2 score matching: regress the policy's x-prediction onto a
         # Q-gradient-derived velocity target, with logarithmic time weighting.
+        # 行は状態ごとに割引率の並びで続く (B * G, ...)
         eps = 1e-4
-        t = torch.rand((B, 1), device=device) * (1 - eps) + eps
+        t = torch.rand((B * G, 1), device=device) * (1 - eps) + eps
         w_t = torch.exp(0.4 * t + (-1.8))
 
-        actions = action.view(B, -1).clone().detach().requires_grad_(True)
-        actions_chunk = actions.view(B, horizon, action_dim)
-        q_values = value_head.scalar_value(state, actions_chunk).unsqueeze(-1)
+        actions = action.view(B, G, -1).clone().detach().requires_grad_(True)
+        q_values = value_head.gamma_values(state, actions.view(B, G, horizon, action_dim))
         q_grad = torch.autograd.grad(q_values.sum(), actions, create_graph=True)[0]
+        q_grad = q_grad.view(B * G, -1)
+        flat_actions = actions.detach().view(B * G, -1)
 
-        noise = torch.randn_like(actions).clamp(-3.0, 3.0)
-        a_t = (1.0 - t) * noise + t * actions
+        noise = torch.randn_like(flat_actions).clamp(-3.0, 3.0)
+        a_t = (1.0 - t) * noise + t * flat_actions
         with torch.no_grad():
-            v_target = (1 - t) / t * q_grad + 1 / t * actions
+            v_target = (1 - t) / t * q_grad + 1 / t * flat_actions
             v_target = v_target / (v_target.norm(dim=1, keepdim=True) + 1e-8)
             v_target = w_t * v_target
             # Convert to x-space (policy outputs the clean action prediction).
             target = a_t + (1 - t) * v_target
 
-        pred_dict = self.forward(a_t, t.squeeze(1), state)
+        pred_dict = self.forward(a_t, t.squeeze(1), *_repeat_over_gammas(state, self.gamma_tokens))
         pred = pred_dict.output
         dacer_loss = F.mse_loss(pred, target)
         total_loss = actor_loss + dacer_loss * self.dacer_loss_weight
@@ -360,6 +453,10 @@ class CFGDiffusionPolicy(nn.Module):
 
     Training: Drop condition I (positive/negative) with condition_drop_prob probability
     Inference: Adjust guidance strength with beta (cfgrl_beta)
+
+    方策は割引率ごとに持つ（AMAGO の multi-gamma）。割引率の特徴を入力につないで条件づけ、
+    割引率 g の方策は割引率 g の価値での advantage の符号で条件づけて学習する。環境で実行
+    するのは主の割引率の方策の行動だけ。
     """
 
     def __init__(
@@ -376,6 +473,8 @@ class CFGDiffusionPolicy(nn.Module):
         denoising_steps: int,
         condition_drop_prob: float,
         detach_state: bool,
+        gamma: float,
+        multi_gammas: list[float],
     ) -> None:
         super().__init__()
         # 状態をトークンとしては読まないので、トークンの幅は使わない
@@ -391,7 +490,11 @@ class CFGDiffusionPolicy(nn.Module):
         self.condition_embedding = nn.Embedding(3, condition_embedding_size)
 
         self.fc_in = nn.Linear(
-            state_dim + total_action_dim + time_embedding_size + condition_embedding_size,
+            state_dim
+            + total_action_dim
+            + time_embedding_size
+            + condition_embedding_size
+            + GAMMA_EMBEDDING_SIZE,
             hidden_dim,
         )
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
@@ -406,6 +509,10 @@ class CFGDiffusionPolicy(nn.Module):
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
+        self.register_buffer(
+            "gamma_features", _gamma_features(GAMMA_EMBEDDING_SIZE, gamma, multi_gammas)
+        )
+        self.num_gammas = self.gamma_features.size(0)
 
     def forward(
         self,
@@ -413,6 +520,7 @@ class CFGDiffusionPolicy(nn.Module):
         t: torch.Tensor,
         state: torch.Tensor,
         condition: torch.Tensor,
+        gamma_feature: torch.Tensor,
     ) -> HeadOutput:
         """
         Args:
@@ -420,10 +528,11 @@ class CFGDiffusionPolicy(nn.Module):
             t: timestep (B,)
             state: state embedding (B, state_dim)
             condition: condition I (B,) - 0=negative, 1=positive, 2=unconditional
+            gamma_feature: その行の方策の割引率の特徴 (B, GAMMA_EMBEDDING_SIZE)
         """
         t_emb = self.t_embedder(t)
         cond_emb = self.condition_embedding(condition)  # (B, condition_embedding_size)
-        x = torch.cat([a, t_emb, state, cond_emb], 1)
+        x = torch.cat([a, t_emb, state, cond_emb, gamma_feature], 1)
         x = self.fc_in(x)
 
         x = self.fc_mid(x)
@@ -435,9 +544,10 @@ class CFGDiffusionPolicy(nn.Module):
         x = torch.tanh(x)
         return HeadOutput(output=x, activation=activation)
 
-    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+    def _denoise(self, x: torch.Tensor, gamma_feature: torch.Tensor) -> torch.Tensor:
         """
-        Inference using CFG.
+        Inference using CFG, per row of state (B, state_dim) and gamma feature
+        (B, GAMMA_EMBEDDING_SIZE).
 
         Guidance in output space: out = (1 - beta) * out_uncond + beta * out_positive
         Higher beta increases guidance towards positive advantage direction.
@@ -452,12 +562,22 @@ class CFGDiffusionPolicy(nn.Module):
 
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            out_pos = self.forward(x_flat, t, x, cond_positive).output
-            out_unc = self.forward(x_flat, t, x, cond_uncond).output
+            out_pos = self.forward(x_flat, t, x, cond_positive, gamma_feature).output
+            out_unc = self.forward(x_flat, t, x, cond_uncond, gamma_feature).output
             out = (1 - self.cfgrl_beta) * out_unc + self.cfgrl_beta * out_pos
             return out.view(bs, self.horizon, self.action_dim)
 
         return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
+
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
+
+    def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
+        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        return self._denoise(*_repeat_over_gammas(x, self.gamma_features)).view(
+            x.size(0), self.num_gammas, self.horizon, self.action_dim
+        )
 
     def compute_actor_loss(
         self,
@@ -468,28 +588,32 @@ class CFGDiffusionPolicy(nn.Module):
     ) -> tuple[torch.Tensor, dict]:
         """CFGRL/pistar06: condition on advantage sign, drop with condition_drop_prob.
 
-        データの行動の advantage は、今の方策の行動の Q を基準に Q(s, a) - Q(s, π(s)) とする。"""
+        データの行動の advantage は、割引率ごとに、その割引率の方策の行動の Q を基準に
+        Q_g(s, a) - Q_g(s, π_g(s)) とする。中央値は割引率ごとに取る。"""
         if self.detach_state:
             state = state.detach()
         batch_size = state.shape[0]
         device = state.device
-        action_flat = action_chunk.view(batch_size, -1)
+        G = self.num_gammas
 
         with torch.no_grad():
-            advantage = value_head.scalar_value(state, action_chunk) - value_head.scalar_value(
-                state, self.get_action(state)
-            )
-            threshold = advantage.median()
-            condition = (advantage >= threshold).long()
-            drop_mask = torch.rand(batch_size, device=device) < self.condition_drop_prob
+            data_q = value_head.to_values(value_head(state, action_chunk).output)  # (B, G)
+            policy_q = value_head.gamma_values(state, self.get_gamma_actions(state))  # (B, G)
+            advantage = data_q - policy_q
+            threshold = advantage.median(dim=0, keepdim=True).values
+            # 行は状態ごとに割引率の並びで続く (B * G,)
+            condition = (advantage >= threshold).long().view(-1)
+            drop_mask = torch.rand(batch_size * G, device=device) < self.condition_drop_prob
             condition = torch.where(drop_mask, torch.full_like(condition, 2), condition)
 
+        state_rep, gamma_feature = _repeat_over_gammas(state, self.gamma_features)
+        action_flat = action_chunk.view(batch_size, -1).repeat_interleave(G, dim=0)
         eps = 1e-4
-        t = torch.rand((batch_size, 1), device=device) * (1 - eps) + eps
+        t = torch.rand((batch_size * G, 1), device=device) * (1 - eps) + eps
         noise = torch.randn_like(action_flat)
         noise = torch.clamp(noise, -3.0, 3.0)
         a_t = (1.0 - t) * noise + t * action_flat
-        actor_output_dict = self.forward(a_t, t.squeeze(1), state, condition)
+        actor_output_dict = self.forward(a_t, t.squeeze(1), state_rep, condition, gamma_feature)
         pred = actor_output_dict.output
         actor_loss = F.mse_loss(pred, action_flat)
 
@@ -514,6 +638,9 @@ class IMLEPolicy(nn.Module):
     nearest the ground truth. Here the ground truth is replaced by the critic:
     the candidate with the highest Q is pushed up by Q-gradient ascent, while
     the others are left untouched, so different z can settle on different modes.
+
+    方策は割引率ごとに持つ（AMAGO の multi-gamma）。割引率の特徴を入力につないで条件づけ、
+    割引率 g の方策の候補は割引率 g の価値で選ぶ。環境で実行するのは主の割引率の方策の行動だけ。
     """
 
     def __init__(
@@ -527,6 +654,8 @@ class IMLEPolicy(nn.Module):
         sparsity: float,
         sample_num: int,
         detach_state: bool,
+        gamma: float,
+        multi_gammas: list[float],
     ) -> None:
         super().__init__()
         # 状態をトークンとしては読まないので、トークンの幅は使わない
@@ -536,21 +665,28 @@ class IMLEPolicy(nn.Module):
         self.action_dim = action_dim
         self.sample_num = sample_num
         total_action_dim = action_dim * horizon
-        self.fc_in = nn.Linear(state_dim + total_action_dim, hidden_dim)
+        self.fc_in = nn.Linear(state_dim + total_action_dim + GAMMA_EMBEDDING_SIZE, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.fc_out = nn.Linear(hidden_dim, total_action_dim)
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
+        self.register_buffer(
+            "gamma_features", _gamma_features(GAMMA_EMBEDDING_SIZE, gamma, multi_gammas)
+        )
+        self.num_gammas = self.gamma_features.size(0)
 
-    def forward(self, z: torch.Tensor, state: torch.Tensor) -> HeadOutput:
+    def forward(
+        self, z: torch.Tensor, state: torch.Tensor, gamma_feature: torch.Tensor
+    ) -> HeadOutput:
         """
         Args:
             z: latent noise (B, horizon * action_dim)
             state: state embedding (B, state_dim)
+            gamma_feature: その行の方策の割引率の特徴 (B, GAMMA_EMBEDDING_SIZE)
         """
-        x = torch.cat([z, state], 1)
+        x = torch.cat([z, state, gamma_feature], 1)
         x = self.fc_in(x)
         x = self.fc_mid(x)
         x = self.norm(x)
@@ -559,10 +695,22 @@ class IMLEPolicy(nn.Module):
         x = torch.tanh(x)
         return HeadOutput(output=x, activation=activation)
 
-    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+    def _generate(self, x: torch.Tensor, gamma_feature: torch.Tensor) -> torch.Tensor:
+        """状態 (B, state_dim) と割引率の特徴 (B, GAMMA_EMBEDDING_SIZE) の行ごとの行動
+        (B, horizon, action_dim)。"""
         bs = x.size(0)
         z = torch.randn(bs, self.horizon * self.action_dim, device=x.device)
-        return self.forward(z, x).output.view(bs, self.horizon, self.action_dim)
+        return self.forward(z, x, gamma_feature).output.view(bs, self.horizon, self.action_dim)
+
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        return self._generate(x, self.gamma_features[-1:].expand(x.size(0), -1))
+
+    def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
+        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        return self._generate(*_repeat_over_gammas(x, self.gamma_features)).view(
+            x.size(0), self.num_gammas, self.horizon, self.action_dim
+        )
 
     def compute_actor_loss(
         self,
@@ -571,22 +719,27 @@ class IMLEPolicy(nn.Module):
         *,
         value_head: nn.Module,
     ) -> tuple[torch.Tensor, dict]:
-        """Maximize Q of the best of ``sample_num`` candidates per state."""
+        """Maximize Q of the best of ``sample_num`` candidates per state and gamma.
+
+        割引率 g の方策の候補は割引率 g の価値で評価し、その中の最良を押し上げる。"""
         del action_chunk
         if self.detach_state:
             state = state.detach()
         B = state.shape[0]
         m = self.sample_num
+        G = self.num_gammas
 
+        # 行は状態ごとに候補、候補ごとに割引率の並びで続く (B * m * G, ...)
         state_rep = state.repeat_interleave(m, dim=0)  # (B*m, state_dim)
-        z = torch.randn(B * m, self.horizon * self.action_dim, device=state.device)
-        action = self.forward(z, state_rep).output.view(B * m, self.horizon, self.action_dim)
+        action = self._generate(*_repeat_over_gammas(state_rep, self.gamma_features)).view(
+            B * m, G, self.horizon, self.action_dim
+        )
 
         # The critic only scores the candidates: no gradient into its weights,
         # and none into the encoder through its state input.
         for param in value_head.parameters():
             param.requires_grad_(False)
-        q = value_head.scalar_value(state_rep.detach(), action).view(B, m)
+        q = value_head.gamma_values(state_rep.detach(), action).view(B, m, G)
         for param in value_head.parameters():
             param.requires_grad_(True)
 
@@ -595,10 +748,10 @@ class IMLEPolicy(nn.Module):
         best_q = q.gather(1, best)
         actor_loss = -best_q.mean()
 
-        # Mean pairwise L2 distance between the candidates of the same state.
-        candidates = action.detach().view(B, m, -1)
-        pairwise = torch.cdist(candidates, candidates)  # (B, m, m), zero diagonal
-        action_gap = pairwise.sum(dim=(1, 2)) / (m * (m - 1))
+        # Mean pairwise L2 distance between the candidates of the same state and gamma.
+        candidates = action.detach().view(B, m, G, -1).transpose(1, 2)  # (B, G, m, D)
+        pairwise = torch.cdist(candidates, candidates)  # (B, G, m, m), zero diagonal
+        action_gap = pairwise.sum(dim=(2, 3)) / (m * (m - 1))
 
         info_dict = {
             "actor_loss": actor_loss.item(),
@@ -623,6 +776,10 @@ class TanhPolicy(nn.Module):
     learning rate it would take hundreds of thousands of steps to cross the
     range it has to cross, which leaves the loss maximizing entropy for as long
     as the critic is still near zero.
+
+    方策は割引率ごとに持つ（AMAGO の multi-gamma）。割引率の特徴を入力につないで条件づけ、
+    割引率 g の方策は割引率 g の価値を最大にするように学習する。温度は全割引率で1つ。環境で
+    実行するのは主の割引率の方策の行動だけ。
     """
 
     LOG_STD_MIN = -20.0
@@ -645,6 +802,8 @@ class TanhPolicy(nn.Module):
         init_temperature: float,
         temperature_lr: float,
         detach_state: bool,
+        gamma: float,
+        multi_gammas: list[float],
     ) -> None:
         super().__init__()
         # 状態をトークンとしては読まないので、トークンの幅は使わない
@@ -655,7 +814,7 @@ class TanhPolicy(nn.Module):
         self.horizon = horizon
         self.action_dim = action_dim
         total_action_dim = action_dim * horizon
-        self.fc_in = nn.Linear(state_dim, hidden_dim)
+        self.fc_in = nn.Linear(state_dim + GAMMA_EMBEDDING_SIZE, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.fc_mean = nn.Linear(hidden_dim, total_action_dim)
@@ -675,16 +834,21 @@ class TanhPolicy(nn.Module):
         self.sparse_mask = (
             None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
         )
+        self.register_buffer(
+            "gamma_features", _gamma_features(GAMMA_EMBEDDING_SIZE, gamma, multi_gammas)
+        )
+        self.num_gammas = self.gamma_features.size(0)
 
-    def forward(self, state: torch.Tensor) -> HeadOutput:
-        """The distribution's parameters for ``state``, ``output`` being the
+    def forward(self, state: torch.Tensor, gamma_feature: torch.Tensor) -> HeadOutput:
+        """The distribution's parameters for ``state`` under the policy of the
+        gamma ``gamma_feature`` (B, GAMMA_EMBEDDING_SIZE), ``output`` being the
         mean and the log standard deviation on one axis."""
-        x = self.norm(self.fc_mid(self.fc_in(state)))
+        x = self.norm(self.fc_mid(self.fc_in(torch.cat([state, gamma_feature], dim=-1))))
         log_std = self.fc_log_std(x).clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
         return HeadOutput(output=torch.cat([self.fc_mean(x), log_std], dim=-1), activation=x)
 
     def _sample(
-        self, state: torch.Tensor
+        self, state: torch.Tensor, gamma_feature: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """One reparameterized draw: the action chunk and its log density under
         the squashed Gaussian, with the Gaussian's mean and log standard
@@ -694,7 +858,7 @@ class TanhPolicy(nn.Module):
         softplus(-2u))`` rather than ``log(1 - tanh(u)^2)``, which underflows
         where the sample saturates.
         """
-        head_out = self.forward(state)
+        head_out = self.forward(state, gamma_feature)
         mean, log_std = head_out.output.chunk(2, dim=-1)
         noise = torch.randn_like(mean)
         pre_tanh = mean + noise * log_std.exp()
@@ -708,8 +872,14 @@ class TanhPolicy(nn.Module):
         return action, log_prob, mean, log_std
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
-        action, _, _, _ = self._sample(x)
+        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        action, _, _, _ = self._sample(x, self.gamma_features[-1:].expand(x.size(0), -1))
         return action
+
+    def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
+        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        action, _, _, _ = self._sample(*_repeat_over_gammas(x, self.gamma_features))
+        return action.view(x.size(0), self.num_gammas, self.horizon, self.action_dim)
 
     def compute_actor_loss(
         self,
@@ -729,7 +899,11 @@ class TanhPolicy(nn.Module):
         del action_chunk
         if self.detach_state:
             state = state.detach()
-        action, log_prob, mean, log_std = self._sample(state)
+        # 行は状態ごとに割引率の並びで続く (B * G, ...)
+        B, G = state.size(0), self.num_gammas
+        action, log_prob, mean, log_std = self._sample(
+            *_repeat_over_gammas(state, self.gamma_features)
+        )
 
         with torch.no_grad():
             self.log_temperature += self.temperature_lr * (log_prob.mean() + self.target_entropy)
@@ -738,7 +912,9 @@ class TanhPolicy(nn.Module):
 
         for param in value_head.parameters():
             param.requires_grad_(False)
-        policy_q = value_head.scalar_value(state, action)
+        policy_q = value_head.gamma_values(
+            state, action.view(B, G, self.horizon, self.action_dim)
+        ).reshape(-1)
         for param in value_head.parameters():
             param.requires_grad_(True)
 

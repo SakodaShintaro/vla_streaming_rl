@@ -9,3 +9,5 @@ denoising_steps: 1
 cfgrl_beta: 1.5
 condition_drop_prob: 0.1
 detach_state: true
+gamma: ${gamma}
+multi_gammas: ${multi_gammas}

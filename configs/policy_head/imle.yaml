@@ -6,3 +6,5 @@ horizon: ${horizon}
 sparsity: ${sparsity}
 sample_num: 2
 detach_state: true
+gamma: ${gamma}
+multi_gammas: ${multi_gammas}
