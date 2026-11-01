@@ -214,7 +214,9 @@ class Agent(ABC):
         scalar_obs = read_scalar_obs(obs)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            self.network.to_stored_image(images, scalar_obs, self.instruction, reset_state),
+            self.network.to_stored_image(
+                images, scalar_obs, normalized_action, shaped_reward, self.instruction, reset_state
+            ),
             shaped_reward,
             episode_done if self.use_done else False,
             self.rnn_state.squeeze(0),

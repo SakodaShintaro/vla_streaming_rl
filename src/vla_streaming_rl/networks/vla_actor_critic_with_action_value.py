@@ -98,10 +98,14 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         self,
         images: list[torch.Tensor],
         scalar_obs: np.ndarray,
+        prev_action: np.ndarray,
+        reward: float,
         instruction: str,
         reset_state: bool,
     ) -> torch.Tensor:
-        return self.encoder.represent(images, scalar_obs, instruction, reset_state)
+        return self.encoder.represent(
+            images, scalar_obs, prev_action, reward, instruction, reset_state
+        )
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:

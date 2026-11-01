@@ -117,12 +117,16 @@ class NetworkInterface(nn.Module, abc.ABC):
         self,
         images: list[torch.Tensor],
         scalar_obs: np.ndarray,
+        prev_action: np.ndarray,
+        reward: float,
         instruction: str,
         reset_state: bool,
     ) -> torch.Tensor:
         """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）と方策が読む指示の文を、まとめて
         保存する形、``stored_image_shape`` の形。エージェントは毎ステップ順に呼び、
-        ``reset_state`` は再帰状態を初期化するステップ（エピソードの始め）で真。"""
+        ``reset_state`` は再帰状態を初期化するステップ（エピソードの始め）で真。
+        ``prev_action`` はこの観測に至った正規化済みの行動 (action_dim,)、``reward`` は
+        そのとき受け取った報酬。"""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:

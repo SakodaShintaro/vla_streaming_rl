@@ -120,15 +120,22 @@ class VLMEncoder(nn.Module):
 
     @torch.no_grad()
     def represent(
-        self, images: list[torch.Tensor], scalar_obs: np.ndarray, text: str, reset_state: bool
+        self,
+        images: list[torch.Tensor],
+        scalar_obs: np.ndarray,
+        prev_action: np.ndarray,
+        reward: float,
+        text: str,
+        reset_state: bool,
     ) -> torch.Tensor:
         """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませ、画像のトークンの活性の
         ``image_layers`` の層での平均の表現 (num_positions, hidden_size)。``reset_state`` ならエピソードの流れを空にして
-        から、スカラーの観測 (SCALAR_OBS_DIM,) を書いた文と画像を流れに積む。"""
+        から、前の行動 (action_dim,) と受け取った報酬とスカラーの観測 (SCALAR_OBS_DIM,) を
+        書いた文と画像を流れに積む。"""
         assert len(images) == self.images_num, (len(images), self.images_num)
         if reset_state:
             self._reset_stream()
-        return self._represent_stream(images, scalar_obs, text)
+        return self._represent_stream(images, scalar_obs, prev_action, reward, text)
 
     def _image_tokens(self, input_ids: torch.Tensor, outputs) -> torch.Tensor:
         """画像のトークンの位置の活性の ``image_layers`` の層での平均。画像のトークンは、
@@ -182,13 +189,26 @@ class VLMEncoder(nn.Module):
                 )
 
     def _represent_stream(
-        self, images: list[torch.Tensor], scalar_obs: np.ndarray, text: str
+        self,
+        images: list[torch.Tensor],
+        scalar_obs: np.ndarray,
+        prev_action: np.ndarray,
+        reward: float,
+        text: str,
     ) -> torch.Tensor:
-        """このステップのスカラーの観測の文と画像をエピソードの流れに積む。"""
+        """このステップの前の行動と報酬とスカラーの観測の文と画像をエピソードの流れに積む。
+        自分がどう動いて何を受け取ったかを流れに残し、前のエピソードの試みも含めて記憶できるようにする。"""
         if self.stream_next_position == 0:
             self._read_prompt(text)
         scalars = ", ".join(
-            f"{SCALAR_OBS_NAMES[index]}: {scalar_obs[index]:.2f}" for index in STATE_SCALAR_INDICES
+            [
+                "previous_action: [" + ", ".join(f"{value:.2f}" for value in prev_action) + "]",
+                f"reward: {reward:.4f}",
+            ]
+            + [
+                f"{SCALAR_OBS_NAMES[index]}: {scalar_obs[index]:.2f}"
+                for index in STATE_SCALAR_INDICES
+            ]
         )
         inputs = self.processor(
             text=[f"{scalars}\n{IMAGE_PLACEHOLDER * len(images)}"],
