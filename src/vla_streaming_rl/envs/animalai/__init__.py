@@ -22,6 +22,7 @@ def make_animalai_env(
     eval_variants: list[str],
     steps_per_stage: int,
     lives: int,
+    life_recovery_stages: float,
     binary_path: str,
     continuous_action: bool,
     topdown_camera: bool,
@@ -43,6 +44,7 @@ def make_animalai_env(
         eval_variants=list(eval_variants),
         steps_per_stage=steps_per_stage,
         lives=lives,
+        life_recovery_stages=life_recovery_stages,
         seed=seed,
     )
     # アリーナの選択順と、Unity 側の乱数（位置 -1 の物体の配置など）の両方を

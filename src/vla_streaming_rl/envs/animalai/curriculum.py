@@ -497,13 +497,17 @@ class LifeSelector(ArenaSelector):
     ゲームはライフ `lives` 個で最初のステージから始まる。成功したら次のステージへ進み、
     失敗したらライフが1以上なら1減らして同じステージに再挑戦し、0ならゲームオーバーで
     最初のステージからライフ `lives` 個でやり直す。最後のステージに成功したときもゲームを
-    終えて最初からやり直す。train.py の episode_limit か step_limit が学習を終える。
+    終えて最初からやり直す。ゲームの中でステージに `life_recovery_stages` 回成功するたびに、
+    ライフを1つ（`lives` 個を上限に）回復する。無限大なら回復しない。train.py の
+    episode_limit か step_limit が学習を終える。
     """
 
-    def __init__(self, arenas: list[Arena], lives: int):
+    def __init__(self, arenas: list[Arena], lives: int, life_recovery_stages: float):
         super().__init__(arenas)
         assert lives >= 0, lives
+        assert life_recovery_stages >= 1, life_recovery_stages
         self.lives = lives
+        self.life_recovery_stages = life_recovery_stages
         self._stage_index = 0
         self._lives_left = lives
         # 1つのゲームで到達した最も先のステージ（0 始まり）。全ステージに成功したゲームは
@@ -536,6 +540,9 @@ class LifeSelector(ArenaSelector):
         if success:
             self._stage_index += 1
             self._max_stage_index = max(self._max_stage_index, self._stage_index)
+            # ゲームは最初のステージから始まるので、_stage_index がこのゲームで成功した回数
+            if self._stage_index % self.life_recovery_stages == 0:
+                self._lives_left = min(self._lives_left + 1, self.lives)
             if self._stage_index == len(self.arenas):
                 self._end_game(len(self.arenas))
         elif self._lives_left >= 1:
@@ -636,6 +643,7 @@ def build_selector(
     eval_variants: list[str],
     steps_per_stage: int,
     lives: int,
+    life_recovery_stages: float,
     seed: int,
 ) -> ArenaSelector:
     """Build the arena selector named by `mode` (see the module docstring).
@@ -659,7 +667,9 @@ def build_selector(
             arenas=_training_arenas(train_variant, train_levels), shuffle=True, seed=seed
         ),
         "life": lambda: LifeSelector(
-            arenas=_training_arenas(train_variant, train_levels), lives=lives
+            arenas=_training_arenas(train_variant, train_levels),
+            lives=lives,
+            life_recovery_stages=life_recovery_stages,
         ),
         "eval": lambda: SequentialSelector(arenas=_eval_arenas(eval_levels, eval_variants)),
     }

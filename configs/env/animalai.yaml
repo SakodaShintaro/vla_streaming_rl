@@ -29,7 +29,8 @@ env_factory:
   #               with `lives` lives; a success moves on to the next stage, a
   #               failure retries the same stage at the cost of a life, and a
   #               failure with no life left (or a success on the last stage)
-  #               starts a new game from the first stage.
+  #               starts a new game from the first stage. Every
+  #               `life_recovery_stages` stages cleared in a game give back a life.
   #     eval    : run each external/animal-ai/configs/competition/ arena of
   #               eval_levels and eval_variants once, in order (with every level
   #               and variant, the paper's 900-arena Testbed protocol).
@@ -58,6 +59,9 @@ env_factory:
   # - lives ("life"): how many failed retries a game allows before it starts
   #   over from the first stage.
   lives: 3
+  # - life_recovery_stages ("life"): a game recovers one life (up to `lives`)
+  #   each time it has cleared this many stages. .inf never recovers one.
+  life_recovery_stages: 10
   binary_path: ~/animalai_env/4.3.2_alpha3/Linux/animalAI.x86_64
   # - continuous_action: how Unity consumes the Box(-1, 1, (2,)) action.
   #     false : discretize to the official MultiDiscrete([3, 3]) branches with a
