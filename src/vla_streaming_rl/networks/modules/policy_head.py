@@ -264,6 +264,158 @@ class DiffusionPolicy(nn.Module):
         return total_loss, info_dict
 
 
+class QF3Policy(nn.Module):
+    """QF3 (Fast Flow RL with Filtered Q-Gradients, arXiv:2610.08789) の flow の方策。
+
+    ネットワークは速度場 v(s, x_τ, τ) を出し、行動はノイズ x_0 ~ N(0, I) から τ = 0 → 1 へ
+    Euler で積分して作る。最後の層は 0 で初期化するので、学習の始めの flow は x_1 = x_0。
+
+    actor の損失はリプレイの行動 a_buf への flow matching と、a_buf にノイズを乗せた x_τ から
+    1 回の Euler で作った行動の Q の最大化の和。Q を読む行動は、速度の a_buf との差を成分ごとに
+    [-α, α] に切って作る（式 (3)）ので、critic が学習した a_buf の近くでしか評価せず、差が α を
+    超えた成分には Q の勾配が届かない（式 (5)）。flow matching は切らない速度に掛かる。
+
+    方策は割引率ごとに持つ（AMAGO の multi-gamma）。割引率の特徴を入力につないで条件づけ、
+    割引率 g の方策は割引率 g の価値を最大にするように学習し、環境で実行するのは主の割引率の
+    方策の行動だけ。flow matching の目標はどの割引率でも同じリプレイの行動。
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        token_dim: int,
+        hidden_dim: int,
+        block_num: int,
+        sparsity: float,
+        horizon: int,
+        denoising_steps: int,
+        clip_alpha: float,
+        cfm_loss_weight: float,
+        detach_state: bool,
+        gamma: float,
+        multi_gammas: list[float],
+    ) -> None:
+        super().__init__()
+        # 状態をトークンとしては読まないので、トークンの幅は使わない
+        del token_dim
+        self.detach_state = detach_state
+        time_embedding_size = 256
+        self.horizon = horizon
+        total_action_dim = action_dim * horizon
+        self.fc_in = nn.Linear(
+            state_dim + total_action_dim + time_embedding_size + GAMMA_EMBEDDING_SIZE, hidden_dim
+        )
+        self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.fc_out = nn.Linear(hidden_dim, total_action_dim)
+        nn.init.zeros_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
+        self.action_dim = action_dim
+        self.denoising_steps = denoising_steps
+        self.clip_alpha = clip_alpha
+        self.cfm_loss_weight = cfm_loss_weight
+        self.t_embedder = TimestepEmbedder(time_embedding_size)
+        self.sparse_mask = (
+            None if sparsity == 0.0 else apply_one_shot_pruning(self, overall_sparsity=sparsity)
+        )
+        self.register_buffer(
+            "gamma_features", _gamma_features(GAMMA_EMBEDDING_SIZE, gamma, multi_gammas)
+        )
+        self.num_gammas = self.gamma_features.size(0)
+
+    def forward(
+        self, a: torch.Tensor, t: torch.Tensor, state: torch.Tensor, gamma_feature: torch.Tensor
+    ) -> HeadOutput:
+        """
+        Args:
+            a: flattened noisy action x_τ (B, horizon * action_dim)
+            t: flow time τ (B,)
+            state: state embedding (B, state_dim)
+            gamma_feature: その行の方策の割引率の特徴 (B, GAMMA_EMBEDDING_SIZE)
+
+        Returns:
+            速度 v (B, horizon * action_dim)。有界にはしない
+        """
+        x = torch.cat([a, self.t_embedder(t), state, gamma_feature], 1)
+        x = self.norm(self.fc_mid(self.fc_in(x)))
+        activation = x
+        return HeadOutput(output=self.fc_out(x), activation=activation)
+
+    def _denoise(self, x: torch.Tensor, gamma_feature: torch.Tensor) -> torch.Tensor:
+        """状態 (B, state_dim) と割引率の特徴 (B, GAMMA_EMBEDDING_SIZE) の行ごとの行動
+        (B, horizon, action_dim)。τ = 0 → 1 を ``denoising_steps`` 回の Euler で積分する。"""
+        bs = x.size(0)
+        noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
+
+        def predict_fn(x_t, t):
+            # 速度を x-prediction に直して渡す（_euler_denoise はそこから速度を戻す）
+            velocity = self.forward(x_t.view(bs, -1), t, x, gamma_feature).output
+            return x_t + (1.0 - t).view(bs, 1, 1) * velocity.view(bs, self.horizon, self.action_dim)
+
+        return _euler_denoise(noise, 1.0, self.denoising_steps, predict_fn)
+
+    def get_action(self, x: torch.Tensor) -> torch.Tensor:
+        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
+
+    def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
+        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        return self._denoise(*_repeat_over_gammas(x, self.gamma_features)).view(
+            x.size(0), self.num_gammas, self.horizon, self.action_dim
+        )
+
+    def compute_actor_loss(
+        self,
+        state: torch.Tensor,
+        action_chunk: torch.Tensor,
+        *,
+        value_head,
+    ) -> tuple[torch.Tensor, dict]:
+        """QF3 の actor の損失 -Q(s, x̂_1,clip) + λ_cfm L_cfm（式 (4)）。
+
+        割引率ごとの方策の行動を、それぞれの割引率の価値で評価して最大にする。
+        """
+        if self.detach_state:
+            state = state.detach()
+        B, G = state.size(0), self.num_gammas
+        device = state.device
+
+        # 行は状態ごとに割引率の並びで続く (B * G, ...)
+        state_rep, gamma_feature = _repeat_over_gammas(state, self.gamma_features)
+        replay_action = action_chunk.reshape(B, -1).repeat_interleave(G, dim=0)
+        t = torch.rand((B * G, 1), device=device)
+        noise = torch.randn_like(replay_action)
+        x_t = (1.0 - t) * noise + t * replay_action
+        replay_velocity = replay_action - noise
+
+        velocity = self.forward(x_t, t.squeeze(1), state_rep, gamma_feature).output
+        cfm_loss = F.mse_loss(velocity, replay_velocity)
+
+        # 速度のリプレイとの差を [-α, α] に切った 1 回の Euler の行動（式 (3)）
+        gap = velocity - replay_velocity
+        clipped_action = replay_action + (1.0 - t) * gap.clamp(-self.clip_alpha, self.clip_alpha)
+
+        for param in value_head.parameters():
+            param.requires_grad_(False)
+        policy_q = value_head.gamma_values(
+            state, clipped_action.view(B, G, self.horizon, self.action_dim)
+        )  # (B, G)
+        for param in value_head.parameters():
+            param.requires_grad_(True)
+        actor_loss = -policy_q.mean()
+        total_loss = actor_loss + self.cfm_loss_weight * cfm_loss
+
+        info_dict = {
+            "actor_loss": actor_loss.item(),
+            "cfm_loss": cfm_loss.item(),
+            "policy_q": policy_q.mean().item(),
+            # Q の勾配が届く成分の割合（論文 4.1 節）
+            "qf3_inside_clip": (gap.detach().abs() < self.clip_alpha).float().mean().item(),
+        }
+        return total_loss, info_dict
+
+
 class TokenDiffusionPolicy(nn.Module):
     """状態のトークンに、ノイズの乗った行動のトークンと拡散の時刻のトークンを並べ、Transformer の
     層で混ぜてから MLP で読む拡散の方策。混ぜる前後以外は :class:`DiffusionPolicy` と同じ。
