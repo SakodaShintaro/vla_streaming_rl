@@ -40,6 +40,8 @@ class VLMEncoder(nn.Module):
     空にする。GDN の層の状態はエピソードの間ずっと持ち越す。full attention の層の KV は、
     指示の文（attention sink として常に残す）と直近の ``stream_window_steps`` ステップの分だけ
     残し、それより古いステップの分は捨てる。表現はそれまでのステップを反映する。
+    ``stream_window_steps`` が 0 なら毎ステップ流れを空にして、そのステップだけを読ませる
+    （GDN の層の状態も持ち越さず、履歴を使わない）。
 
     ``forward`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``token_dim`` 幅のトークンにした
@@ -64,7 +66,7 @@ class VLMEncoder(nn.Module):
         )
         self.vlm.eval().requires_grad_(False)
         self.vlm_hidden_size = self.vlm.config.text_config.hidden_size
-        assert vla_config.stream_window_steps >= 1, vla_config.stream_window_steps
+        assert vla_config.stream_window_steps >= 0, vla_config.stream_window_steps
         self.stream_window_steps = vla_config.stream_window_steps
         self._reset_stream()
         self.image_layers = slice(vla_config.image_layer_start, vla_config.image_layer_stop)
@@ -129,11 +131,12 @@ class VLMEncoder(nn.Module):
         reset_state: bool,
     ) -> torch.Tensor:
         """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませ、画像のトークンの活性の
-        ``image_layers`` の層での平均の表現 (num_positions, hidden_size)。``reset_state`` ならエピソードの流れを空にして
-        から、前の行動 (action_dim,) と受け取った報酬とスカラーの観測 (SCALAR_OBS_DIM,) を
+        ``image_layers`` の層での平均の表現 (num_positions, hidden_size)。``reset_state`` か、
+        履歴を使わない（``stream_window_steps`` が 0）ならエピソードの流れを空にしてから、
+        前の行動 (action_dim,) と受け取った報酬とスカラーの観測 (SCALAR_OBS_DIM,) を
         書いた文と画像を流れに積む。"""
         assert len(images) == self.images_num, (len(images), self.images_num)
-        if reset_state:
+        if reset_state or self.stream_window_steps == 0:
             self._reset_stream()
         return self._represent_stream(images, scalar_obs, prev_action, reward, text)
 
