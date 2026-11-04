@@ -5,6 +5,7 @@ set -eux
 #   difficulty: easy    -> level 01 の variant 01 だけ（簡易な検証用）
 #               1301    -> 13-01-01 だけ
 #               14      -> 暗転の課題 14-01-01（最初の 1 ステップだけ見える）
+#               15      -> 迷路の記憶の課題 15-01-01 から 15-04-01（始めにルールで左右を1周ずつ走る）
 #               blink   -> level 01 を点滅の記憶の課題にしたもの（env_factory.blink_dark_steps_increment）
 #               life    -> ライフ制のステージ（env_factory.mode=life）。レベルと版とライフの数は
 #                          configs/env/animalai.yaml のデフォルト通り
@@ -63,6 +64,14 @@ case ${difficulty} in
       episode_limit=1200
     )
     ;;
+  15)
+    # 迷路の記憶の課題（scripts/make_maze_arenas.py で作る 15-01-01 から 15-04-01）
+    difficulty_overrides=(
+      'env_factory.train_levels=["15"]'
+      'env_factory.train_variant="01"'
+      episode_limit=1200
+    )
+    ;;
   blink)
     # 点滅の記憶の課題に作り変えたレベル 01（configs/env/animalai.yaml の blink_dark_steps_increment）
     difficulty_overrides=(
@@ -83,7 +92,7 @@ case ${difficulty} in
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, blink, life or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, 15, blink, life or normal)" >&2
     exit 1
     ;;
 esac

@@ -88,6 +88,15 @@ def read_blackouts(yaml_path: Path) -> list[int]:
     return [int(v) for v in arena["blackouts"]] if "blackouts" in arena else []
 
 
+def read_demo_waypoints(yaml_path: Path) -> list[tuple[float, float]]:
+    """アリーナの ``demoWaypoints``（エピソードの始めにルールでエージェントを走らせる道筋の
+    点 (x, z) の並び）。書いていなければ空で、始めから操作できる。"""
+    arena = _load_arena_yaml(yaml_path)
+    if "demoWaypoints" not in arena:
+        return []
+    return [(float(x), float(z)) for x, z in arena["demoWaypoints"]]
+
+
 def read_frozen_steps(yaml_path: Path) -> int:
     """Agent の項目の ``frozenAgentDelays``。Unity では秒だが、ここではエピソードの始めに
     止めておくステップ数として読む。書いていなければ 0。"""

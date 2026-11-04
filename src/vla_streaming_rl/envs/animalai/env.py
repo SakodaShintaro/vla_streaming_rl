@@ -25,7 +25,9 @@ docstring describes the modes); the render-panel drawing lives in
 return to the arena's pass mark, which Unity itself never does (see `step`).
 """
 
+import math
 import random
+import tempfile
 from pathlib import Path
 
 import gymnasium as gym
@@ -41,6 +43,7 @@ from vla_streaming_rl.envs.animalai.curriculum import (
     Arena,
     ArenaSelector,
     read_blackouts,
+    read_demo_waypoints,
     read_frozen_steps,
     read_pass_mark,
 )
@@ -83,9 +86,10 @@ def with_agent_skin(arena_yaml: str) -> str:
     )
 
 
-# 暗転と停止は Python の側で行う項目。Unity の実装は、暗転の黒い画像がエージェントのカメラに
-# 映らず、停止は秒で数えてリセットをまたぐと解除されないことがあるので、Unity には送らない
-_PYTHON_SIDE_KEYS = ("blackouts:", "frozenAgentDelays:")
+# 暗転と停止とデモは Python の側で行う項目。Unity の実装は、暗転の黒い画像がエージェントの
+# カメラに映らず、停止は秒で数えてリセットをまたぐと解除されないことがあるので、Unity には
+# 送らない。デモは Unity にはない
+_PYTHON_SIDE_KEYS = ("blackouts:", "frozenAgentDelays:", "demoWaypoints:")
 
 
 def without_python_side_keys(arena_yaml: str) -> str:
@@ -143,6 +147,30 @@ GOAL_BONUS = 0.5
 RAMPS_COEF = 0.01
 BACK_MOVE_COEF = 0.001
 PASS_MARK_BONUS = 1.0
+
+
+# デモ（アリーナの demoWaypoints）でエージェントを走らせる制御。点にこの距離まで近づいたら
+# 次の点へ向かう。向きの誤差がこの角度で旋回を最大にし、誤差が整列の角度より小さいときだけ
+# 進む。前進の強さは点までの距離を減速の距離で割ったもの（1 で切る）で、勢いがついたまま
+# 狭い通路の角を行き過ぎないように、点に近づくほど弱める
+DEMO_REACH_RADIUS = 1.0
+DEMO_FULL_TURN_DEG = 30.0
+DEMO_ALIGN_DEG = 20.0
+DEMO_SLOWDOWN_DIST = 4.0
+
+
+def demo_action(xz: tuple[float, float], yaw_deg: float, target: tuple[float, float]) -> np.ndarray:
+    """位置 ``xz`` で向き ``yaw_deg``（+z が 0 で、+x へ向かって増える）のエージェントを
+    ``target`` へ向かわせる行動 (前進, 右旋回)。"""
+    heading_deg = math.degrees(math.atan2(target[0] - xz[0], target[1] - xz[1]))
+    error_deg = (heading_deg - yaw_deg + 180.0) % 360.0 - 180.0
+    turn = float(np.clip(error_deg / DEMO_FULL_TURN_DEG, -1.0, 1.0))
+    forward = (
+        min(math.dist(xz, target) / DEMO_SLOWDOWN_DIST, 1.0)
+        if abs(error_deg) < DEMO_ALIGN_DEG
+        else 0.0
+    )
+    return np.array([forward, turn], dtype=np.float32)
 
 
 def _to_discrete(value: float) -> int:
@@ -242,6 +270,10 @@ class AnimalAIEnv(gym.Env):
         # このエピソードの暗転の切り替えと、始めに止めておくステップ数
         self._blackouts: list[int] = []
         self._frozen_steps = 0
+        # このエピソードのデモの道筋と、次に向かう点の番号。番号が道筋の長さに達するまでは、
+        # エージェントの行動の代わりにデモの行動で動かす
+        self._demo_waypoints: list[tuple[float, float]] = []
+        self._demo_index = 0
         self._arena: Arena | None = None
         self._episode_return = 0.0
         # (x, y, z) agent position in arena coords; populated each step from
@@ -305,10 +337,14 @@ class AnimalAIEnv(gym.Env):
                 str(int(self.colored_walls)),
             ]
         )
+        # Unity は起動時にも最初のアリーナの yaml を読み、知らない項目（demoWaypoints）が
+        # あると読めないので、Python の側の項目を除いたものを渡す
+        startup_yaml = Path(tempfile.mkdtemp()) / "startup_arena.yaml"
+        startup_yaml.write_text(without_python_side_keys(self.selector.arenas[0].path.read_text()))
         self._aai = environment_class(
             side_channels=[parameters_channel],
             file_name=self.binary_path,
-            arenas_configurations=str(self.selector.arenas[0].path),
+            arenas_configurations=str(startup_yaml),
             seed=self.seed_value,
             play=False,
             useCamera=True,
@@ -449,6 +485,8 @@ class AnimalAIEnv(gym.Env):
         self.pass_mark = read_pass_mark(self._arena.path)
         self._blackouts = read_blackouts(self._arena.path)
         self._frozen_steps = read_frozen_steps(self._arena.path)
+        self._demo_waypoints = read_demo_waypoints(self._arena.path)
+        self._demo_index = 0
         if self.blink_memory:
             # 点滅の課題はアリーナの暗転と停止を置き換えるので、アリーナには書いていないものに限る
             assert self._blackouts == [] and self._frozen_steps == 0, self.arena_name
@@ -473,6 +511,16 @@ class AnimalAIEnv(gym.Env):
         # 始めの ``_frozen_steps`` ステップは止めておく
         if self.episode_step < self._frozen_steps:
             a = np.zeros_like(a)
+        # デモの間は、道筋の点を順にたどる行動で動かす
+        xz = (self._agent_xyz[0], self._agent_xyz[2])
+        while self._demo_index < len(self._demo_waypoints) and (
+            math.dist(xz, self._demo_waypoints[self._demo_index]) < DEMO_REACH_RADIUS
+        ):
+            self._demo_index += 1
+        if self._demo_index < len(self._demo_waypoints):
+            a = demo_action(
+                xz, self._agent_rotation[1], self._demo_waypoints[self._demo_index]
+            ).reshape(1, 2)
         # Both halves go out every step; which one Unity obeys was fixed at
         # launch by CONTINUOUS_ACTIONS_KEY. The slice is empty for an official
         # binary, which has no continuous actions to fill.
