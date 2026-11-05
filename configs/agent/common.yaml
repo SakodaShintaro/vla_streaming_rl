@@ -15,8 +15,8 @@ vla:
   # 画像のトークンの位置の活性を平均する層の範囲 [image_layer_start, image_layer_stop)。
   # 0 は言語モデルに入る前の埋め込み（ViT の出力そのもの）で、null は最後の層まで。
   # ViT の特徴だけを使うなら 0 と 1
-  image_layer_start: 0
-  image_layer_stop: null
+  image_layer_start: 23
+  image_layer_stop: 24
   # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする。状態の幅は
   # (画像のトークンの数 + スカラーの数) * token_dim。画像のトークンは
   # 256px の画像1枚で 8x8
