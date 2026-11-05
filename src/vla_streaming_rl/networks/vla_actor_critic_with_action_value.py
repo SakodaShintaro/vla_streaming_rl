@@ -129,10 +129,9 @@ class VLAActorCriticWithActionValue(NetworkInterface):
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         terms = self._loss_terms(data)
-        # -Q(s,a) for eligibility trace backward (detached from encoder)
-        neg_value_detached = -self.value_head.scalar_value(
-            terms.state.detach(), terms.action_chunk.detach()
-        ).mean()
+        # -Q(s,a) for the eligibility trace. Its gradient reaches the encoder too,
+        # which learns from the critic as in the off-policy mode
+        neg_value = -self.value_head.scalar_value(terms.state, terms.action_chunk.detach()).mean()
         infer_result = InferResult(
             action=terms.next_action,
             value_report=self.value_head.value_report(terms.next_critic_output),
@@ -145,7 +144,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             et_info=EligibilityTraceInfo(
                 actor_loss=terms.actor_loss,
                 state_prediction_loss=terms.state_prediction_loss,
-                neg_value=neg_value_detached,
+                neg_value=neg_value,
                 delta=terms.info["losses/delta"],
             ),
         )

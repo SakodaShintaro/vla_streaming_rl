@@ -51,6 +51,15 @@ class StreamingAgent(Agent):
         # AdamET (eligibility traces) when the trace is on, AdamW otherwise; the
         # actor is always AdamW.
         actor_params, critic_params = split_actor_critic_params(network)
+        if use_eligibility_trace:
+            # エンコーダは off-policy と同じく critic でも学習する。トレースに積むのは -Q の
+            # 勾配なので、エンコーダを value head と並べて AdamET にも持たせる。状態の予測の
+            # 損失の勾配は、これまでどおり actor の側の AdamW で当てる
+            critic_params = critic_params + [
+                p for p in network.encoder.parameters() if p.requires_grad
+            ]
+        self.actor_params = actor_params
+        self.critic_params = critic_params
         super().__init__(
             action_space=action_space,
             image_names=image_names,
@@ -114,15 +123,19 @@ class StreamingAgent(Agent):
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
         if self.use_eligibility_trace:
+            # エンコーダは -Q の勾配（AdamET のトレースに積む）と、状態の予測の損失の勾配
+            # （AdamW で当てる）の両方を受けるので、-Q の勾配は先に別に取っておく
+            neg_value_grads = torch.autograd.grad(
+                result.et_info.neg_value, self.critic_params, retain_graph=True, allow_unused=True
+            )
             # actor と将来の状態の予測の損失の勾配は、value head 以外（エンコーダ、actor、
             # 予測器）に流す
-            (result.et_info.actor_loss + result.et_info.state_prediction_loss).backward(
-                retain_graph=True
-            )
-            # Critic: backward -V(s) → value_head grads only (detached from encoder).
-            result.et_info.neg_value.backward()
-            nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=self.max_grad_norm)
+            (result.et_info.actor_loss + result.et_info.state_prediction_loss).backward()
+            nn.utils.clip_grad_norm_(self.actor_params, max_norm=self.max_grad_norm)
             self.actor_optimizer.step()
+            for param, grad in zip(self.critic_params, neg_value_grads, strict=True):
+                param.grad = grad
+            nn.utils.clip_grad_norm_(self.critic_params, max_norm=self.max_grad_norm)
             self.critic_optimizer.step(delta=result.et_info.delta, reset=self._episode_reset)
             self._episode_reset = False
         else:
