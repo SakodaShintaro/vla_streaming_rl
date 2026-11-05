@@ -6,5 +6,5 @@ defaults:
 agent_type: streaming
 network_class: vla_actor_critic_with_action_value
 batch_size: 1
-actor_lr: 1e-6
-critic_lr: 1e-6
+actor_lr: 1e-5
+critic_lr: 1e-5
