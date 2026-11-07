@@ -20,6 +20,7 @@ docs/qwen_lora_structure.md。
 
 import torch
 import torch.nn.functional as F
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from torch import nn
 
 # LoRA を付ける射影。gdn_rtrl の part 3 の最終レシピ（targets all）と同じ
@@ -191,29 +192,14 @@ class GDNMemoryLayer(nn.Module):
         )
         return correction - correction.detach()
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        valid: torch.Tensor,
-        S_prev: torch.Tensor,
-        h_prev: torch.Tensor,
-        use_trace: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """1ステップ分のトークンの層の入力 x (B, L, D) を読む。``valid`` (B, L) は詰め物でない
-        トークンで、各行の先頭に詰めてある。前の状態は S_prev (B, H, d_k, d_v) と、直前の
-        conv_size - 1 トークンの正規化した入力 h_prev (B, conv_size - 1, D)。
-
-        層の出力 (B, L, D) と、次の S と h を返す。"""
+    def _project(
+        self, x: torch.Tensor, valid: torch.Tensor, h_prev: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """1ステップ分の入力 x (B, L, D) から、再帰に入る量と出力のゲートを作る。``valid`` (B, L)
+        の詰め物のトークンでは状態を変えない（alpha = 1、beta = 0）。h_prev は直前の
+        conv_size - 1 トークンの正規化した入力 (B, conv_size - 1, D)。"""
         B, L, _ = x.shape
-        H, dk, dv, cs = self.num_heads, self.key_dim, self.value_dim, self.conv_size
-        lengths = valid.sum(dim=1)
-        S = S_prev.detach()
-        if use_trace:
-            assert B == 1, B
-            assert set(self.lora_targets) == set(LORA_TARGETS), self.lora_targets
-            if self.trace is not None:
-                S = S + self._correction()
-
+        H, dk, dv = self.num_heads, self.key_dim, self.value_dim
         h = zc_rms_norm(x, self.w_input_norm, self.eps)
         # 直前のステップの入力に続けて、このステップの入力を畳み込む
         h_all = torch.cat([h_prev.detach(), h], dim=1)  # (B, cs - 1 + L, D)
@@ -229,48 +215,103 @@ class GDNMemoryLayer(nn.Module):
         conv = F.conv1d(qkv_pre.transpose(1, 2), self.w_conv, groups=qkv_pre.shape[-1])
         conv = conv.transpose(1, 2)  # (B, L, C)、SiLU の前
         q, k, v = torch.split(F.silu(conv), self.qkv_split, dim=-1)
-        q = l2norm(q.view(B, L, H, dk), 1e-6) * dk**-0.5
-        k = l2norm(k.view(B, L, H, dk), 1e-6)
-        v = v.view(B, L, H, dv)
         beta = torch.sigmoid(self._proj("b", self.w_b, h))
         a_pre = self._proj("a", self.w_a, h) + self.w_dt_bias
-        alpha = torch.exp(-torch.exp(self.w_A_log) * F.softplus(a_pre))
-        # 詰め物のトークンでは状態を変えない
-        alpha = torch.where(valid[..., None], alpha, torch.ones_like(alpha))
-        beta = torch.where(valid[..., None], beta, torch.zeros_like(beta))
-        z = self._proj("z", self.w_z, h).view(B, L, H, dv)
+        log_alpha = -torch.exp(self.w_A_log) * F.softplus(a_pre)
+        return {
+            "h_all": h_all,
+            "conv": conv,
+            "q": l2norm(q.view(B, L, H, dk), 1e-6) * dk**-0.5,
+            "k": l2norm(k.view(B, L, H, dk), 1e-6),
+            "v": v.view(B, L, H, dv),
+            "log_alpha": torch.where(valid[..., None], log_alpha, torch.zeros_like(log_alpha)),
+            "beta": torch.where(valid[..., None], beta, torch.zeros_like(beta)),
+            "a_pre": a_pre,
+            "z": self._proj("z", self.w_z, h).view(B, L, H, dv),
+        }
 
-        states = [S]
-        outputs = []
-        for t in range(L):
-            S, o = delta_rule_step(S, q[:, t], k[:, t], v[:, t], alpha[:, t], beta[:, t])
-            states.append(S)
-            outputs.append(o)
-        o = torch.stack(outputs, dim=1)  # (B, L, H, dv)
+    def _output(self, x: torch.Tensor, o: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """再帰の出力 o (B, L, H, d_v) をゲートして射影し、残差と MLP を通した層の出力 (B, L, D)。"""
         o = o * torch.rsqrt(o.pow(2).mean(dim=-1, keepdim=True) + self.eps) * self.w_out_norm
         o = o * F.silu(z)
         y = x + self._proj("out", self.w_out, o.flatten(2))
         post = zc_rms_norm(y, self.w_post_norm, self.eps)
         mlp = F.silu(self._proj("gate", self.w_gate, post)) * self._proj("up", self.w_up, post)
-        y = y + self._proj("down", self.w_down, mlp)
+        return y + self._proj("down", self.w_down, mlp)
 
-        # 次のステップの畳み込みが読む、最後の conv_size - 1 トークンの入力
-        last = lengths[:, None] + torch.arange(cs - 1, device=x.device)
-        h_next = torch.gather(h_all, 1, last[..., None].expand(-1, -1, h_all.shape[-1]))
+    def _last_inputs(self, h_all: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        """次のステップの畳み込みが読む、最後の conv_size - 1 トークンの正規化した入力。"""
+        last = lengths[:, None] + torch.arange(self.conv_size - 1, device=h_all.device)
+        return torch.gather(h_all, 1, last[..., None].expand(-1, -1, h_all.shape[-1])).detach()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        valid: torch.Tensor,
+        S_prev: torch.Tensor,
+        h_prev: torch.Tensor,
+        use_trace: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """1ステップ分のトークンの層の入力 x (B, L, D) を読む。``valid`` (B, L) は詰め物でない
+        トークンで、各行の先頭に詰めてある。前の状態は S_prev (B, H, d_k, d_v) と、直前の
+        conv_size - 1 トークンの正規化した入力 h_prev (B, conv_size - 1, D)。
+
+        層の出力 (B, L, D) と、次の S と h を返す。"""
+        B, L, _ = x.shape
+        lengths = valid.sum(dim=1)
+        S = S_prev.detach()
+        if use_trace:
+            assert B == 1, B
+            assert set(self.lora_targets) == set(LORA_TARGETS), self.lora_targets
+            if self.trace is not None:
+                S = S + self._correction()
+
+        p = self._project(x, valid, h_prev)
+        alpha = torch.exp(p["log_alpha"])
+        states = [S]
+        outputs = []
+        for t in range(L):
+            S, o = delta_rule_step(
+                S, p["q"][:, t], p["k"][:, t], p["v"][:, t], alpha[:, t], p["beta"][:, t]
+            )
+            states.append(S)
+            outputs.append(o)
+        y = self._output(x, torch.stack(outputs, dim=1), p["z"])
 
         if use_trace:
             self._advance_trace(
-                h_all.detach(),
-                conv.detach(),
-                k.detach(),
-                v.detach(),
+                p["h_all"].detach(),
+                p["conv"].detach(),
+                p["k"].detach(),
+                p["v"].detach(),
                 alpha.detach(),
-                beta.detach(),
-                a_pre.detach(),
+                p["beta"].detach(),
+                p["a_pre"].detach(),
                 [state.detach() for state in states],
                 int(lengths[0]),
             )
-        return y, S.detach(), h_next.detach()
+        return y, S.detach(), self._last_inputs(p["h_all"], lengths)
+
+    def forward_chunked(
+        self, x: torch.Tensor, S_prev: torch.Tensor, h_prev: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """詰め物のない入力 x (B, L, D) を、fla の chunk カーネルでまとめて読む。``forward`` と
+        同じ計算で、トークンの数が多い窓の BPTT 用。前の状態の勾配は切り、トレースは使わない。"""
+        B, L, _ = x.shape
+        valid = torch.ones(B, L, dtype=torch.bool, device=x.device)
+        p = self._project(x, valid, h_prev)
+        o, S = chunk_gated_delta_rule(
+            p["q"],
+            p["k"],
+            p["v"],
+            p["log_alpha"],
+            p["beta"],
+            scale=1.0,
+            initial_state=S_prev.detach(),
+            output_final_state=True,
+        )
+        y = self._output(x, o, p["z"])
+        return y, S.detach(), self._last_inputs(p["h_all"], valid.sum(dim=1))
 
     @torch.no_grad()
     def _advance_trace(

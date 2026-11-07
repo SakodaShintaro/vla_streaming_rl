@@ -34,6 +34,22 @@ STATE_SCALAR_INDICES = [
 ]
 
 
+def step_text_items(
+    scalar_obs: np.ndarray, prev_action: np.ndarray, reward: float
+) -> list[tuple[str, str]]:
+    """ステップの文の項目ごとの (名前, 書いた文字列)。文はこれを ", " でつないだもの。"""
+    return [
+        (
+            "previous_action",
+            "previous_action: [" + ", ".join(f"{value:.2f}" for value in prev_action) + "]",
+        ),
+        ("reward", f"reward: {reward:.4f}"),
+    ] + [
+        (SCALAR_OBS_NAMES[index], f"{SCALAR_OBS_NAMES[index]}: {scalar_obs[index]:.2f}")
+        for index in STATE_SCALAR_INDICES
+    ]
+
+
 class VLMEncoder(nn.Module):
     """画像の並びと指示の文を凍結した VLM に読ませ、1ステップ分の状態を作るエンコーダ。
 
@@ -241,28 +257,17 @@ class VLMEncoder(nn.Module):
                     [layer.values[..., keep_head, :], layer.values[..., keep_tail, :]], dim=-2
                 )
 
-    def _represent_stream(
+    def step_inputs(
         self,
         images: list[torch.Tensor],
         scalar_obs: np.ndarray,
         prev_action: np.ndarray,
         reward: float,
-        text: str,
-    ) -> torch.Tensor:
-        """このステップの前の行動と報酬とスカラーの観測の文と画像をエピソードの流れに積む。
-        自分がどう動いて何を受け取ったかを流れに残し、前のエピソードの試みも含めて記憶できるようにする。"""
-        if self.stream_next_position == 0:
-            self._read_prompt(text)
-        scalars = ", ".join(
-            [
-                "previous_action: [" + ", ".join(f"{value:.2f}" for value in prev_action) + "]",
-                f"reward: {reward:.4f}",
-            ]
-            + [
-                f"{SCALAR_OBS_NAMES[index]}: {scalar_obs[index]:.2f}"
-                for index in STATE_SCALAR_INDICES
-            ]
-        )
+        start_position: int,
+    ) -> tuple[dict, torch.Tensor]:
+        """このステップの文と画像のプロセッサの入力と、流れの位置 ``start_position`` から続ける
+        M-RoPE の位置 (3, 1, L)。"""
+        scalars = ", ".join(item for _, item in step_text_items(scalar_obs, prev_action, reward))
         inputs = self.processor(
             text=[f"{scalars}\n{IMAGE_PLACEHOLDER * len(images)}"],
             images=list(images),
@@ -276,7 +281,23 @@ class VLMEncoder(nn.Module):
             mm_token_type_ids=inputs["mm_token_type_ids"],
             image_grid_thw=inputs["image_grid_thw"],
         )
-        step_positions = step_positions + self.stream_next_position
+        return inputs, step_positions + start_position
+
+    def _represent_stream(
+        self,
+        images: list[torch.Tensor],
+        scalar_obs: np.ndarray,
+        prev_action: np.ndarray,
+        reward: float,
+        text: str,
+    ) -> torch.Tensor:
+        """このステップの前の行動と報酬とスカラーの観測の文と画像をエピソードの流れに積む。
+        自分がどう動いて何を受け取ったかを流れに残し、前のエピソードの試みも含めて記憶できるようにする。"""
+        if self.stream_next_position == 0:
+            self._read_prompt(text)
+        inputs, step_positions = self.step_inputs(
+            images, scalar_obs, prev_action, reward, self.stream_next_position
+        )
         self.stream_next_position = int(step_positions.max()) + 1
         # プロセッサの attention_mask はこの分の長さしかなく、キャッシュに積んだ分を覆わないので
         # 渡さない（渡すとマスクがずれる）。因果的なマスクはキャッシュの長さから作られる
