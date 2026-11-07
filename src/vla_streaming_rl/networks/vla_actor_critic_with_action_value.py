@@ -34,6 +34,7 @@ class LossTerms:
     next_action: torch.Tensor
     next_critic_output: torch.Tensor
     td_error: torch.Tensor
+    next_memory: torch.Tensor
 
 
 class VLAActorCriticWithActionValue(NetworkInterface):
@@ -45,6 +46,12 @@ class VLAActorCriticWithActionValue(NetworkInterface):
 
     VLM は凍結して使うので、表現は観測を受け取ったときに一度だけ計算してバッファに保存する。
     推論も学習もそれを読み戻し、VLM を通さない。
+
+    エンコーダに GDN の記憶の層があれば、その再帰状態をエージェントの再帰の状態として持ち回らせる
+    （バッファの各行には、そのステップを読む前の状態が入る）。lora_rtrl の LoRA は streaming の
+    ``infer_and_compute_loss`` で RTRL で学習し、トレースは学習しない ``infer`` で捨てる
+    （streaming ではエピソードの境目でだけ呼ばれる）。off-policy の ``compute_loss`` は保存した
+    状態から1ステップ分の勾配だけを使う。
     """
 
     def __init__(
@@ -84,10 +91,11 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             if self.use_state_predictor
             else None
         )
-        self._dummy_state = torch.zeros(1, 1, 1)
+        # 記憶の層の状態は推論のたびに1ステップ進むので、行動のチャンクは1ステップに限る
+        assert vla_config.gdn_memory == "none" or horizon == 1, horizon
 
     def init_state(self) -> torch.Tensor:
-        return self._dummy_state.clone()
+        return self.encoder.init_memory()
 
     def stored_image_shape(self) -> tuple[int, ...]:
         """VLM の表現の、画像のトークンの格子。射影は学習するので、その手前を
@@ -110,7 +118,10 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
-        state = self._state(data.s_seq, data.a_seq, data.r_seq, data.scalar_obs_seq, -1)
+        self.encoder.reset_memory_trace()
+        state, next_memory = self._state(
+            data.s_seq, data.a_seq, data.r_seq, data.scalar_obs_seq, data.rnn_state, -1, False
+        )
         action = self.policy_head.get_action(state)
         value_report = self.value_head.value_report(self.value_head(state, action).output)
         if data.warmup:
@@ -119,23 +130,23 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         return InferResult(
             action=action,
             value_report=value_report,
-            rnn_state=self._dummy_state.clone(),
+            rnn_state=next_memory,
             features=state,
         )
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
-        terms = self._loss_terms(data)
+        terms = self._loss_terms(data, False)
         return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
 
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
-        terms = self._loss_terms(data)
+        terms = self._loss_terms(data, True)
         # -Q(s,a) for the eligibility trace. Its gradient reaches the encoder too,
         # which learns from the critic as in the off-policy mode
         neg_value = -self.value_head.scalar_value(terms.state, terms.action_chunk.detach()).mean()
         infer_result = InferResult(
             action=terms.next_action,
             value_report=self.value_head.value_report(terms.next_critic_output),
-            rnn_state=self._dummy_state.clone(),
+            rnn_state=terms.next_memory,
             features=terms.next_state,
         )
         return InferLossResult(
@@ -159,12 +170,19 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         scalar_obs: torch.Tensor,
+        memory: torch.Tensor,
         step: int,
-    ) -> torch.Tensor:
+        advance_trace: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """窓 (B, T, ...) の ``step`` 番目のステップの、保存した表現・前の行動・報酬・スカラーの
-        観測から状態を作る。"""
+        観測と、それを読む前の再帰の状態 ``memory`` から、状態と次の再帰の状態を作る。"""
         return self.encoder(
-            observations[:, step], actions[:, step], rewards[:, step], scalar_obs[:, step]
+            observations[:, step],
+            actions[:, step],
+            rewards[:, step],
+            scalar_obs[:, step],
+            memory,
+            advance_trace,
         )
 
     def _prediction_loss(
@@ -185,12 +203,13 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             data.dones[:, -self.horizon :],
         )
 
-    def _loss_terms(self, data: ReplayBufferData) -> LossTerms:
+    def _loss_terms(self, data: ReplayBufferData, advance_trace: bool) -> LossTerms:
         """リプレイバッチの損失。現在の状態はチャンクの手前のステップから、次の状態は最後の
-        ステップから作る。"""
+        ステップから作る。``advance_trace`` なら、現在の状態を作るときに記憶の層の RTRL の
+        トレースを1ステップ進める。"""
         window = (data.observations, data.actions, data.rewards, data.scalar_obs)
         with torch.no_grad():
-            next_state = self._state(*window, -1)
+            next_state, next_memory = self._state(*window, data.rnn_state[:, -1], -1, False)
             # TD の目標は割引率ごとに、その割引率の方策の次の行動で作る。最後が主の割引率の
             # 方策の行動で、推論の結果と状態の予測にはそれを使う
             next_gamma_actions = self.policy_head.get_gamma_actions(next_state)
@@ -200,7 +219,9 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         target_value = self.value_head.compute_target_value(
             next_q, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
         )
-        state = self._state(*window, -self.horizon - 1)
+        state, _ = self._state(
+            *window, data.rnn_state[:, -self.horizon - 1], -self.horizon - 1, advance_trace
+        )
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
             state, action_chunk, target_value, data.weights
@@ -226,4 +247,5 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             next_action=next_action,
             next_critic_output=next_critic_output,
             td_error=td_error,
+            next_memory=next_memory,
         )

@@ -35,3 +35,12 @@ vla:
   # 常に残す。GDN の層の再帰状態は窓に関係なくエピソードの間ずっと持ち越す。
   # 0 なら毎ステップ流れを空にし、GDN の層の状態も持ち越さない（履歴を使わない）
   stream_window_steps: 1
+  # ヘッドが読む層（image_layer_start の1層）を出す GDN の層だけに、エピソードの間の記憶を
+  # 持たせる（stream_window_steps は 0 にし、ほかの層は毎ステップ空にする）。none は使わない、frozen は凍結したまま、
+  # lora は LoRA を1ステップ分の勾配で、lora_rtrl は LoRA を RTRL で学習する（streaming だけ）
+  gdn_memory: none
+  # LoRA のランクと alpha（delta W = alpha / rank * B A）。gdn_rtrl の最終レシピと同じ
+  gdn_lora_rank: 8
+  gdn_lora_alpha: 16.0
+  # 1ステップに読むトークンの数の上限。表現はこの長さに詰め物をして保存する
+  gdn_max_step_tokens: 256

@@ -8,6 +8,7 @@ from torch import nn
 from transformers import DynamicCache
 from transformers.cache_utils import LinearAttentionCacheLayerMixin
 
+from vla_streaming_rl.networks.modules.gdn_memory import LORA_TARGETS, GDNMemoryLayer
 from vla_streaming_rl.networks.modules.reward_embed import embed_reward
 from vla_streaming_rl.networks.modules.self_attention import (
     SpatialTransformerBlock,
@@ -19,6 +20,12 @@ from vla_streaming_rl.scalar_obs import SCALAR_OBS_NAMES
 # VLM のチャットテンプレートの書式
 IM_START = "<|im_start|>"
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
+
+# GDN の記憶の層に渡す表現で、トークンごとに最後のチャネルに入れる種類
+PAD_TOKEN = 0.0
+TEXT_TOKEN = 1.0
+IMAGE_TOKEN = 2.0
+GDN_MEMORY_MODES = ("none", "frozen", "lora", "lora_rtrl")
 
 # 状態に数値のまま入れるスカラーの観測の、SCALAR_OBS_NAMES での位置。global_step は
 # エピソードの中の状況を表さず、学習の間ずっと増え続けるので入れない
@@ -47,6 +54,13 @@ class VLMEncoder(nn.Module):
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``token_dim`` 幅のトークンにした
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
     読む状態にする。学習するのは射影と混ぜる層。
+
+    ``gdn_memory`` が none でなければ、ヘッドが読む層（``image_layer_start`` の1層）を出す GDN の
+    層だけをエピソードの間の記憶にする。VLM は毎ステップ流れを空にして読み（``stream_window_steps``
+    は 0）、その層の入力をこのステップの全トークンについて保存する。``forward`` はその層を
+    ``GDNMemoryLayer`` で計算し直し、再帰状態をエージェントの再帰の状態として持ち回る。
+    frozen はその層を凍結したまま、lora は LoRA を1ステップ分の勾配で、lora_rtrl は LoRA を
+    RTRL で学習する。
     """
 
     def __init__(
@@ -71,6 +85,25 @@ class VLMEncoder(nn.Module):
         self._reset_stream()
         self.image_layers = slice(vla_config.image_layer_start, vla_config.image_layer_stop)
         self.image_pad_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        assert vla_config.gdn_memory in GDN_MEMORY_MODES, vla_config.gdn_memory
+        self.gdn_memory = vla_config.gdn_memory
+        if self.gdn_memory != "none":
+            # hidden_states[i] は層 i - 1 の出力なので、ヘッドが読む層を出すのは層 start - 1
+            assert vla_config.image_layer_stop == vla_config.image_layer_start + 1
+            self.memory_layer_index = vla_config.image_layer_start - 1
+            text_config = self.vlm.config.text_config
+            assert text_config.layer_types[self.memory_layer_index] == "linear_attention", (
+                self.memory_layer_index
+            )
+            # 記憶を持つのはその層だけにする
+            assert self.stream_window_steps == 0, self.stream_window_steps
+            self.max_step_tokens = vla_config.gdn_max_step_tokens
+            self.memory_layer = GDNMemoryLayer(
+                self.vlm.model.language_model.layers[self.memory_layer_index],
+                () if self.gdn_memory == "frozen" else LORA_TARGETS,
+                vla_config.gdn_lora_rank,
+                vla_config.gdn_lora_alpha,
+            )
         # 観測の画像（一人称の視点と、あれば鳥瞰図）ごとのトークンの格子を並べる。格子の
         # 大きさは画像の大きさからプロセッサが決める（256px なら統合後 8x8）
         self.images_num = len(image_shapes)
@@ -117,8 +150,11 @@ class VLMEncoder(nn.Module):
         ).to(device)
 
     def representation_shape(self) -> tuple[int, ...]:
-        """``represent`` が返す表現の形。射影は学習するので、その手前を保存する。"""
-        return (self.num_positions, self.vlm_hidden_size)
+        """``represent`` が返す表現の形。射影は学習するので、その手前を保存する。GDN の記憶が
+        あれば、ステップの全トークンの記憶の層の入力に、トークンの種類のチャネルを足したもの。"""
+        if self.gdn_memory == "none":
+            return (self.num_positions, self.vlm_hidden_size)
+        return (self.max_step_tokens, self.vlm_hidden_size + 1)
 
     @torch.no_grad()
     def represent(
@@ -148,6 +184,20 @@ class VLMEncoder(nn.Module):
         return sum(depth[0, image_position].to(torch.float32) for depth in image_layers) / len(
             image_layers
         )
+
+    def _step_tokens(self, input_ids: torch.Tensor, outputs) -> torch.Tensor:
+        """このステップの全トークンの記憶の層の入力を先頭に詰め、最後のチャネルにトークンの
+        種類（文、画像、詰め物）を入れたもの (max_step_tokens, hidden_size + 1)。"""
+        hidden = outputs.hidden_states[self.memory_layer_index][0].to(torch.float32)
+        length = hidden.shape[0]
+        assert length <= self.max_step_tokens, (length, self.max_step_tokens)
+        kinds = torch.where(input_ids[0] == self.image_pad_id, IMAGE_TOKEN, TEXT_TOKEN)
+        representation = torch.zeros(
+            self.max_step_tokens, self.vlm_hidden_size + 1, device=self.device
+        )
+        representation[:length, :-1] = hidden
+        representation[:length, -1] = kinds
+        return representation
 
     def _reset_stream(self) -> None:
         """エピソードの流れを空にする。キャッシュと、次に読むトークンの位置（M-RoPE の位置）、
@@ -245,7 +295,19 @@ class VLMEncoder(nn.Module):
         if len(self.stream_step_lens) > self.stream_window_steps:
             self._drop_oldest_step()
 
-        return self._image_tokens(inputs["input_ids"], step_outputs)
+        if self.gdn_memory == "none":
+            return self._image_tokens(inputs["input_ids"], step_outputs)
+        return self._step_tokens(inputs["input_ids"], step_outputs)
+
+    def init_memory(self) -> torch.Tensor:
+        """エピソードの始めの再帰の状態 (1, ...)。GDN の記憶がなければ使わない詰め物。"""
+        if self.gdn_memory == "none":
+            return torch.zeros(1, 1, 1)
+        return torch.zeros(1, self.memory_layer.memory_size())
+
+    def reset_memory_trace(self) -> None:
+        if self.gdn_memory != "none":
+            self.memory_layer.reset_trace()
 
     def forward(
         self,
@@ -253,16 +315,26 @@ class VLMEncoder(nn.Module):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         scalar_obs: torch.Tensor,
-    ) -> torch.Tensor:
+        memory: torch.Tensor,
+        advance_trace: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """保存した表現 (B, num_positions, hidden_size) を射影したものに、同じステップの
         前の行動 (B, action_dim)、報酬 (B, 1)、スカラーの観測 (B, SCALAR_OBS_DIM) をそれぞれ
-        トークンにしたものを並べ、ヘッドが読む状態 (B, output_dim) にする。
+        トークンにしたものを並べ、ヘッドが読む状態 (B, output_dim) にする。GDN の記憶があれば、
+        表現はこのステップの全トークンの記憶の層の入力で、その層を前の再帰の状態 ``memory``
+        (B, ...) から読んで画像のトークンの出力を作る。状態と次の再帰の状態を返す。
+        ``advance_trace`` なら、lora_rtrl では RTRL のトレースを1ステップ進める。
 
         スカラー1つを1次元のまま連結すると、表現の次元に比べて割合が小さく埋もれやすく、残りの
         収益の 1 と 2 のような小さい違いも1つの入力のわずかな差にしかならない。周期の短い成分は
         小さい違いを別のベクトルにし、周期の長い成分は大きい値のおおよその位置を表す。変換は
         固定で、学習中に変わらない。"""
-        projected = self.state_out_proj(representation)
+        if self.gdn_memory == "none":
+            image = representation
+            next_memory = memory
+        else:
+            image, next_memory = self._remember(representation, memory, advance_trace)
+        projected = self.state_out_proj(image)
         device = projected.device
         action_tokens = get_fourier_embeds_from_coordinates(
             self.token_dim, actions.to(device, torch.float32).unsqueeze(1)
@@ -272,4 +344,29 @@ class VLMEncoder(nn.Module):
         angles = scalars.unsqueeze(-1) * self.scalar_frequencies
         scalar_tokens = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
         tokens = torch.cat([projected, action_tokens, reward_token, scalar_tokens], dim=1)
-        return self.token_mixer(tokens + self.token_position).flatten(start_dim=1)
+        return self.token_mixer(tokens + self.token_position).flatten(start_dim=1), next_memory
+
+    def _remember(
+        self, representation: torch.Tensor, memory: torch.Tensor, advance_trace: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """記憶の層で1ステップ分のトークンを読み、画像のトークンの出力
+        (B, num_positions, hidden_size) と次の再帰の状態を作る。"""
+        layer = self.memory_layer
+        B = representation.shape[0]
+        representation = representation.to(self.device)
+        kinds = representation[..., -1]
+        valid = kinds != PAD_TOKEN
+        # 詰め物は各行の後ろにあるので、どの行の詰め物でもない範囲だけ読む
+        length = int(valid.sum(dim=1).max())
+        state_size = layer.num_heads * layer.key_dim * layer.value_dim
+        memory = memory.to(self.device)
+        S, h = memory.split([state_size, memory.shape[1] - state_size], dim=1)
+        output, S, h = layer(
+            representation[:, :length, :-1],
+            valid[:, :length],
+            S.view(B, layer.num_heads, layer.key_dim, layer.value_dim),
+            h.view(B, layer.conv_size - 1, layer.hidden_size),
+            advance_trace and self.gdn_memory == "lora_rtrl",
+        )
+        image = output[kinds[:, :length] == IMAGE_TOKEN].view(B, self.num_positions, -1)
+        return image, torch.cat([S.flatten(start_dim=1), h.flatten(start_dim=1)], dim=1)

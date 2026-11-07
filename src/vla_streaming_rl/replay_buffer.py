@@ -76,12 +76,13 @@ class ReplayBuffer:
                 device=self.storage_device,
             )
 
-        # 行の大半を占める観測の表現と再帰状態は bf16 で持ち、1行の大きさを半分にする。
-        # 引くときは float32 に戻す
+        # 行の大半を占める観測の表現は bf16 で持ち、1行の大きさを半分にする。引くときは
+        # float32 に戻す。再帰の状態は次のステップの入力になり、丸めると毎ステップ誤差が
+        # 積もるので float32 のまま持つ
         self.observations = init_tensor((size, *obs_shape), torch.bfloat16)
         self.rewards = init_tensor((size, 1), torch.float32)
         self.dones = init_tensor((size, 1), torch.float32)
-        self.rnn_states = init_tensor((size, *rnn_state_shape), torch.bfloat16)
+        self.rnn_states = init_tensor((size, *rnn_state_shape), torch.float32)
         self.actions = init_tensor((size, *action_shape), torch.float32)
         self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM), torch.float32)
         # 行 t を先頭とする窓の優先度（TD 誤差の絶対値 + priority_epsilon）
