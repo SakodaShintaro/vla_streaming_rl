@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: MIT
-"""ステップをまたぐ記憶を持つ、Qwen3.5 の GDN の層1つ（~/work/gdn_rtrl の移植）。
+"""ステップをまたぐ記憶を持つ、Qwen3.5 の GDN の層1つ。
 
-事前学習の重みは凍結し、LoRA だけを学習する。RTRL は gdn_rtrl の n = 1 の構造化 RTRL
-（``qwen_rtrl_layerlocal.QwenLayerSensitivity``）を、1ステップ分のトークンをまとめて読む形に
-したもの（同じファイルの ``hybrid`` の n = 1 に当たる）。式の導出は gdn_rtrl の
-docs/qwen_lora_structure.md。
+事前学習の重みは凍結し、LoRA だけを学習する。RTRL は層1つの構造化 RTRL で、LoRA の B に
+対する再帰状態 S の感度を、1ステップ分のトークンをまとめて進める。
 
 層の計算（transformers の Qwen3_5DecoderLayer と同じ）::
 
@@ -23,10 +21,10 @@ import torch.nn.functional as F
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from torch import nn
 
-# LoRA を付ける射影。gdn_rtrl の part 3 の最終レシピ（targets all）と同じ
+# LoRA を付ける射影（層のすべての線形写像）
 LORA_TARGETS = ("q", "k", "v", "z", "a", "b", "out", "gate", "up", "down")
 # 再帰状態 S に直接入る射影。A を凍結し（LoRA-FA）、RTRL の感度を B についてだけ持つ。
-# k の感度は対角だけを残す近似（gdn_rtrl の kdiag）。ほかの射影は S に入らないので、
+# k の感度は対角だけを残す近似。ほかの射影は S に入らないので、
 # 1ステップ分の逆伝播だけで勾配が決まる
 RECURRENT_TARGETS = ("k", "v", "a", "b")
 
@@ -43,33 +41,6 @@ def l2norm(x: torch.Tensor, eps: float) -> torch.Tensor:
 def silu_grad(c: torch.Tensor) -> torch.Tensor:
     sigmoid = torch.sigmoid(c)
     return sigmoid * (1.0 + c * (1.0 - sigmoid))
-
-
-def delta_rule_step(
-    S: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    alpha: torch.Tensor,
-    beta: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """gated delta rule の1トークン分。S (B, H, d_k, d_v)、q, k (B, H, d_k)、v (B, H, d_v)、
-    alpha, beta (B, H) から、次の S と出力 o (B, H, d_v)。"""
-    decayed = alpha[..., None, None] * S
-    old_value = torch.einsum("bhkv,bhk->bhv", decayed, k)
-    S_new = decayed + torch.einsum("bhk,bhv->bhkv", k, beta[..., None] * (v - old_value))
-    return S_new, torch.einsum("bhkv,bhk->bhv", S_new, q)
-
-
-def propagate(
-    M: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor, k: torch.Tensor
-) -> torch.Tensor:
-    """感度 M (B, H, d_k, d_v, P) を、再帰のヤコビアン alpha (I - beta k k^T) で1トークン進める
-    （キーの添字に掛かる）。"""
-    kM = torch.einsum("bhi,bhijp->bhjp", k, M)
-    return alpha[..., None, None, None] * (
-        M - beta[..., None, None, None] * k[..., None, None] * kM[:, :, None]
-    )
 
 
 class GDNMemoryLayer(nn.Module):
@@ -252,9 +223,10 @@ class GDNMemoryLayer(nn.Module):
         h_prev: torch.Tensor,
         use_trace: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """1ステップ分のトークンの層の入力 x (B, L, D) を読む。``valid`` (B, L) は詰め物でない
-        トークンで、各行の先頭に詰めてある。前の状態は S_prev (B, H, d_k, d_v) と、直前の
-        conv_size - 1 トークンの正規化した入力 h_prev (B, conv_size - 1, D)。
+        """1ステップ分のトークンの層の入力 x (B, L, D) を、fla の chunk カーネルでまとめて読む。
+        ``valid`` (B, L) は詰め物でないトークンで、各行の先頭に詰めてある。前の状態は
+        S_prev (B, H, d_k, d_v) と、直前の conv_size - 1 トークンの正規化した入力
+        h_prev (B, conv_size - 1, D)。
 
         層の出力 (B, L, D) と、次の S と h を返す。"""
         B, L, _ = x.shape
@@ -267,16 +239,17 @@ class GDNMemoryLayer(nn.Module):
                 S = S + self._correction()
 
         p = self._project(x, valid, h_prev)
-        alpha = torch.exp(p["log_alpha"])
-        states = [S]
-        outputs = []
-        for t in range(L):
-            S, o = delta_rule_step(
-                S, p["q"][:, t], p["k"][:, t], p["v"][:, t], alpha[:, t], p["beta"][:, t]
-            )
-            states.append(S)
-            outputs.append(o)
-        y = self._output(x, torch.stack(outputs, dim=1), p["z"])
+        o, S_next = chunk_gated_delta_rule(
+            p["q"],
+            p["k"],
+            p["v"],
+            p["log_alpha"],
+            p["beta"],
+            scale=1.0,
+            initial_state=S,
+            output_final_state=True,
+        )
+        y = self._output(x, o, p["z"])
 
         if use_trace:
             self._advance_trace(
@@ -284,34 +257,13 @@ class GDNMemoryLayer(nn.Module):
                 p["conv"].detach(),
                 p["k"].detach(),
                 p["v"].detach(),
-                alpha.detach(),
+                torch.exp(p["log_alpha"]).detach(),
                 p["beta"].detach(),
                 p["a_pre"].detach(),
-                [state.detach() for state in states],
+                S_prev.detach(),
                 int(lengths[0]),
             )
-        return y, S.detach(), self._last_inputs(p["h_all"], lengths)
-
-    def forward_chunked(
-        self, x: torch.Tensor, S_prev: torch.Tensor, h_prev: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """詰め物のない入力 x (B, L, D) を、fla の chunk カーネルでまとめて読む。``forward`` と
-        同じ計算で、トークンの数が多い窓の BPTT 用。前の状態の勾配は切り、トレースは使わない。"""
-        B, L, _ = x.shape
-        valid = torch.ones(B, L, dtype=torch.bool, device=x.device)
-        p = self._project(x, valid, h_prev)
-        o, S = chunk_gated_delta_rule(
-            p["q"],
-            p["k"],
-            p["v"],
-            p["log_alpha"],
-            p["beta"],
-            scale=1.0,
-            initial_state=S_prev.detach(),
-            output_final_state=True,
-        )
-        y = self._output(x, o, p["z"])
-        return y, S.detach(), self._last_inputs(p["h_all"], valid.sum(dim=1))
+        return y, S_next.detach(), self._last_inputs(p["h_all"], lengths)
 
     @torch.no_grad()
     def _advance_trace(
@@ -323,11 +275,19 @@ class GDNMemoryLayer(nn.Module):
         alpha: torch.Tensor,
         beta: torch.Tensor,
         a_pre: torch.Tensor,
-        states: list[torch.Tensor],
+        S_start: torch.Tensor,
         length: int,
     ) -> None:
-        """感度を、このステップの詰め物でないトークンの数だけ進める: M <- J_t M + I_t。I_t は前の
-        状態を止めたときの、そのトークンでの S の変化（畳み込みの窓のトークンを通る分を含む）。"""
+        """感度を、このステップの詰め物でないトークン t = 0..L-1 の分だけ進める。1トークンでは
+        M <- J_t M + I_t、J_t = alpha_t (I - beta_t k_t k_t^T)（キーの添字に掛かる）、I_t は前の状態を
+        止めたときの、そのトークンでの S の変化（畳み込みの窓のトークンを通る分を含む）。
+        L トークン分をまとめて
+
+            M <- G_{-1} M + sum_t G_t I_t,   G_t = J_{L-1} ... J_{t+1}（G_{L-1} = I）
+
+        とする。v, a, b の I_t はキーの添字に k_t か (d_k, d_v) の行列が掛かる形なので、G_t を
+        掛けてから t で縮約する。k の感度は対角の近似で、J_t の代わりに対角
+        alpha_t (1 - beta_t k_t^2) で運ぶ。"""
         H, dk, dv, cs, r = (
             self.num_heads,
             self.key_dim,
@@ -336,63 +296,88 @@ class GDNMemoryLayer(nn.Module):
             self.lora_rank,
         )
         B = h_all.shape[0]
+        L = length
         if self.trace is None:
             self.trace = {
                 target: torch.zeros(B, H, dk, dv, r, device=h_all.device, dtype=h_all.dtype)
                 for target in RECURRENT_TARGETS
             }
         trace = self.trace
+        k, v, alpha, beta = k[:, :L], v[:, :L], alpha[:, :L], beta[:, :L]
         neg_A = -torch.exp(self.w_A_log)
-        c_k = conv[..., H * dk : 2 * H * dk].view(B, -1, H, dk)
-        c_v = conv[..., 2 * H * dk :].view(B, -1, H, dv)
+        c_k = conv[:, :L, H * dk : 2 * H * dk].view(B, L, H, dk)
+        c_v = conv[:, :L, 2 * H * dk :].view(B, L, H, dv)
         conv_k = self.w_conv[H * dk : 2 * H * dk, 0].view(H, dk, cs)
         conv_v = self.w_conv[2 * H * dk :, 0].view(H, dv, cs)
 
         def conv_lift(target: str, conv_weight: torch.Tensor) -> torch.Tensor:
             """畳み込みの窓のトークンの s A h を、チャネルごとの畳み込みの重みで足したもの
             (B, L, H, channels, rank)。"""
-            windows = self._lift(target, h_all).unfold(1, cs, 1)  # (B, L, r, cs)
+            windows = self._lift(target, h_all[:, : cs - 1 + L]).unfold(1, cs, 1)  # (B, L, r, cs)
             return torch.einsum("hcw,blrw->blhcr", conv_weight, windows)
 
-        lifted_v = conv_lift("v", conv_v)
-        lifted_k = conv_lift("k", conv_k)
-        lifted_a = self._lift("a", h_all[:, cs - 1 :])  # (B, L, r)
-        lifted_b = self._lift("b", h_all[:, cs - 1 :])
-        for t in range(length):
-            S = states[t]
-            k_t, v_t, alpha_t, beta_t = k[:, t], v[:, t], alpha[:, t], beta[:, t]
-            ab = alpha_t[..., None, None]
-            bb = beta_t[..., None, None]
-            sk = torch.einsum("bhkv,bhk->bhv", S, k_t)  # S^T k
-            residual = v_t - alpha_t[..., None] * sk
-            # v: I[i, j, p] = beta k_i silu'(c_v[j]) (畳み込んだ s A_v h)[j, p]
-            e_v = silu_grad(c_v[:, t])[..., None] * lifted_v[:, t]
-            trace["v"] = propagate(trace["v"], alpha_t, beta_t, k_t) + (
-                (beta_t[..., None] * k_t)[:, :, :, None, None] * e_v[:, :, None]
+        # 各トークンを読む前の状態 S_{t-1} (B, L, H, d_k, d_v)
+        S = S_start
+        states = []
+        for t in range(L):
+            states.append(S)
+            decayed = alpha[:, t, :, None, None] * S
+            old_value = torch.einsum("bhkv,bhk->bhv", decayed, k[:, t])
+            S = decayed + torch.einsum(
+                "bhk,bhv->bhkv", k[:, t], beta[:, t, :, None] * (v[:, t] - old_value)
             )
-            # a: I = (I - beta k k^T) S_{t-1} * d alpha / d pre * s A_a h_t
-            d_alpha = alpha_t * neg_A * torch.sigmoid(a_pre[:, t])
-            P = S - bb * k_t[..., None] * sk[:, :, None, :]
-            phi_a = d_alpha[..., None] * lifted_a[:, t][:, None, :]
-            trace["a"] = propagate(trace["a"], alpha_t, beta_t, k_t) + (
-                P[..., None] * phi_a[:, :, None, None, :]
+        states = torch.stack(states, dim=1)
+        # 後ろのトークンのヤコビアンの積 G_t (B, L, H, d_k, d_k) と、全トークンの積 G_{-1}
+        G = torch.eye(dk, device=k.device, dtype=k.dtype).expand(B, H, dk, dk)
+        suffix = [G] * L
+        for t in reversed(range(L)):
+            suffix[t] = G
+            Gk = torch.einsum("bhij,bhj->bhi", G, k[:, t])
+            G = alpha[:, t, :, None, None] * (
+                G - beta[:, t, :, None, None] * Gk[..., None] * k[:, t, :, None, :]
             )
-            # b: I = k r^T * beta (1 - beta) * s A_b h_t
-            phi_b = (beta_t * (1.0 - beta_t))[..., None] * lifted_b[:, t][:, None, :]
-            trace["b"] = propagate(trace["b"], alpha_t, beta_t, k_t) + (
-                (k_t[..., None] * residual[:, :, None, :])[..., None] * phi_b[:, :, None, None, :]
-            )
-            # k（対角の近似）: S の行 i は B_k の行 (h, i) にだけよるとし、alpha (1 - beta k_i^2) で運ぶ。
-            # dk = Q dx、Q = n (I - k k^T)、n = 1 / |x|、x = silu(c_k)
-            x_k = F.silu(c_k[:, t])
-            n = torch.rsqrt((x_k * x_k).sum(dim=-1, keepdim=True) + 1e-6)  # (B, H, 1)
-            Q_diag = n * (1.0 - k_t * k_t)  # (B, H, d_k)
-            # (S^T Q)[j, i] = n (S[i, j] - k_i (S^T k)[j])
-            SQ = n[..., None] * (S - k_t[..., None] * sk[:, :, None, :])  # (B, H, d_k, d_v)
-            coef = bb * residual[:, :, None, :] * Q_diag[..., None] - ab * bb * k_t[..., None] * SQ
-            f = silu_grad(c_k[:, t])[..., None] * lifted_k[:, t]  # (B, H, d_k, r)
-            trace["k"] = (
-                trace["k"]
-                * (alpha_t[..., None] * (1.0 - beta_t[..., None] * k_t * k_t))[..., None, None]
-                + coef[..., None] * f[:, :, :, None, :]
-            )
+        G_all = G
+        suffix = torch.stack(suffix, dim=1)
+        Gk = torch.einsum("blhij,blhj->blhi", suffix, k)
+
+        sk = torch.einsum("blhkv,blhk->blhv", states, k)  # S^T k
+        residual = v - alpha[..., None] * sk
+        # v: I[i, j, p] = beta k_i silu'(c_v[j]) (畳み込んだ s A_v h)[j, p]
+        e_v = silu_grad(c_v)[..., None] * conv_lift("v", conv_v)
+        immediate_v = torch.einsum("blhi,blhjp->bhijp", beta[..., None] * Gk, e_v)
+        # a: I = (I - beta k k^T) S_{t-1} * d alpha / d pre * s A_a h_t
+        d_alpha = alpha * neg_A * torch.sigmoid(a_pre[:, :L])
+        P = states - beta[..., None, None] * k[..., None] * sk[:, :, :, None, :]
+        phi_a = d_alpha[..., None] * self._lift("a", h_all[:, cs - 1 : cs - 1 + L])[:, :, None, :]
+        immediate_a = torch.einsum(
+            "blhij,blhp->bhijp", torch.einsum("blhik,blhkj->blhij", suffix, P), phi_a
+        )
+        # b: I = k r^T * beta (1 - beta) * s A_b h_t
+        phi_b = (beta * (1.0 - beta))[..., None] * self._lift("b", h_all[:, cs - 1 : cs - 1 + L])[
+            :, :, None, :
+        ]
+        immediate_b = torch.einsum(
+            "blhi,blhjp->bhijp", Gk, residual[..., None] * phi_b[:, :, :, None, :]
+        )
+        for target, immediate in (("v", immediate_v), ("a", immediate_a), ("b", immediate_b)):
+            trace[target] = torch.einsum("bhik,bhkjp->bhijp", G_all, trace[target]) + immediate
+
+        # k（対角の近似）: S の行 i は B_k の行 (h, i) にだけよるとし、alpha (1 - beta k_i^2) で運ぶ。
+        # dk = Q dx、Q = n (I - k k^T)、n = 1 / |x|、x = silu(c_k)
+        x_k = F.silu(c_k)
+        n = torch.rsqrt((x_k * x_k).sum(dim=-1, keepdim=True) + 1e-6)  # (B, L, H, 1)
+        Q_diag = n * (1.0 - k * k)  # (B, L, H, d_k)
+        # (S^T Q)[j, i] = n (S[i, j] - k_i (S^T k)[j])
+        SQ = n[..., None] * (states - k[..., None] * sk[:, :, :, None, :])
+        coef = (
+            beta[..., None, None] * residual[:, :, :, None, :] * Q_diag[..., None]
+            - (alpha * beta)[..., None, None] * k[..., None] * SQ
+        )
+        f = silu_grad(c_k)[..., None] * conv_lift("k", conv_k)  # (B, L, H, d_k, r)
+        # 後ろのトークンの対角の積（そのトークンを含まない）と、全トークンの積
+        d = alpha[..., None] * (1.0 - beta[..., None] * k * k)  # (B, L, H, d_k)
+        inclusive = torch.flip(torch.cumprod(torch.flip(d, [1]), dim=1), [1])
+        exclusive = torch.cat([inclusive[:, 1:], torch.ones_like(d[:, :1])], dim=1)
+        trace["k"] = inclusive[:, 0, :, :, None, None] * trace["k"] + torch.einsum(
+            "blhij,blhip->bhijp", exclusive[..., None] * coef, f
+        )

@@ -101,14 +101,15 @@ def save_prompt(encoder: VLMEncoder, instruction: str, path: Path) -> None:
 def main(data_dir: Path, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=False)
     common = OmegaConf.load(Path(__file__).parents[1] / "configs" / "agent" / "common.yaml")
-    # 記憶の層を FIRST_LAYER にすると、エンコーダはその入力を保存する表現として返す
+    # 記憶の層を FIRST_LAYER からにすると、エンコーダはその入力を保存する表現として返す
     vla_config = OmegaConf.merge(
         common.vla,
         {
             "gdn_memory": "frozen",
+            "gdn_memory_layers": ATTENTION_LAYER - FIRST_LAYER,
             "stream_window_steps": 0,
-            "image_layer_start": FIRST_LAYER + 1,
-            "image_layer_stop": FIRST_LAYER + 2,
+            "image_layer_start": ATTENTION_LAYER,
+            "image_layer_stop": ATTENTION_LAYER + 1,
         },
     )
     instruction = (data_dir / "instruction.txt").read_text()
@@ -123,7 +124,7 @@ def main(data_dir: Path, out_dir: Path) -> None:
         vla_config=vla_config,
         device="cuda",
     )
-    assert encoder.memory_layer_index == FIRST_LAYER, encoder.memory_layer_index
+    assert encoder.memory_layer_start == FIRST_LAYER, encoder.memory_layer_start
     layer_types = encoder.vlm.config.text_config.layer_types
     assert layer_types[FIRST_LAYER:ATTENTION_LAYER] == ["linear_attention"] * (
         ATTENTION_LAYER - FIRST_LAYER

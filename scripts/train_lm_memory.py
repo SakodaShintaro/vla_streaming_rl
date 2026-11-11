@@ -16,7 +16,7 @@ anything that learns, so their output is computed once when the data is loaded.
 ``--method rtrl`` updates after every tick with the RTRL gradient (the trace is
 carried across episodes, like the state). With more than one memory layer each
 layer carries the trace of its own LoRA only and takes its input as given
-(layer-local RTRL, as in ~/work/gdn_rtrl), which leaves out how a lower layer's
+(layer-local RTRL), which leaves out how a lower layer's
 LoRA reaches an upper layer's state across ticks. ``--method bptt`` reads
 ``--window`` ticks at once with the chunk kernel and updates once per window,
 cutting the gradient (not the state) at the window boundary.
@@ -132,7 +132,9 @@ class Game:
                 for index in range(self.num_ticks):
                     y = x[self.offsets[index] : self.offsets[index + 1]].float()[None]
                     for layer, (S, h) in zip(lower, lower_states, strict=True):
-                        y = layer.forward_chunked(y, S, h)[0]
+                        y = layer(
+                            y, torch.ones(y.shape[:2], dtype=torch.bool, device=device), S, h, False
+                        )[0]
                     pieces.append(y[0].to(torch.bfloat16))
             x = torch.cat(pieces)
         self.x = x
@@ -185,7 +187,7 @@ def read_chunked(
     """層を下から順に、詰め物のない入力 x (1, L, D) をまとめて読ませる。出力と次の状態。"""
     next_states = []
     for layer, (S, h) in zip(layers, states, strict=True):
-        x, S, h = layer.forward_chunked(x, S, h)
+        x, S, h = layer(x, torch.ones(x.shape[:2], dtype=torch.bool, device=x.device), S, h, False)
         next_states.append((S, h))
     return x, next_states
 
