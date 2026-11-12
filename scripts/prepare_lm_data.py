@@ -2,7 +2,7 @@
 """Turn episodes from scripts/collect_lm_data.py into the input of the GDN layers
 for the language-model check of RTRL (scripts/train_lm_memory.py).
 
-Every tick is read the way the agent reads it with ``gdn_memory`` (the stream is
+Every tick is read the way the agent reads it with the memory layers (the stream is
 emptied every step, so the VLM reads the instruction and this tick's text and
 image). The GDN layers just below the last full-attention layer are the ones the
 check may train (the last one, two or three), so the input of the lowest of
@@ -107,7 +107,6 @@ def main(data_dir: Path, out_dir: Path) -> None:
     vla_config = OmegaConf.merge(
         default_vla,
         {
-            "gdn_memory": "frozen",
             "gdn_memory_layers": ATTENTION_LAYER - FIRST_LAYER,
             "stream_window_steps": 0,
             "image_layer_start": ATTENTION_LAYER,
@@ -124,6 +123,7 @@ def main(data_dir: Path, out_dir: Path) -> None:
         image_shapes=[tuple(first["image"].shape[1:])],
         action_dim=first["prev_action"].shape[1],
         vla_config=vla_config,
+        use_memory=True,
         device="cuda",
     )
     assert encoder.memory_layer_start == FIRST_LAYER, encoder.memory_layer_start

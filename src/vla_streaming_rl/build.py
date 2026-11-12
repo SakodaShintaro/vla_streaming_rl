@@ -27,6 +27,8 @@ def build_all(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         horizon=args.horizon,
         critic_loss_weight=args.critic_loss_weight,
         vla_config=args.vla,
+        # 記憶の層は streaming の更新の RTRL で学ぶので、そのときだけ持つ
+        use_memory=args.streaming_update,
     )
     instruction = ENV_INSTRUCTIONS[args.env_id]
     if "topdown_image" in image_names:

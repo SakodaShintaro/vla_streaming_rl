@@ -5,4 +5,4 @@ set -eux
 RESULT_DIR=/tmp/vla_streaming_rl_test
 
 uv run python scripts/train.py exp_name=test debug=true result_dir=${RESULT_DIR} batch_size=2
-uv run python scripts/train.py exp_name=test debug=true result_dir=${RESULT_DIR} batch_size=2 env=animalai streaming_update=true vla.gdn_memory=lora_rtrl
+uv run python scripts/train.py exp_name=test debug=true result_dir=${RESULT_DIR} batch_size=2 env=animalai streaming_update=true

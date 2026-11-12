@@ -25,7 +25,6 @@ IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 PAD_TOKEN = 0.0
 TEXT_TOKEN = 1.0
 IMAGE_TOKEN = 2.0
-GDN_MEMORY_MODES = ("none", "frozen", "lora", "lora_rtrl")
 
 # 状態に数値のまま入れるスカラーの観測の、SCALAR_OBS_NAMES での位置。global_step は
 # エピソードの中の状況を表さず、学習の間ずっと増え続けるので入れない
@@ -71,12 +70,12 @@ class VLMEncoder(nn.Module):
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
     読む状態にする。学習するのは射影と混ぜる層。
 
-    ``gdn_memory`` が none でなければ、ヘッドが読む層（``image_layer_start`` の1層）の直前の
+    ``use_memory`` なら、ヘッドが読む層（``image_layer_start`` の1層）の直前の
     ``gdn_memory_layers`` 層の GDN だけをエピソードの間の記憶にする。VLM は毎ステップ流れを
     空にして読み（``stream_window_steps`` は 0）、その最も下の層の入力をこのステップの全トークン
     について保存する。``forward`` はそれらの層を ``GDNMemoryLayer`` で下から順に計算し直し、
-    再帰状態をエージェントの再帰の状態として持ち回る。frozen はその層を凍結したまま、lora は
-    LoRA を1ステップ分の勾配で、lora_rtrl は LoRA を RTRL で学習する。
+    再帰状態をエージェントの再帰の状態として持ち回る。その層の LoRA を
+    学習する（``advance_trace`` で呼ばれる経路では RTRL で）。
     """
 
     def __init__(
@@ -85,6 +84,7 @@ class VLMEncoder(nn.Module):
         image_shapes: list[tuple[int, ...]],
         action_dim: int,
         vla_config: DictConfig,
+        use_memory: bool,
         device: str,
     ) -> None:
         super().__init__()
@@ -101,9 +101,8 @@ class VLMEncoder(nn.Module):
         self._reset_stream()
         self.image_layers = slice(vla_config.image_layer_start, vla_config.image_layer_stop)
         self.image_pad_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-        assert vla_config.gdn_memory in GDN_MEMORY_MODES, vla_config.gdn_memory
-        self.gdn_memory = vla_config.gdn_memory
-        if self.gdn_memory != "none":
+        self.use_memory = use_memory
+        if self.use_memory:
             # hidden_states[i] は層 i - 1 の出力なので、ヘッドが読む層を出すのは層 start - 1。
             # 記憶の層はそこまでの gdn_memory_layers 層で、表現は最も下の層の入力
             assert vla_config.image_layer_stop == vla_config.image_layer_start + 1
@@ -120,7 +119,7 @@ class VLMEncoder(nn.Module):
                 [
                     GDNMemoryLayer(
                         self.vlm.model.language_model.layers[index],
-                        () if self.gdn_memory == "frozen" else LORA_TARGETS,
+                        LORA_TARGETS,
                         vla_config.gdn_lora_rank,
                         vla_config.gdn_lora_alpha,
                     )
@@ -175,7 +174,7 @@ class VLMEncoder(nn.Module):
     def representation_shape(self) -> tuple[int, ...]:
         """``represent`` が返す表現の形。射影は学習するので、その手前を保存する。GDN の記憶が
         あれば、ステップの全トークンの記憶の層の入力に、トークンの種類のチャネルを足したもの。"""
-        if self.gdn_memory == "none":
+        if not self.use_memory:
             return (self.num_positions, self.vlm_hidden_size)
         return (self.max_step_tokens, self.vlm_hidden_size + 1)
 
@@ -323,18 +322,18 @@ class VLMEncoder(nn.Module):
         if len(self.stream_step_lens) > self.stream_window_steps:
             self._drop_oldest_step()
 
-        if self.gdn_memory == "none":
+        if not self.use_memory:
             return self._image_tokens(inputs["input_ids"], step_outputs)
         return self._step_tokens(inputs["input_ids"], step_outputs)
 
     def init_memory(self) -> torch.Tensor:
         """エピソードの始めの再帰の状態 (1, ...)。GDN の記憶がなければ使わない詰め物。"""
-        if self.gdn_memory == "none":
+        if not self.use_memory:
             return torch.zeros(1, 1, 1)
         return torch.zeros(1, sum(layer.memory_size() for layer in self.memory_layers))
 
     def reset_memory_trace(self) -> None:
-        if self.gdn_memory != "none":
+        if self.use_memory:
             for layer in self.memory_layers:
                 layer.reset_trace()
 
@@ -352,13 +351,13 @@ class VLMEncoder(nn.Module):
         トークンにしたものを並べ、ヘッドが読む状態 (B, output_dim) にする。GDN の記憶があれば、
         表現はこのステップの全トークンの記憶の層の入力で、その層を前の再帰の状態 ``memory``
         (B, ...) から読んで画像のトークンの出力を作る。状態と次の再帰の状態を返す。
-        ``advance_trace`` なら、lora_rtrl では RTRL のトレースを1ステップ進める。
+        ``advance_trace`` なら、RTRL のトレースを1ステップ進める。
 
         スカラー1つを1次元のまま連結すると、表現の次元に比べて割合が小さく埋もれやすく、残りの
         収益の 1 と 2 のような小さい違いも1つの入力のわずかな差にしかならない。周期の短い成分は
         小さい違いを別のベクトルにし、周期の長い成分は大きい値のおおよその位置を表す。変換は
         固定で、学習中に変わらない。"""
-        if self.gdn_memory == "none":
+        if not self.use_memory:
             image = representation
             next_memory = memory
         else:
@@ -380,7 +379,7 @@ class VLMEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """記憶の層を下から順に1ステップ分のトークンを読ませ、最も上の層の画像のトークンの出力
         (B, num_positions, hidden_size) と次の再帰の状態を作る。再帰の状態は層ごとの S と、
-        畳み込みが読む直前のトークンの入力 h を並べたもの。lora_rtrl では各層が自分の LoRA の
+        畳み込みが読む直前のトークンの入力 h を並べたもの。各層が自分の LoRA の
         トレースだけを運ぶ（層ごとに閉じた近似）。"""
         B = representation.shape[0]
         representation = representation.to(self.device)
@@ -401,7 +400,7 @@ class VLMEncoder(nn.Module):
                 valid,
                 S.view(B, layer.num_heads, layer.key_dim, layer.value_dim),
                 h.view(B, layer.conv_size - 1, layer.hidden_size),
-                advance_trace and self.gdn_memory == "lora_rtrl",
+                advance_trace,
             )
             next_memories += [S.flatten(start_dim=1), h.flatten(start_dim=1)]
         image = x[kinds[:, :length] == IMAGE_TOKEN].view(B, self.num_positions, -1)

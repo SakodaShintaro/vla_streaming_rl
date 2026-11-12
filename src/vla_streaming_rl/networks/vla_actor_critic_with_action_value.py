@@ -43,8 +43,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     推論も学習もそれを読み戻し、VLM を通さない。
 
     エンコーダに GDN の記憶の層があれば、その再帰状態をエージェントの再帰の状態として持ち回らせる
-    （バッファの各行には、そのステップを読む前の状態が入る）。lora_rtrl の LoRA は ``streaming_update``
-    のときの ``infer_and_compute_loss`` で RTRL で学習する。off-policy の ``compute_loss`` は保存した
+    （バッファの各行には、そのステップを読む前の状態が入る）。記憶の層の LoRA は
+    ``infer_and_compute_loss`` で RTRL で学習する。off-policy の ``compute_loss`` は保存した
     状態から1ステップ分の勾配だけを使う。
     """
 
@@ -59,6 +59,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         horizon: int,
         critic_loss_weight: float,
         vla_config: DictConfig,
+        use_memory: bool,
     ) -> None:
         super().__init__()
         # 表現はバッファに保存するので、バッファから読む窓は今のステップだけでよい
@@ -68,7 +69,11 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         device = "cuda"
         action_dim = action_space_shape[0]
         self.encoder = VLMEncoder(
-            image_shapes=image_shapes, action_dim=action_dim, vla_config=vla_config, device=device
+            image_shapes=image_shapes,
+            action_dim=action_dim,
+            vla_config=vla_config,
+            use_memory=use_memory,
+            device=device,
         )
         state_dim = self.encoder.output_dim
         self.policy_head = policy_head_factory(
@@ -86,7 +91,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             else None
         )
         # 記憶の層の状態は推論のたびに1ステップ進むので、行動のチャンクは1ステップに限る
-        assert vla_config.gdn_memory == "none" or horizon == 1, horizon
+        assert not use_memory or horizon == 1, horizon
 
     def init_state(self) -> torch.Tensor:
         return self.encoder.init_memory()
