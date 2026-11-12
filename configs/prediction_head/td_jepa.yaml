@@ -1,6 +1,5 @@
 _target_: vla_streaming_rl.networks.modules.prediction_head.LatentTDPredictionHead
 _partial_: true
-horizon: ${horizon}
 predictor_hidden_dim: 512
 predictor_block_num: 2
 detach_predictor: false

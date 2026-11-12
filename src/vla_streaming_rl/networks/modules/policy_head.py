@@ -119,7 +119,6 @@ class DiffusionPolicy(nn.Module):
         block_num: int,
         denoising_time: float,
         sparsity: float,
-        horizon: int,
         denoising_steps: int,
         dacer_loss_weight: float,
         detach_state: bool,
@@ -131,8 +130,7 @@ class DiffusionPolicy(nn.Module):
         del token_dim
         self.detach_state = detach_state
         time_embedding_size = 256
-        self.horizon = horizon
-        total_action_dim = action_dim * horizon
+        total_action_dim = action_dim
         self.fc_in = nn.Linear(
             state_dim + total_action_dim + time_embedding_size + GAMMA_EMBEDDING_SIZE, hidden_dim
         )
@@ -159,7 +157,7 @@ class DiffusionPolicy(nn.Module):
     ) -> HeadOutput:
         """
         Args:
-            a: flattened action (B, horizon * action_dim)
+            a: flattened action (B, action_dim)
             t: timestep (B,)
             state: state embedding (B, state_dim)
             gamma_feature: その行の方策の割引率の特徴 (B, GAMMA_EMBEDDING_SIZE)
@@ -179,32 +177,30 @@ class DiffusionPolicy(nn.Module):
 
     def _denoise(self, x: torch.Tensor, gamma_feature: torch.Tensor) -> torch.Tensor:
         """状態 (B, state_dim) と割引率の特徴 (B, GAMMA_EMBEDDING_SIZE) の行ごとの行動
-        (B, horizon, action_dim)。"""
+        (B, action_dim)。"""
         bs = x.size(0)
-        noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
+        noise = torch.randn(bs, self.action_dim, device=x.device)
 
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            return self.forward(x_flat, t, x, gamma_feature).output.view(
-                bs, self.horizon, self.action_dim
-            )
+            return self.forward(x_flat, t, x, gamma_feature).output.view(bs, self.action_dim)
 
         return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
-        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
-        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
         return self._denoise(*_repeat_over_gammas(x, self.gamma_features)).view(
-            x.size(0), self.num_gammas, self.horizon, self.action_dim
+            x.size(0), self.num_gammas, self.action_dim
         )
 
     def compute_actor_loss(
         self,
         state: torch.Tensor,
-        action_chunk: torch.Tensor,
+        taken_action: torch.Tensor,
         *,
         value_head,
     ) -> tuple[torch.Tensor, dict]:
@@ -213,11 +209,11 @@ class DiffusionPolicy(nn.Module):
 
         割引率ごとの方策の行動を、それぞれの割引率の価値で評価して最大にする。
         """
-        del action_chunk
+        del taken_action
         if self.detach_state:
             state = state.detach()
         action = self.get_gamma_actions(state)
-        B, G, horizon, action_dim = action.shape
+        B, G, action_dim = action.shape
         device = action.device
 
         for param in value_head.parameters():
@@ -235,7 +231,7 @@ class DiffusionPolicy(nn.Module):
         w_t = torch.exp(0.4 * t + (-1.8))
 
         actions = action.view(B, G, -1).clone().detach().requires_grad_(True)
-        q_values = value_head.gamma_values(state, actions.view(B, G, horizon, action_dim))
+        q_values = value_head.gamma_values(state, actions.view(B, G, action_dim))
         q_grad = torch.autograd.grad(q_values.sum(), actions, create_graph=True)[0]
         q_grad = q_grad.view(B * G, -1)
         flat_actions = actions.detach().view(B * G, -1)
@@ -288,7 +284,6 @@ class QF3Policy(nn.Module):
         hidden_dim: int,
         block_num: int,
         sparsity: float,
-        horizon: int,
         denoising_steps: int,
         clip_alpha: float,
         cfm_loss_weight: float,
@@ -301,8 +296,7 @@ class QF3Policy(nn.Module):
         del token_dim
         self.detach_state = detach_state
         time_embedding_size = 256
-        self.horizon = horizon
-        total_action_dim = action_dim * horizon
+        total_action_dim = action_dim
         self.fc_in = nn.Linear(
             state_dim + total_action_dim + time_embedding_size + GAMMA_EMBEDDING_SIZE, hidden_dim
         )
@@ -329,13 +323,13 @@ class QF3Policy(nn.Module):
     ) -> HeadOutput:
         """
         Args:
-            a: flattened noisy action x_τ (B, horizon * action_dim)
+            a: flattened noisy action x_τ (B, action_dim)
             t: flow time τ (B,)
             state: state embedding (B, state_dim)
             gamma_feature: その行の方策の割引率の特徴 (B, GAMMA_EMBEDDING_SIZE)
 
         Returns:
-            速度 v (B, horizon * action_dim)。有界にはしない
+            速度 v (B, action_dim)。有界にはしない
         """
         x = torch.cat([a, self.t_embedder(t), state, gamma_feature], 1)
         x = self.norm(self.fc_mid(self.fc_in(x)))
@@ -344,31 +338,31 @@ class QF3Policy(nn.Module):
 
     def _denoise(self, x: torch.Tensor, gamma_feature: torch.Tensor) -> torch.Tensor:
         """状態 (B, state_dim) と割引率の特徴 (B, GAMMA_EMBEDDING_SIZE) の行ごとの行動
-        (B, horizon, action_dim)。τ = 0 → 1 を ``denoising_steps`` 回の Euler で積分する。"""
+        (B, action_dim)。τ = 0 → 1 を ``denoising_steps`` 回の Euler で積分する。"""
         bs = x.size(0)
-        noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
+        noise = torch.randn(bs, self.action_dim, device=x.device)
 
         def predict_fn(x_t, t):
             # 速度を x-prediction に直して渡す（_euler_denoise はそこから速度を戻す）
             velocity = self.forward(x_t.view(bs, -1), t, x, gamma_feature).output
-            return x_t + (1.0 - t).view(bs, 1, 1) * velocity.view(bs, self.horizon, self.action_dim)
+            return x_t + (1.0 - t).view(bs, 1) * velocity
 
         return _euler_denoise(noise, 1.0, self.denoising_steps, predict_fn)
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
-        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
-        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
         return self._denoise(*_repeat_over_gammas(x, self.gamma_features)).view(
-            x.size(0), self.num_gammas, self.horizon, self.action_dim
+            x.size(0), self.num_gammas, self.action_dim
         )
 
     def compute_actor_loss(
         self,
         state: torch.Tensor,
-        action_chunk: torch.Tensor,
+        taken_action: torch.Tensor,
         *,
         value_head,
     ) -> tuple[torch.Tensor, dict]:
@@ -383,7 +377,7 @@ class QF3Policy(nn.Module):
 
         # 行は状態ごとに割引率の並びで続く (B * G, ...)
         state_rep, gamma_feature = _repeat_over_gammas(state, self.gamma_features)
-        replay_action = action_chunk.reshape(B, -1).repeat_interleave(G, dim=0)
+        replay_action = taken_action.reshape(B, -1).repeat_interleave(G, dim=0)
         t = torch.rand((B * G, 1), device=device)
         noise = torch.randn_like(replay_action)
         x_t = (1.0 - t) * noise + t * replay_action
@@ -399,7 +393,7 @@ class QF3Policy(nn.Module):
         for param in value_head.parameters():
             param.requires_grad_(False)
         policy_q = value_head.gamma_values(
-            state, clipped_action.view(B, G, self.horizon, self.action_dim)
+            state, clipped_action.view(B, G, self.action_dim)
         )  # (B, G)
         for param in value_head.parameters():
             param.requires_grad_(True)
@@ -442,7 +436,6 @@ class TokenDiffusionPolicy(nn.Module):
         block_num: int,
         denoising_time: float,
         sparsity: float,
-        horizon: int,
         denoising_steps: int,
         dacer_loss_weight: float,
         detach_state: bool,
@@ -453,8 +446,7 @@ class TokenDiffusionPolicy(nn.Module):
         assert state_dim % token_dim == 0, (state_dim, token_dim)
         self.detach_state = detach_state
         time_embedding_size = 256
-        self.horizon = horizon
-        total_action_dim = action_dim * horizon
+        total_action_dim = action_dim
         # 状態のトークン、行動の成分ごとのトークン、時刻のトークン、割引率のトークン
         tokens_num = state_dim // token_dim + total_action_dim + 2
         mixed_dim = tokens_num * token_dim
@@ -493,7 +485,7 @@ class TokenDiffusionPolicy(nn.Module):
     ) -> HeadOutput:
         """
         Args:
-            a: flattened action (B, horizon * action_dim)
+            a: flattened action (B, action_dim)
             t: timestep (B,)
             state: state embedding (B, state_dim), state_dim // token_dim tokens laid flat
             gamma_token: その行の方策の割引率のトークン (B, 1, token_dim)
@@ -516,32 +508,30 @@ class TokenDiffusionPolicy(nn.Module):
 
     def _denoise(self, x: torch.Tensor, gamma_token: torch.Tensor) -> torch.Tensor:
         """状態 (B, state_dim) と割引率のトークン (B, 1, token_dim) の行ごとの行動
-        (B, horizon, action_dim)。"""
+        (B, action_dim)。"""
         bs = x.size(0)
-        noise = torch.randn(bs, self.horizon, self.action_dim, device=x.device)
+        noise = torch.randn(bs, self.action_dim, device=x.device)
 
         def predict_fn(x_t, t):
             x_flat = x_t.view(bs, -1)
-            return self.forward(x_flat, t, x, gamma_token).output.view(
-                bs, self.horizon, self.action_dim
-            )
+            return self.forward(x_flat, t, x, gamma_token).output.view(bs, self.action_dim)
 
         return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
-        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._denoise(x, self.gamma_tokens[-1:].expand(x.size(0), -1, -1))
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
-        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
         return self._denoise(*_repeat_over_gammas(x, self.gamma_tokens)).view(
-            x.size(0), self.num_gammas, self.horizon, self.action_dim
+            x.size(0), self.num_gammas, self.action_dim
         )
 
     def compute_actor_loss(
         self,
         state: torch.Tensor,
-        action_chunk: torch.Tensor,
+        taken_action: torch.Tensor,
         *,
         value_head,
     ) -> tuple[torch.Tensor, dict]:
@@ -550,11 +540,11 @@ class TokenDiffusionPolicy(nn.Module):
 
         割引率ごとの方策の行動を、それぞれの割引率の価値で評価して最大にする。
         """
-        del action_chunk
+        del taken_action
         if self.detach_state:
             state = state.detach()
         action = self.get_gamma_actions(state)
-        B, G, horizon, action_dim = action.shape
+        B, G, action_dim = action.shape
         device = action.device
 
         for param in value_head.parameters():
@@ -572,7 +562,7 @@ class TokenDiffusionPolicy(nn.Module):
         w_t = torch.exp(0.4 * t + (-1.8))
 
         actions = action.view(B, G, -1).clone().detach().requires_grad_(True)
-        q_values = value_head.gamma_values(state, actions.view(B, G, horizon, action_dim))
+        q_values = value_head.gamma_values(state, actions.view(B, G, action_dim))
         q_grad = torch.autograd.grad(q_values.sum(), actions, create_graph=True)[0]
         q_grad = q_grad.view(B * G, -1)
         flat_actions = actions.detach().view(B * G, -1)
@@ -621,7 +611,6 @@ class CFGDiffusionPolicy(nn.Module):
         denoising_time: float,
         sparsity: float,
         cfgrl_beta: float,
-        horizon: int,
         denoising_steps: int,
         condition_drop_prob: float,
         detach_state: bool,
@@ -634,10 +623,9 @@ class CFGDiffusionPolicy(nn.Module):
         self.detach_state = detach_state
         self.cfgrl_beta = cfgrl_beta
         self.condition_drop_prob = condition_drop_prob
-        self.horizon = horizon
         time_embedding_size = 256
         condition_embedding_size = 64
-        total_action_dim = action_dim * horizon
+        total_action_dim = action_dim
         # Condition I embedding: 0=negative, 1=positive, 2=unconditional(dropout)
         self.condition_embedding = nn.Embedding(3, condition_embedding_size)
 
@@ -676,7 +664,7 @@ class CFGDiffusionPolicy(nn.Module):
     ) -> HeadOutput:
         """
         Args:
-            a: flattened action (B, horizon * action_dim)
+            a: flattened action (B, action_dim)
             t: timestep (B,)
             state: state embedding (B, state_dim)
             condition: condition I (B,) - 0=negative, 1=positive, 2=unconditional
@@ -706,7 +694,7 @@ class CFGDiffusionPolicy(nn.Module):
         """
         bs = x.size(0)
         device = x.device
-        noise = torch.randn(bs, self.horizon, self.action_dim, device=device)
+        noise = torch.randn(bs, self.action_dim, device=device)
 
         # Condition labels: 1=positive, 2=unconditional
         cond_positive = torch.ones((bs,), dtype=torch.long, device=device)
@@ -717,24 +705,24 @@ class CFGDiffusionPolicy(nn.Module):
             out_pos = self.forward(x_flat, t, x, cond_positive, gamma_feature).output
             out_unc = self.forward(x_flat, t, x, cond_uncond, gamma_feature).output
             out = (1 - self.cfgrl_beta) * out_unc + self.cfgrl_beta * out_pos
-            return out.view(bs, self.horizon, self.action_dim)
+            return out.view(bs, self.action_dim)
 
         return _euler_denoise(noise, self.denoising_time, self.denoising_steps, predict_fn)
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
-        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
-        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
         return self._denoise(*_repeat_over_gammas(x, self.gamma_features)).view(
-            x.size(0), self.num_gammas, self.horizon, self.action_dim
+            x.size(0), self.num_gammas, self.action_dim
         )
 
     def compute_actor_loss(
         self,
         state: torch.Tensor,
-        action_chunk: torch.Tensor,
+        taken_action: torch.Tensor,
         *,
         value_head: nn.Module,
     ) -> tuple[torch.Tensor, dict]:
@@ -749,7 +737,7 @@ class CFGDiffusionPolicy(nn.Module):
         G = self.num_gammas
 
         with torch.no_grad():
-            data_q = value_head.to_values(value_head(state, action_chunk).output)  # (B, G)
+            data_q = value_head.to_values(value_head(state, taken_action).output)  # (B, G)
             policy_q = value_head.gamma_values(state, self.get_gamma_actions(state))  # (B, G)
             advantage = data_q - policy_q
             threshold = advantage.median(dim=0, keepdim=True).values
@@ -759,7 +747,7 @@ class CFGDiffusionPolicy(nn.Module):
             condition = torch.where(drop_mask, torch.full_like(condition, 2), condition)
 
         state_rep, gamma_feature = _repeat_over_gammas(state, self.gamma_features)
-        action_flat = action_chunk.view(batch_size, -1).repeat_interleave(G, dim=0)
+        action_flat = taken_action.view(batch_size, -1).repeat_interleave(G, dim=0)
         eps = 1e-4
         t = torch.rand((batch_size * G, 1), device=device) * (1 - eps) + eps
         noise = torch.randn_like(action_flat)
@@ -802,7 +790,6 @@ class IMLEPolicy(nn.Module):
         token_dim: int,
         hidden_dim: int,
         block_num: int,
-        horizon: int,
         sparsity: float,
         sample_num: int,
         detach_state: bool,
@@ -813,10 +800,9 @@ class IMLEPolicy(nn.Module):
         # 状態をトークンとしては読まないので、トークンの幅は使わない
         del token_dim
         self.detach_state = detach_state
-        self.horizon = horizon
         self.action_dim = action_dim
         self.sample_num = sample_num
-        total_action_dim = action_dim * horizon
+        total_action_dim = action_dim
         self.fc_in = nn.Linear(state_dim + total_action_dim + GAMMA_EMBEDDING_SIZE, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
@@ -834,7 +820,7 @@ class IMLEPolicy(nn.Module):
     ) -> HeadOutput:
         """
         Args:
-            z: latent noise (B, horizon * action_dim)
+            z: latent noise (B, action_dim)
             state: state embedding (B, state_dim)
             gamma_feature: その行の方策の割引率の特徴 (B, GAMMA_EMBEDDING_SIZE)
         """
@@ -849,32 +835,32 @@ class IMLEPolicy(nn.Module):
 
     def _generate(self, x: torch.Tensor, gamma_feature: torch.Tensor) -> torch.Tensor:
         """状態 (B, state_dim) と割引率の特徴 (B, GAMMA_EMBEDDING_SIZE) の行ごとの行動
-        (B, horizon, action_dim)。"""
+        (B, action_dim)。"""
         bs = x.size(0)
-        z = torch.randn(bs, self.horizon * self.action_dim, device=x.device)
-        return self.forward(z, x, gamma_feature).output.view(bs, self.horizon, self.action_dim)
+        z = torch.randn(bs, self.action_dim, device=x.device)
+        return self.forward(z, x, gamma_feature).output.view(bs, self.action_dim)
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
-        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._generate(x, self.gamma_features[-1:].expand(x.size(0), -1))
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
-        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
         return self._generate(*_repeat_over_gammas(x, self.gamma_features)).view(
-            x.size(0), self.num_gammas, self.horizon, self.action_dim
+            x.size(0), self.num_gammas, self.action_dim
         )
 
     def compute_actor_loss(
         self,
         state: torch.Tensor,
-        action_chunk: torch.Tensor,
+        taken_action: torch.Tensor,
         *,
         value_head: nn.Module,
     ) -> tuple[torch.Tensor, dict]:
         """Maximize Q of the best of ``sample_num`` candidates per state and gamma.
 
         割引率 g の方策の候補は割引率 g の価値で評価し、その中の最良を押し上げる。"""
-        del action_chunk
+        del taken_action
         if self.detach_state:
             state = state.detach()
         B = state.shape[0]
@@ -884,7 +870,7 @@ class IMLEPolicy(nn.Module):
         # 行は状態ごとに候補、候補ごとに割引率の並びで続く (B * m * G, ...)
         state_rep = state.repeat_interleave(m, dim=0)  # (B*m, state_dim)
         action = self._generate(*_repeat_over_gammas(state_rep, self.gamma_features)).view(
-            B * m, G, self.horizon, self.action_dim
+            B * m, G, self.action_dim
         )
 
         # The critic only scores the candidates: no gradient into its weights,
@@ -916,7 +902,7 @@ class IMLEPolicy(nn.Module):
 
 
 class TanhPolicy(nn.Module):
-    """A squashed Gaussian over the action chunk: a = tanh(u), u ~ N(mu(s), sigma(s)).
+    """A squashed Gaussian over the action: a = tanh(u), u ~ N(mu(s), sigma(s)).
 
     The head every residual policy is built on (EXPO, arXiv:2506.16560): one
     distribution the entropy of which is a number the loss can hold to a target,
@@ -948,7 +934,6 @@ class TanhPolicy(nn.Module):
         token_dim: int,
         hidden_dim: int,
         block_num: int,
-        horizon: int,
         sparsity: float,
         target_entropy_scale: float,
         init_temperature: float,
@@ -963,9 +948,8 @@ class TanhPolicy(nn.Module):
         self.detach_state = detach_state
         assert init_temperature > 0.0, init_temperature
         assert temperature_lr > 0.0, temperature_lr
-        self.horizon = horizon
         self.action_dim = action_dim
-        total_action_dim = action_dim * horizon
+        total_action_dim = action_dim
         self.fc_in = nn.Linear(state_dim + GAMMA_EMBEDDING_SIZE, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
@@ -977,7 +961,7 @@ class TanhPolicy(nn.Module):
         nn.init.zeros_(self.fc_mean.weight)
         nn.init.zeros_(self.fc_mean.bias)
         nn.init.zeros_(self.fc_log_std.bias)
-        # Entropy of a chunk this wide that the temperature holds the policy to.
+        # Entropy of an action this wide that the temperature holds the policy to.
         self.target_entropy = -target_entropy_scale * total_action_dim
         self.temperature_lr = temperature_lr
         # A buffer, not a parameter: it is stepped by :meth:`compute_actor_loss`
@@ -1002,7 +986,7 @@ class TanhPolicy(nn.Module):
     def _sample(
         self, state: torch.Tensor, gamma_feature: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """One reparameterized draw: the action chunk and its log density under
+        """One reparameterized draw: the action and its log density under
         the squashed Gaussian, with the Gaussian's mean and log standard
         deviation it was drawn from.
 
@@ -1020,23 +1004,23 @@ class TanhPolicy(nn.Module):
             - 0.5 * math.log(2 * math.pi)
             - 2.0 * (math.log(2.0) - pre_tanh - F.softplus(-2.0 * pre_tanh))
         ).sum(dim=-1)
-        action = torch.tanh(pre_tanh).view(-1, self.horizon, self.action_dim)
+        action = torch.tanh(pre_tanh).view(-1, self.action_dim)
         return action, log_prob, mean, log_std
 
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
-        """主の割引率の方策の行動 (B, horizon, action_dim)。環境で実行するのはこれ。"""
+        """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         action, _, _, _ = self._sample(x, self.gamma_features[-1:].expand(x.size(0), -1))
         return action
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
-        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim)。最後が主の割引率。"""
+        """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
         action, _, _, _ = self._sample(*_repeat_over_gammas(x, self.gamma_features))
-        return action.view(x.size(0), self.num_gammas, self.horizon, self.action_dim)
+        return action.view(x.size(0), self.num_gammas, self.action_dim)
 
     def compute_actor_loss(
         self,
         state: torch.Tensor,
-        action_chunk: torch.Tensor,
+        taken_action: torch.Tensor,
         *,
         value_head,
     ) -> tuple[torch.Tensor, dict]:
@@ -1048,7 +1032,7 @@ class TanhPolicy(nn.Module):
         (log_prob + target_entropy)`` -- down while the policy is more random
         than the target asks, up while it is less.
         """
-        del action_chunk
+        del taken_action
         if self.detach_state:
             state = state.detach()
         # 行は状態ごとに割引率の並びで続く (B * G, ...)
@@ -1064,9 +1048,7 @@ class TanhPolicy(nn.Module):
 
         for param in value_head.parameters():
             param.requires_grad_(False)
-        policy_q = value_head.gamma_values(
-            state, action.view(B, G, self.horizon, self.action_dim)
-        ).reshape(-1)
+        policy_q = value_head.gamma_values(state, action.view(B, G, self.action_dim)).reshape(-1)
         for param in value_head.parameters():
             param.requires_grad_(True)
 
@@ -1084,8 +1066,8 @@ class TanhPolicy(nn.Module):
     def _distribution_report(self, mean: torch.Tensor, log_std: torch.Tensor) -> dict:
         """方策の分布が行動空間のどこに寄っているか。行動の成分ごとの tanh(平均) のバッチ
         平均、標準偏差、tanh(平均) が端（絶対値 0.95 超）に張り付いている割合。"""
-        squashed_mean = torch.tanh(mean).view(-1, self.horizon, self.action_dim)
-        std = log_std.exp().view(-1, self.horizon, self.action_dim)
+        squashed_mean = torch.tanh(mean).view(-1, self.action_dim)
+        std = log_std.exp().view(-1, self.action_dim)
         return {
             **{
                 f"policy_mean_{i}": squashed_mean[..., i].mean().item()

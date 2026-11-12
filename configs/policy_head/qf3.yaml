@@ -2,7 +2,6 @@ _target_: vla_streaming_rl.networks.modules.policy_head.QF3Policy
 _partial_: true
 hidden_dim: 512
 block_num: 1
-horizon: ${horizon}
 sparsity: ${sparsity}
 denoising_steps: 5
 clip_alpha: 1.0

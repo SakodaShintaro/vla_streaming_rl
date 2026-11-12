@@ -3,7 +3,7 @@
 
 Every tick is stored; once ``learning_starts`` ticks have gone by, one gradient
 step on a ``batch_size`` sample of the buffer fires every tick, before the
-action of that tick is chosen, whatever the ``horizon`` of the action chunks.
+action of that tick is chosen.
 Below ``learning_starts`` the network is told it is warming up and returns
 uniform random actions, so the buffer fills with something other than an
 untrained policy's output.
@@ -29,7 +29,6 @@ from torch import nn, optim
 
 from vla_streaming_rl.networks.vla_actor_critic_with_action_value import (
     InferInput,
-    InferResult,
 )
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
@@ -88,7 +87,6 @@ class OffPolicyAgent:
         max_grad_norm: float,
         use_done: bool,
         seq_len: int,
-        horizon: int,
         actor_lr: float,
         critic_lr: float,
         weight_decay: float,
@@ -113,7 +111,6 @@ class OffPolicyAgent:
         self.network = network
         self.instruction = instruction
         self.seq_len = seq_len
-        self.horizon = horizon
         self.normalizing_by_return = normalizing_by_return
         self.use_done = use_done
         self.reset_on_episode_end = reset_on_episode_end
@@ -132,8 +129,8 @@ class OffPolicyAgent:
 
         self.rb = ReplayBuffer(
             size=buffer_size,
-            seq_len=seq_len + horizon,
-            horizon=horizon,
+            # 状態の窓と、その後の遷移の結果の1行
+            seq_len=seq_len + 1,
             obs_shape=network.stored_image_shape(),
             action_shape=action_space.shape,
             output_device=self.device,
@@ -143,9 +140,6 @@ class OffPolicyAgent:
             priority_epsilon=priority_epsilon,
         )
 
-        # 実行中の行動チャンク (horizon, action_dim) と、そのうち実行した数
-        self.action_chunk: np.ndarray | None = None
-        self.chunk_step = 0
         # 最後に環境へ渡した行動。エピソードをまたいで持ち越す
         self.prev_action = np.zeros(action_space.shape, dtype=np.float32)
         # the first observation of a run starts an episode
@@ -216,7 +210,7 @@ class OffPolicyAgent:
     def _learn(self, global_step: int) -> dict[str, float]:
         """リプレイの損失に、``streaming_update`` なら最新の窓の streaming の損失を足して、
         1回更新する。metrics を返す。"""
-        window_len = self.seq_len + self.horizon
+        window_len = self.seq_len + 1
         if not self.is_learning:
             print(f"Start learning at global step {global_step}.")
             self.is_learning = True
@@ -245,10 +239,8 @@ class OffPolicyAgent:
         return metrics
 
     def _act(self, global_step: int, metrics: dict) -> StepResult:
-        """実行中のチャンクの続きか、バッファの最新の窓から推論した新しいチャンクを実行する。"""
+        """バッファの最新の窓から推論した行動を、環境の行動空間に写して実行する。"""
         warmup = global_step < self.learning_starts
-        if not warmup and self._has_chunk_left():
-            return self._continue_chunk(metrics)
         latest_data = self.rb.get_latest(self.seq_len)
         infer_result = self.network.infer(
             InferInput(
@@ -259,7 +251,20 @@ class OffPolicyAgent:
                 warmup=warmup,
             )
         )
-        return self._start_chunk(infer_result, metrics)
+        self.last_features = infer_result.features
+        metrics.update(infer_result.value_report)
+        action = np.clip(
+            infer_result.action[0].cpu().numpy() * self.action_scale + self.action_bias,
+            self.action_low,
+            self.action_high,
+        )
+        self.prev_action = action
+        return StepResult(
+            action=action,
+            metrics=metrics,
+            panels={},
+            texts={"prompt": self.instruction},
+        )
 
     def _observe(
         self, obs: dict[str, Any], reward: float, terminated: bool, truncated: bool, info: dict
@@ -271,11 +276,6 @@ class OffPolicyAgent:
         # recurrent state is reset on the tick after it rather than on it.
         self._episode_start = self._previous_done
         reset_state = self._episode_start and self.reset_on_episode_end
-        if self._episode_start:
-            # A chunk begun on the terminal frame would otherwise run into the
-            # new episode; the first action of an episode comes from its own frame.
-            self.action_chunk = None
-            self.chunk_step = 0
         self._previous_done = episode_done
 
         # What the agent trains on, against what the env reported as its score.
@@ -306,32 +306,3 @@ class OffPolicyAgent:
             scalar_obs,
         )
         return metrics
-
-    def _has_chunk_left(self) -> bool:
-        """実行中のチャンクに、まだ実行していない行動があるか。"""
-        return self.action_chunk is not None and self.chunk_step < self.horizon
-
-    def _start_chunk(self, infer_result: InferResult, metrics: dict) -> StepResult:
-        """ネットワークが出したチャンクを始め、その最初の行動を実行する。"""
-        self.last_features = infer_result.features
-        metrics.update(infer_result.value_report)
-        self.action_chunk = infer_result.action[0].cpu().numpy()
-        self.chunk_step = 0
-        return self._continue_chunk(metrics)
-
-    def _continue_chunk(self, metrics: dict) -> StepResult:
-        """実行中のチャンクの次の行動を、環境の行動空間に写して実行する。"""
-        action = np.clip(
-            self.action_chunk[self.chunk_step] * self.action_scale + self.action_bias,
-            self.action_low,
-            self.action_high,
-        )
-        self.chunk_step += 1
-        self.prev_action = action
-        metrics["chunk_step"] = self.chunk_step
-        return StepResult(
-            action=action,
-            metrics=metrics,
-            panels={},
-            texts={"prompt": self.instruction},
-        )

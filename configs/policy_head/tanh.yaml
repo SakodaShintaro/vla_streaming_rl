@@ -2,7 +2,6 @@ _target_: vla_streaming_rl.networks.modules.policy_head.TanhPolicy
 _partial_: true
 hidden_dim: 512
 block_num: 1
-horizon: ${horizon}
 sparsity: ${sparsity}
 target_entropy_scale: 0.0
 init_temperature: 0.01

@@ -99,7 +99,7 @@ class DistributionalValueHead(nn.Module):
         return self.to_values(logits).mean(dim=1)
 
     def gamma_values(self, x: torch.Tensor, gamma_actions: torch.Tensor) -> torch.Tensor:
-        """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim) を、それぞれの割引率の
+        """割引率ごとの方策の行動 (B, num_gammas, action_dim) を、それぞれの割引率の
         価値で評価した値 (B, num_gammas)。割引率 g の行動は割引率 g の価値でだけ読む。"""
         bs, num_gammas = gamma_actions.shape[:2]
         assert num_gammas == self.num_gammas, (num_gammas, self.num_gammas)
@@ -170,40 +170,29 @@ class DistributionalValueHead(nn.Module):
 
     @torch.no_grad()
     def compute_target_value(
-        self,
-        next_q: torch.Tensor,
-        chunk_rewards: torch.Tensor,
-        chunk_dones: torch.Tensor,
+        self, next_q: torch.Tensor, reward: torch.Tensor, done: torch.Tensor
     ) -> torch.Tensor:
         """割引率ごとの TD の目標 (B, num_gammas)。``next_q`` は次の状態での割引率ごとの
-        価値 (B, num_gammas)（:meth:`gamma_values`）。"""
-        batch_size = chunk_rewards.size(0)
-        gammas = self.gammas_tensor.to(chunk_rewards.device)  # (G,)
-        discounted_reward = torch.zeros(batch_size, self.num_gammas, device=chunk_rewards.device)
-        gamma_power = torch.ones(self.num_gammas, device=chunk_rewards.device)  # (G,)
-        continuing = torch.ones(batch_size, 1, device=chunk_rewards.device)  # (B, 1)
-        for i in range(self.horizon):
-            reward_i = chunk_rewards[:, i].view(batch_size, 1)
-            discounted_reward += continuing * gamma_power.unsqueeze(0) * reward_i
-            gamma_power = gamma_power * gammas
-            continuing = continuing * (1 - chunk_dones[:, i].view(batch_size, 1))
-        return discounted_reward + continuing * gamma_power.unsqueeze(0) * next_q
+        価値 (B, num_gammas)（:meth:`gamma_values`）、``reward`` と ``done`` は遷移の報酬と
+        終端 (B, 1)。"""
+        gammas = self.gammas_tensor.to(reward.device)  # (G,)
+        return reward + (1 - done) * gammas.unsqueeze(0) * next_q
 
     def compute_critic_loss(
         self,
         state: torch.Tensor,
-        action_chunk: torch.Tensor,
+        action: torch.Tensor,
         target_value: torch.Tensor,
         weights: torch.Tensor,
     ) -> tuple[torch.Tensor, dict, torch.Tensor]:
-        """Distributional TD loss for Q(state, action_chunk) vs ``target_value``.
+        """Distributional TD loss for Q(state, action) vs ``target_value``.
 
         Each sample's loss is scaled by its importance weight ``weights`` ``(B,)``
         (all ones under uniform replay). Also returns the per-sample TD error
         ``(B,)``, detached, for the replay buffer's priorities.
 
         Mirrors :meth:`PolicyHead.compute_actor_loss`: given the state, action
-        chunk and the per-gamma TD target ``(B, num_gammas)`` (built by
+        and the per-gamma TD target ``(B, num_gammas)`` (built by
         :meth:`compute_target_value`), the value head owns its loss (forward →
         :meth:`update_value_range` → :meth:`value_loss`) and the scalar logging
         info. ``detach_state`` stops the gradient into the encoder.
@@ -211,7 +200,7 @@ class DistributionalValueHead(nn.Module):
         if self.detach_state:
             state = state.detach()
 
-        logits = self(state, action_chunk).output
+        logits = self(state, action).output
 
         self.update_value_range(target_value)
         # ``to_value`` averages over gammas; the per-gamma loss is in ``value_loss``.
@@ -246,7 +235,6 @@ class ActionValueHead(DistributionalValueHead):
         in_channels: int,
         action_dim: int,
         token_dim: int,
-        horizon: int,
         hidden_dim: int,
         block_num: int,
         num_bins: int,
@@ -261,9 +249,8 @@ class ActionValueHead(DistributionalValueHead):
         # 補助の割引率を先に、主の割引率を最後に並べる
         gammas = list(multi_gammas) + [gamma]
         self.detach_state = detach_state
-        self.horizon = horizon
         self.action_dim = action_dim
-        total_action_dim = action_dim * horizon
+        total_action_dim = action_dim
         mid_dim = in_channels + total_action_dim
         out_dim = len(gammas) * num_bins
 
@@ -287,10 +274,10 @@ class ActionValueHead(DistributionalValueHead):
         """
         Args:
             x: state embedding (B, state_dim)
-            a: action chunk (B, horizon, action_dim)
+            a: action (B, action_dim)
         """
         bs = a.size(0)
-        a_flat = a.view(bs, -1)  # (B, horizon * action_dim)
+        a_flat = a.view(bs, -1)  # (B, action_dim)
 
         xa = torch.cat([x, a_flat], dim=1)
         h = self.norm(self.fc_mid(self.fc_in(xa)))
@@ -314,7 +301,6 @@ class TokenActionValueHead(DistributionalValueHead):
         self,
         in_channels: int,
         action_dim: int,
-        horizon: int,
         token_dim: int,
         mixer_layers: int,
         mixer_heads: int,
@@ -332,10 +318,9 @@ class TokenActionValueHead(DistributionalValueHead):
         # 補助の割引率を先に、主の割引率を最後に並べる
         gammas = list(multi_gammas) + [gamma]
         self.detach_state = detach_state
-        self.horizon = horizon
         self.action_dim = action_dim
         self.token_dim = token_dim
-        total_action_dim = action_dim * horizon
+        total_action_dim = action_dim
         tokens_num = in_channels // token_dim + total_action_dim
         mixed_dim = tokens_num * token_dim
         out_dim = len(gammas) * num_bins
@@ -368,14 +353,14 @@ class TokenActionValueHead(DistributionalValueHead):
         """
         Args:
             x: state embedding (B, state_dim), state_dim // token_dim tokens laid flat
-            a: action chunk (B, horizon, action_dim)
+            a: action (B, action_dim)
         """
         bs = a.size(0)
-        a_flat = a.view(bs, -1)  # (B, horizon * action_dim)
+        a_flat = a.view(bs, -1)  # (B, action_dim)
         state_tokens = x.view(bs, -1, self.token_dim)
         action_tokens = get_fourier_embeds_from_coordinates(
             self.token_dim, a.reshape(bs, 1, -1).to(x.dtype)
-        )[:, 0]  # (B, horizon * action_dim, token_dim)
+        )[:, 0]  # (B, action_dim, token_dim)
         tokens = torch.cat([state_tokens, action_tokens], dim=1) + self.token_position
         mixed = self.token_mixer(tokens).flatten(start_dim=1)
 
@@ -417,7 +402,6 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         in_channels: int,
         action_dim: int,
         token_dim: int,
-        horizon: int,
         hidden_dim: int,
         block_num: int,
         num_bins: int,
@@ -431,9 +415,8 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         # 補助の割引率を先に、主の割引率を最後に並べる
         gammas = list(multi_gammas) + [gamma]
         self.detach_state = detach_state
-        self.horizon = horizon
         self.action_dim = action_dim
-        in_dim = in_channels + action_dim * horizon
+        in_dim = in_channels + action_dim
         num_gammas = len(gammas)
 
         # Encoder scalers/alphas follow the reference critic config:
@@ -465,7 +448,7 @@ class HypersphericalActionValueHead(DistributionalValueHead):
         """
         Args:
             x: state embedding (B, state_dim)
-            a: action chunk (B, horizon, action_dim)
+            a: action (B, action_dim)
         """
         bs = a.size(0)
         h = torch.cat([x, a.view(bs, -1)], dim=1)

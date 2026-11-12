@@ -24,7 +24,6 @@ def build_all(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         value_head_factory=hydra.utils.instantiate(args.value_head),
         policy_head_factory=hydra.utils.instantiate(args.policy_head),
         prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
-        horizon=args.horizon,
         critic_loss_weight=args.critic_loss_weight,
         vla_config=args.vla,
         # LoRA 付きの GDN の層は streaming の更新の RTRL で学ぶので、そのときだけ持つ
@@ -44,7 +43,6 @@ def build_all(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         max_grad_norm=args.max_grad_norm,
         use_done=args.use_done,
         seq_len=network.seq_len,
-        horizon=args.horizon,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         weight_decay=args.weight_decay,

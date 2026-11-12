@@ -34,7 +34,7 @@ class InferInput:
 class InferResult:
     """Structured return value of a network's ``infer``."""
 
-    action: torch.Tensor  # (B, horizon, action_dim)
+    action: torch.Tensor  # (B, action_dim)
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
     features: torch.Tensor
 
@@ -77,7 +77,6 @@ class VLAActorCriticWithActionValue(nn.Module):
         value_head_factory: Callable[[int, int], DistributionalValueHead],
         policy_head_factory,
         prediction_head_factory: Callable[..., LatentTDPredictionHead],
-        horizon: int,
         critic_loss_weight: float,
         vla_config: DictConfig,
         use_memory: bool,
@@ -85,7 +84,6 @@ class VLAActorCriticWithActionValue(nn.Module):
         super().__init__()
         # 表現はバッファに保存するので、バッファから読む窓は今のステップだけでよい
         self.seq_len = 1
-        self.horizon = horizon
         self.critic_loss_weight = critic_loss_weight
         device = "cuda"
         action_dim = action_space_shape[0]
@@ -111,8 +109,6 @@ class VLAActorCriticWithActionValue(nn.Module):
             if self.use_state_predictor
             else None
         )
-        # LoRA 付きの GDN の層の状態は推論のたびに1ステップ進むので、行動のチャンクは1ステップに限る
-        assert not use_memory or horizon == 1, horizon
 
     def stored_image_shape(self) -> tuple[int, ...]:
         """バッファに保存する、画像のトークンの表現の形。"""
@@ -143,19 +139,18 @@ class VLAActorCriticWithActionValue(nn.Module):
         return InferResult(action=action, value_report=value_report, features=state)
 
     def compute_replay_loss(self, data: ReplayBufferData) -> LossResult:
-        """リプレイの窓の損失。現在の状態はチャンクの手前のステップから、次の状態は最後の
-        ステップから、どちらも保存した表現で作る。"""
+        """リプレイの窓の損失。現在の状態は窓の最初のステップから、次の状態は最後のステップ
+        から、どちらも保存した表現で作る。"""
         window = (data.observations, data.actions, data.rewards, data.scalar_obs)
         with torch.no_grad():
             next_state = self._state(*window, -1)
-        state = self._state(*window, -self.horizon - 1)
+        state = self._state(*window, -2)
         return self._head_terms(data, state, next_state)
 
     def compute_streaming_loss(self, image: torch.Tensor, data: ReplayBufferData) -> LossResult:
         """最新の窓 ``data`` (B=1) の損失。現在の状態は、前のティックで ``represent`` が返した
         画像のトークン ``image`` (num_positions, hidden_size)（計算グラフ付き）から作り、勾配は
         LoRA 付きの GDN の層の LoRA まで届く。次の状態は保存した表現で作る。"""
-        assert self.horizon == 1, self.horizon
         state = self.encoder.to_state(
             image.unsqueeze(0), data.actions[:, -2], data.rewards[:, -2], data.scalar_obs[:, -2]
         )
@@ -200,7 +195,7 @@ class VLAActorCriticWithActionValue(nn.Module):
             )
         return self.prediction_head.compute_loss(
             state,
-            data.actions[:, -self.horizon :],
+            data.actions[:, -1],
             next_state,
             next_action,
         )
@@ -212,7 +207,7 @@ class VLAActorCriticWithActionValue(nn.Module):
         next_state: torch.Tensor,
     ) -> LossResult:
         """現在の状態 ``state``（勾配あり）と次の状態 ``next_state`` から、ヘッドの損失。
-        行動・報酬・終端は窓 ``data`` の最後の horizon ステップのもの。"""
+        遷移の行動・報酬・終端は窓 ``data`` の最後のステップのもの。"""
         with torch.no_grad():
             # TD の目標は割引率ごとに、その割引率の方策の次の行動で作る。最後が主の割引率の
             # 方策の行動で、状態の予測にはそれを使う
@@ -222,24 +217,15 @@ class VLAActorCriticWithActionValue(nn.Module):
         state_prediction_loss, state_prediction_info, intrinsic_reward = self._prediction_loss(
             state, data, next_state, next_action
         )
-        # 内発報酬はチャンクの最初のステップの報酬に足す。TD の目標にだけ入り、観測の文には入らない
-        chunk_rewards = data.rewards[:, -self.horizon :]
-        chunk_rewards = torch.cat(
-            [
-                chunk_rewards[:, :1] + intrinsic_reward.view(-1, 1, 1),
-                chunk_rewards[:, 1:],
-            ],
-            dim=1,
-        )
-        target_value = self.value_head.compute_target_value(
-            next_q, chunk_rewards, data.dones[:, -self.horizon :]
-        )
-        action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
+        # 内発報酬は遷移の報酬に足す。TD の目標にだけ入り、観測の文には入らない
+        reward = data.rewards[:, -1] + intrinsic_reward.view(-1, 1)
+        target_value = self.value_head.compute_target_value(next_q, reward, data.dones[:, -1])
+        action = data.actions[:, -1]  # (B, action_dim)
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
-            state, action_chunk, target_value, data.weights
+            state, action, target_value, data.weights
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
-            state, action_chunk, value_head=self.value_head
+            state, action, value_head=self.value_head
         )
         info = {
             f"losses/{key}": value
