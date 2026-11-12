@@ -1,6 +1,7 @@
 # @package _global_
 defaults:
   - common
+  - override /policy_head: tanh
   - _self_
 
 agent_type: streaming
