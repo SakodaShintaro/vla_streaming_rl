@@ -10,8 +10,8 @@ untrained policy's output.
 
 With ``streaming_update`` the encoder has the GDN memory layers. The buffer
 still stores one representation per tick, the image tokens out of those
-layers, and the replayed update is unchanged; the agent carries the layers'
-recurrent state itself and keeps the newest tick's input, and every tick adds
+layers, and the replayed update is unchanged; the encoder carries the layers'
+recurrent state and RTRL trace, and every tick adds
 the streaming loss (the newest window, the memory layers run again with their
 LoRA carried by RTRL) to the replayed loss; one optimizer step takes the sum.
 """
@@ -137,14 +137,6 @@ class OffPolicyAgent:
             priority_epsilon=priority_epsilon,
         )
 
-        if streaming_update:
-            # 記憶の層の再帰の状態（最新のティックを読んだ後）と、最新とその前のティックの
-            # 記憶の層の入力と、それを読む前の再帰の状態。streaming の損失は前のティックを
-            # 記憶の層に通し直す
-            self.memory = network.init_memory().to(self.device)
-            self.latest_memory_step: tuple[torch.Tensor, torch.Tensor] | None = None
-            self.previous_memory_step: tuple[torch.Tensor, torch.Tensor] | None = None
-
         # 実行中の行動チャンク (horizon, action_dim) と、そのうち実行した数
         self.action_chunk: np.ndarray | None = None
         self.chunk_step = 0
@@ -227,13 +219,11 @@ class OffPolicyAgent:
         result = self.network.compute_replay_loss(data)
         loss = result.loss
         metrics.update(result.info)
-        # エピソードをまたぐ窓では学習しない。またいだ前のティックのトレースは _remember で進めた
+        # エピソードをまたぐ窓では学習しない。またいだ前のティックのトレースは _observe で進めた
         if self.streaming_update and not self._episode_start:
             latest = self.rb.get_latest(window_len)
             latest.rewards = self.reward_scaler.normalize(latest.rewards)
-            streaming_result = self.network.compute_streaming_loss(
-                *self.previous_memory_step, latest
-            )
+            streaming_result = self.network.compute_streaming_loss(latest)
             loss = loss + streaming_result.loss
             metrics.update(
                 {f"streaming/{key}": value for key, value in streaming_result.info.items()}
@@ -296,38 +286,26 @@ class OffPolicyAgent:
         images = [torch.from_numpy(obs[name]).to(self.device) for name in self.image_names]
         scalar_obs = read_scalar_obs(obs)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
-        representation = self.network.represent(
+        encoded = self.network.represent(
             images, scalar_obs, normalized_action, shaped_reward, self.instruction, reset_state
         )
         if self.streaming_update:
-            representation = self._remember(representation, reset_state)
+            if reset_state:
+                self.network.reset_memory()
+            encoded = self.network.remember(encoded)
+            if self._episode_start and not reset_state and self.rb.num_stored() > 0:
+                # 記憶を持ち越すなら、終わったエピソードの最後のティックはエピソードをまたぐ窓に
+                # なって streaming の損失に使わない。そのティックの分もトレースを進めて、持ち越す
+                # 再帰の状態と感度をそろえる
+                self.network.trace_previous_tick()
         self.rb.add(
-            representation,
+            encoded,
             shaped_reward,
             episode_done if self.use_done else False,
             torch.from_numpy(normalized_action).to(self.device),
             scalar_obs,
         )
         return metrics
-
-    @torch.no_grad()
-    def _remember(self, representation: torch.Tensor, reset_state: bool) -> torch.Tensor:
-        """このティックの記憶の層の入力を記憶の層に読ませ、保存する表現を返す。再帰の状態を
-        1ティック進め、streaming の損失が通し直す前のティックの入力を持ち回る。"""
-        self.previous_memory_step = self.latest_memory_step
-        if reset_state:
-            self.memory = self.network.init_memory().to(self.device)
-            # 空の記憶はパラメータによらないので、RTRL のトレースも 0 に戻す
-            self.network.reset_memory_trace()
-        elif self._episode_start and self.previous_memory_step is not None:
-            # 記憶を持ち越すなら、終わったエピソードの最後のティックはエピソードをまたぐ窓に
-            # なって streaming の損失に使わない。そのティックの分もトレースを進めて、持ち越す
-            # 再帰の状態と感度をそろえる
-            self.network.remember(*self.previous_memory_step, True)
-        step_input = (representation.unsqueeze(0), self.memory)
-        image, self.memory = self.network.remember(*step_input, False)
-        self.latest_memory_step = step_input
-        return image[0]
 
     def _has_chunk_left(self) -> bool:
         """実行中のチャンクに、まだ実行していない行動があるか。"""

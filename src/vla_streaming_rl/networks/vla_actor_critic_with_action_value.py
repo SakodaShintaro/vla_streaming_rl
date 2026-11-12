@@ -22,8 +22,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     VLM は凍結して使うので、表現は観測を受け取ったときに一度だけ計算してバッファに保存する。
     推論も学習もそれを読み戻し、VLM を通さない。
 
-    ``use_memory`` なら、エンコーダの GDN の記憶の層を通した画像のトークンを保存する。記憶の層の
-    再帰の状態はエージェントが持ち回り、バッファには入れない。記憶の層の LoRA は
+    ``use_memory`` なら、エンコーダの LoRA 付きの GDN の層を通した画像のトークンを保存する。LoRA 付きの GDN の層の
+    再帰の状態と RTRL のトレースはエンコーダが持ち、バッファには入れない。LoRA 付きの GDN の層の LoRA は
     ``compute_streaming_loss`` が最新のステップで RTRL で学習し、リプレイの ``compute_replay_loss`` は
     保存した表現から射影とヘッドを学習する。
     """
@@ -70,7 +70,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             if self.use_state_predictor
             else None
         )
-        # 記憶の層の状態は推論のたびに1ステップ進むので、行動のチャンクは1ステップに限る
+        # LoRA 付きの GDN の層の状態は推論のたびに1ステップ進むので、行動のチャンクは1ステップに限る
         assert not use_memory or horizon == 1, horizon
 
     def stored_image_shape(self) -> tuple[int, ...]:
@@ -90,13 +90,15 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             images, scalar_obs, prev_action, reward, instruction, reset_state
         )
 
-    def init_memory(self) -> torch.Tensor:
-        return self.encoder.init_memory()
+    def reset_memory(self) -> None:
+        self.encoder.reset_memory()
 
-    def remember(
-        self, representation: torch.Tensor, memory: torch.Tensor, advance_trace: bool
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.encoder.remember(representation, memory, advance_trace)
+    def remember(self, step_tokens: torch.Tensor) -> torch.Tensor:
+        return self.encoder.remember(step_tokens)
+
+    @torch.no_grad()
+    def trace_previous_tick(self) -> None:
+        self.encoder.retrace_previous_tick()
 
     def reset_memory_trace(self) -> None:
         self.encoder.reset_memory_trace()
@@ -121,14 +123,11 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         state = self._state(*window, -self.horizon - 1)
         return self._head_terms(data, state, next_state)
 
-    def compute_streaming_loss(
-        self, representation: torch.Tensor, memory: torch.Tensor, data: ReplayBufferData
-    ) -> LossResult:
-        """最新の窓 ``data`` (B=1) の損失。現在の状態は、そのステップの記憶の層の入力
-        ``representation`` (1, ...) を読む前の再帰の状態 ``memory`` (1, ...) から記憶の層を
+    def compute_streaming_loss(self, data: ReplayBufferData) -> LossResult:
+        """最新の窓 ``data`` (B=1) の損失。現在の状態は、エンコーダが持つ前のティックをLoRA 付きの GDN の層に
         通し直して作り、RTRL のトレースを1ステップ進める。次の状態は保存した表現で作る。"""
         assert self.horizon == 1, self.horizon
-        image, _ = self.encoder.remember(representation, memory, True)
+        image = self.encoder.retrace_previous_tick()
         state = self.encoder(
             image, data.actions[:, -2], data.rewards[:, -2], data.scalar_obs[:, -2]
         )

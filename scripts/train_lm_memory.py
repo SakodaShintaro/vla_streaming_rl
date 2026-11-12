@@ -53,7 +53,7 @@ LORA_ALPHA = 16.0
 
 
 class Readout(nn.Module):
-    """記憶の層の出力から、ステップの文の次のトークンの損失を出す凍結した上の層（float32）。"""
+    """LoRA 付きの GDN の層の出力から、ステップの文の次のトークンの損失を出す凍結した上の層（float32）。"""
 
     def __init__(
         self, language_model: nn.Module, attention_layer: int, prompt: dict[str, torch.Tensor]
@@ -75,7 +75,7 @@ class Readout(nn.Module):
         loss_index: torch.Tensor,
         target_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """1ティックの文の部分の記憶の層の出力 y (L, D) と M-RoPE の位置 (3, L) から、位置
+        """1ティックの文の部分のLoRA 付きの GDN の層の出力 y (L, D) と M-RoPE の位置 (3, L) から、位置
         ``loss_index`` (n,) で ``target_ids`` (n,) を当てる損失 (n,)。"""
         attention = self.layer.self_attn
         L = y.shape[0]
@@ -111,7 +111,7 @@ class Readout(nn.Module):
 
 
 class Game:
-    """前処理した1ゲーム分のティック（GPU に置く）。``x`` は記憶の層の最も下の層の入力で、
+    """前処理した1ゲーム分のティック（GPU に置く）。``x`` はLoRA 付きの GDN の層の最も下の層の入力で、
     保存した入力を、その下の凍結した層 ``lower`` に、指示の文のあとの状態 ``lower_states`` から
     毎ティック読ませて作る。"""
 
@@ -159,7 +159,7 @@ class Game:
 
 
 def tick_loss(readout: Readout, y: torch.Tensor, tick: dict) -> torch.Tensor:
-    """1ティックの記憶の層の出力 y (L, D) の、文のトークンごとの損失 (n,)。上の層の活性は
+    """1ティックのLoRA 付きの GDN の層の出力 y (L, D) の、文のトークンごとの損失 (n,)。上の層の活性は
     逆伝播のときに計算し直す（窓が長いとロジットが大きい）。"""
     return checkpoint(
         readout,

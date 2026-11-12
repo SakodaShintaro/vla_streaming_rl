@@ -103,7 +103,7 @@ def main(data_dir: Path, out_dir: Path) -> None:
     default_vla = OmegaConf.load(
         Path(__file__).parents[1] / "configs" / "agent" / "vla_off_policy.yaml"
     ).vla
-    # 記憶の層を FIRST_LAYER からにすると、エンコーダはその入力を保存する表現として返す
+    # LoRA 付きの GDN の層を FIRST_LAYER からにすると、エンコーダはその入力を保存する表現として返す
     vla_config = OmegaConf.merge(
         default_vla,
         {

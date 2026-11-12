@@ -4,7 +4,7 @@
 Every policy/value network exposes the forward passes — ``infer``,
 ``compute_replay_loss`` and ``compute_streaming_loss`` — returning the structured
 types defined here, plus the observation-side hooks the agents drive
-(``stored_image_shape`` / ``represent`` / ``remember``).
+(``stored_image_shape`` / ``represent`` / ``remember`` …).
 ``NetworkInterface`` makes that contract explicit: a subclass that does not
 implement all of them cannot be instantiated. Anything else on a concrete
 network is an implementation detail (``_``-prefixed by convention) and is not
@@ -86,26 +86,28 @@ class NetworkInterface(nn.Module, abc.ABC):
         reset_state: bool,
     ) -> torch.Tensor:
         """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）と方策が読む指示の文を VLM に読ませた
-        表現。記憶の層がなければ ``stored_image_shape`` の形でそのまま保存し、あれば記憶の層の
+        もの。LoRA 付きの GDN の層がなければ ``stored_image_shape`` の形の表現でそのまま保存し、あればLoRA 付きの GDN の層の
         入力で、``remember`` に通したものを保存する。エージェントは毎ステップ順に呼び、
         ``reset_state`` はエピソードの流れを空にするステップ（エピソードの始め）で真。
         ``prev_action`` はこの観測に至った正規化済みの行動 (action_dim,)、``reward`` は
         そのとき受け取った報酬。"""
 
     @abc.abstractmethod
-    def init_memory(self) -> torch.Tensor:
-        """エピソードの始めの記憶の層の再帰の状態 (1, ...)。"""
+    def reset_memory(self) -> None:
+        """LoRA 付きの GDN の層の再帰の状態と、RTRL で運んでいるその感度を空にする。"""
 
     @abc.abstractmethod
-    def remember(
-        self, representation: torch.Tensor, memory: torch.Tensor, advance_trace: bool
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """記憶の層の入力 (B, ...) を再帰の状態 ``memory`` から記憶の層に読ませ、保存する表現と
-        次の再帰の状態を返す。``advance_trace`` なら RTRL のトレースを1ステップ進める。"""
+    def remember(self, step_tokens: torch.Tensor) -> torch.Tensor:
+        """このティックのLoRA 付きの GDN の層の入力をLoRA 付きの GDN の層に読ませて再帰の状態を1ティック進め、保存する
+        表現を返す。"""
+
+    @abc.abstractmethod
+    def trace_previous_tick(self) -> None:
+        """streaming の損失に使わない前のティックの分だけ、RTRL のトレースを進める。"""
 
     @abc.abstractmethod
     def reset_memory_trace(self) -> None:
-        """再帰状態を初期化したとき、RTRL で運んでいるその感度も 0 に戻す。"""
+        """RTRL で運んでいる感度だけを 0 に戻す（そこで打ち切る）。"""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:
@@ -117,8 +119,5 @@ class NetworkInterface(nn.Module, abc.ABC):
         """Training loss over a replay batch."""
 
     @abc.abstractmethod
-    def compute_streaming_loss(
-        self, representation: torch.Tensor, memory: torch.Tensor, data: ReplayBufferData
-    ) -> LossResult:
-        """最新の窓 ``data`` での、記憶の層を通し直す損失。``representation`` と ``memory`` は
-        窓の現在のステップの記憶の層の入力と、それを読む前の再帰の状態。"""
+    def compute_streaming_loss(self, data: ReplayBufferData) -> LossResult:
+        """最新の窓 ``data`` での、前のティックをLoRA 付きの GDN の層に通し直す損失。"""
