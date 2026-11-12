@@ -67,13 +67,6 @@ class StepResult:
 
 
 class OffPolicyAgent:
-    """The contract the trainer drives: ``step`` on every tick while learning,
-    ``select_action`` when acting without learning. ``instruction`` is the text
-    the policy reads beside the image.
-
-    毎ティックの観測をバッファに1行積み、ネットワークが出した行動チャンクを1ステップずつ
-    実行する。"""
-
     def __init__(
         self,
         *,
