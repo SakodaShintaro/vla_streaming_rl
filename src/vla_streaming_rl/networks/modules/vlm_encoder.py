@@ -73,9 +73,9 @@ class VLMEncoder(nn.Module):
     ``use_memory`` なら、ヘッドが読む層（``image_layer_start`` の1層）の直前の
     ``gdn_memory_layers`` 層の GDN だけをエピソードの間の記憶にする。VLM は毎ステップ流れを
     空にして読み（``stream_window_steps`` は 0）、``represent`` はその最も下の層の入力をこのステップの
-    全トークンについて返す。``step_gdn_layers`` はそれらの層を ``GDNMemoryLayer`` で下から順に計算し、
-    画像のトークンの出力（``forward`` が読む表現）を返す。再帰の状態と RTRL の感度はエンコーダが
-    持ち、その層の LoRA は ``step_gdn_layers`` の出力から作った状態の損失で RTRL で学習する。
+    全トークンについて取り出して、それらの層を ``GDNMemoryLayer`` で下から順に計算し、画像の
+    トークンの出力（``forward`` が読む表現）を返す。再帰の状態と RTRL の感度はエンコーダが持ち、
+    その層の LoRA は ``represent`` の出力から作った状態の損失で RTRL で学習する。
     """
 
     def __init__(
@@ -178,7 +178,6 @@ class VLMEncoder(nn.Module):
         GDN の記憶があればLoRA 付きの GDN の層の出力で、なければ ``represent`` が返すものそのもの。"""
         return (self.num_positions, self.vlm_hidden_size)
 
-    @torch.no_grad()
     def represent(
         self,
         images: list[torch.Tensor],
@@ -188,42 +187,78 @@ class VLMEncoder(nn.Module):
         text: str,
         reset_state: bool,
     ) -> torch.Tensor:
-        """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませ、画像のトークンの活性の
-        ``image_layers`` の層での平均の表現 (num_positions, hidden_size)。``use_memory`` なら
-        代わりに、LoRA 付きの GDN の層の入力（``_step_tokens``）。``reset_state`` か、
-        履歴を使わない（``stream_window_steps`` が 0）ならエピソードの流れを空にしてから、
-        前の行動 (action_dim,) と受け取った報酬とスカラーの観測 (SCALAR_OBS_DIM,) を
-        書いた文と画像を流れに積む。自分がどう動いて何を受け取ったかを流れに残し、前のエピソードの
-        試みも含めて記憶できるようにする。"""
-        assert len(images) == self.images_num, (len(images), self.images_num)
-        if reset_state or self.stream_window_steps == 0:
-            self._reset_stream()
-        if self.stream_next_position == 0:
-            self._read_prompt(text)
-        inputs, step_positions = self.step_inputs(
-            images, scalar_obs, prev_action, reward, self.stream_next_position
-        )
-        self.stream_next_position = int(step_positions.max()) + 1
-        # プロセッサの attention_mask はこの分の長さしかなく、キャッシュに積んだ分を覆わないので
-        # 渡さない（渡すとマスクがずれる）。因果的なマスクはキャッシュの長さから作られる
-        step_outputs = self.vlm(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
-            image_grid_thw=inputs["image_grid_thw"],
-            mm_token_type_ids=inputs["mm_token_type_ids"],
-            position_ids=step_positions,
-            past_key_values=self.stream_cache,
-            use_cache=True,
-            output_hidden_states=True,
-            logits_to_keep=1,
-        )
-        self.stream_step_lens.append(inputs["input_ids"].shape[1])
-        if len(self.stream_step_lens) > self.stream_window_steps:
-            self._drop_oldest_step()
+        """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませ、バッファに保存する画像のトークンの
+        表現 (num_positions, hidden_size) を返す。``reset_state`` か、履歴を使わない
+        （``stream_window_steps`` が 0）ならエピソードの流れを空にしてから、前の行動 (action_dim,) と
+        受け取った報酬とスカラーの観測 (SCALAR_OBS_DIM,) を書いた文と画像を流れに積む。自分がどう
+        動いて何を受け取ったかを流れに残し、前のエピソードの試みも含めて記憶できるようにする。
+
+        ``use_memory`` でなければ、表現は画像のトークンの活性の ``image_layers`` の層での平均。
+        ``use_memory`` なら、このステップの全トークンの LoRA 付きの GDN の層の入力を、前の再帰の
+        状態から層に下から順に読ませ、再帰の状態とその感度を1ティック進めて、最も上の層の画像の
+        トークンの出力を表現にする（``reset_state`` なら再帰の状態と感度を先に空にする）。凍結した
+        VLM は勾配なしで読み、GDN の層の出力は、次のティックの損失が勾配を LoRA まで流せるよう
+        計算グラフ付きで返す。再帰の状態は層ごとの S と、畳み込みが読む直前のトークンの入力 h を
+        並べたもの。各層が自分の LoRA の感度だけを運ぶ（層ごとに閉じた近似）。"""
+        with torch.no_grad():
+            assert len(images) == self.images_num, (len(images), self.images_num)
+            if reset_state or self.stream_window_steps == 0:
+                self._reset_stream()
+            if self.stream_next_position == 0:
+                self._read_prompt(text)
+            inputs, step_positions = self.step_inputs(
+                images, scalar_obs, prev_action, reward, self.stream_next_position
+            )
+            self.stream_next_position = int(step_positions.max()) + 1
+            # プロセッサの attention_mask はこの分の長さしかなく、キャッシュに積んだ分を覆わないので
+            # 渡さない（渡すとマスクがずれる）。因果的なマスクはキャッシュの長さから作られる
+            step_outputs = self.vlm(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                image_grid_thw=inputs["image_grid_thw"],
+                mm_token_type_ids=inputs["mm_token_type_ids"],
+                position_ids=step_positions,
+                past_key_values=self.stream_cache,
+                use_cache=True,
+                output_hidden_states=True,
+                logits_to_keep=1,
+            )
+            self.stream_step_lens.append(inputs["input_ids"].shape[1])
+            if len(self.stream_step_lens) > self.stream_window_steps:
+                self._drop_oldest_step()
 
         if not self.use_memory:
             return self._image_tokens(inputs["input_ids"], step_outputs)
-        return self._step_tokens(inputs["input_ids"], step_outputs)
+        step_tokens = self._step_tokens(inputs["input_ids"], step_outputs)
+        if reset_state:
+            # 空の状態はパラメータによらないので、感度も 0 に戻す
+            self.memory = self._initial_memory()
+            for layer in self.memory_layers:
+                layer.reset_trace()
+        with torch.enable_grad():
+            step_tokens = step_tokens.to(self.device)
+            kinds = step_tokens[:, -1]
+            valid = kinds != PAD_TOKEN
+            # 詰め物は後ろにあるので、詰め物でない範囲だけ読む
+            length = int(valid.sum())
+            x = step_tokens[None, :length, :-1]
+            layer_memories = self.memory.split(
+                [layer.memory_size() for layer in self.memory_layers], dim=1
+            )
+            next_memories = []
+            for layer, layer_memory in zip(self.memory_layers, layer_memories, strict=True):
+                state_size = layer.num_heads * layer.key_dim * layer.value_dim
+                S, h = layer_memory.split([state_size, layer_memory.shape[1] - state_size], dim=1)
+                x, S, h = layer(
+                    x,
+                    valid[None, :length],
+                    S.view(1, layer.num_heads, layer.key_dim, layer.value_dim),
+                    h.view(1, layer.conv_size - 1, layer.hidden_size),
+                    True,
+                )
+                next_memories += [S.flatten(start_dim=1), h.flatten(start_dim=1)]
+            self.memory = torch.cat(next_memories, dim=1)
+            return x[0, kinds[:length] == IMAGE_TOKEN].view(self.num_positions, -1)
 
     def _image_tokens(self, input_ids: torch.Tensor, outputs) -> torch.Tensor:
         """画像のトークンの位置の活性の ``image_layers`` の層での平均。画像のトークンは、
@@ -315,44 +350,6 @@ class VLMEncoder(nn.Module):
             image_grid_thw=inputs["image_grid_thw"],
         )
         return inputs, step_positions + start_position
-
-    def reset_memory(self) -> None:
-        """LoRA 付きの GDN の層の再帰の状態を空にする。空の状態はパラメータによらないので、
-        感度も 0 に戻す。"""
-        assert self.use_memory
-        self.memory = self._initial_memory()
-        for layer in self.memory_layers:
-            layer.reset_trace()
-
-    def step_gdn_layers(self, step_tokens: torch.Tensor) -> torch.Tensor:
-        """``represent`` が返したこのティックの LoRA 付きの GDN の層の入力 (max_step_tokens,
-        hidden_size + 1) を、前の再帰の状態から層に下から順に読ませ、再帰の状態とその感度を
-        1ティック進めて、最も上の層の画像のトークンの出力 (num_positions, hidden_size) を返す。
-        勾配を取るかは呼び出し側が決める。再帰の状態は層ごとの S と、畳み込みが読む直前の
-        トークンの入力 h を並べたもの。各層が自分の LoRA の感度だけを運ぶ（層ごとに閉じた近似）。"""
-        step_tokens = step_tokens.to(self.device)
-        kinds = step_tokens[:, -1]
-        valid = kinds != PAD_TOKEN
-        # 詰め物は後ろにあるので、詰め物でない範囲だけ読む
-        length = int(valid.sum())
-        x = step_tokens[None, :length, :-1]
-        layer_memories = self.memory.split(
-            [layer.memory_size() for layer in self.memory_layers], dim=1
-        )
-        next_memories = []
-        for layer, layer_memory in zip(self.memory_layers, layer_memories, strict=True):
-            state_size = layer.num_heads * layer.key_dim * layer.value_dim
-            S, h = layer_memory.split([state_size, layer_memory.shape[1] - state_size], dim=1)
-            x, S, h = layer(
-                x,
-                valid[None, :length],
-                S.view(1, layer.num_heads, layer.key_dim, layer.value_dim),
-                h.view(1, layer.conv_size - 1, layer.hidden_size),
-                True,
-            )
-            next_memories += [S.flatten(start_dim=1), h.flatten(start_dim=1)]
-        self.memory = torch.cat(next_memories, dim=1)
-        return x[0, kinds[:length] == IMAGE_TOKEN].view(self.num_positions, -1)
 
     def forward(
         self,

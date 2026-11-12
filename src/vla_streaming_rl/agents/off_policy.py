@@ -152,7 +152,8 @@ class OffPolicyAgent:
         self._previous_done = True
         # このティックがエピソードの最初のティックか
         self._episode_start = True
-        # streaming_update のとき、最新とその前のティックの LoRA 付きの GDN の層の出力（計算グラフ付き）
+        # 最新とその前のティックの表現。streaming_update なら LoRA 付きの GDN の層の出力で、計算
+        # グラフが付いている
         self.latest_image: torch.Tensor | None = None
         self.previous_image: torch.Tensor | None = None
         # Shared representation fed to policy/value/prediction heads on the most
@@ -292,21 +293,13 @@ class OffPolicyAgent:
         images = [torch.from_numpy(obs[name]).to(self.device) for name in self.image_names]
         scalar_obs = read_scalar_obs(obs)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
-        encoded = self.network.represent(
+        image = self.network.represent(
             images, scalar_obs, normalized_action, shaped_reward, self.instruction, reset_state
         )
-        if self.streaming_update:
-            if reset_state:
-                self.network.reset_memory()
-            # 次のティックの streaming の損失が勾配を LoRA まで流せるよう、学習しないとき
-            # （select_action）も計算グラフを作る
-            with torch.enable_grad():
-                image = self.network.step_gdn_layers(encoded)
-            self.previous_image = self.latest_image
-            self.latest_image = image
-            encoded = image.detach()
+        self.previous_image = self.latest_image
+        self.latest_image = image
         self.rb.add(
-            encoded,
+            image.detach(),
             shaped_reward,
             episode_done if self.use_done else False,
             torch.from_numpy(normalized_action).to(self.device),

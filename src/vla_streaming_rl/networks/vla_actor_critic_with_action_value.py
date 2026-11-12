@@ -131,12 +131,6 @@ class VLAActorCriticWithActionValue(nn.Module):
             images, scalar_obs, prev_action, reward, instruction, reset_state
         )
 
-    def reset_memory(self) -> None:
-        self.encoder.reset_memory()
-
-    def step_gdn_layers(self, step_tokens: torch.Tensor) -> torch.Tensor:
-        return self.encoder.step_gdn_layers(step_tokens)
-
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
@@ -158,7 +152,7 @@ class VLAActorCriticWithActionValue(nn.Module):
         return self._head_terms(data, state, next_state)
 
     def compute_streaming_loss(self, image: torch.Tensor, data: ReplayBufferData) -> LossResult:
-        """最新の窓 ``data`` (B=1) の損失。現在の状態は、前のティックで ``step_gdn_layers`` が返した
+        """最新の窓 ``data`` (B=1) の損失。現在の状態は、前のティックで ``represent`` が返した
         画像のトークン ``image`` (num_positions, hidden_size)（計算グラフ付き）から作り、勾配は
         LoRA 付きの GDN の層の LoRA まで届く。次の状態は保存した表現で作る。"""
         assert self.horizon == 1, self.horizon
