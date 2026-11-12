@@ -65,8 +65,8 @@ class VLMEncoder(nn.Module):
     ``use_lora_gdn`` でなければ、表現は画像のトークンの位置の活性の
     ``[image_layer_start, image_layer_stop)`` の層（0 は言語モデルに入る前の埋め込みで、ViT の
     出力そのもの）での平均。``use_lora_gdn`` なら、ヘッドが読む層（``image_layer_start`` の1層）の
-    直前の ``num_lora_gdn_layers`` 層の GDN に LoRA を付け、ステップをまたぐ履歴はその層の再帰の
-    状態だけが運ぶ（``stream_window_steps`` は 0）。``represent`` はその最も下の層の入力をこの
+    直前の ``num_lora_gdn_layers`` 層の GDN に LoRA を付け、その層の再帰の状態をステップをまたいで
+    持ち越す。``represent`` はその最も下の層の入力をこの
     ステップの全トークンについて取り出し、それらの層を ``LoRAGDNLayer`` で下から順に計算して、
     画像のトークンの出力を表現にする。再帰の状態と RTRL の感度はエンコーダが持ち、LoRA は
     ``represent`` の出力から作った状態の損失で RTRL で学習する。エピソードの始めで空にするかは
@@ -107,8 +107,6 @@ class VLMEncoder(nn.Module):
             text_config = self.vlm.config.text_config
             for index in lora_gdn_indices:
                 assert text_config.layer_types[index] == "linear_attention", index
-            # 記憶を持つのはその層だけにする
-            assert self.stream_window_steps == 0, self.stream_window_steps
             self.lora_gdn_layers = nn.ModuleList(
                 [
                     LoRAGDNLayer(
