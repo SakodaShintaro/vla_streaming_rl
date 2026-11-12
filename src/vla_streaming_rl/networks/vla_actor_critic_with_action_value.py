@@ -15,12 +15,7 @@ from .modules.vlm_encoder import VLMEncoder
 
 @dataclass
 class InferInput:
-    """Inputs to a network's ``infer`` (the live, single-step inference call).
-
-    Unlike ``compute_replay_loss`` — which reads a replay batch
-    (:class:`ReplayBufferData`) — inference assembles its window from the
-    buffer's latest frames. Batch size is 1.
-    """
+    """``infer`` の入力。バッファの最新の窓 (B=1)。"""
 
     s_seq: torch.Tensor  # (B, T, *obs_shape) image observation window
     a_seq: torch.Tensor  # (B, T, action_dim)
@@ -32,22 +27,17 @@ class InferInput:
 
 @dataclass
 class InferResult:
-    """Structured return value of a network's ``infer``."""
+    """``infer`` の出力。"""
 
     action: torch.Tensor  # (B, action_dim)
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
-    features: torch.Tensor
+    features: torch.Tensor  # (B, state_dim) ヘッドが読んだ状態
 
 
 @dataclass
 class LossResult:
-    """Structured return value of a network's ``compute_replay_loss`` /
-    ``compute_replay_and_streaming_loss``.
-
-    ``info`` stays a plain dict on purpose: it is a dynamic ``name -> float``
-    telemetry map whose keys vary per policy-head / predictor configuration and
-    is flattened verbatim into wandb metrics.
-    """
+    """``compute_replay_loss`` と ``compute_replay_and_streaming_loss`` の出力。``info`` は
+    ヘッドの種類で項目が変わる ``名前 -> 値`` の記録で、そのまま wandb に出す。"""
 
     loss: torch.Tensor
     info: dict  # scalar name -> float
@@ -55,19 +45,17 @@ class LossResult:
 
 
 class VLAActorCriticWithActionValue(nn.Module):
-    """1枚の画像と指示の文から行動を出す VLA。
+    """画像と指示の文から行動を出す VLA。
 
-    毎ステップ、観測の画像とスカラーの観測をエンコーダ（凍結した VLM）に読ませて状態を作る。
-    VLM は指示の文から始まるエピソードの流れを読み続けるので、過去の観測は VLM が自分の
-    キャッシュに持ち越した分として反映される。方策ヘッドと行動価値ヘッドはその状態を読む。
+    毎ステップ、観測の画像と指示の文と前の行動・報酬・スカラーの観測の文をエンコーダ（凍結した
+    VLM）に読ませて画像のトークンの表現を作り（``represent``）、バッファに保存する。推論も学習も
+    保存した表現を読み戻し、VLM を通さない。表現から射影とトークンを混ぜる層で状態を作り、方策
+    ヘッド・行動価値ヘッド・予測ヘッドがその状態を読む。
 
-    VLM は凍結して使うので、表現は観測を受け取ったときに一度だけ計算してバッファに保存する。
-    推論も学習もそれを読み戻し、VLM を通さない。
-
-    ``use_memory`` なら、エンコーダの LoRA 付きの GDN の層を通した画像のトークンを保存する。LoRA 付きの GDN の層の
-    再帰の状態と RTRL のトレースはエンコーダが持ち、バッファには入れない。LoRA 付きの GDN の層の LoRA は
-    ``compute_replay_and_streaming_loss`` の最新のステップの分で RTRL で学習し、リプレイの窓の分は
-    保存した表現から射影とヘッドを学習する。
+    ``use_memory`` なら、表現はエンコーダの LoRA 付きの GDN の層の出力で、ステップをまたぐ履歴は
+    その層の再帰の状態だけが運ぶ。再帰の状態と RTRL の感度はエンコーダが持ち、バッファには
+    入れない。LoRA は ``compute_replay_and_streaming_loss`` の最新のステップの分で RTRL で学習し、
+    リプレイの窓の分は保存した表現から射影とヘッドを学習する。
     """
 
     def __init__(

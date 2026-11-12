@@ -47,30 +47,30 @@ def step_text_items(
 class VLMEncoder(nn.Module):
     """画像の並びと指示の文を凍結した VLM に読ませ、1ステップ分の状態を作るエンコーダ。
 
-    処理は2段に分かれる。``represent`` はこのステップの画像を VLM に読ませ、画像のトークンの
-    位置の活性を ``[image_layer_start, image_layer_stop)`` の層（0 は言語モデルに入る前の
-    埋め込みで、ViT の出力そのもの）で平均した、画像ごとのトークンの格子を並べた表現を返す。
-    VLM は凍結しているので、この表現はバッファに保存して使い回せる。
+    処理は2段に分かれる。``represent`` はこのステップを VLM に読ませ、画像のトークンの表現
+    （画像ごとのトークンの格子を並べたもの）を返す。この表現はバッファに保存して使い回す。
 
-    VLM はエピソードを1本の user ターンとして読み続ける。先頭に指示の文を置き、ステップごとにスカラーの観測（global_step を除く）を書いた文と画像を
-    キャッシュ（GDN の層の再帰状態と、full attention の層の KV）に積み、エピソードの始めで
-    空にする。GDN の層の状態はエピソードの間ずっと持ち越す。full attention の層の KV は、
-    指示の文（attention sink として常に残す）と直近の ``stream_window_steps`` ステップの分だけ
-    残し、それより古いステップの分は捨てる。表現はそれまでのステップを反映する。
-    ``stream_window_steps`` が 0 なら毎ステップ流れを空にして、そのステップだけを読ませる
-    （GDN の層の状態も持ち越さず、履歴を使わない）。
+    VLM は指示の文と、ステップごとの前の行動・報酬・スカラーの観測（global_step を除く）の文と
+    画像を、1本の user ターンの流れとしてキャッシュ（GDN の層の再帰状態と、full attention の層の
+    KV）に積んで読む。``stream_window_steps`` が 0 なら、毎ステップ流れを空にして、指示の文と
+    そのステップだけを読ませる（VLM の中では履歴を使わない）。0 より大きければ流れはエピソードの
+    始めでだけ空にし、full attention の層の KV は指示の文（attention sink）と直近の
+    ``stream_window_steps`` ステップの分だけ残す。
 
     ``to_state`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``token_dim`` 幅のトークンにした
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
     読む状態にする。学習するのは射影と混ぜる層。
 
-    ``use_memory`` なら、ヘッドが読む層（``image_layer_start`` の1層）の直前の
-    ``gdn_memory_layers`` 層の GDN だけをエピソードの間の記憶にする。VLM は毎ステップ流れを
-    空にして読み（``stream_window_steps`` は 0）、``represent`` はその最も下の層の入力をこのステップの
-    全トークンについて取り出して、それらの層を ``GDNMemoryLayer`` で下から順に計算し、画像の
-    トークンの出力（``to_state`` が読む表現）を返す。再帰の状態と RTRL の感度はエンコーダが持ち、
-    その層の LoRA は ``represent`` の出力から作った状態の損失で RTRL で学習する。
+    ``use_memory`` でなければ、表現は画像のトークンの位置の活性の
+    ``[image_layer_start, image_layer_stop)`` の層（0 は言語モデルに入る前の埋め込みで、ViT の
+    出力そのもの）での平均。``use_memory`` なら、ヘッドが読む層（``image_layer_start`` の1層）の
+    直前の ``gdn_memory_layers`` 層の GDN に LoRA を付け、ステップをまたぐ履歴はその層の再帰の
+    状態だけが運ぶ（``stream_window_steps`` は 0）。``represent`` はその最も下の層の入力をこの
+    ステップの全トークンについて取り出し、それらの層を ``GDNMemoryLayer`` で下から順に計算して、
+    画像のトークンの出力を表現にする。再帰の状態と RTRL の感度はエンコーダが持ち、LoRA は
+    ``represent`` の出力から作った状態の損失で RTRL で学習する。エピソードの始めで空にするかは
+    ``represent`` の ``reset_state`` が決める。
     """
 
     def __init__(
@@ -168,8 +168,8 @@ class VLMEncoder(nn.Module):
         ).to(device)
 
     def representation_shape(self) -> tuple[int, ...]:
-        """バッファに保存する、画像のトークンの表現の形。射影は学習するので、その手前を保存する。
-        GDN の記憶があればLoRA 付きの GDN の層の出力で、なければ ``represent`` が返すものそのもの。"""
+        """``represent`` が返し、バッファに保存する画像のトークンの表現の形。射影は学習するので、
+        その手前を保存する。"""
         return (self.num_positions, self.vlm_hidden_size)
 
     def represent(
@@ -182,10 +182,9 @@ class VLMEncoder(nn.Module):
         reset_state: bool,
     ) -> torch.Tensor:
         """[0, 1] の画像 (3, H, W) の並びと文を VLM に読ませ、バッファに保存する画像のトークンの
-        表現 (num_positions, hidden_size) を返す。``reset_state`` か、履歴を使わない
-        （``stream_window_steps`` が 0）ならエピソードの流れを空にしてから、前の行動 (action_dim,) と
-        受け取った報酬とスカラーの観測 (SCALAR_OBS_DIM,) を書いた文と画像を流れに積む。自分がどう
-        動いて何を受け取ったかを流れに残し、前のエピソードの試みも含めて記憶できるようにする。
+        表現 (num_positions, hidden_size) を返す。``reset_state``（エピソードの始め）か
+        ``stream_window_steps`` が 0 なら流れを空にしてから、前の行動 (action_dim,) と受け取った
+        報酬とスカラーの観測 (SCALAR_OBS_DIM,) を書いた文と画像を流れに積む。
 
         ``use_memory`` でなければ、表現は画像のトークンの活性の ``image_layers`` の層での平均。
         ``use_memory`` なら、このステップの全トークンの LoRA 付きの GDN の層の入力を、前の再帰の
@@ -356,6 +355,6 @@ class VLMEncoder(nn.Module):
         return self.token_mixer(tokens + self.token_position).flatten(start_dim=1)
 
     def _initial_memory(self) -> torch.Tensor:
-        """エピソードの始めのLoRA 付きの GDN の層の再帰の状態 (1, ...)。"""
+        """エピソードの始めの LoRA 付きの GDN の層の再帰の状態 (1, ...)。"""
         size = sum(layer.memory_size() for layer in self.memory_layers)
         return torch.zeros(1, size, device=self.device)
