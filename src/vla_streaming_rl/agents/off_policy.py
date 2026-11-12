@@ -27,7 +27,10 @@ import numpy as np
 import torch
 from torch import nn, optim
 
-from vla_streaming_rl.networks.interface import InferInput, InferResult
+from vla_streaming_rl.networks.vla_actor_critic_with_action_value import (
+    InferInput,
+    InferResult,
+)
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs

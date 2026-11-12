@@ -1,18 +1,59 @@
 # SPDX-License-Identifier: MIT
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 from omegaconf import DictConfig
+from torch import nn
 
 from ..replay_buffer import ReplayBufferData
-from .interface import InferInput, InferResult, LossResult, NetworkInterface
 from .modules.prediction_head import LatentTDPredictionHead
 from .modules.value_head import DistributionalValueHead
 from .modules.vlm_encoder import VLMEncoder
 
 
-class VLAActorCriticWithActionValue(NetworkInterface):
+@dataclass
+class InferInput:
+    """Inputs to a network's ``infer`` (the live, single-step inference call).
+
+    Unlike ``compute_replay_loss`` — which reads a replay batch
+    (:class:`ReplayBufferData`) — inference assembles its window from the
+    buffer's latest frames. Batch size is 1.
+    """
+
+    s_seq: torch.Tensor  # (B, T, *obs_shape) image observation window
+    a_seq: torch.Tensor  # (B, T, action_dim)
+    r_seq: torch.Tensor  # (B, T, 1)
+    scalar_obs_seq: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
+    # バッファを貯めている間のステップか。このあいだは一様乱数の行動を返す
+    warmup: bool
+
+
+@dataclass
+class InferResult:
+    """Structured return value of a network's ``infer``."""
+
+    action: torch.Tensor  # (B, horizon, action_dim)
+    value_report: dict[str, float]  # value head diagnostics (incl. "value")
+    features: torch.Tensor
+
+
+@dataclass
+class LossResult:
+    """Structured return value of a network's ``compute_replay_loss`` / ``compute_streaming_loss``.
+
+    ``info`` stays a plain dict on purpose: it is a dynamic ``name -> float``
+    telemetry map whose keys vary per policy-head / predictor configuration and
+    is flattened verbatim into wandb metrics.
+    """
+
+    loss: torch.Tensor
+    info: dict  # scalar name -> float
+    td_error: torch.Tensor  # (B,) 窓ごとの TD 誤差。リプレイの優先度の更新に使う
+
+
+class VLAActorCriticWithActionValue(nn.Module):
     """1枚の画像と指示の文から行動を出す VLA。
 
     毎ステップ、観測の画像とスカラーの観測をエンコーダ（凍結した VLM）に読ませて状態を作る。
