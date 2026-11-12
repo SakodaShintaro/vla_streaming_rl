@@ -129,6 +129,15 @@ class NetworkInterface(nn.Module, abc.ABC):
         そのとき受け取った報酬。"""
 
     @abc.abstractmethod
+    def reset_memory_trace(self) -> None:
+        """再帰状態を初期化したとき、RTRL で運んでいるその感度も 0 に戻す。"""
+
+    @abc.abstractmethod
+    def advance_memory_trace(self, data: ReplayBufferData) -> None:
+        """学習しないステップで、窓の最後の観測 ``data`` (B=1) を読ませて RTRL の感度だけを
+        進める。再帰状態をエピソードをまたいで持ち越すとき、エピソードの最後の観測に使う。"""
+
+    @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:
         """Single-step inference: the action to take, its value report, the
         carried RNN state and predicted next state. Batch size is 1."""

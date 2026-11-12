@@ -115,10 +115,25 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             images, scalar_obs, prev_action, reward, instruction, reset_state
         )
 
+    def reset_memory_trace(self) -> None:
+        self.encoder.reset_memory_trace()
+
+    @torch.no_grad()
+    def advance_memory_trace(self, data: ReplayBufferData) -> None:
+        assert data.observations.shape[0] == 1, data.observations.shape
+        self._state(
+            data.observations,
+            data.actions,
+            data.rewards,
+            data.scalar_obs,
+            data.rnn_state[:, -1],
+            -1,
+            True,
+        )
+
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
-        self.encoder.reset_memory_trace()
         state, next_memory = self._state(
             data.s_seq, data.a_seq, data.r_seq, data.scalar_obs_seq, data.rnn_state, -1, False
         )

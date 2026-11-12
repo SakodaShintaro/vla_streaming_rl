@@ -192,6 +192,15 @@ class Agent(ABC):
         if self._previous_done:
             if reset_state:
                 self.rnn_state = self.network.init_state().to(self.device)
+                # 空の記憶はパラメータによらないので、RTRL のトレースも 0 に戻す
+                self.network.reset_memory_trace()
+            elif self.rb.full or self.rb.idx > 0:
+                # 記憶を持ち越すなら、終わったエピソードの最後の観測は、エピソードをまたぐ窓の
+                # 状態になって学習に使われない。そのブロックの分も RTRL のトレースを進めて、
+                # 持ち越す記憶の状態と感度をそろえる
+                last = self.rb.get_latest(self.seq_len)
+                last.rewards = self.reward_scaler.normalize(last.rewards)
+                self.network.advance_memory_trace(last)
             # A chunk begun on the terminal frame would otherwise run into the
             # new episode; the first action of an episode comes from its own frame.
             self.action_chunk = None
