@@ -41,7 +41,8 @@ class InferResult:
 
 @dataclass
 class LossResult:
-    """Structured return value of a network's ``compute_replay_loss`` / ``compute_streaming_loss``.
+    """Structured return value of a network's ``compute_replay_loss`` /
+    ``compute_replay_and_streaming_loss``.
 
     ``info`` stays a plain dict on purpose: it is a dynamic ``name -> float``
     telemetry map whose keys vary per policy-head / predictor configuration and
@@ -65,7 +66,7 @@ class VLAActorCriticWithActionValue(nn.Module):
 
     ``use_memory`` なら、エンコーダの LoRA 付きの GDN の層を通した画像のトークンを保存する。LoRA 付きの GDN の層の
     再帰の状態と RTRL のトレースはエンコーダが持ち、バッファには入れない。LoRA 付きの GDN の層の LoRA は
-    ``compute_streaming_loss`` が最新のステップで RTRL で学習し、リプレイの ``compute_replay_loss`` は
+    ``compute_replay_and_streaming_loss`` の最新のステップの分で RTRL で学習し、リプレイの窓の分は
     保存した表現から射影とヘッドを学習する。
     """
 
@@ -125,7 +126,9 @@ class VLAActorCriticWithActionValue(nn.Module):
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
-        state = self._state(data.s_seq, data.a_seq, data.r_seq, data.scalar_obs_seq, -1)
+        state = self.encoder.to_state(
+            data.s_seq[:, -1], data.a_seq[:, -1], data.r_seq[:, -1], data.scalar_obs_seq[:, -1]
+        )
         action = self.policy_head.get_action(state)
         value_report = self.value_head.value_report(self.value_head(state, action).output)
         if data.warmup:
@@ -134,53 +137,76 @@ class VLAActorCriticWithActionValue(nn.Module):
         return InferResult(action=action, value_report=value_report, features=state)
 
     def compute_replay_loss(self, data: ReplayBufferData) -> LossResult:
-        """リプレイの窓の損失。現在の状態は窓の最初のステップから、次の状態は最後のステップ
-        から、どちらも保存した表現で作る。"""
-        window = (data.observations, data.actions, data.rewards, data.scalar_obs)
-        with torch.no_grad():
-            next_state = self._state(*window, -1)
-        state = self._state(*window, -2)
-        return self._head_terms(data, state, next_state)
+        """リプレイの窓の損失。"""
+        state, next_state = self._replay_states(data)
+        return self._head_terms(
+            state,
+            next_state,
+            data.actions[:, -1],
+            data.rewards[:, -1],
+            data.dones[:, -1],
+            data.weights,
+        )
 
-    def compute_streaming_loss(self, image: torch.Tensor, data: ReplayBufferData) -> LossResult:
-        """最新の窓 ``data`` (B=1) の損失。現在の状態は、前のティックで ``represent`` が返した
-        画像のトークン ``image`` (num_positions, hidden_size)（計算グラフ付き）から作り、勾配は
-        LoRA 付きの GDN の層の LoRA まで届く。次の状態は保存した表現で作る。"""
-        state = self.encoder.to_state(
-            image.unsqueeze(0), data.actions[:, -2], data.rewards[:, -2], data.scalar_obs[:, -2]
+    def compute_replay_and_streaming_loss(
+        self, data: ReplayBufferData, image: torch.Tensor, latest: ReplayBufferData
+    ) -> LossResult:
+        """リプレイの窓 ``data`` と最新の窓 ``latest`` (B=1) を1つのバッチにつないだ損失。
+        最新の窓の現在の状態は、前のティックで ``represent`` が返した画像のトークン ``image``
+        (num_positions, hidden_size)（計算グラフ付き）から作り、勾配は LoRA 付きの GDN の層の
+        LoRA まで届く。ヘッドは損失の計算のたびに自分の状態（目標の予測器、誤差の統計、温度）を
+        進めるので、2つに分けず1回で計算する。TD 誤差はリプレイの窓の分だけ返す。"""
+        replay_state, replay_next_state = self._replay_states(data)
+        streaming_state = self.encoder.to_state(
+            image.unsqueeze(0),
+            latest.actions[:, -2],
+            latest.rewards[:, -2],
+            latest.scalar_obs[:, -2],
         )
         with torch.no_grad():
-            next_state = self._state(
-                data.observations, data.actions, data.rewards, data.scalar_obs, -1
-            )
-        return self._head_terms(data, state, next_state)
+            streaming_next_state = self._state(latest, -1)
+        result = self._head_terms(
+            torch.cat([replay_state, streaming_state]),
+            torch.cat([replay_next_state, streaming_next_state]),
+            torch.cat([data.actions[:, -1], latest.actions[:, -1]]),
+            torch.cat([data.rewards[:, -1], latest.rewards[:, -1]]),
+            torch.cat([data.dones[:, -1], latest.dones[:, -1]]),
+            torch.cat([data.weights, latest.weights]),
+        )
+        result.td_error = result.td_error[: data.weights.shape[0]]
+        return result
 
     ####################
     # Internal methods #
     ####################
 
-    def _state(
-        self,
-        observations: torch.Tensor,
-        actions: torch.Tensor,
-        rewards: torch.Tensor,
-        scalar_obs: torch.Tensor,
-        step: int,
-    ) -> torch.Tensor:
+    def _state(self, data: ReplayBufferData, step: int) -> torch.Tensor:
         """窓 (B, T, ...) の ``step`` 番目のステップの、保存した表現・前の行動・報酬・スカラーの
         観測から状態を作る。"""
         return self.encoder.to_state(
-            observations[:, step], actions[:, step], rewards[:, step], scalar_obs[:, step]
+            data.observations[:, step],
+            data.actions[:, step],
+            data.rewards[:, step],
+            data.scalar_obs[:, step],
         )
+
+    def _replay_states(self, data: ReplayBufferData) -> tuple[torch.Tensor, torch.Tensor]:
+        """リプレイの窓の現在の状態（最初のステップ）と次の状態（最後のステップ、勾配なし）。"""
+        with torch.no_grad():
+            next_state = self._state(data, -1)
+        return self._state(data, -2), next_state
 
     def _head_terms(
         self,
-        data: ReplayBufferData,
         state: torch.Tensor,
         next_state: torch.Tensor,
+        action: torch.Tensor,
+        reward: torch.Tensor,
+        done: torch.Tensor,
+        weights: torch.Tensor,
     ) -> LossResult:
-        """現在の状態 ``state``（勾配あり）と次の状態 ``next_state`` から、ヘッドの損失。
-        遷移の行動・報酬・終端は窓 ``data`` の最後のステップのもの。"""
+        """現在の状態 ``state``（勾配あり）と次の状態 ``next_state`` (B, state_dim)、遷移の行動
+        (B, action_dim)、報酬と終端 (B, 1)、重要度の重み (B,) から、ヘッドの損失。"""
         with torch.no_grad():
             # TD の目標は割引率ごとに、その割引率の方策の次の行動で作る。最後が主の割引率の
             # 方策の行動で、状態の予測にはそれを使う
@@ -188,14 +214,13 @@ class VLAActorCriticWithActionValue(nn.Module):
             next_action = next_gamma_actions[:, -1]
             next_q = self.value_head.gamma_values(next_state, next_gamma_actions)
         state_prediction_loss, state_prediction_info, intrinsic_reward = (
-            self.prediction_head.compute_loss(state, data.actions[:, -1], next_state, next_action)
+            self.prediction_head.compute_loss(state, action, next_state, next_action)
         )
         # 内発報酬は遷移の報酬に足す。TD の目標にだけ入り、観測の文には入らない
-        reward = data.rewards[:, -1] + intrinsic_reward.view(-1, 1)
-        target_value = self.value_head.compute_target_value(next_q, reward, data.dones[:, -1])
-        action = data.actions[:, -1]  # (B, action_dim)
+        reward = reward + intrinsic_reward.view(-1, 1)
+        target_value = self.value_head.compute_target_value(next_q, reward, done)
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
-            state, action, target_value, data.weights
+            state, action, target_value, weights
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state, action, value_head=self.value_head

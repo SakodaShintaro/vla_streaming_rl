@@ -13,10 +13,11 @@ their recurrent state across ticks. The buffer still stores one representation
 per tick, the image tokens out of those layers, and the replayed update is
 unchanged; the encoder carries the layers' recurrent state and its RTRL
 sensitivity, and the agent keeps the previous tick's output of those layers
-with its graph. Every tick adds the streaming loss on the newest window, whose
-gradient reaches the LoRA through that graph, to the replayed loss; one
-optimizer step takes the sum. The graph was built before the previous update,
-so that gradient is evaluated at the weights one update old.
+with its graph. Every tick appends the newest window to the replayed batch as
+one more sample, whose gradient reaches the LoRA through that graph, and one
+optimizer step takes the loss of the whole batch. The graph was built before
+the previous update, so that gradient is evaluated at the weights one update
+old.
 """
 
 from dataclasses import dataclass
@@ -201,8 +202,8 @@ class OffPolicyAgent:
     ####################
 
     def _learn(self, global_step: int) -> dict[str, float]:
-        """リプレイの損失に、``streaming_update`` なら最新の窓の streaming の損失を足して、
-        1回更新する。metrics を返す。"""
+        """リプレイのバッチ（``streaming_update`` なら最新の窓をつないだもの）の損失で1回
+        更新する。metrics を返す。"""
         window_len = self.seq_len + 1
         if not self.is_learning:
             print(f"Start learning at global step {global_step}.")
@@ -210,21 +211,19 @@ class OffPolicyAgent:
         data = self.rb.sample(self.batch_size)
         metrics = self.rb.batch_stats(data)
         data.rewards = self.reward_scaler.normalize(data.rewards)
-        result = self.network.compute_replay_loss(data)
-        loss = result.loss
-        metrics.update(result.info)
-        # エピソードをまたぐ窓では学習しない
+        # streaming_update なら最新の窓もつなぐ。エピソードをまたぐ窓では学習しない
         if self.streaming_update and not self._episode_start:
             latest = self.rb.get_latest(window_len)
             latest.rewards = self.reward_scaler.normalize(latest.rewards)
-            streaming_result = self.network.compute_streaming_loss(self.previous_image, latest)
-            loss = loss + streaming_result.loss
-            metrics.update(
-                {f"streaming/{key}": value for key, value in streaming_result.info.items()}
+            result = self.network.compute_replay_and_streaming_loss(
+                data, self.previous_image, latest
             )
+        else:
+            result = self.network.compute_replay_loss(data)
+        metrics.update(result.info)
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        result.loss.backward()
         nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
