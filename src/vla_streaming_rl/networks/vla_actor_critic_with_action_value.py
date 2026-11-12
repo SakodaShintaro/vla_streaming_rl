@@ -156,7 +156,7 @@ class VLAActorCriticWithActionValue(nn.Module):
         画像のトークン ``image`` (num_positions, hidden_size)（計算グラフ付き）から作り、勾配は
         LoRA 付きの GDN の層の LoRA まで届く。次の状態は保存した表現で作る。"""
         assert self.horizon == 1, self.horizon
-        state = self.encoder(
+        state = self.encoder.to_state(
             image.unsqueeze(0), data.actions[:, -2], data.rewards[:, -2], data.scalar_obs[:, -2]
         )
         with torch.no_grad():
@@ -179,7 +179,7 @@ class VLAActorCriticWithActionValue(nn.Module):
     ) -> torch.Tensor:
         """窓 (B, T, ...) の ``step`` 番目のステップの、保存した表現・前の行動・報酬・スカラーの
         観測から状態を作る。"""
-        return self.encoder(
+        return self.encoder.to_state(
             observations[:, step], actions[:, step], rewards[:, step], scalar_obs[:, step]
         )
 

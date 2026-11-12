@@ -60,7 +60,7 @@ class VLMEncoder(nn.Module):
     ``stream_window_steps`` が 0 なら毎ステップ流れを空にして、そのステップだけを読ませる
     （GDN の層の状態も持ち越さず、履歴を使わない）。
 
-    ``forward`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
+    ``to_state`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``token_dim`` 幅のトークンにした
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
     読む状態にする。学習するのは射影と混ぜる層。
@@ -69,7 +69,7 @@ class VLMEncoder(nn.Module):
     ``gdn_memory_layers`` 層の GDN だけをエピソードの間の記憶にする。VLM は毎ステップ流れを
     空にして読み（``stream_window_steps`` は 0）、``represent`` はその最も下の層の入力をこのステップの
     全トークンについて取り出して、それらの層を ``GDNMemoryLayer`` で下から順に計算し、画像の
-    トークンの出力（``forward`` が読む表現）を返す。再帰の状態と RTRL の感度はエンコーダが持ち、
+    トークンの出力（``to_state`` が読む表現）を返す。再帰の状態と RTRL の感度はエンコーダが持ち、
     その層の LoRA は ``represent`` の出力から作った状態の損失で RTRL で学習する。
     """
 
@@ -328,7 +328,7 @@ class VLMEncoder(nn.Module):
         )
         return inputs, step_positions + start_position
 
-    def forward(
+    def to_state(
         self,
         image: torch.Tensor,
         actions: torch.Tensor,
