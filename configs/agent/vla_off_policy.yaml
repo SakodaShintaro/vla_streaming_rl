@@ -47,5 +47,3 @@ vla:
   # LoRA のランクと alpha（delta W = alpha / rank * B A）
   gdn_lora_rank: 8
   gdn_lora_alpha: 16.0
-  # 1ステップに読むトークンの数の上限。表現はこの長さに詰め物をして保存する
-  gdn_max_step_tokens: 256

@@ -21,11 +21,6 @@ from vla_streaming_rl.scalar_obs import SCALAR_OBS_NAMES
 IM_START = "<|im_start|>"
 IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 
-# LoRA 付きの GDN の層に渡す表現で、トークンごとに最後のチャネルに入れる種類
-PAD_TOKEN = 0.0
-TEXT_TOKEN = 1.0
-IMAGE_TOKEN = 2.0
-
 # 状態に数値のまま入れるスカラーの観測の、SCALAR_OBS_NAMES での位置。global_step は
 # エピソードの中の状況を表さず、学習の間ずっと増え続けるので入れない
 STATE_SCALAR_INDICES = [
@@ -114,7 +109,6 @@ class VLMEncoder(nn.Module):
                 assert text_config.layer_types[index] == "linear_attention", index
             # 記憶を持つのはその層だけにする
             assert self.stream_window_steps == 0, self.stream_window_steps
-            self.max_step_tokens = vla_config.gdn_max_step_tokens
             self.memory_layers = nn.ModuleList(
                 [
                     GDNMemoryLayer(
@@ -229,19 +223,15 @@ class VLMEncoder(nn.Module):
 
         if not self.use_memory:
             return self._image_tokens(inputs["input_ids"], step_outputs)
-        step_tokens = self._step_tokens(inputs["input_ids"], step_outputs)
         if reset_state:
             # 空の状態はパラメータによらないので、感度も 0 に戻す
             self.memory = self._initial_memory()
             for layer in self.memory_layers:
                 layer.reset_trace()
         with torch.enable_grad():
-            step_tokens = step_tokens.to(self.device)
-            kinds = step_tokens[:, -1]
-            valid = kinds != PAD_TOKEN
-            # 詰め物は後ろにあるので、詰め物でない範囲だけ読む
-            length = int(valid.sum())
-            x = step_tokens[None, :length, :-1]
+            # このステップの全トークン（文と画像）の、最も下の GDN の層の入力 (1, L, hidden_size)
+            x = step_outputs.hidden_states[self.memory_layer_start].to(torch.float32)
+            valid = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
             layer_memories = self.memory.split(
                 [layer.memory_size() for layer in self.memory_layers], dim=1
             )
@@ -251,14 +241,15 @@ class VLMEncoder(nn.Module):
                 S, h = layer_memory.split([state_size, layer_memory.shape[1] - state_size], dim=1)
                 x, S, h = layer(
                     x,
-                    valid[None, :length],
+                    valid,
                     S.view(1, layer.num_heads, layer.key_dim, layer.value_dim),
                     h.view(1, layer.conv_size - 1, layer.hidden_size),
                     True,
                 )
                 next_memories += [S.flatten(start_dim=1), h.flatten(start_dim=1)]
             self.memory = torch.cat(next_memories, dim=1)
-            return x[0, kinds[:length] == IMAGE_TOKEN].view(self.num_positions, -1)
+            image_position = inputs["input_ids"][0] == self.image_pad_id
+            return x[0, image_position].view(self.num_positions, -1)
 
     def _image_tokens(self, input_ids: torch.Tensor, outputs) -> torch.Tensor:
         """画像のトークンの位置の活性の ``image_layers`` の層での平均。画像のトークンは、
@@ -268,20 +259,6 @@ class VLMEncoder(nn.Module):
         return sum(depth[0, image_position].to(torch.float32) for depth in image_layers) / len(
             image_layers
         )
-
-    def _step_tokens(self, input_ids: torch.Tensor, outputs) -> torch.Tensor:
-        """このステップの全トークンのLoRA 付きの GDN の層の入力を先頭に詰め、最後のチャネルにトークンの
-        種類（文、画像、詰め物）を入れたもの (max_step_tokens, hidden_size + 1)。"""
-        hidden = outputs.hidden_states[self.memory_layer_start][0].to(torch.float32)
-        length = hidden.shape[0]
-        assert length <= self.max_step_tokens, (length, self.max_step_tokens)
-        kinds = torch.where(input_ids[0] == self.image_pad_id, IMAGE_TOKEN, TEXT_TOKEN)
-        step_tokens = torch.zeros(
-            self.max_step_tokens, self.vlm_hidden_size + 1, device=self.device
-        )
-        step_tokens[:length, :-1] = hidden
-        step_tokens[:length, -1] = kinds
-        return step_tokens
 
     def _reset_stream(self) -> None:
         """エピソードの流れを空にする。キャッシュと、次に読むトークンの位置（M-RoPE の位置）、
