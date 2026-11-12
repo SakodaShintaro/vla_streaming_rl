@@ -101,14 +101,9 @@ class VLAActorCriticWithActionValue(nn.Module):
         self.value_head = value_head_factory(
             in_channels=state_dim, action_dim=action_dim, token_dim=self.encoder.token_dim
         ).to(device)
-        self.use_state_predictor = vla_config.use_state_predictor
-        # 予測を切るときは予測器そのものを作らない。作ると使わない重みが optimizer に入り、
-        # weight decay だけを受け続ける
-        self.prediction_head = (
-            prediction_head_factory(state_dim=state_dim, action_dim=action_dim).to(device)
-            if self.use_state_predictor
-            else None
-        )
+        self.prediction_head = prediction_head_factory(
+            state_dim=state_dim, action_dim=action_dim
+        ).to(device)
 
     def stored_image_shape(self) -> tuple[int, ...]:
         """バッファに保存する、画像のトークンの表現の形。"""
@@ -178,28 +173,6 @@ class VLAActorCriticWithActionValue(nn.Module):
             observations[:, step], actions[:, step], rewards[:, step], scalar_obs[:, step]
         )
 
-    def _prediction_loss(
-        self,
-        state: torch.Tensor,
-        data: ReplayBufferData,
-        next_state: torch.Tensor,
-        next_action: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
-        """将来の状態の予測の損失と、遷移ごとの内発報酬 (B,)。予測を切っているときは予測器が
-        ないので、どちらも 0。"""
-        if not self.use_state_predictor:
-            return (
-                torch.zeros((), device=state.device),
-                {},
-                torch.zeros(state.shape[0], device=state.device),
-            )
-        return self.prediction_head.compute_loss(
-            state,
-            data.actions[:, -1],
-            next_state,
-            next_action,
-        )
-
     def _head_terms(
         self,
         data: ReplayBufferData,
@@ -214,8 +187,8 @@ class VLAActorCriticWithActionValue(nn.Module):
             next_gamma_actions = self.policy_head.get_gamma_actions(next_state)
             next_action = next_gamma_actions[:, -1]
             next_q = self.value_head.gamma_values(next_state, next_gamma_actions)
-        state_prediction_loss, state_prediction_info, intrinsic_reward = self._prediction_loss(
-            state, data, next_state, next_action
+        state_prediction_loss, state_prediction_info, intrinsic_reward = (
+            self.prediction_head.compute_loss(state, data.actions[:, -1], next_state, next_action)
         )
         # 内発報酬は遷移の報酬に足す。TD の目標にだけ入り、観測の文には入らない
         reward = data.rewards[:, -1] + intrinsic_reward.view(-1, 1)
