@@ -3,17 +3,17 @@
 
 Every tick is stored; once ``learning_starts`` ticks have gone by, one gradient
 step on a ``batch_size`` sample of the buffer fires every tick, before the
-action of that tick is chosen, whatever the ``horizon`` of the action chunks. Below ``learning_starts`` the network
-is told it is warming up and returns uniform random actions, so the buffer
-fills with something other than an untrained policy's output while the
-network's recurrent state still follows the episode.
+action of that tick is chosen, whatever the ``horizon`` of the action chunks.
+Below ``learning_starts`` the network is told it is warming up and returns
+uniform random actions, so the buffer fills with something other than an
+untrained policy's output.
 
-With ``streaming_update`` the replay holds the state the heads read, saved when
-each action was chosen, instead of the observation, and every tick adds the
-streaming update (the newest window, through the encoder, the memory layers'
-LoRA carried by RTRL) to a replayed update of the heads alone on those saved
-states; one optimizer step takes the sum. Only the newest window of
-observations is kept for the streaming half.
+With ``streaming_update`` the encoder has the GDN memory layers. The buffer
+still stores one representation per tick, the image tokens out of those
+layers, and the replayed update is unchanged; the agent carries the layers'
+recurrent state itself and keeps the newest tick's input, and every tick adds
+the streaming loss (the newest window, the memory layers run again with their
+LoRA carried by RTRL) to the replayed loss; one optimizer step takes the sum.
 """
 
 from dataclasses import dataclass
@@ -95,15 +95,10 @@ class OffPolicyAgent:
         streaming_update: bool,
         instruction: str,
     ) -> None:
-        # Actor / critic optimizer split (critic == value head); both AdamW,
-        # the replayed update has no trace to carry.
+        # Actor / critic optimizer split (critic == value head); both AdamW.
         critic_params = list(network.value_head.parameters())
         critic_param_ids = {id(p) for p in critic_params}
         actor_params = [p for p in network.parameters() if id(p) not in critic_param_ids]
-        if streaming_update:
-            # 状態を保存するのは行動を選んだステップだけなので、毎ステップ選ぶ長さ 1 のチャンク
-            assert horizon == 1, horizon
-        window_len = seq_len + horizon
         self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
         self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay)
         self.device = torch.device("cuda")
@@ -117,6 +112,11 @@ class OffPolicyAgent:
         self.use_done = use_done
         self.reset_on_episode_end = reset_on_episode_end
         self.reward_scaler = reward_scaler
+        self.learning_starts = learning_starts
+        self.batch_size = batch_size
+        self.max_grad_norm = max_grad_norm
+        self.is_learning = False
+        self.streaming_update = streaming_update
 
         # 方策の行動は [-1, 1] に正規化した空間にあり、環境の行動空間へはこれで写す
         self.action_low = action_space.low
@@ -124,21 +124,26 @@ class OffPolicyAgent:
         self.action_scale = (action_space.high - action_space.low) / 2.0
         self.action_bias = (action_space.high + action_space.low) / 2.0
 
-        self.rnn_state = network.init_state().to(self.device)
         self.rb = ReplayBuffer(
-            # streaming の更新があれば、観測は streaming の更新が読む最新の窓だけ持つ
-            size=window_len if streaming_update else buffer_size,
-            seq_len=window_len,
+            size=buffer_size,
+            seq_len=seq_len + horizon,
             horizon=horizon,
             obs_shape=network.stored_image_shape(),
-            rnn_state_shape=self.rnn_state.squeeze(0).shape,
             action_shape=action_space.shape,
             output_device=self.device,
             storage_device=torch.device(buffer_device),
-            priority_alpha=0.0 if streaming_update else priority_alpha,
-            priority_beta=0.0 if streaming_update else priority_beta,
-            priority_epsilon=1.0 if streaming_update else priority_epsilon,
+            priority_alpha=priority_alpha,
+            priority_beta=priority_beta,
+            priority_epsilon=priority_epsilon,
         )
+
+        if streaming_update:
+            # 記憶の層の再帰の状態（最新のティックを読んだ後）と、最新とその前のティックの
+            # 記憶の層の入力と、それを読む前の再帰の状態。streaming の損失は前のティックを
+            # 記憶の層に通し直す
+            self.memory = network.init_memory().to(self.device)
+            self.latest_memory_step: tuple[torch.Tensor, torch.Tensor] | None = None
+            self.previous_memory_step: tuple[torch.Tensor, torch.Tensor] | None = None
 
         # 実行中の行動チャンク (horizon, action_dim) と、そのうち実行した数
         self.action_chunk: np.ndarray | None = None
@@ -147,35 +152,11 @@ class OffPolicyAgent:
         self.prev_action = np.zeros(action_space.shape, dtype=np.float32)
         # the first observation of a run starts an episode
         self._previous_done = True
+        # このティックがエピソードの最初のティックか
+        self._episode_start = True
         # Shared representation fed to policy/value/prediction heads on the most
         # recent inference (used by scripts/collect_probe_data.py).
         self.last_features: torch.Tensor | None = None
-
-        self.learning_starts = learning_starts
-        self.batch_size = batch_size
-        self.max_grad_norm = max_grad_norm
-        self.is_learning = False
-        self.streaming_update = streaming_update
-        # streaming の更新があるときのリプレイ。行ごとに、観測の代わりに行動を選んだときの状態を
-        # 持つ（報酬・終端・行動・スカラーは観測のバッファの同じステップの行と同じ）。再帰の
-        # 状態は使わないので幅 1 の詰め物
-        self.feature_rb = (
-            ReplayBuffer(
-                size=buffer_size,
-                seq_len=window_len,
-                horizon=horizon,
-                obs_shape=network.feature_shape(),
-                rnn_state_shape=(1,),
-                action_shape=action_space.shape,
-                output_device=self.device,
-                storage_device=torch.device(buffer_device),
-                priority_alpha=priority_alpha,
-                priority_beta=priority_beta,
-                priority_epsilon=priority_epsilon,
-            )
-            if streaming_update
-            else None
-        )
 
     def step(
         self,
@@ -186,33 +167,13 @@ class OffPolicyAgent:
         truncated: bool,
         info: dict,
     ) -> StepResult:
-        if self.streaming_update:
-            return self._step_with_streaming_update(
-                global_step, obs, reward, terminated, truncated, info
-            )
-        train_metrics = {}
+        metrics = self._observe(obs, reward, terminated, truncated, info)
         if (
             global_step >= self.learning_starts
             and self.rb.num_stored() >= self.batch_size + self.rb.seq_len
         ):
-            if not self.is_learning:
-                print(f"Start learning at global step {global_step}.")
-                self.is_learning = True
-            data = self.rb.sample(self.batch_size)
-            replay_stats = self.rb.batch_stats(data)
-            data.rewards = self.reward_scaler.normalize(data.rewards)
-            result = self.network.compute_loss(data)
-            self.actor_optimizer.zero_grad(set_to_none=True)
-            self.critic_optimizer.zero_grad(set_to_none=True)
-            result.loss.backward()
-            nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
-            self.actor_optimizer.step()
-            self.critic_optimizer.step()
-            self.rb.update_priorities(data.start_indices, result.td_error)
-            train_metrics = {**result.info, **replay_stats}
-        step_result = self.select_action(global_step, obs, reward, terminated, truncated, info)
-        step_result.metrics.update(train_metrics)
-        return step_result
+            metrics.update(self._learn(global_step))
+        return self._act(global_step, metrics)
 
     @torch.no_grad()
     def select_action(
@@ -224,14 +185,10 @@ class OffPolicyAgent:
         truncated: bool,
         info: dict,
     ) -> StepResult:
+        """Act without learning: the trainer calls this once per episode after
+        the reset, and the testbed calls it on every tick."""
         metrics = self._observe(obs, reward, terminated, truncated, info)
-        warmup = global_step < self.learning_starts
-        if not warmup and self._has_chunk_left():
-            return self._continue_chunk(metrics)
-        infer_result = self._infer(warmup)
-        if self.streaming_update:
-            self._store_features(infer_result.features)
-        return self._start_chunk(infer_result, metrics)
+        return self._act(global_step, metrics)
 
     def on_episode_end(self, score: float) -> None:
         """エピソードが ``score`` で終わったときに呼ぶ。学習でも評価でも呼ぶ。"""
@@ -250,83 +207,62 @@ class OffPolicyAgent:
         self.actor_optimizer.load_state_dict(state["actor"])
         self.critic_optimizer.load_state_dict(state["critic"])
 
-    def _step_with_streaming_update(
-        self,
-        global_step: int,
-        obs: dict[str, Any],
-        reward: float,
-        terminated: bool,
-        truncated: bool,
-        info: dict,
-    ) -> StepResult:
-        """最新の窓での streaming の更新と、保存した状態のリプレイでのヘッドの更新を足して
-        1回更新し、streaming の更新の順伝播が出した行動を実行する。エピソードをまたぐ窓や
-        学習を始める前は、更新せずに推論だけする。"""
-        metrics = self._observe(obs, reward, terminated, truncated, info)
+    ####################
+    # Internal methods #
+    ####################
+
+    def _learn(self, global_step: int) -> dict[str, float]:
+        """リプレイの損失に、``streaming_update`` なら最新の窓の streaming の損失を足して、
+        1回更新する。metrics を返す。"""
         window_len = self.seq_len + self.horizon
-        learning = (
-            global_step >= self.learning_starts
-            and self.feature_rb.num_stored() >= self.batch_size + window_len
-        )
-        if not (learning and self.rb.latest_window_is_clean(window_len)):
-            infer_result = self._infer(global_step < self.learning_starts)
-            self._store_features(infer_result.features)
-            return self._start_chunk(infer_result, metrics)
         if not self.is_learning:
             print(f"Start learning at global step {global_step}.")
             self.is_learning = True
-            # 学習を始める前は RTRL のトレースを毎ステップ進めていないので、ここで打ち切る
-            self.network.reset_memory_trace()
-
-        data = self.rb.get_latest(window_len)
+            if self.streaming_update:
+                # 学習を始める前は RTRL のトレースを毎ステップ進めていないので、ここで打ち切る
+                self.network.reset_memory_trace()
+        data = self.rb.sample(self.batch_size)
+        metrics = self.rb.batch_stats(data)
         data.rewards = self.reward_scaler.normalize(data.rewards)
-        result = self.network.infer_and_compute_loss(data)
-        replay = self.feature_rb.sample(self.batch_size)
-        replay_stats = self.feature_rb.batch_stats(replay)
-        replay.rewards = self.reward_scaler.normalize(replay.rewards)
-        replay_result = self.network.compute_feature_loss(replay)
-
+        result = self.network.compute_loss(data)
+        loss = result.loss
+        metrics.update(result.info)
+        # エピソードをまたぐ窓では学習しない。またいだ前のティックのトレースは _remember で進めた
+        if self.streaming_update and not self._episode_start:
+            latest = self.rb.get_latest(window_len)
+            latest.rewards = self.reward_scaler.normalize(latest.rewards)
+            streaming_result = self.network.compute_streaming_loss(
+                *self.previous_memory_step, latest
+            )
+            loss = loss + streaming_result.loss
+            metrics.update(
+                {f"streaming/{key}": value for key, value in streaming_result.info.items()}
+            )
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
-        (result.loss_result.loss + replay_result.loss).backward()
+        loss.backward()
         nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
-        self.feature_rb.update_priorities(replay.start_indices, replay_result.td_error)
+        self.rb.update_priorities(data.start_indices, result.td_error)
+        return metrics
 
-        metrics.update(result.loss_result.info)
-        metrics.update({f"replay/{key}": value for key, value in replay_result.info.items()})
-        metrics.update(replay_stats)
-        self._store_features(result.infer_result.features)
-        return self._start_chunk(result.infer_result, metrics)
-
-    def _store_features(self, features: torch.Tensor) -> None:
-        """観測のバッファの最新の行に対応する、行動を選んだときの状態 (1, state_dim) を
-        リプレイに積む。報酬・終端・行動・スカラーはその行のものをそのまま写す。"""
-        latest = self.rb.get_latest(1)
-        self.feature_rb.add(
-            features.detach()[0],
-            float(latest.rewards[0, 0, 0]),
-            bool(latest.dones[0, 0, 0]),
-            torch.zeros(1),
-            latest.actions[0, 0],
-            latest.scalar_obs[0, 0].cpu().numpy(),
-        )
-
-    def _infer(self, warmup: bool) -> InferResult:
-        """バッファの最新の窓から、ネットワークに推論させる。"""
+    def _act(self, global_step: int, metrics: dict) -> StepResult:
+        """実行中のチャンクの続きか、バッファの最新の窓から推論した新しいチャンクを実行する。"""
+        warmup = global_step < self.learning_starts
+        if not warmup and self._has_chunk_left():
+            return self._continue_chunk(metrics)
         latest_data = self.rb.get_latest(self.seq_len)
-        # 学習と同じく、窓の先頭のステップで保存した状態から窓を読む
-        return self.network.infer(
+        infer_result = self.network.infer(
             InferInput(
                 s_seq=latest_data.observations,
                 a_seq=latest_data.actions,
                 r_seq=self.reward_scaler.normalize(latest_data.rewards),
-                rnn_state=latest_data.rnn_state[:, 0],
                 scalar_obs_seq=latest_data.scalar_obs,
                 warmup=warmup,
             )
         )
+        return self._start_chunk(infer_result, metrics)
 
     def _observe(
         self, obs: dict[str, Any], reward: float, terminated: bool, truncated: bool, info: dict
@@ -336,19 +272,9 @@ class OffPolicyAgent:
         episode_done = terminated or truncated
         # A terminal observation still belongs to the episode that ended, so the
         # recurrent state is reset on the tick after it rather than on it.
-        reset_state = self._previous_done and self.reset_on_episode_end
-        if self._previous_done:
-            if reset_state:
-                self.rnn_state = self.network.init_state().to(self.device)
-                # 空の記憶はパラメータによらないので、RTRL のトレースも 0 に戻す
-                self.network.reset_memory_trace()
-            elif self.rb.full or self.rb.idx > 0:
-                # 記憶を持ち越すなら、終わったエピソードの最後の観測は、エピソードをまたぐ窓の
-                # 状態になって学習に使われない。そのブロックの分も RTRL のトレースを進めて、
-                # 持ち越す記憶の状態と感度をそろえる
-                last = self.rb.get_latest(self.seq_len)
-                last.rewards = self.reward_scaler.normalize(last.rewards)
-                self.network.advance_memory_trace(last)
+        self._episode_start = self._previous_done
+        reset_state = self._episode_start and self.reset_on_episode_end
+        if self._episode_start:
             # A chunk begun on the terminal frame would otherwise run into the
             # new episode; the first action of an episode comes from its own frame.
             self.action_chunk = None
@@ -370,17 +296,38 @@ class OffPolicyAgent:
         images = [torch.from_numpy(obs[name]).to(self.device) for name in self.image_names]
         scalar_obs = read_scalar_obs(obs)
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
+        representation = self.network.represent(
+            images, scalar_obs, normalized_action, shaped_reward, self.instruction, reset_state
+        )
+        if self.streaming_update:
+            representation = self._remember(representation, reset_state)
         self.rb.add(
-            self.network.to_stored_image(
-                images, scalar_obs, normalized_action, shaped_reward, self.instruction, reset_state
-            ),
+            representation,
             shaped_reward,
             episode_done if self.use_done else False,
-            self.rnn_state.squeeze(0),
             torch.from_numpy(normalized_action).to(self.device),
             scalar_obs,
         )
         return metrics
+
+    @torch.no_grad()
+    def _remember(self, representation: torch.Tensor, reset_state: bool) -> torch.Tensor:
+        """このティックの記憶の層の入力を記憶の層に読ませ、保存する表現を返す。再帰の状態を
+        1ティック進め、streaming の損失が通し直す前のティックの入力を持ち回る。"""
+        self.previous_memory_step = self.latest_memory_step
+        if reset_state:
+            self.memory = self.network.init_memory().to(self.device)
+            # 空の記憶はパラメータによらないので、RTRL のトレースも 0 に戻す
+            self.network.reset_memory_trace()
+        elif self._episode_start and self.previous_memory_step is not None:
+            # 記憶を持ち越すなら、終わったエピソードの最後のティックはエピソードをまたぐ窓に
+            # なって streaming の損失に使わない。そのティックの分もトレースを進めて、持ち越す
+            # 再帰の状態と感度をそろえる
+            self.network.remember(*self.previous_memory_step, True)
+        step_input = (representation.unsqueeze(0), self.memory)
+        image, self.memory = self.network.remember(*step_input, False)
+        self.latest_memory_step = step_input
+        return image[0]
 
     def _has_chunk_left(self) -> bool:
         """実行中のチャンクに、まだ実行していない行動があるか。"""
@@ -388,7 +335,6 @@ class OffPolicyAgent:
 
     def _start_chunk(self, infer_result: InferResult, metrics: dict) -> StepResult:
         """ネットワークが出したチャンクを始め、その最初の行動を実行する。"""
-        self.rnn_state = infer_result.rnn_state
         self.last_features = infer_result.features
         metrics.update(infer_result.value_report)
         self.action_chunk = infer_result.action[0].cpu().numpy()

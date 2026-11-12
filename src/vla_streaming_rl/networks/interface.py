@@ -2,9 +2,9 @@
 """Shared network interface: structured result types and the abstract base class.
 
 Every policy/value network exposes the forward passes — ``infer``,
-``compute_loss`` and ``infer_and_compute_loss`` — returning the structured
+``compute_loss`` and ``compute_streaming_loss`` — returning the structured
 types defined here, plus the observation-side hooks the agents drive
-(``stored_image_shape`` / ``to_stored_image``).
+(``stored_image_shape`` / ``represent`` / ``remember``).
 ``NetworkInterface`` makes that contract explicit: a subclass that does not
 implement all of them cannot be instantiated. Anything else on a concrete
 network is an implementation detail (``_``-prefixed by convention) and is not
@@ -25,17 +25,14 @@ from vla_streaming_rl.replay_buffer import ReplayBufferData
 class InferInput:
     """Inputs to a network's ``infer`` (the live, single-step inference call).
 
-    Unlike ``compute_loss`` / ``infer_and_compute_loss`` — which read a replay
-    batch (:class:`ReplayBufferData`) — inference assembles its window from the
-    buffer's latest frames but carries the *live* recurrent state held by the
-    agent, which therefore is an explicit field here rather than read off the
-    buffer. Batch size is 1.
+    Unlike ``compute_loss`` — which reads a replay batch
+    (:class:`ReplayBufferData`) — inference assembles its window from the
+    buffer's latest frames. Batch size is 1.
     """
 
     s_seq: torch.Tensor  # (B, T, *obs_shape) image observation window
     a_seq: torch.Tensor  # (B, T, action_dim)
     r_seq: torch.Tensor  # (B, T, 1)
-    rnn_state: torch.Tensor  # live recurrent state carried by the agent
     scalar_obs_seq: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
     # バッファを貯めている間のステップか。このあいだは一様乱数の行動を返す
     warmup: bool
@@ -43,17 +40,10 @@ class InferInput:
 
 @dataclass
 class InferResult:
-    """Structured return value of a network's ``infer`` / ``infer_and_compute_loss``.
-
-    Replaces the free-form dict whose schema silently differed between the two
-    call sites (``infer`` returned extra keys that ``infer_and_compute_loss``
-    omitted, forcing a ``.get(..., [])`` fallback in the agent). The fields are
-    exactly those the agents consume.
-    """
+    """Structured return value of a network's ``infer``."""
 
     action: torch.Tensor  # (B, horizon, action_dim)
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
-    rnn_state: torch.Tensor  # (B, ...)
     features: torch.Tensor
 
 
@@ -71,14 +61,6 @@ class LossResult:
     td_error: torch.Tensor  # (B,) 窓ごとの TD 誤差。リプレイの優先度の更新に使う
 
 
-@dataclass
-class InferLossResult:
-    """Structured return value of a network's ``infer_and_compute_loss``."""
-
-    infer_result: InferResult
-    loss_result: LossResult
-
-
 class NetworkInterface(nn.Module, abc.ABC):
     """Abstract base for all policy/value networks.
 
@@ -90,17 +72,11 @@ class NetworkInterface(nn.Module, abc.ABC):
     """
 
     @abc.abstractmethod
-    def init_state(self) -> torch.Tensor:
-        """Initial recurrent state the agent carries between steps."""
-
-    @abc.abstractmethod
     def stored_image_shape(self) -> tuple[int, ...]:
-        """Shape of the per-step image tensor the replay buffer stores, which
-        is the raw observation's or that of a representation the network
-        pre-encodes it into (see ``to_stored_image``)."""
+        """バッファに保存する1ステップの表現の形。"""
 
     @abc.abstractmethod
-    def to_stored_image(
+    def represent(
         self,
         images: list[torch.Tensor],
         scalar_obs: np.ndarray,
@@ -109,38 +85,40 @@ class NetworkInterface(nn.Module, abc.ABC):
         instruction: str,
         reset_state: bool,
     ) -> torch.Tensor:
-        """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）と方策が読む指示の文を、まとめて
-        保存する形、``stored_image_shape`` の形。エージェントは毎ステップ順に呼び、
-        ``reset_state`` は再帰状態を初期化するステップ（エピソードの始め）で真。
+        """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）と方策が読む指示の文を VLM に読ませた
+        表現。記憶の層がなければ ``stored_image_shape`` の形でそのまま保存し、あれば記憶の層の
+        入力で、``remember`` に通したものを保存する。エージェントは毎ステップ順に呼び、
+        ``reset_state`` はエピソードの流れを空にするステップ（エピソードの始め）で真。
         ``prev_action`` はこの観測に至った正規化済みの行動 (action_dim,)、``reward`` は
         そのとき受け取った報酬。"""
+
+    @abc.abstractmethod
+    def init_memory(self) -> torch.Tensor:
+        """エピソードの始めの記憶の層の再帰の状態 (1, ...)。"""
+
+    @abc.abstractmethod
+    def remember(
+        self, representation: torch.Tensor, memory: torch.Tensor, advance_trace: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """記憶の層の入力 (B, ...) を再帰の状態 ``memory`` から記憶の層に読ませ、保存する表現と
+        次の再帰の状態を返す。``advance_trace`` なら RTRL のトレースを1ステップ進める。"""
 
     @abc.abstractmethod
     def reset_memory_trace(self) -> None:
         """再帰状態を初期化したとき、RTRL で運んでいるその感度も 0 に戻す。"""
 
     @abc.abstractmethod
-    def advance_memory_trace(self, data: ReplayBufferData) -> None:
-        """学習しないステップで、窓の最後の観測 ``data`` (B=1) を読ませて RTRL の感度だけを
-        進める。再帰状態をエピソードをまたいで持ち越すとき、エピソードの最後の観測に使う。"""
-
-    @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:
-        """Single-step inference: the action to take, its value report, the
-        carried RNN state and predicted next state. Batch size is 1."""
+        """Single-step inference: the action to take, its value report and the
+        state the heads read. Batch size is 1."""
 
     @abc.abstractmethod
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         """Training loss over a replay batch."""
 
     @abc.abstractmethod
-    def feature_shape(self) -> tuple[int, ...]:
-        """ヘッドが読む状態（``InferResult.features``）の1行の形。"""
-
-    @abc.abstractmethod
-    def compute_feature_loss(self, data: ReplayBufferData) -> LossResult:
-        """観測の代わりに保存した状態 ``features`` を並べたリプレイの窓での、ヘッドだけの損失。"""
-
-    @abc.abstractmethod
-    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
-        """Combined inference + loss in one forward, sharing the encoder pass."""
+    def compute_streaming_loss(
+        self, representation: torch.Tensor, memory: torch.Tensor, data: ReplayBufferData
+    ) -> LossResult:
+        """最新の窓 ``data`` での、記憶の層を通し直す損失。``representation`` と ``memory`` は
+        窓の現在のステップの記憶の層の入力と、それを読む前の再帰の状態。"""

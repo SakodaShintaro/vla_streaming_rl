@@ -1,35 +1,15 @@
 # SPDX-License-Identifier: MIT
 from collections.abc import Callable
-from dataclasses import dataclass
 
 import numpy as np
 import torch
 from omegaconf import DictConfig
 
 from ..replay_buffer import ReplayBufferData
-from .interface import (
-    InferInput,
-    InferLossResult,
-    InferResult,
-    LossResult,
-    NetworkInterface,
-)
+from .interface import InferInput, InferResult, LossResult, NetworkInterface
 from .modules.prediction_head import LatentTDPredictionHead
 from .modules.value_head import DistributionalValueHead
 from .modules.vlm_encoder import VLMEncoder
-
-
-@dataclass
-class LossTerms:
-    """リプレイバッチ1つ分の損失と、それを計算する途中で得た次状態での推論結果。"""
-
-    total_loss: torch.Tensor
-    info: dict
-    next_state: torch.Tensor
-    next_action: torch.Tensor
-    next_critic_output: torch.Tensor
-    td_error: torch.Tensor
-    next_memory: torch.Tensor
 
 
 class VLAActorCriticWithActionValue(NetworkInterface):
@@ -42,10 +22,10 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     VLM は凍結して使うので、表現は観測を受け取ったときに一度だけ計算してバッファに保存する。
     推論も学習もそれを読み戻し、VLM を通さない。
 
-    エンコーダに GDN の記憶の層があれば、その再帰状態をエージェントの再帰の状態として持ち回らせる
-    （バッファの各行には、そのステップを読む前の状態が入る）。記憶の層の LoRA は
-    ``infer_and_compute_loss`` で RTRL で学習する。off-policy の ``compute_loss`` は保存した
-    状態から1ステップ分の勾配だけを使う。
+    ``use_memory`` なら、エンコーダの GDN の記憶の層を通した画像のトークンを保存する。記憶の層の
+    再帰の状態はエージェントが持ち回り、バッファには入れない。記憶の層の LoRA は
+    ``compute_streaming_loss`` が最新のステップで RTRL で学習し、リプレイの ``compute_loss`` は
+    保存した表現から射影とヘッドを学習する。
     """
 
     def __init__(
@@ -93,15 +73,11 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         # 記憶の層の状態は推論のたびに1ステップ進むので、行動のチャンクは1ステップに限る
         assert not use_memory or horizon == 1, horizon
 
-    def init_state(self) -> torch.Tensor:
-        return self.encoder.init_memory()
-
     def stored_image_shape(self) -> tuple[int, ...]:
-        """VLM の表現の、画像のトークンの格子。射影は学習するので、その手前を
-        保存する。"""
+        """バッファに保存する、画像のトークンの表現の形。"""
         return self.encoder.representation_shape()
 
-    def to_stored_image(
+    def represent(
         self,
         images: list[torch.Tensor],
         scalar_obs: np.ndarray,
@@ -114,70 +90,53 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             images, scalar_obs, prev_action, reward, instruction, reset_state
         )
 
+    def init_memory(self) -> torch.Tensor:
+        return self.encoder.init_memory()
+
+    def remember(
+        self, representation: torch.Tensor, memory: torch.Tensor, advance_trace: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.encoder.remember(representation, memory, advance_trace)
+
     def reset_memory_trace(self) -> None:
         self.encoder.reset_memory_trace()
-
-    @torch.no_grad()
-    def advance_memory_trace(self, data: ReplayBufferData) -> None:
-        assert data.observations.shape[0] == 1, data.observations.shape
-        self._state(
-            data.observations,
-            data.actions,
-            data.rewards,
-            data.scalar_obs,
-            data.rnn_state[:, -1],
-            -1,
-            True,
-        )
 
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
-        state, next_memory = self._state(
-            data.s_seq, data.a_seq, data.r_seq, data.scalar_obs_seq, data.rnn_state, -1, False
-        )
+        state = self._state(data.s_seq, data.a_seq, data.r_seq, data.scalar_obs_seq, -1)
         action = self.policy_head.get_action(state)
         value_report = self.value_head.value_report(self.value_head(state, action).output)
         if data.warmup:
             # バッファを貯めている間は一様乱数の行動を返す
             action = torch.rand_like(action) * 2.0 - 1.0
-        return InferResult(
-            action=action,
-            value_report=value_report,
-            rnn_state=next_memory,
-            features=state,
-        )
+        return InferResult(action=action, value_report=value_report, features=state)
 
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
-        terms = self._loss_terms(data, False)
-        return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
+        """リプレイの窓の損失。現在の状態はチャンクの手前のステップから、次の状態は最後の
+        ステップから、どちらも保存した表現で作る。"""
+        window = (data.observations, data.actions, data.rewards, data.scalar_obs)
+        with torch.no_grad():
+            next_state = self._state(*window, -1)
+        state = self._state(*window, -self.horizon - 1)
+        return self._head_terms(data, state, next_state)
 
-    def feature_shape(self) -> tuple[int, ...]:
-        return (self.encoder.output_dim,)
-
-    def compute_feature_loss(self, data: ReplayBufferData) -> LossResult:
-        """観測の代わりに、行動を選んだときの状態 (B, T, state_dim) を並べた窓での、ヘッドだけの
-        損失。エンコーダは通さないので、勾配はヘッドにだけ流れる。"""
-        terms = self._head_terms(
-            data,
-            data.observations[:, -self.horizon - 1],
-            data.observations[:, -1],
-            data.rnn_state[:, -1],
+    def compute_streaming_loss(
+        self, representation: torch.Tensor, memory: torch.Tensor, data: ReplayBufferData
+    ) -> LossResult:
+        """最新の窓 ``data`` (B=1) の損失。現在の状態は、そのステップの記憶の層の入力
+        ``representation`` (1, ...) を読む前の再帰の状態 ``memory`` (1, ...) から記憶の層を
+        通し直して作り、RTRL のトレースを1ステップ進める。次の状態は保存した表現で作る。"""
+        assert self.horizon == 1, self.horizon
+        image, _ = self.encoder.remember(representation, memory, True)
+        state = self.encoder(
+            image, data.actions[:, -2], data.rewards[:, -2], data.scalar_obs[:, -2]
         )
-        return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
-
-    def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
-        terms = self._loss_terms(data, True)
-        infer_result = InferResult(
-            action=terms.next_action,
-            value_report=self.value_head.value_report(terms.next_critic_output),
-            rnn_state=terms.next_memory,
-            features=terms.next_state,
-        )
-        return InferLossResult(
-            infer_result=infer_result,
-            loss_result=LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error),
-        )
+        with torch.no_grad():
+            next_state = self._state(
+                data.observations, data.actions, data.rewards, data.scalar_obs, -1
+            )
+        return self._head_terms(data, state, next_state)
 
     ####################
     # Internal methods #
@@ -189,19 +148,12 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         actions: torch.Tensor,
         rewards: torch.Tensor,
         scalar_obs: torch.Tensor,
-        memory: torch.Tensor,
         step: int,
-        advance_trace: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """窓 (B, T, ...) の ``step`` 番目のステップの、保存した表現・前の行動・報酬・スカラーの
-        観測と、それを読む前の再帰の状態 ``memory`` から、状態と次の再帰の状態を作る。"""
+        観測から状態を作る。"""
         return self.encoder(
-            observations[:, step],
-            actions[:, step],
-            rewards[:, step],
-            scalar_obs[:, step],
-            memory,
-            advance_trace,
+            observations[:, step], actions[:, step], rewards[:, step], scalar_obs[:, step]
         )
 
     def _prediction_loss(
@@ -226,33 +178,19 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             next_action,
         )
 
-    def _loss_terms(self, data: ReplayBufferData, advance_trace: bool) -> LossTerms:
-        """リプレイバッチの損失。現在の状態はチャンクの手前のステップから、次の状態は最後の
-        ステップから作る。``advance_trace`` なら、現在の状態を作るときに記憶の層の RTRL の
-        トレースを1ステップ進める。"""
-        window = (data.observations, data.actions, data.rewards, data.scalar_obs)
-        with torch.no_grad():
-            next_state, next_memory = self._state(*window, data.rnn_state[:, -1], -1, False)
-        state, _ = self._state(
-            *window, data.rnn_state[:, -self.horizon - 1], -self.horizon - 1, advance_trace
-        )
-        return self._head_terms(data, state, next_state, next_memory)
-
     def _head_terms(
         self,
         data: ReplayBufferData,
         state: torch.Tensor,
         next_state: torch.Tensor,
-        next_memory: torch.Tensor,
-    ) -> LossTerms:
+    ) -> LossResult:
         """現在の状態 ``state``（勾配あり）と次の状態 ``next_state`` から、ヘッドの損失。
         行動・報酬・終端は窓 ``data`` の最後の horizon ステップのもの。"""
         with torch.no_grad():
             # TD の目標は割引率ごとに、その割引率の方策の次の行動で作る。最後が主の割引率の
-            # 方策の行動で、推論の結果と状態の予測にはそれを使う
+            # 方策の行動で、状態の予測にはそれを使う
             next_gamma_actions = self.policy_head.get_gamma_actions(next_state)
             next_action = next_gamma_actions[:, -1]
-            next_critic_output = self.value_head(next_state, next_action).output
             next_q = self.value_head.gamma_values(next_state, next_gamma_actions)
         state_prediction_loss, state_prediction_info, intrinsic_reward = self._prediction_loss(
             state, data, next_state, next_action
@@ -280,12 +218,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             f"losses/{key}": value
             for key, value in {**critic_info, **actor_info, **state_prediction_info}.items()
         }
-        return LossTerms(
-            total_loss=self.critic_loss_weight * critic_loss + actor_loss + state_prediction_loss,
+        return LossResult(
+            loss=self.critic_loss_weight * critic_loss + actor_loss + state_prediction_loss,
             info=info,
-            next_state=next_state,
-            next_action=next_action,
-            next_critic_output=next_critic_output,
             td_error=td_error,
-            next_memory=next_memory,
         )

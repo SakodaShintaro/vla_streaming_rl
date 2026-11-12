@@ -13,7 +13,6 @@ from the environment vs. the action selected before — the pairing is arbitrary
 In this code, index t stores information visible to the agent just before
 selecting an action at timestep t. Specifically:
 - obs, reward, done are obtained from the environment at timestep t as inputs
-- rnn_state is the RNN hidden state at timestep t
 - action is the action selected at timestep t-1
 """
 
@@ -23,7 +22,6 @@ class ReplayBufferData:
     observations: torch.Tensor  # (B, T, obs_shape) image only
     rewards: torch.Tensor  # (B, T)
     dones: torch.Tensor  # (B, T)
-    rnn_state: torch.Tensor  # (B, min(T, horizon + 1), space_len, state_size, n_layer)
     actions: torch.Tensor  # (B, T, action_shape)
     scalar_obs: torch.Tensor  # (B, T, SCALAR_OBS_DIM)、並びは SCALAR_OBS_NAMES
     # 窓の先頭の行。学習の後に、その窓の TD 誤差で優先度を更新するのに使う
@@ -48,7 +46,6 @@ class ReplayBuffer:
         seq_len: int,
         horizon: int,
         obs_shape: tuple[int, ...],
-        rnn_state_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
         output_device: torch.device,
         storage_device: torch.device,
@@ -77,12 +74,10 @@ class ReplayBuffer:
             )
 
         # 行の大半を占める観測の表現は bf16 で持ち、1行の大きさを半分にする。引くときは
-        # float32 に戻す。再帰の状態は次のステップの入力になり、丸めると毎ステップ誤差が
-        # 積もるので float32 のまま持つ
+        # float32 に戻す
         self.observations = init_tensor((size, *obs_shape), torch.bfloat16)
         self.rewards = init_tensor((size, 1), torch.float32)
         self.dones = init_tensor((size, 1), torch.float32)
-        self.rnn_states = init_tensor((size, *rnn_state_shape), torch.float32)
         self.actions = init_tensor((size, *action_shape), torch.float32)
         self.scalar_obs = init_tensor((size, SCALAR_OBS_DIM), torch.float32)
         # 行 t を先頭とする窓の優先度（TD 誤差の絶対値 + priority_epsilon）
@@ -103,7 +98,6 @@ class ReplayBuffer:
         obs: torch.Tensor,
         reward: float,
         done: bool,
-        rnn_state: torch.Tensor,
         action: torch.Tensor,
         scalar_obs: np.ndarray,
     ) -> None:
@@ -112,7 +106,6 @@ class ReplayBuffer:
         self.observations[self.idx].copy_(obs.reshape(self.observations[self.idx].shape))
         self.rewards[self.idx].fill_(reward)
         self.dones[self.idx].fill_(done)
-        self.rnn_states[self.idx].copy_(rnn_state.reshape(self.rnn_states[self.idx].shape))
         self.actions[self.idx].copy_(action.reshape(self.actions[self.idx].shape))
         self.scalar_obs[self.idx].copy_(torch.from_numpy(scalar_obs))
         self.priorities[self.idx] = self.max_priority
@@ -151,9 +144,6 @@ class ReplayBuffer:
             self._gather("observations", self.observations, indices),
             self._gather("rewards", self.rewards, indices),
             self._gather("dones", self.dones, indices),
-            # 状態は窓の先頭（現在状態の窓）と horizon 先（次状態の窓）でしか読まないので、
-            # その範囲だけ集める。状態が大きい時間モデルでは、全ステップ分の転送が重い
-            self._gather("rnn_states", self.rnn_states, indices[:, : self.horizon + 1]),
             self._gather("actions", self.actions, indices),
             self._gather("scalar_obs", self.scalar_obs, indices),
             indices[:, 0].to(self.output_device),
@@ -204,21 +194,6 @@ class ReplayBuffer:
             crosses_head = torch.zeros_like(crosses_episode)
 
         return starts[~(crosses_episode | crosses_head)]
-
-    def latest_window_is_clean(self, window_len: int) -> bool:
-        """Whether the newest ``window_len`` slots pass the rule
-        :meth:`valid_start_indices` draws under: from the current state slot on,
-        a ``done`` only on the last slot, which is the episode ending on the
-        window's own final action. The learner that reads the newest window
-        instead of sampling asks this before it trains on it.
-        """
-        if not self.full and self.idx < window_len:
-            return False
-        state_slot = window_len - self.horizon - 1
-        indices = (
-            self.idx - window_len + torch.arange(window_len, device=self.storage_device)
-        ) % self.size
-        return bool(self.dones[indices[state_slot:-1], 0].sum() == 0)
 
     def sample(self, batch_size: int) -> ReplayBufferData:
         curr_size = self.size if self.full else self.idx
