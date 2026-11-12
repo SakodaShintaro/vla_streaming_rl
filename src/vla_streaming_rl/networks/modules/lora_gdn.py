@@ -43,7 +43,7 @@ def silu_grad(c: torch.Tensor) -> torch.Tensor:
     return sigmoid * (1.0 + c * (1.0 - sigmoid))
 
 
-class GDNMemoryLayer(nn.Module):
+class LoRAGDNLayer(nn.Module):
     """凍結した GDN の層に LoRA を付け、再帰状態をステップをまたいで持ち越す層。
 
     ``forward`` は1ステップ分のトークンを、前のステップから持ち越した再帰状態 S と、畳み込みが
@@ -123,7 +123,7 @@ class GDNMemoryLayer(nn.Module):
         # B_v, B_a, B_b, B_k に対する S の感度 (1, H, d_k, d_v, rank)。None はまだ 0
         self.trace: dict[str, torch.Tensor] | None = None
 
-    def memory_size(self) -> int:
+    def recurrent_size(self) -> int:
         """持ち越す状態の大きさ。S と、畳み込みが読む直前の conv_size - 1 トークンの正規化した入力。"""
         return (
             self.num_heads * self.key_dim * self.value_dim + (self.conv_size - 1) * self.hidden_size

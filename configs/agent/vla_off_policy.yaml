@@ -37,11 +37,11 @@ vla:
   # 常に残す。GDN の層の再帰状態は窓に関係なくエピソードの間ずっと持ち越す。
   # 0 なら毎ステップ流れを空にし、GDN の層の状態も持ち越さない（履歴を使わない）
   stream_window_steps: 0
-  # streaming_update なら、ヘッドが読む層（image_layer_start の1層）の直前の gdn_memory_layers 層の
+  # streaming_update なら、ヘッドが読む層（image_layer_start の1層）の直前の num_lora_gdn_layers 層の
   # GDN だけにエピソードの間の記憶を持たせ、その LoRA を RTRL で学ぶ（stream_window_steps は 0 にし、
   # ほかの層は毎ステップ空にする。2層以上では層ごとに閉じた近似）
   # LoRA 付きの GDN の層の数。image_layer_start が 23 なら 3 で層 20〜22（言語モデルの確認では3層で初めて記憶が効いた）
-  gdn_memory_layers: 3
+  num_lora_gdn_layers: 3
   # LoRA のランクと alpha（delta W = alpha / rank * B A）
   gdn_lora_rank: 8
   gdn_lora_alpha: 16.0

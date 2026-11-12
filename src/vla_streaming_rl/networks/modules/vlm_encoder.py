@@ -8,7 +8,7 @@ from torch import nn
 from transformers import DynamicCache
 from transformers.cache_utils import LinearAttentionCacheLayerMixin
 
-from vla_streaming_rl.networks.modules.gdn_memory import LORA_TARGETS, GDNMemoryLayer
+from vla_streaming_rl.networks.modules.lora_gdn import LORA_TARGETS, LoRAGDNLayer
 from vla_streaming_rl.networks.modules.reward_embed import embed_reward
 from vla_streaming_rl.networks.modules.self_attention import (
     SpatialTransformerBlock,
@@ -62,12 +62,12 @@ class VLMEncoder(nn.Module):
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
     読む状態にする。学習するのは射影と混ぜる層。
 
-    ``use_memory`` でなければ、表現は画像のトークンの位置の活性の
+    ``use_lora_gdn`` でなければ、表現は画像のトークンの位置の活性の
     ``[image_layer_start, image_layer_stop)`` の層（0 は言語モデルに入る前の埋め込みで、ViT の
-    出力そのもの）での平均。``use_memory`` なら、ヘッドが読む層（``image_layer_start`` の1層）の
-    直前の ``gdn_memory_layers`` 層の GDN に LoRA を付け、ステップをまたぐ履歴はその層の再帰の
+    出力そのもの）での平均。``use_lora_gdn`` なら、ヘッドが読む層（``image_layer_start`` の1層）の
+    直前の ``num_lora_gdn_layers`` 層の GDN に LoRA を付け、ステップをまたぐ履歴はその層の再帰の
     状態だけが運ぶ（``stream_window_steps`` は 0）。``represent`` はその最も下の層の入力をこの
-    ステップの全トークンについて取り出し、それらの層を ``GDNMemoryLayer`` で下から順に計算して、
+    ステップの全トークンについて取り出し、それらの層を ``LoRAGDNLayer`` で下から順に計算して、
     画像のトークンの出力を表現にする。再帰の状態と RTRL の感度はエンコーダが持ち、LoRA は
     ``represent`` の出力から作った状態の損失で RTRL で学習する。エピソードの始めで空にするかは
     ``represent`` の ``reset_state`` が決める。
@@ -79,7 +79,7 @@ class VLMEncoder(nn.Module):
         image_shapes: list[tuple[int, ...]],
         action_dim: int,
         vla_config: DictConfig,
-        use_memory: bool,
+        use_lora_gdn: bool,
         device: str,
     ) -> None:
         super().__init__()
@@ -96,32 +96,32 @@ class VLMEncoder(nn.Module):
         self._reset_stream()
         self.image_layers = slice(vla_config.image_layer_start, vla_config.image_layer_stop)
         self.image_pad_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-        self.use_memory = use_memory
-        if self.use_memory:
+        self.use_lora_gdn = use_lora_gdn
+        if self.use_lora_gdn:
             # hidden_states[i] は層 i - 1 の出力なので、ヘッドが読む層を出すのは層 start - 1。
-            # LoRA 付きの GDN の層はそこまでの gdn_memory_layers 層で、表現は最も下の層の入力
+            # LoRA 付きの GDN の層はそこまでの num_lora_gdn_layers 層で、表現は最も下の層の入力
             assert vla_config.image_layer_stop == vla_config.image_layer_start + 1
-            assert vla_config.gdn_memory_layers >= 1, vla_config.gdn_memory_layers
-            self.memory_layer_start = vla_config.image_layer_start - vla_config.gdn_memory_layers
-            memory_layer_indices = range(self.memory_layer_start, vla_config.image_layer_start)
+            assert vla_config.num_lora_gdn_layers >= 1, vla_config.num_lora_gdn_layers
+            self.lora_gdn_start = vla_config.image_layer_start - vla_config.num_lora_gdn_layers
+            lora_gdn_indices = range(self.lora_gdn_start, vla_config.image_layer_start)
             text_config = self.vlm.config.text_config
-            for index in memory_layer_indices:
+            for index in lora_gdn_indices:
                 assert text_config.layer_types[index] == "linear_attention", index
             # 記憶を持つのはその層だけにする
             assert self.stream_window_steps == 0, self.stream_window_steps
-            self.memory_layers = nn.ModuleList(
+            self.lora_gdn_layers = nn.ModuleList(
                 [
-                    GDNMemoryLayer(
+                    LoRAGDNLayer(
                         self.vlm.model.language_model.layers[index],
                         LORA_TARGETS,
                         vla_config.gdn_lora_rank,
                         vla_config.gdn_lora_alpha,
                     )
-                    for index in memory_layer_indices
+                    for index in lora_gdn_indices
                 ]
             )
             # LoRA 付きの GDN の層の再帰の状態（最新のティックを読んだ後）。その感度は各層が持つ
-            self.memory = self._initial_memory()
+            self.gdn_state = self._initial_gdn_state()
         # 観測の画像（一人称の視点と、あれば鳥瞰図）ごとのトークンの格子を並べる。格子の
         # 大きさは画像の大きさからプロセッサが決める（256px なら統合後 8x8）
         self.images_num = len(image_shapes)
@@ -186,8 +186,8 @@ class VLMEncoder(nn.Module):
         ``stream_window_steps`` が 0 なら流れを空にしてから、前の行動 (action_dim,) と受け取った
         報酬とスカラーの観測 (SCALAR_OBS_DIM,) を書いた文と画像を流れに積む。
 
-        ``use_memory`` でなければ、表現は画像のトークンの活性の ``image_layers`` の層での平均。
-        ``use_memory`` なら、このステップの全トークンの LoRA 付きの GDN の層の入力を、前の再帰の
+        ``use_lora_gdn`` でなければ、表現は画像のトークンの活性の ``image_layers`` の層での平均。
+        ``use_lora_gdn`` なら、このステップの全トークンの LoRA 付きの GDN の層の入力を、前の再帰の
         状態から層に下から順に読ませ、再帰の状態とその感度を1ティック進めて、最も上の層の画像の
         トークンの出力を表現にする（``reset_state`` なら再帰の状態と感度を先に空にする）。凍結した
         VLM は勾配なしで読み、GDN の層の出力は、次のティックの損失が勾配を LoRA まで流せるよう
@@ -220,24 +220,24 @@ class VLMEncoder(nn.Module):
             if len(self.stream_step_lens) > self.stream_window_steps:
                 self._drop_oldest_step()
 
-        if not self.use_memory:
+        if not self.use_lora_gdn:
             return self._image_tokens(inputs["input_ids"], step_outputs)
         if reset_state:
             # 空の状態はパラメータによらないので、感度も 0 に戻す
-            self.memory = self._initial_memory()
-            for layer in self.memory_layers:
+            self.gdn_state = self._initial_gdn_state()
+            for layer in self.lora_gdn_layers:
                 layer.reset_trace()
         with torch.enable_grad():
             # このステップの全トークン（文と画像）の、最も下の GDN の層の入力 (1, L, hidden_size)
-            x = step_outputs.hidden_states[self.memory_layer_start].to(torch.float32)
+            x = step_outputs.hidden_states[self.lora_gdn_start].to(torch.float32)
             valid = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
-            layer_memories = self.memory.split(
-                [layer.memory_size() for layer in self.memory_layers], dim=1
+            layer_states = self.gdn_state.split(
+                [layer.recurrent_size() for layer in self.lora_gdn_layers], dim=1
             )
-            next_memories = []
-            for layer, layer_memory in zip(self.memory_layers, layer_memories, strict=True):
+            next_states = []
+            for layer, layer_state in zip(self.lora_gdn_layers, layer_states, strict=True):
                 state_size = layer.num_heads * layer.key_dim * layer.value_dim
-                S, h = layer_memory.split([state_size, layer_memory.shape[1] - state_size], dim=1)
+                S, h = layer_state.split([state_size, layer_state.shape[1] - state_size], dim=1)
                 x, S, h = layer(
                     x,
                     valid,
@@ -245,8 +245,8 @@ class VLMEncoder(nn.Module):
                     h.view(1, layer.conv_size - 1, layer.hidden_size),
                     True,
                 )
-                next_memories += [S.flatten(start_dim=1), h.flatten(start_dim=1)]
-            self.memory = torch.cat(next_memories, dim=1)
+                next_states += [S.flatten(start_dim=1), h.flatten(start_dim=1)]
+            self.gdn_state = torch.cat(next_states, dim=1)
             image_position = inputs["input_ids"][0] == self.image_pad_id
             return x[0, image_position].view(self.num_positions, -1)
 
@@ -354,7 +354,7 @@ class VLMEncoder(nn.Module):
         tokens = torch.cat([projected, action_tokens, reward_token, scalar_tokens], dim=1)
         return self.token_mixer(tokens + self.token_position).flatten(start_dim=1)
 
-    def _initial_memory(self) -> torch.Tensor:
+    def _initial_gdn_state(self) -> torch.Tensor:
         """エピソードの始めの LoRA 付きの GDN の層の再帰の状態 (1, ...)。"""
-        size = sum(layer.memory_size() for layer in self.memory_layers)
+        size = sum(layer.recurrent_size() for layer in self.lora_gdn_layers)
         return torch.zeros(1, size, device=self.device)

@@ -52,7 +52,7 @@ class VLAActorCriticWithActionValue(nn.Module):
     保存した表現を読み戻し、VLM を通さない。表現から射影とトークンを混ぜる層で状態を作り、方策
     ヘッド・行動価値ヘッド・予測ヘッドがその状態を読む。
 
-    ``use_memory`` なら、表現はエンコーダの LoRA 付きの GDN の層の出力で、ステップをまたぐ履歴は
+    ``use_lora_gdn`` なら、表現はエンコーダの LoRA 付きの GDN の層の出力で、ステップをまたぐ履歴は
     その層の再帰の状態だけが運ぶ。再帰の状態と RTRL の感度はエンコーダが持ち、バッファには
     入れない。LoRA は ``compute_replay_and_streaming_loss`` の最新のステップの分で RTRL で学習し、
     リプレイの窓の分は保存した表現から射影とヘッドを学習する。
@@ -68,7 +68,7 @@ class VLAActorCriticWithActionValue(nn.Module):
         prediction_head_factory: Callable[..., LatentTDPredictionHead],
         critic_loss_weight: float,
         vla_config: DictConfig,
-        use_memory: bool,
+        use_lora_gdn: bool,
     ) -> None:
         super().__init__()
         # 表現はバッファに保存するので、バッファから読む窓は今のステップだけでよい
@@ -80,7 +80,7 @@ class VLAActorCriticWithActionValue(nn.Module):
             image_shapes=image_shapes,
             action_dim=action_dim,
             vla_config=vla_config,
-            use_memory=use_memory,
+            use_lora_gdn=use_lora_gdn,
             device=device,
         )
         state_dim = self.encoder.output_dim
