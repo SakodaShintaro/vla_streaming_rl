@@ -298,7 +298,7 @@ class OffPolicyAgent:
             # 次のティックの streaming の損失が勾配を LoRA まで流せるよう、学習しないとき
             # （select_action）も計算グラフを作る
             with torch.enable_grad():
-                image = self.network.remember(encoded)
+                image = self.network.step_gdn_layers(encoded)
             self.previous_image = self.latest_image
             self.latest_image = image
             encoded = image.detach()

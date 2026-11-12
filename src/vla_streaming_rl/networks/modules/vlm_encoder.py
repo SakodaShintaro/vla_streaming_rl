@@ -73,9 +73,9 @@ class VLMEncoder(nn.Module):
     ``use_memory`` なら、ヘッドが読む層（``image_layer_start`` の1層）の直前の
     ``gdn_memory_layers`` 層の GDN だけをエピソードの間の記憶にする。VLM は毎ステップ流れを
     空にして読み（``stream_window_steps`` は 0）、``represent`` はその最も下の層の入力をこのステップの
-    全トークンについて返す。``remember`` はそれらの層を ``GDNMemoryLayer`` で下から順に計算し、
+    全トークンについて返す。``step_gdn_layers`` はそれらの層を ``GDNMemoryLayer`` で下から順に計算し、
     画像のトークンの出力（``forward`` が読む表現）を返す。再帰の状態と RTRL の感度はエンコーダが
-    持ち、その層の LoRA は ``remember`` の出力から作った状態の損失で RTRL で学習する。
+    持ち、その層の LoRA は ``step_gdn_layers`` の出力から作った状態の損失で RTRL で学習する。
     """
 
     def __init__(
@@ -335,7 +335,7 @@ class VLMEncoder(nn.Module):
         for layer in self.memory_layers:
             layer.reset_trace()
 
-    def remember(self, step_tokens: torch.Tensor) -> torch.Tensor:
+    def step_gdn_layers(self, step_tokens: torch.Tensor) -> torch.Tensor:
         """``represent`` が返したこのティックの LoRA 付きの GDN の層の入力 (max_step_tokens,
         hidden_size + 1) を層に読ませ、再帰の状態とその感度を1ティック進めて、画像のトークンの
         出力 (num_positions, hidden_size) を返す。勾配を取るかは呼び出し側が決める。"""

@@ -4,7 +4,7 @@
 Every policy/value network exposes the forward passes — ``infer``,
 ``compute_replay_loss`` and ``compute_streaming_loss`` — returning the structured
 types defined here, plus the observation-side hooks the agents drive
-(``stored_image_shape`` / ``represent`` / ``remember`` …).
+(``stored_image_shape`` / ``represent`` / ``step_gdn_layers`` …).
 ``NetworkInterface`` makes that contract explicit: a subclass that does not
 implement all of them cannot be instantiated. Anything else on a concrete
 network is an implementation detail (``_``-prefixed by convention) and is not
@@ -87,7 +87,7 @@ class NetworkInterface(nn.Module, abc.ABC):
     ) -> torch.Tensor:
         """1ステップの観測の画像（IMAGE_OBS_NAMES の並び）と方策が読む指示の文を VLM に読ませた
         もの。LoRA 付きの GDN の層がなければ ``stored_image_shape`` の形の表現でそのまま保存し、あればLoRA 付きの GDN の層の
-        入力で、``remember`` に通したものを保存する。エージェントは毎ステップ順に呼び、
+        入力で、``step_gdn_layers`` に通したものを保存する。エージェントは毎ステップ順に呼び、
         ``reset_state`` はエピソードの流れを空にするステップ（エピソードの始め）で真。
         ``prev_action`` はこの観測に至った正規化済みの行動 (action_dim,)、``reward`` は
         そのとき受け取った報酬。"""
@@ -97,7 +97,7 @@ class NetworkInterface(nn.Module, abc.ABC):
         """LoRA 付きの GDN の層の再帰の状態と、RTRL で運んでいるその感度を空にする。"""
 
     @abc.abstractmethod
-    def remember(self, step_tokens: torch.Tensor) -> torch.Tensor:
+    def step_gdn_layers(self, step_tokens: torch.Tensor) -> torch.Tensor:
         """このティックの LoRA 付きの GDN の層の入力を層に読ませて、再帰の状態とその感度を
         1ティック進め、画像のトークンの出力を返す。保存するのはその出力。"""
 
@@ -112,5 +112,5 @@ class NetworkInterface(nn.Module, abc.ABC):
 
     @abc.abstractmethod
     def compute_streaming_loss(self, image: torch.Tensor, data: ReplayBufferData) -> LossResult:
-        """最新の窓 ``data`` での損失。``image`` は前のティックで ``remember`` が返した計算グラフ
+        """最新の窓 ``data`` での損失。``image`` は前のティックで ``step_gdn_layers`` が返した計算グラフ
         付きの出力。"""
