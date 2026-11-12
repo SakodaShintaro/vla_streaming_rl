@@ -10,14 +10,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from vla_streaming_rl.agents.base import Agent
+from vla_streaming_rl.agents.off_policy import OffPolicyAgent
 from vla_streaming_rl.envs.animalai.curriculum import seen_in_training
 from vla_streaming_rl.episode_log import EpisodeRecord, save_episode_data
 from vla_streaming_rl.render import render_frame
 
 
 def run_arena(
-    agent: Agent,
+    agent: OffPolicyAgent,
     env,
     seed: int,
     render: bool,
@@ -66,7 +66,7 @@ def run_arena(
 
 
 def run_testbed(
-    agent: Agent,
+    agent: OffPolicyAgent,
     env,
     seed: int,
     render: bool,
