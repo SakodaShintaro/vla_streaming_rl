@@ -8,12 +8,15 @@ Below ``learning_starts`` the network is told it is warming up and returns
 uniform random actions, so the buffer fills with something other than an
 untrained policy's output.
 
-With ``streaming_update`` the encoder has the GDN memory layers. The buffer
-still stores one representation per tick, the image tokens out of those
-layers, and the replayed update is unchanged; the encoder carries the layers'
-recurrent state and RTRL trace, and every tick adds
-the streaming loss (the newest window, the memory layers run again with their
-LoRA carried by RTRL) to the replayed loss; one optimizer step takes the sum.
+With ``streaming_update`` the encoder has GDN layers with LoRA that carry
+their recurrent state across ticks. The buffer still stores one representation
+per tick, the image tokens out of those layers, and the replayed update is
+unchanged; the encoder carries the layers' recurrent state and its RTRL
+sensitivity, and the agent keeps the previous tick's output of those layers
+with its graph. Every tick adds the streaming loss on the newest window, whose
+gradient reaches the LoRA through that graph, to the replayed loss; one
+optimizer step takes the sum. The graph was built before the previous update,
+so that gradient is evaluated at the weights one update old.
 """
 
 from dataclasses import dataclass
@@ -146,6 +149,9 @@ class OffPolicyAgent:
         self._previous_done = True
         # このティックがエピソードの最初のティックか
         self._episode_start = True
+        # streaming_update のとき、最新とその前のティックの LoRA 付きの GDN の層の出力（計算グラフ付き）
+        self.latest_image: torch.Tensor | None = None
+        self.previous_image: torch.Tensor | None = None
         # Shared representation fed to policy/value/prediction heads on the most
         # recent inference (used by scripts/collect_probe_data.py).
         self.last_features: torch.Tensor | None = None
@@ -210,20 +216,17 @@ class OffPolicyAgent:
         if not self.is_learning:
             print(f"Start learning at global step {global_step}.")
             self.is_learning = True
-            if self.streaming_update:
-                # 学習を始める前は RTRL のトレースを毎ステップ進めていないので、ここで打ち切る
-                self.network.reset_memory_trace()
         data = self.rb.sample(self.batch_size)
         metrics = self.rb.batch_stats(data)
         data.rewards = self.reward_scaler.normalize(data.rewards)
         result = self.network.compute_replay_loss(data)
         loss = result.loss
         metrics.update(result.info)
-        # エピソードをまたぐ窓では学習しない。またいだ前のティックのトレースは _observe で進めた
+        # エピソードをまたぐ窓では学習しない
         if self.streaming_update and not self._episode_start:
             latest = self.rb.get_latest(window_len)
             latest.rewards = self.reward_scaler.normalize(latest.rewards)
-            streaming_result = self.network.compute_streaming_loss(latest)
+            streaming_result = self.network.compute_streaming_loss(self.previous_image, latest)
             loss = loss + streaming_result.loss
             metrics.update(
                 {f"streaming/{key}": value for key, value in streaming_result.info.items()}
@@ -292,12 +295,13 @@ class OffPolicyAgent:
         if self.streaming_update:
             if reset_state:
                 self.network.reset_memory()
-            encoded = self.network.remember(encoded)
-            if self._episode_start and not reset_state and self.rb.num_stored() > 0:
-                # 記憶を持ち越すなら、終わったエピソードの最後のティックはエピソードをまたぐ窓に
-                # なって streaming の損失に使わない。そのティックの分もトレースを進めて、持ち越す
-                # 再帰の状態と感度をそろえる
-                self.network.trace_previous_tick()
+            # 次のティックの streaming の損失が勾配を LoRA まで流せるよう、学習しないとき
+            # （select_action）も計算グラフを作る
+            with torch.enable_grad():
+                image = self.network.remember(encoded)
+            self.previous_image = self.latest_image
+            self.latest_image = image
+            encoded = image.detach()
         self.rb.add(
             encoded,
             shaped_reward,

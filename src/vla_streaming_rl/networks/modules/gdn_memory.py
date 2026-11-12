@@ -135,14 +135,19 @@ class GDNMemoryLayer(nn.Module):
     def lora_A_weight(self, target: str) -> torch.Tensor:
         if target in RECURRENT_TARGETS:
             return self.get_buffer(f"lora_A_frozen_{target}")
-        return self.lora_A[target]
+        return self.lora_A[target].clone()
+
+    def lora_B_weight(self, target: str) -> torch.Tensor:
+        """学習する重みは複製を読む。計算グラフは複製を保存するので、次のティックで backward
+        する前に optimizer が重みをその場で更新しても使える（勾配は1回前の重みで評価したもの）。"""
+        return self.lora_B[target].clone()
 
     def _proj(self, target: str, weight: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """凍結した線形写像に、LoRA があればその差分を足したもの。"""
         y = F.linear(x, weight)
         if target in self.lora_targets:
             y = y + self.lora_scale * F.linear(
-                F.linear(x, self.lora_A_weight(target)), self.lora_B[target]
+                F.linear(x, self.lora_A_weight(target)), self.lora_B_weight(target)
             )
         return y
 
@@ -156,10 +161,10 @@ class GDNMemoryLayer(nn.Module):
         H, dk, dv, r = self.num_heads, self.key_dim, self.value_dim, self.lora_rank
         trace = self.trace
         correction = (
-            torch.einsum("bhijp,hjp->bhij", trace["v"], self.lora_B["v"].view(H, dv, r))
-            + torch.einsum("bhijp,hp->bhij", trace["a"], self.lora_B["a"])
-            + torch.einsum("bhijp,hp->bhij", trace["b"], self.lora_B["b"])
-            + torch.einsum("bhijp,hip->bhij", trace["k"], self.lora_B["k"].view(H, dk, r))
+            torch.einsum("bhijp,hjp->bhij", trace["v"], self.lora_B_weight("v").view(H, dv, r))
+            + torch.einsum("bhijp,hp->bhij", trace["a"], self.lora_B_weight("a"))
+            + torch.einsum("bhijp,hp->bhij", trace["b"], self.lora_B_weight("b"))
+            + torch.einsum("bhijp,hip->bhij", trace["k"], self.lora_B_weight("k").view(H, dk, r))
         )
         return correction - correction.detach()
 

@@ -96,13 +96,6 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     def remember(self, step_tokens: torch.Tensor) -> torch.Tensor:
         return self.encoder.remember(step_tokens)
 
-    @torch.no_grad()
-    def trace_previous_tick(self) -> None:
-        self.encoder.retrace_previous_tick()
-
-    def reset_memory_trace(self) -> None:
-        self.encoder.reset_memory_trace()
-
     @torch.inference_mode()
     def infer(self, data: InferInput) -> InferResult:
         assert data.s_seq.shape[0] == 1, "Batch size must be 1 for inference"
@@ -123,13 +116,13 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         state = self._state(*window, -self.horizon - 1)
         return self._head_terms(data, state, next_state)
 
-    def compute_streaming_loss(self, data: ReplayBufferData) -> LossResult:
-        """最新の窓 ``data`` (B=1) の損失。現在の状態は、エンコーダが持つ前のティックをLoRA 付きの GDN の層に
-        通し直して作り、RTRL のトレースを1ステップ進める。次の状態は保存した表現で作る。"""
+    def compute_streaming_loss(self, image: torch.Tensor, data: ReplayBufferData) -> LossResult:
+        """最新の窓 ``data`` (B=1) の損失。現在の状態は、前のティックで ``remember`` が返した
+        画像のトークン ``image`` (num_positions, hidden_size)（計算グラフ付き）から作り、勾配は
+        LoRA 付きの GDN の層の LoRA まで届く。次の状態は保存した表現で作る。"""
         assert self.horizon == 1, self.horizon
-        image = self.encoder.retrace_previous_tick()
         state = self.encoder(
-            image, data.actions[:, -2], data.rewards[:, -2], data.scalar_obs[:, -2]
+            image.unsqueeze(0), data.actions[:, -2], data.rewards[:, -2], data.scalar_obs[:, -2]
         )
         with torch.no_grad():
             next_state = self._state(

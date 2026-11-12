@@ -98,16 +98,8 @@ class NetworkInterface(nn.Module, abc.ABC):
 
     @abc.abstractmethod
     def remember(self, step_tokens: torch.Tensor) -> torch.Tensor:
-        """このティックのLoRA 付きの GDN の層の入力をLoRA 付きの GDN の層に読ませて再帰の状態を1ティック進め、保存する
-        表現を返す。"""
-
-    @abc.abstractmethod
-    def trace_previous_tick(self) -> None:
-        """streaming の損失に使わない前のティックの分だけ、RTRL のトレースを進める。"""
-
-    @abc.abstractmethod
-    def reset_memory_trace(self) -> None:
-        """RTRL で運んでいる感度だけを 0 に戻す（そこで打ち切る）。"""
+        """このティックの LoRA 付きの GDN の層の入力を層に読ませて、再帰の状態とその感度を
+        1ティック進め、画像のトークンの出力を返す。保存するのはその出力。"""
 
     @abc.abstractmethod
     def infer(self, data: InferInput) -> InferResult:
@@ -119,5 +111,6 @@ class NetworkInterface(nn.Module, abc.ABC):
         """Training loss over a replay batch."""
 
     @abc.abstractmethod
-    def compute_streaming_loss(self, data: ReplayBufferData) -> LossResult:
-        """最新の窓 ``data`` での、前のティックをLoRA 付きの GDN の層に通し直す損失。"""
+    def compute_streaming_loss(self, image: torch.Tensor, data: ReplayBufferData) -> LossResult:
+        """最新の窓 ``data`` での損失。``image`` は前のティックで ``remember`` が返した計算グラフ
+        付きの出力。"""

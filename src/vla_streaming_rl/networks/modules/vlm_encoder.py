@@ -74,8 +74,8 @@ class VLMEncoder(nn.Module):
     ``gdn_memory_layers`` 層の GDN だけをエピソードの間の記憶にする。VLM は毎ステップ流れを
     空にして読み（``stream_window_steps`` は 0）、``represent`` はその最も下の層の入力をこのステップの
     全トークンについて返す。``remember`` はそれらの層を ``GDNMemoryLayer`` で下から順に計算し、
-    画像のトークンの出力（``forward`` が読む表現）を返す。再帰の状態と RTRL のトレースはエンコーダが
-    持ち、その層の LoRA は ``retrace_previous_tick`` を通した streaming の損失で RTRL で学習する。
+    画像のトークンの出力（``forward`` が読む表現）を返す。再帰の状態と RTRL の感度はエンコーダが
+    持ち、その層の LoRA は ``remember`` の出力から作った状態の損失で RTRL で学習する。
     """
 
     def __init__(
@@ -126,13 +126,8 @@ class VLMEncoder(nn.Module):
                     for index in memory_layer_indices
                 ]
             )
-            # LoRA 付きの GDN の層の再帰の状態（最新のティックを読んだ後）。RTRL のトレースは各層が持つ
+            # LoRA 付きの GDN の層の再帰の状態（最新のティックを読んだ後）。その感度は各層が持つ
             self.memory = self._initial_memory()
-            # 最新とその前のティックのLoRA 付きの GDN の層の入力と、それを読む前の再帰の状態。トレースは
-            # 前のティックを読んだ後の状態の感度まで進める（streaming の損失が前のティックを
-            # 通し直すときに進める）
-            self.latest_tick: tuple[torch.Tensor, torch.Tensor] | None = None
-            self.previous_tick: tuple[torch.Tensor, torch.Tensor] | None = None
         # 観測の画像（一人称の視点と、あれば鳥瞰図）ごとのトークンの格子を並べる。格子の
         # 大きさは画像の大きさからプロセッサが決める（256px なら統合後 8x8）
         self.images_num = len(image_shapes)
@@ -333,33 +328,21 @@ class VLMEncoder(nn.Module):
         return self._step_tokens(inputs["input_ids"], step_outputs)
 
     def reset_memory(self) -> None:
-        """LoRA 付きの GDN の層の再帰の状態を空にする。空の記憶はパラメータによらないので、RTRL の
-        トレースも 0 に戻す。"""
-        self.memory = self._initial_memory()
-        self.reset_memory_trace()
-
-    def reset_memory_trace(self) -> None:
+        """LoRA 付きの GDN の層の再帰の状態を空にする。空の状態はパラメータによらないので、
+        感度も 0 に戻す。"""
         assert self.use_memory
+        self.memory = self._initial_memory()
         for layer in self.memory_layers:
             layer.reset_trace()
 
-    @torch.no_grad()
     def remember(self, step_tokens: torch.Tensor) -> torch.Tensor:
-        """``represent`` が返したこのティックのLoRA 付きの GDN の層の入力 (max_step_tokens, hidden_size + 1)
-        をLoRA 付きの GDN の層に読ませ、再帰の状態を1ティック進めて、画像のトークンの出力
-        (num_positions, hidden_size) を返す。トレースは進めない。"""
-        tick = (step_tokens.unsqueeze(0).to(self.device), self.memory)
-        image, self.memory = self._run_memory_layers(*tick, False)
-        self.previous_tick, self.latest_tick = self.latest_tick, tick
+        """``represent`` が返したこのティックの LoRA 付きの GDN の層の入力 (max_step_tokens,
+        hidden_size + 1) を層に読ませ、再帰の状態とその感度を1ティック進めて、画像のトークンの
+        出力 (num_positions, hidden_size) を返す。勾配を取るかは呼び出し側が決める。"""
+        image, self.memory = self._run_memory_layers(
+            step_tokens.unsqueeze(0).to(self.device), self.memory, True
+        )
         return image[0]
-
-    def retrace_previous_tick(self) -> torch.Tensor:
-        """前のティックを、それを読む前の再帰の状態からLoRA 付きの GDN の層に通し直し、RTRL のトレースを
-        1ステップ進めて、画像のトークンの出力 (1, num_positions, hidden_size) を返す。勾配を
-        取るかは呼び出し側が決める。どのティックも、次のティックの後にちょうど1回呼ぶ。"""
-        assert self.previous_tick is not None
-        image, _ = self._run_memory_layers(*self.previous_tick, True)
-        return image
 
     def forward(
         self,
