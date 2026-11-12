@@ -30,10 +30,16 @@ class LatentTDPredictionHead(nn.Module):
     行動チャンクでの目標の予測器の出力から TD で作る。状態は価値の TD での報酬の役を、
     予測器は行動価値の役をする。あわせて、状態と次の状態から行動チャンクを当てる逆運動モデルの
     損失を足す。次の状態は入力にチャンクの最後の行動のトークンを含むので、その分は写すだけで
-    解ける損失でもある。"""
+    解ける損失でもある。
+
+    遷移ごとの予測の誤差は内発報酬にもする。誤差の指数移動平均の平均と分散で標準化してから
+    ``intrinsic_reward_weight`` を掛ける。平均を引くので、ステップを重ねるだけでは報酬が
+    たまらず、いつもより予測が外れる遷移ほど報酬が大きい。"""
 
     # 目標の予測器が予測器を指数移動平均で追う刻み
     TARGET_EMA_RATE = 0.001
+    # 内発報酬を標準化する誤差の平均と分散が、遷移ごとの誤差を指数移動平均で追う刻み
+    INTRINSIC_EMA_RATE = 0.01
 
     def __init__(
         self,
@@ -46,6 +52,7 @@ class LatentTDPredictionHead(nn.Module):
         gamma: float,
         td_loss_weight: float,
         idm_loss_weight: float,
+        intrinsic_reward_weight: float,
     ) -> None:
         super().__init__()
         # 予測の損失の勾配をエンコーダに流さない
@@ -53,6 +60,10 @@ class LatentTDPredictionHead(nn.Module):
         self.gamma = gamma
         self.td_loss_weight = td_loss_weight
         self.idm_loss_weight = idm_loss_weight
+        self.intrinsic_reward_weight = intrinsic_reward_weight
+        # 遷移ごとの予測の誤差の指数移動平均の平均と分散
+        self.register_buffer("error_mean", torch.zeros(()))
+        self.register_buffer("error_var", torch.ones(()))
         chunk_dim = horizon * action_dim
         self.predictor = _MLP(
             state_dim + chunk_dim, predictor_hidden_dim, predictor_block_num, state_dim
@@ -94,13 +105,13 @@ class LatentTDPredictionHead(nn.Module):
         action_chunk: torch.Tensor,
         next_state: torch.Tensor,
         next_action_chunk: torch.Tensor,
-        chunk_dones: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict]:
+    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
         """``state`` (B, state_dim) と ``action_chunk`` (B, horizon, action_dim) から、
         ``next_state`` (B, state_dim) と ``next_action_chunk`` (B, horizon, action_dim) で
-        ブートストラップした状態の割引和を予測する損失と、逆運動モデルの損失。
-        ``next_state`` は勾配なしで作ったもの。``chunk_dones`` (B, horizon, 1) のどこかで
-        エピソードが終わっていれば、ブートストラップしない。"""
+        ブートストラップした状態の割引和を予測する損失と、逆運動モデルの損失、および遷移ごとの
+        内発報酬 (B,)。``next_state`` は勾配なしで作ったもの。状態の流れはエピソードをまたいで
+        続くものとして、エピソードの終わりでもブートストラップする（区切りで目標の作り方を
+        変えると、そこで誤差が跳ねて内発報酬になる）。"""
         if self.detach_predictor:
             state = state.detach()
         action = action_chunk.flatten(start_dim=1)
@@ -110,11 +121,11 @@ class LatentTDPredictionHead(nn.Module):
             boot = self.target_predictor(
                 torch.cat([next_state, next_action_chunk.flatten(start_dim=1)], dim=-1)
             )
-            # エピソードが終わった遷移には続く状態がないので、次の状態だけを目標にする
-            boot_weight = self.gamma * (1.0 - chunk_dones.amax(dim=1))
-            target = (1.0 - boot_weight) * next_state + boot_weight * boot
+            target = (1.0 - self.gamma) * next_state + self.gamma * boot
         pred = self.predictor(torch.cat([state, action], dim=-1))
-        td_loss = (pred - target).pow(2).mean()
+        error = (pred - target).pow(2).mean(dim=-1)  # (B,)
+        td_loss = error.mean()
+        intrinsic_reward = self._intrinsic_reward(error.detach())
         # 目標の大半は目標の予測器の出力で、隣り合うチャンクの状態は似ているので、
         # td_loss は何も学ばなくても小さい。今の状態をそのまま予測にしたときの損失と、
         # 目標のバッチの分散を物差しとして残す
@@ -130,6 +141,21 @@ class LatentTDPredictionHead(nn.Module):
             "seq_td_loss": td_loss.item(),
             "seq_idm_loss": idm_loss.item(),
             "seq_td_copy_loss": copy_loss.item(),
+            "intrinsic_reward": intrinsic_reward.mean().item(),
             **self._collapse_info(state, target),
         }
-        return loss, info
+        return loss, info, intrinsic_reward
+
+    @torch.no_grad()
+    def _intrinsic_reward(self, error: torch.Tensor) -> torch.Tensor:
+        """遷移ごとの予測の誤差 (B,) を、それまでの誤差の平均と分散で標準化して重みを掛けた
+        内発報酬 (B,)。そのあと平均と分散をこのバッチの誤差へ進める。"""
+        reward = (
+            self.intrinsic_reward_weight
+            * (error - self.error_mean)
+            / torch.sqrt(self.error_var + 1e-8)
+        )
+        batch_mean = error.mean()
+        self.error_mean.lerp_(batch_mean, self.INTRINSIC_EMA_RATE)
+        self.error_var.lerp_((error - self.error_mean).pow(2).mean(), self.INTRINSIC_EMA_RATE)
+        return reward

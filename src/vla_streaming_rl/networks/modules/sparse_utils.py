@@ -33,36 +33,28 @@ def create_random_mask(shape: tuple, sparsity: float, device: torch.device) -> t
 
 def create_sparse_init_mask(shape: tuple, sparsity: float, device: torch.device) -> torch.Tensor:
     """
-    Create a SparseInit mask that zeros out complete input dimensions.
-    Based on Algorithm 1 from "Streaming Deep Reinforcement Learning Finally Works"
+    Create a SparseInit mask (SparseInit of "Streaming Deep Reinforcement Learning Finally
+    Works"): each output unit (row) keeps its own random subset of incoming weights and
+    zeros the rest, so every input still reaches some units.
 
     Args:
         shape: Shape of the tensor (output_dim, input_dim) for FC layers
-        sparsity: Sparsity level (0.0 to 1.0) - proportion of input dimensions to zero out
+        sparsity: Proportion of each row's incoming weights to zero out (0.0 to 1.0)
         device: Device to create mask on
 
     Returns:
-        Binary mask tensor
+        Binary mask tensor (1 for kept weights, 0 for zeroed weights)
     """
     assert len(shape) == 2, f"SparseInit only supports 2D tensors, got shape {shape}"
 
-    _, input_dim = shape
-    fan_in = input_dim
-
-    # n ← s × fan_in (number of input dimensions to zero out)
+    output_dim, fan_in = shape
+    # 行ごとに fan_in のうち sparsity の割合を 0 にする。行ごとに独立な順列の先頭を選ぶ
     n_zero_inputs = int(sparsity * fan_in)
-
-    # Create permutation set P of size fan_in
-    input_perm = torch.randperm(fan_in, device=device)
-
-    # Index set I of size n (subset of P) - input dimensions to zero out
-    zero_input_indices = input_perm[:n_zero_inputs]
-
-    # Create mask (1 for kept weights, 0 for zeroed weights)
+    zero_input_indices = torch.rand(output_dim, fan_in, device=device).argsort(dim=1)[
+        :, :n_zero_inputs
+    ]
     mask = torch.ones(shape, device=device, dtype=torch.float32)
-    # Wi,j ← 0, ∀i ∈ I, ∀j (zero out selected input dimensions)
-    mask[:, zero_input_indices] = 0
-
+    mask.scatter_(1, zero_input_indices, 0.0)
     return mask
 
 

@@ -8,3 +8,6 @@ detach_predictor: false
 gamma: 0.8
 td_loss_weight: 10.0
 idm_loss_weight: 1.0
+# 遷移ごとの予測の誤差を標準化した内発報酬の重み。TD の目標の報酬に足す（観測の文には入らない）。
+# 標準化した誤差は平均 0・標準偏差 1 なので、1ステップの報酬（-0.004）とゴール（~1）の間に置く
+intrinsic_reward_weight: 0.01

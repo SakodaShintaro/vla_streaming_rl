@@ -191,16 +191,20 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         data: ReplayBufferData,
         next_state: torch.Tensor,
         next_action: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict]:
-        """将来の状態の予測の損失。予測を切っているときは予測器がないので 0。"""
+    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
+        """将来の状態の予測の損失と、遷移ごとの内発報酬 (B,)。予測を切っているときは予測器が
+        ないので、どちらも 0。"""
         if not self.use_state_predictor:
-            return torch.zeros((), device=state.device), {}
+            return (
+                torch.zeros((), device=state.device),
+                {},
+                torch.zeros(state.shape[0], device=state.device),
+            )
         return self.prediction_head.compute_loss(
             state,
             data.actions[:, -self.horizon :],
             next_state,
             next_action,
-            data.dones[:, -self.horizon :],
         )
 
     def _loss_terms(self, data: ReplayBufferData, advance_trace: bool) -> LossTerms:
@@ -216,11 +220,23 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             next_action = next_gamma_actions[:, -1]
             next_critic_output = self.value_head(next_state, next_action).output
             next_q = self.value_head.gamma_values(next_state, next_gamma_actions)
-        target_value = self.value_head.compute_target_value(
-            next_q, data.rewards[:, -self.horizon :], data.dones[:, -self.horizon :]
-        )
         state, _ = self._state(
             *window, data.rnn_state[:, -self.horizon - 1], -self.horizon - 1, advance_trace
+        )
+        state_prediction_loss, state_prediction_info, intrinsic_reward = self._prediction_loss(
+            state, data, next_state, next_action
+        )
+        # 内発報酬はチャンクの最初のステップの報酬に足す。TD の目標にだけ入り、観測の文には入らない
+        chunk_rewards = data.rewards[:, -self.horizon :]
+        chunk_rewards = torch.cat(
+            [
+                chunk_rewards[:, :1] + intrinsic_reward.view(-1, 1, 1),
+                chunk_rewards[:, 1:],
+            ],
+            dim=1,
+        )
+        target_value = self.value_head.compute_target_value(
+            next_q, chunk_rewards, data.dones[:, -self.horizon :]
         )
         action_chunk = data.actions[:, -self.horizon :]  # (B, horizon, action_dim)
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
@@ -228,9 +244,6 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state, action_chunk, value_head=self.value_head
-        )
-        state_prediction_loss, state_prediction_info = self._prediction_loss(
-            state, data, next_state, next_action
         )
         info = {
             f"losses/{key}": value
