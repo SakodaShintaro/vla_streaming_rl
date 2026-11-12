@@ -224,7 +224,7 @@ class OffPolicyAgent:
         data = self.rb.sample(self.batch_size)
         metrics = self.rb.batch_stats(data)
         data.rewards = self.reward_scaler.normalize(data.rewards)
-        result = self.network.compute_loss(data)
+        result = self.network.compute_replay_loss(data)
         loss = result.loss
         metrics.update(result.info)
         # エピソードをまたぐ窓では学習しない。またいだ前のティックのトレースは _remember で進めた

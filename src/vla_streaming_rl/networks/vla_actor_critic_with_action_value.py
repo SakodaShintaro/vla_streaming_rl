@@ -24,7 +24,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
 
     ``use_memory`` なら、エンコーダの GDN の記憶の層を通した画像のトークンを保存する。記憶の層の
     再帰の状態はエージェントが持ち回り、バッファには入れない。記憶の層の LoRA は
-    ``compute_streaming_loss`` が最新のステップで RTRL で学習し、リプレイの ``compute_loss`` は
+    ``compute_streaming_loss`` が最新のステップで RTRL で学習し、リプレイの ``compute_replay_loss`` は
     保存した表現から射影とヘッドを学習する。
     """
 
@@ -112,7 +112,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
             action = torch.rand_like(action) * 2.0 - 1.0
         return InferResult(action=action, value_report=value_report, features=state)
 
-    def compute_loss(self, data: ReplayBufferData) -> LossResult:
+    def compute_replay_loss(self, data: ReplayBufferData) -> LossResult:
         """リプレイの窓の損失。現在の状態はチャンクの手前のステップから、次の状態は最後の
         ステップから、どちらも保存した表現で作る。"""
         window = (data.observations, data.actions, data.rewards, data.scalar_obs)

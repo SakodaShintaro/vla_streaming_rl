@@ -2,7 +2,7 @@
 """Shared network interface: structured result types and the abstract base class.
 
 Every policy/value network exposes the forward passes — ``infer``,
-``compute_loss`` and ``compute_streaming_loss`` — returning the structured
+``compute_replay_loss`` and ``compute_streaming_loss`` — returning the structured
 types defined here, plus the observation-side hooks the agents drive
 (``stored_image_shape`` / ``represent`` / ``remember``).
 ``NetworkInterface`` makes that contract explicit: a subclass that does not
@@ -25,7 +25,7 @@ from vla_streaming_rl.replay_buffer import ReplayBufferData
 class InferInput:
     """Inputs to a network's ``infer`` (the live, single-step inference call).
 
-    Unlike ``compute_loss`` — which reads a replay batch
+    Unlike ``compute_replay_loss`` — which reads a replay batch
     (:class:`ReplayBufferData`) — inference assembles its window from the
     buffer's latest frames. Batch size is 1.
     """
@@ -49,7 +49,7 @@ class InferResult:
 
 @dataclass
 class LossResult:
-    """Structured return value of a network's ``compute_loss``.
+    """Structured return value of a network's ``compute_replay_loss`` / ``compute_streaming_loss``.
 
     ``info`` stays a plain dict on purpose: it is a dynamic ``name -> float``
     telemetry map whose keys vary per policy-head / predictor configuration and
@@ -113,7 +113,7 @@ class NetworkInterface(nn.Module, abc.ABC):
         state the heads read. Batch size is 1."""
 
     @abc.abstractmethod
-    def compute_loss(self, data: ReplayBufferData) -> LossResult:
+    def compute_replay_loss(self, data: ReplayBufferData) -> LossResult:
         """Training loss over a replay batch."""
 
     @abc.abstractmethod
