@@ -20,7 +20,7 @@ import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from vla_streaming_rl.agents.build import build_all
+from vla_streaming_rl.build import build_all
 from vla_streaming_rl.checkpoint import load_checkpoint_weights, save_checkpoint
 from vla_streaming_rl.envs.animalai.curriculum import training_levels
 from vla_streaming_rl.episode_log import EpisodeRecord, save_episode_data

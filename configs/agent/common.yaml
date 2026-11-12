@@ -38,7 +38,7 @@ vla:
   # ヘッドが読む層（image_layer_start の1層）の直前の gdn_memory_layers 層の GDN だけに、
   # エピソードの間の記憶を持たせる（stream_window_steps は 0 にし、ほかの層は毎ステップ空にする）。
   # none は使わない、frozen は凍結したまま、lora は LoRA を1ステップ分の勾配で、lora_rtrl は
-  # LoRA を RTRL で学習する（streaming だけ。2層以上では層ごとに閉じた近似）
+  # LoRA を RTRL で学習する（streaming_update のときだけ。2層以上では層ごとに閉じた近似）
   gdn_memory: lora_rtrl
   # 記憶の層の数。image_layer_start が 23 なら 3 で層 20〜22（言語モデルの確認では3層で初めて記憶が効いた）
   gdn_memory_layers: 3

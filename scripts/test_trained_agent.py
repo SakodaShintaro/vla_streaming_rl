@@ -28,7 +28,7 @@ from pathlib import Path
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
-from vla_streaming_rl.agents.build import build_all
+from vla_streaming_rl.build import build_all
 from vla_streaming_rl.checkpoint import load_checkpoint_weights, load_global_step
 from vla_streaming_rl.envs.animalai.curriculum import training_levels
 from vla_streaming_rl.script_setup import disable_render_if_headless, resolve_seed, seed_everything

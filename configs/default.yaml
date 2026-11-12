@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - agent: vla_streaming
+  - agent: vla_off_policy
   - env: car_racing
 
 hydra:
@@ -43,8 +43,6 @@ fixed_reward_scale: 1.0
 save_interval: 100
 print_interval: 5
 debug: false
-use_eligibility_trace: true
-et_lambda: 0.5
 
 replay_buffer:
   device: cpu

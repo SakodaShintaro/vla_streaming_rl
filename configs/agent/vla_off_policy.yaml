@@ -3,8 +3,10 @@ defaults:
   - common
   - _self_
 
-agent_type: off_policy
-network_class: vla_actor_critic_with_action_value
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
+# 真なら、リプレイには観測の代わりに行動を選んだときの状態を保存し、毎ステップ、最新の窓での
+# streaming の更新（記憶の層の LoRA は RTRL）と、保存した状態でのヘッドだけのリプレイの更新を
+# 足して1回更新する。記憶の層を lora_rtrl で学ぶときに使う
+streaming_update: false

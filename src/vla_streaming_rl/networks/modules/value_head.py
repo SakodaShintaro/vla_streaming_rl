@@ -28,7 +28,7 @@ class DistributionalValueHead(nn.Module):
     gamma: policy g maximizes Q_g and gamma g's TD target bootstraps from policy
     g's action (:meth:`gamma_values`), and the rollout runs the primary gamma's
     policy. :meth:`to_value` (the mean over gammas) is what the logging and the
-    eligibility trace read. With ``num_gammas == 1`` the logits keep the same
+    actor read. With ``num_gammas == 1`` the logits keep the same
     ``(B, 1, num_bins)`` shape.
 
     With ``num_bins > 1`` the head emits categorical logits and holds an
@@ -95,18 +95,8 @@ class DistributionalValueHead(nn.Module):
 
     def to_value(self, logits: torch.Tensor) -> torch.Tensor:
         """Scalar value per sample, **averaged over all gammas** — the actor /
-        eligibility-trace / rollout objective. Shape ``(B,)``."""
+        rollout objective. Shape ``(B,)``."""
         return self.to_values(logits).mean(dim=1)
-
-    def scalar_value(self, x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-        """Gamma-averaged scalar value of ``(x, a)``, shape ``(B,)``.
-
-        The read-out every actor / eligibility-trace / rollout caller wants, so
-        that pairing a forward with :meth:`to_value` is not repeated at each of
-        them. Reach for the two steps separately only when the forward's
-        ``HeadOutput.activation`` or its per-gamma logits are needed too.
-        """
-        return self.to_value(self(x, a).output)
 
     def gamma_values(self, x: torch.Tensor, gamma_actions: torch.Tensor) -> torch.Tensor:
         """割引率ごとの方策の行動 (B, num_gammas, horizon, action_dim) を、それぞれの割引率の

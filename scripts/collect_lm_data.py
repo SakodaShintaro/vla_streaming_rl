@@ -23,7 +23,7 @@ import numpy as np
 from omegaconf import OmegaConf
 from test_trained_agent import load_wandb_config
 
-from vla_streaming_rl.agents.build import build_all
+from vla_streaming_rl.build import build_all
 from vla_streaming_rl.checkpoint import load_checkpoint_weights, load_global_step
 from vla_streaming_rl.scalar_obs import read_scalar_obs
 from vla_streaming_rl.script_setup import seed_everything

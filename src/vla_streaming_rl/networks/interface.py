@@ -58,18 +58,6 @@ class InferResult:
 
 
 @dataclass
-class EligibilityTraceInfo:
-    """eligibility trace で学習するときの更新に使う量。``actor_loss`` と
-    ``state_prediction_loss`` は通常どおり backward し、``neg_value`` の勾配は value head と
-    エンコーダのトレースに積み、``delta`` を掛けて critic を更新する。"""
-
-    actor_loss: torch.Tensor
-    state_prediction_loss: torch.Tensor
-    neg_value: torch.Tensor
-    delta: torch.Tensor
-
-
-@dataclass
 class LossResult:
     """Structured return value of a network's ``compute_loss``.
 
@@ -89,7 +77,6 @@ class InferLossResult:
 
     infer_result: InferResult
     loss_result: LossResult
-    et_info: EligibilityTraceInfo
 
 
 class NetworkInterface(nn.Module, abc.ABC):
@@ -145,6 +132,14 @@ class NetworkInterface(nn.Module, abc.ABC):
     @abc.abstractmethod
     def compute_loss(self, data: ReplayBufferData) -> LossResult:
         """Training loss over a replay batch."""
+
+    @abc.abstractmethod
+    def feature_shape(self) -> tuple[int, ...]:
+        """ヘッドが読む状態（``InferResult.features``）の1行の形。"""
+
+    @abc.abstractmethod
+    def compute_feature_loss(self, data: ReplayBufferData) -> LossResult:
+        """観測の代わりに保存した状態 ``features`` を並べたリプレイの窓での、ヘッドだけの損失。"""
 
     @abc.abstractmethod
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:

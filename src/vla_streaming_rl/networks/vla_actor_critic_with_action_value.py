@@ -8,7 +8,6 @@ from omegaconf import DictConfig
 
 from ..replay_buffer import ReplayBufferData
 from .interface import (
-    EligibilityTraceInfo,
     InferInput,
     InferLossResult,
     InferResult,
@@ -25,11 +24,7 @@ class LossTerms:
     """リプレイバッチ1つ分の損失と、それを計算する途中で得た次状態での推論結果。"""
 
     total_loss: torch.Tensor
-    actor_loss: torch.Tensor
-    state_prediction_loss: torch.Tensor
     info: dict
-    state: torch.Tensor
-    action_chunk: torch.Tensor
     next_state: torch.Tensor
     next_action: torch.Tensor
     next_critic_output: torch.Tensor
@@ -48,9 +43,8 @@ class VLAActorCriticWithActionValue(NetworkInterface):
     推論も学習もそれを読み戻し、VLM を通さない。
 
     エンコーダに GDN の記憶の層があれば、その再帰状態をエージェントの再帰の状態として持ち回らせる
-    （バッファの各行には、そのステップを読む前の状態が入る）。lora_rtrl の LoRA は streaming の
-    ``infer_and_compute_loss`` で RTRL で学習し、トレースは学習しない ``infer`` で捨てる
-    （streaming ではエピソードの境目でだけ呼ばれる）。off-policy の ``compute_loss`` は保存した
+    （バッファの各行には、そのステップを読む前の状態が入る）。lora_rtrl の LoRA は ``streaming_update``
+    のときの ``infer_and_compute_loss`` で RTRL で学習する。off-policy の ``compute_loss`` は保存した
     状態から1ステップ分の勾配だけを使う。
     """
 
@@ -153,11 +147,22 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         terms = self._loss_terms(data, False)
         return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
 
+    def feature_shape(self) -> tuple[int, ...]:
+        return (self.encoder.output_dim,)
+
+    def compute_feature_loss(self, data: ReplayBufferData) -> LossResult:
+        """観測の代わりに、行動を選んだときの状態 (B, T, state_dim) を並べた窓での、ヘッドだけの
+        損失。エンコーダは通さないので、勾配はヘッドにだけ流れる。"""
+        terms = self._head_terms(
+            data,
+            data.observations[:, -self.horizon - 1],
+            data.observations[:, -1],
+            data.rnn_state[:, -1],
+        )
+        return LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error)
+
     def infer_and_compute_loss(self, data: ReplayBufferData) -> InferLossResult:
         terms = self._loss_terms(data, True)
-        # -Q(s,a) for the eligibility trace. Its gradient reaches the encoder too,
-        # which learns from the critic as in the off-policy mode
-        neg_value = -self.value_head.scalar_value(terms.state, terms.action_chunk.detach()).mean()
         infer_result = InferResult(
             action=terms.next_action,
             value_report=self.value_head.value_report(terms.next_critic_output),
@@ -167,12 +172,6 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         return InferLossResult(
             infer_result=infer_result,
             loss_result=LossResult(loss=terms.total_loss, info=terms.info, td_error=terms.td_error),
-            et_info=EligibilityTraceInfo(
-                actor_loss=terms.actor_loss,
-                state_prediction_loss=terms.state_prediction_loss,
-                neg_value=neg_value,
-                delta=terms.info["losses/delta"],
-            ),
         )
 
     ####################
@@ -229,15 +228,27 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         window = (data.observations, data.actions, data.rewards, data.scalar_obs)
         with torch.no_grad():
             next_state, next_memory = self._state(*window, data.rnn_state[:, -1], -1, False)
+        state, _ = self._state(
+            *window, data.rnn_state[:, -self.horizon - 1], -self.horizon - 1, advance_trace
+        )
+        return self._head_terms(data, state, next_state, next_memory)
+
+    def _head_terms(
+        self,
+        data: ReplayBufferData,
+        state: torch.Tensor,
+        next_state: torch.Tensor,
+        next_memory: torch.Tensor,
+    ) -> LossTerms:
+        """現在の状態 ``state``（勾配あり）と次の状態 ``next_state`` から、ヘッドの損失。
+        行動・報酬・終端は窓 ``data`` の最後の horizon ステップのもの。"""
+        with torch.no_grad():
             # TD の目標は割引率ごとに、その割引率の方策の次の行動で作る。最後が主の割引率の
             # 方策の行動で、推論の結果と状態の予測にはそれを使う
             next_gamma_actions = self.policy_head.get_gamma_actions(next_state)
             next_action = next_gamma_actions[:, -1]
             next_critic_output = self.value_head(next_state, next_action).output
             next_q = self.value_head.gamma_values(next_state, next_gamma_actions)
-        state, _ = self._state(
-            *window, data.rnn_state[:, -self.horizon - 1], -self.horizon - 1, advance_trace
-        )
         state_prediction_loss, state_prediction_info, intrinsic_reward = self._prediction_loss(
             state, data, next_state, next_action
         )
@@ -266,11 +277,7 @@ class VLAActorCriticWithActionValue(NetworkInterface):
         }
         return LossTerms(
             total_loss=self.critic_loss_weight * critic_loss + actor_loss + state_prediction_loss,
-            actor_loss=actor_loss,
-            state_prediction_loss=state_prediction_loss,
             info=info,
-            state=state,
-            action_chunk=action_chunk,
             next_state=next_state,
             next_action=next_action,
             next_critic_output=next_critic_output,
