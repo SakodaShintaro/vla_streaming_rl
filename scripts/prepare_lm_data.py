@@ -100,10 +100,12 @@ def save_prompt(encoder: VLMEncoder, instruction: str, path: Path) -> None:
 
 def main(data_dir: Path, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=False)
-    common = OmegaConf.load(Path(__file__).parents[1] / "configs" / "agent" / "common.yaml")
+    default_vla = OmegaConf.load(
+        Path(__file__).parents[1] / "configs" / "agent" / "vla_off_policy.yaml"
+    ).vla
     # 記憶の層を FIRST_LAYER からにすると、エンコーダはその入力を保存する表現として返す
     vla_config = OmegaConf.merge(
-        common.vla,
+        default_vla,
         {
             "gdn_memory": "frozen",
             "gdn_memory_layers": ATTENTION_LAYER - FIRST_LAYER,

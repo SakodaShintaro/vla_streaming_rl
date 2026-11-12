@@ -1,12 +1,56 @@
 # @package _global_
 defaults:
-  - common
+  - /policy_head: token_diffusion
+  - /value_head: token_dueling  # [dueling, token_dueling, simbav2]
+  - /prediction_head: td_jepa
   - _self_
 
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
+weight_decay: 0.01
 # 真なら、リプレイには観測の代わりに行動を選んだときの状態を保存し、毎ステップ、最新の窓での
 # streaming の更新（記憶の層の LoRA は RTRL）と、保存した状態でのヘッドだけのリプレイの更新を
 # 足して1回更新する。記憶の層を lora_rtrl で学ぶときに使う
 streaming_update: false
+
+vla:
+  model_id: Qwen/Qwen3.5-0.8B
+  load_in_4bit: false
+  # 状態から将来の状態を予測する補助の損失（prediction_head）を入れるか
+  use_state_predictor: true
+  # 画像のトークンの位置の活性を平均する層の範囲 [image_layer_start, image_layer_stop)。
+  # 0 は言語モデルに入る前の埋め込み（ViT の出力そのもの）で、null は最後の層まで。
+  # ViT の特徴だけを使うなら 0 と 1
+  image_layer_start: 23
+  image_layer_stop: 24
+  # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする。状態の幅は
+  # (画像のトークンの数 + スカラーの数) * token_dim。画像のトークンは
+  # 256px の画像1枚で 8x8
+  token_dim: 64
+  # スカラーをトークンにする sin/cos の周期の範囲。最短の周期は残りの収益の 1 と 2 を分け、
+  # 最長の周期は episode_step などの最大の値を1周期に収める
+  scalar_min_period: 0.5
+  scalar_max_period: 4096.0
+  # ヘッドに渡す前にトークンどうしを混ぜる Transformer の層の数（0 なら混ぜない）、注意の
+  # ヘッドの数、残差の layer scale の初期値
+  token_mixer_layers: 2
+  token_mixer_heads: 4
+  token_mixer_layer_scale_init: 0.0001
+  # VLM は指示の文に続けて、ステップごとの前の行動と報酬とスカラーの観測の文と画像を1本の流れとして読み続ける。
+  # full attention の層の KV に残す直近のステップの数。指示の文は sink として
+  # 常に残す。GDN の層の再帰状態は窓に関係なくエピソードの間ずっと持ち越す。
+  # 0 なら毎ステップ流れを空にし、GDN の層の状態も持ち越さない（履歴を使わない）
+  stream_window_steps: 0
+  # ヘッドが読む層（image_layer_start の1層）の直前の gdn_memory_layers 層の GDN だけに、
+  # エピソードの間の記憶を持たせる（stream_window_steps は 0 にし、ほかの層は毎ステップ空にする）。
+  # none は使わない、frozen は凍結したまま、lora は LoRA を1ステップ分の勾配で、lora_rtrl は
+  # LoRA を RTRL で学習する（streaming_update のときだけ。2層以上では層ごとに閉じた近似）
+  gdn_memory: lora_rtrl
+  # 記憶の層の数。image_layer_start が 23 なら 3 で層 20〜22（言語モデルの確認では3層で初めて記憶が効いた）
+  gdn_memory_layers: 3
+  # LoRA のランクと alpha（delta W = alpha / rank * B A）
+  gdn_lora_rank: 8
+  gdn_lora_alpha: 16.0
+  # 1ステップに読むトークンの数の上限。表現はこの長さに詰め物をして保存する
+  gdn_max_step_tokens: 256

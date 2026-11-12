@@ -41,8 +41,10 @@ def main(checkpoint_path: Path, games: int, seed: int) -> None:
     run_dir = checkpoint_path.parent
     cfg = load_wandb_config(run_dir)
     # 試行のあとに足した vla の項目は、いまの既定値で埋める
-    common = OmegaConf.load(Path(__file__).parents[1] / "configs" / "agent" / "common.yaml")
-    cfg.vla = OmegaConf.merge(common.vla, cfg.vla)
+    default_vla = OmegaConf.load(
+        Path(__file__).parents[1] / "configs" / "agent" / "vla_off_policy.yaml"
+    ).vla
+    cfg.vla = OmegaConf.merge(default_vla, cfg.vla)
     assert cfg.env_factory.mode == "life", cfg.env_factory.mode
     out_dir = run_dir / "lm_data" / f"seed{seed}"
     out_dir.mkdir(parents=True, exist_ok=False)
