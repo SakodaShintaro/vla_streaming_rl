@@ -7,6 +7,7 @@ from omegaconf import DictConfig
 from torch import nn
 from transformers import DynamicCache
 from transformers.cache_utils import LinearAttentionCacheLayerMixin
+from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextRotaryEmbedding
 
 from vla_streaming_rl.networks.modules.lora_gdn import LORA_TARGETS, LoRAGDNLayer
 from vla_streaming_rl.networks.modules.reward_embed import embed_reward
@@ -42,6 +43,31 @@ def step_text_items(
         (SCALAR_OBS_NAMES[index], f"{SCALAR_OBS_NAMES[index]}: {scalar_obs[index]:.2f}")
         for index in STATE_SCALAR_INDICES
     ]
+
+
+class ExactPhaseRotaryEmbedding(Qwen3_5TextRotaryEmbedding):
+    """Qwen3.5 の M-RoPE を、位置が大きくなっても角度が狂わないように計算し直したもの。
+
+    元の実装は角度（位置 × 周波数）を fp32 で計算するので、流れを読み続けて位置が 10^6 を
+    超えるあたりから速い周波数の角度がずれ、2^24 を超えると位置そのものが表せなくなる。
+    ここでは整数の位置から角度を fp64 で計算して、周波数ごとに 2π で mod を取ってから fp32 に
+    戻す。回転としては元と同じで、小さい位置では元の値と一致する。"""
+
+    @torch.no_grad()
+    def forward(
+        self, x: torch.Tensor, position_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # 位置は (3, B, L) の整数（M-RoPE の時間・縦・横）
+        assert position_ids.ndim == 3 and position_ids.shape[0] == 3, position_ids.shape
+        assert not position_ids.is_floating_point(), position_ids.dtype
+        # (3, B, L, rotary_dim / 2) の角度を fp64 で作り、2π で mod を取る
+        phases = position_ids[..., None].to(torch.float64) * self.inv_freq.to(torch.float64)
+        freqs = torch.remainder(phases, 2.0 * math.pi).to(torch.float32)
+        freqs = self.apply_interleaved_mrope(freqs, self.mrope_section)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos() * self.attention_scaling
+        sin = emb.sin() * self.attention_scaling
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class VLMEncoder(nn.Module):
@@ -90,6 +116,10 @@ class VLMEncoder(nn.Module):
             device=torch.device(device),
         )
         self.vlm.eval().requires_grad_(False)
+        text_config = self.vlm.config.text_config
+        assert text_config.rope_parameters["rope_type"] == "default", text_config.rope_parameters
+        # 流れを読み続けると位置が大きくなるので、角度を mod 2π で計算する版に差し替える
+        self.vlm.model.language_model.rotary_emb = ExactPhaseRotaryEmbedding(text_config).to(device)
         self.vlm_hidden_size = self.vlm.config.text_config.hidden_size
         assert vla_config.stream_window_steps >= 0, vla_config.stream_window_steps
         self.stream_window_steps = vla_config.stream_window_steps
@@ -104,7 +134,6 @@ class VLMEncoder(nn.Module):
             assert vla_config.num_lora_gdn_layers >= 1, vla_config.num_lora_gdn_layers
             self.lora_gdn_start = vla_config.image_layer_start - vla_config.num_lora_gdn_layers
             lora_gdn_indices = range(self.lora_gdn_start, vla_config.image_layer_start)
-            text_config = self.vlm.config.text_config
             for index in lora_gdn_indices:
                 assert text_config.layer_types[index] == "linear_attention", index
             self.lora_gdn_layers = nn.ModuleList(
