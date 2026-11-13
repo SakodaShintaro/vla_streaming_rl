@@ -93,7 +93,7 @@ class OffPolicyAgent:
         # 最適化は actor・critic（価値ヘッド）・LoRA 付きの GDN の層の LoRA の3つに分ける
         critic_params = list(network.value_head.parameters())
         # LoRA の勾配は streaming の 1 サンプルからしか来ず、ヘッドの勾配とは大きさが違うので、
-        # 学習率もクリップも分ける。weight decay は覚えたことを凍結した層の側へ戻すので掛けない
+        # 学習率もクリップも分ける
         self.lora_params = (
             list(network.encoder.lora_gdn_layers.parameters()) if streaming_update else []
         )
@@ -102,7 +102,11 @@ class OffPolicyAgent:
         self.head_params = actor_params + critic_params
         self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
         self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay)
-        self.lora_optimizer = optim.Adam(self.lora_params, lr=lora_lr) if streaming_update else None
+        self.lora_optimizer = (
+            optim.AdamW(self.lora_params, lr=lora_lr, weight_decay=weight_decay)
+            if streaming_update
+            else None
+        )
         self.device = torch.device("cuda")
         # 観測から読んでネットワークに渡す画像の名前（IMAGE_OBS_NAMES の並び）
         self.image_names = image_names
@@ -235,7 +239,9 @@ class OffPolicyAgent:
         if self.streaming_update:
             self.lora_optimizer.zero_grad(set_to_none=True)
         result.loss.backward()
-        nn.utils.clip_grad_norm_(self.head_params, self.max_grad_norm)
+        metrics["losses/head_grad_norm"] = nn.utils.clip_grad_norm_(
+            self.head_params, self.max_grad_norm
+        ).item()
         self.actor_optimizer.step()
         self.critic_optimizer.step()
         if self.streaming_update:
