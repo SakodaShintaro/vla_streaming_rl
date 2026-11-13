@@ -79,6 +79,7 @@ class OffPolicyAgent:
         seq_len: int,
         actor_lr: float,
         critic_lr: float,
+        lora_lr: float,
         weight_decay: float,
         buffer_size: int,
         buffer_device: str,
@@ -89,12 +90,19 @@ class OffPolicyAgent:
         streaming_update: bool,
         instruction: str,
     ) -> None:
-        # Actor / critic optimizer split (critic == value head); both AdamW.
+        # 最適化は actor・critic（価値ヘッド）・LoRA 付きの GDN の層の LoRA の3つに分ける
         critic_params = list(network.value_head.parameters())
-        critic_param_ids = {id(p) for p in critic_params}
-        actor_params = [p for p in network.parameters() if id(p) not in critic_param_ids]
+        # LoRA の勾配は streaming の 1 サンプルからしか来ず、ヘッドの勾配とは大きさが違うので、
+        # 学習率もクリップも分ける。weight decay は覚えたことを凍結した層の側へ戻すので掛けない
+        self.lora_params = (
+            list(network.encoder.lora_gdn_layers.parameters()) if streaming_update else []
+        )
+        separate_ids = {id(p) for p in critic_params + self.lora_params}
+        actor_params = [p for p in network.parameters() if id(p) not in separate_ids]
+        self.head_params = actor_params + critic_params
         self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
         self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay)
+        self.lora_optimizer = optim.Adam(self.lora_params, lr=lora_lr) if streaming_update else None
         self.device = torch.device("cuda")
         # 観測から読んでネットワークに渡す画像の名前（IMAGE_OBS_NAMES の並び）
         self.image_names = image_names
@@ -184,14 +192,19 @@ class OffPolicyAgent:
     def optimizer_state_dict(self) -> dict:
         """Optimizer states to checkpoint. The trainer stores and restores this
         verbatim."""
-        return {
+        state = {
             "actor": self.actor_optimizer.state_dict(),
             "critic": self.critic_optimizer.state_dict(),
         }
+        if self.streaming_update:
+            state["lora"] = self.lora_optimizer.state_dict()
+        return state
 
     def load_optimizer_state_dict(self, state: dict) -> None:
         self.actor_optimizer.load_state_dict(state["actor"])
         self.critic_optimizer.load_state_dict(state["critic"])
+        if self.streaming_update:
+            self.lora_optimizer.load_state_dict(state["lora"])
 
     ####################
     # Internal methods #
@@ -219,10 +232,17 @@ class OffPolicyAgent:
         metrics.update(result.info)
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
+        if self.streaming_update:
+            self.lora_optimizer.zero_grad(set_to_none=True)
         result.loss.backward()
-        nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
+        nn.utils.clip_grad_norm_(self.head_params, self.max_grad_norm)
         self.actor_optimizer.step()
         self.critic_optimizer.step()
+        if self.streaming_update:
+            metrics["losses/lora_grad_norm"] = nn.utils.clip_grad_norm_(
+                self.lora_params, self.max_grad_norm
+            ).item()
+            self.lora_optimizer.step()
         self.rb.update_priorities(data.start_indices, result.td_error)
         return metrics
 
