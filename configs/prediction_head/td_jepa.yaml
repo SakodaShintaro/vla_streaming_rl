@@ -3,8 +3,7 @@ _partial_: true
 predictor_hidden_dim: 512
 predictor_block_num: 2
 detach_predictor: false
-# 行動チャンク1つあたりの割引率
-gamma: 0.8
+gammas: [0.5, 0.8, 0.95]
 td_loss_weight: 10.0
 idm_loss_weight: 1.0
 # 遷移ごとの予測の誤差を標準化した内発報酬の重み。TD の目標の報酬に足す（観測の文には入らない）。

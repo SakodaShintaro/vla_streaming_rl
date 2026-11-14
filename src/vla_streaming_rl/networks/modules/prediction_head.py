@@ -24,11 +24,12 @@ class _MLP(nn.Module):
 class LatentTDPredictionHead(nn.Module):
     """ヘッドが読む状態そのものを予測先にした TD-JEPA (Bagatella et al., 2025) の対称版。
 
-    予測器 T(φ(s), a) は、ステップごとに割引率 ``gamma`` で割り引いた将来の状態の正規化した和
-    (1 - gamma) Σ_k gamma^k φ(s_{t+1+k}) を決定的に回帰する。目標は次の状態と、次の状態で
-    方策が選ぶ行動での目標の予測器の出力から TD で作る。状態は価値の TD での報酬の役を、
-    予測器は行動価値の役をする。あわせて、状態と次の状態から行動を当てる逆運動モデルの
-    損失を足す。次の状態は入力にその行動のトークンを含むので、写すだけで解ける損失でもある。
+    予測器 T(φ(s), a) は、割引率 ``gammas`` のそれぞれについて、ステップごとに割り引いた将来の
+    状態の正規化した和 (1 - γ) Σ_k γ^k φ(s_{t+1+k}) を決定的に回帰する。割引率ごとに予測する
+    地平が違い、短い割引率は数ステップ先を、長い割引率は数十ステップ先までを読む。目標は割引率
+    ごとに、次の状態と、次の状態で方策が選ぶ行動での目標の予測器の出力から TD で作る。状態は
+    価値の TD での報酬の役を、予測器は行動価値の役をする。あわせて、状態と次の状態から行動を
+    当てる逆運動モデルの損失を足す。次の状態は入力にその行動のトークンを含むので、写すだけで解ける損失でもある。
 
     遷移ごとの予測の誤差は内発報酬にもする。誤差の指数移動平均の平均と分散で標準化してから
     ``intrinsic_reward_weight`` を掛ける。平均を引くので、ステップを重ねるだけでは報酬が
@@ -46,7 +47,7 @@ class LatentTDPredictionHead(nn.Module):
         predictor_hidden_dim: int,
         predictor_block_num: int,
         detach_predictor: bool,
-        gamma: float,
+        gammas: list[float],
         td_loss_weight: float,
         idm_loss_weight: float,
         intrinsic_reward_weight: float,
@@ -54,15 +55,21 @@ class LatentTDPredictionHead(nn.Module):
         super().__init__()
         # 予測の損失の勾配をエンコーダに流さない
         self.detach_predictor = detach_predictor
-        self.gamma = gamma
+        assert len(gammas) >= 1 and all(0.0 <= g < 1.0 for g in gammas), gammas
+        self.register_buffer("gammas", torch.tensor(gammas, dtype=torch.float32), persistent=False)
+        self.state_dim = state_dim
         self.td_loss_weight = td_loss_weight
         self.idm_loss_weight = idm_loss_weight
         self.intrinsic_reward_weight = intrinsic_reward_weight
         # 遷移ごとの予測の誤差の指数移動平均の平均と分散
         self.register_buffer("error_mean", torch.zeros(()))
         self.register_buffer("error_var", torch.ones(()))
+        # 割引率ごとの予測を並べて出す
         self.predictor = _MLP(
-            state_dim + action_dim, predictor_hidden_dim, predictor_block_num, state_dim
+            state_dim + action_dim,
+            predictor_hidden_dim,
+            predictor_block_num,
+            len(gammas) * state_dim,
         )
         # ブートストラップに使う目標の予測器。勾配では学習せず、予測器を指数移動平均で追う
         self.target_predictor = copy.deepcopy(self.predictor).requires_grad_(False)
@@ -112,17 +119,23 @@ class LatentTDPredictionHead(nn.Module):
             state = state.detach()
 
         self._update_target()
+        batch_size, num_gammas = state.shape[0], self.gammas.shape[0]
+        gammas = self.gammas.view(1, num_gammas, 1)
         with torch.no_grad():
             boot = self.target_predictor(torch.cat([next_state, next_action], dim=-1))
-            target = (1.0 - self.gamma) * next_state + self.gamma * boot
+            boot = boot.view(batch_size, num_gammas, self.state_dim)
+            target = (1.0 - gammas) * next_state.unsqueeze(1) + gammas * boot
         pred = self.predictor(torch.cat([state, action], dim=-1))
-        error = (pred - target).pow(2).mean(dim=-1)  # (B,)
+        pred = pred.view(batch_size, num_gammas, self.state_dim)
+        error_per_gamma = (pred - target).pow(2).mean(dim=-1)  # (B, num_gammas)
+        # 遷移ごとの誤差は割引率で平均したもの
+        error = error_per_gamma.mean(dim=-1)  # (B,)
         td_loss = error.mean()
         intrinsic_reward = self._intrinsic_reward(error.detach())
         # 目標の大半は目標の予測器の出力で、隣り合うステップの状態は似ているので、
         # td_loss は何も学ばなくても小さい。今の状態をそのまま予測にしたときの損失と、
         # 目標のバッチの分散を物差しとして残す
-        copy_loss = (state.detach() - target).pow(2).mean()
+        copy_loss = (state.detach().unsqueeze(1) - target).pow(2).mean()
 
         # 行動は [-1, 1] なので tanh で範囲を合わせる
         idm_pred = torch.tanh(self.inverse_dynamics(torch.cat([state, next_state], dim=-1)))
@@ -134,8 +147,14 @@ class LatentTDPredictionHead(nn.Module):
             "seq_td_loss": td_loss.item(),
             "seq_idm_loss": idm_loss.item(),
             "seq_td_copy_loss": copy_loss.item(),
+            **{
+                f"seq_td_loss_g{gamma:g}": value.item()
+                for gamma, value in zip(
+                    self.gammas.tolist(), error_per_gamma.mean(dim=0), strict=True
+                )
+            },
             "intrinsic_reward": intrinsic_reward.mean().item(),
-            **self._collapse_info(state, target),
+            **self._collapse_info(state, target.flatten(start_dim=1)),
         }
         return loss, info, intrinsic_reward
 
