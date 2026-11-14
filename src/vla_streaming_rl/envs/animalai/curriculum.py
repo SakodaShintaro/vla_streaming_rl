@@ -16,6 +16,9 @@ field (see `build_selector`):
   - "life"    the training set as the stages of a game played with lives, in
               label order: advance on success, retry on failure while a life is
               left, otherwise start over from the first stage (`LifeSelector`).
+  - "life2"   "life", except that a game retries without losing a life until it
+              clears the stage the previous game ended on, so the number of
+              stages a game clears goes up every game (`Life2Selector`).
   - "eval"    every configs/competition/ arena of `eval_levels` and
               `eval_variants` once, in order -- with every level and variant,
               the 900-arena Testbed sweep (`SequentialSelector`, which ends
@@ -173,7 +176,7 @@ def _all_levels(variant: str) -> list[str]:
 def training_levels(mode: str, variant: str, train_levels: list[str]) -> list[str]:
     """The levels a run in `mode` trains on: `train_levels` for the sweep modes,
     every level for the curriculum modes, whose stages are the levels."""
-    if mode in ("sequential", "random", "life"):
+    if mode in ("sequential", "random", "life", "life2"):
         return list(train_levels)
     return _all_levels(variant)
 
@@ -554,10 +557,16 @@ class LifeSelector(ArenaSelector):
                 self._lives_left = min(self._lives_left + 1, self.lives)
             if self._stage_index == len(self.arenas):
                 self._end_game(len(self.arenas))
-        elif self._lives_left >= 1:
-            self._lives_left -= 1
-        else:
-            self._end_game(self._stage_index)
+        elif self._failure_costs_life():
+            if self._lives_left >= 1:
+                self._lives_left -= 1
+            else:
+                self._end_game(self._stage_index)
+
+    def _failure_costs_life(self) -> bool:
+        """今のステージでの失敗がライフを使うか。ライフを使わない失敗は、同じステージに
+        そのまま再挑戦する。"""
+        return True
 
     def info(self, global_step: int) -> dict:
         del global_step
@@ -644,6 +653,45 @@ class SequentialSelector(ArenaSelector):
         self._next_index = sum(self._attempts.values())
 
 
+class Life2Selector(LifeSelector):
+    """`LifeSelector` と同じゲームだが、前のゲームが終わったステージ（成功できなかった
+    ステージ）に成功するまでは、失敗してもライフを使わずに同じステージに再挑戦する。そこに
+    成功した時点から、ライフ `lives` 個で `LifeSelector` と同じように進める。
+
+    各ゲームは前のゲームより少なくとも1つ多くのステージに成功するので、ゲームで成功した
+    ステージの数（game_stages_cleared）はゲームごとに狭義単調に増える。ただし前のゲームが
+    全ステージに成功していたら、次のゲームは最後までライフを使わずに全ステージを進める。
+    最初のゲームでは、最初のステージに成功するまでライフを使わない。
+    """
+
+    def __init__(self, arenas: list[Arena], lives: int, life_recovery_stages: float):
+        super().__init__(arenas, lives, life_recovery_stages)
+        # 前のゲームで成功したステージの数。このゲームでは、この番号（0 始まり）のステージに
+        # 成功するまでライフを使わない
+        self._free_until_index = 0
+
+    def _failure_costs_life(self) -> bool:
+        return self._stage_index > self._free_until_index
+
+    def _end_game(self, stages_cleared: int) -> None:
+        super()._end_game(stages_cleared)
+        self._free_until_index = stages_cleared
+
+    def info(self, global_step: int) -> dict:
+        return {
+            **super().info(global_step),
+            # 次のエピソードの失敗がライフを使わないか
+            "free_retry": not self._failure_costs_life(),
+        }
+
+    def progress_state(self) -> dict:
+        return {**super().progress_state(), "free_until_index": self._free_until_index}
+
+    def load_state(self, arena_attempts: dict, arena_successes: dict, progress: dict) -> None:
+        super().load_state(arena_attempts, arena_successes, progress)
+        self._free_until_index = int(progress["free_until_index"])
+
+
 def build_selector(
     mode: str,
     train_variant: str,
@@ -676,6 +724,11 @@ def build_selector(
             arenas=_training_arenas(train_variant, train_levels), shuffle=True, seed=seed
         ),
         "life": lambda: LifeSelector(
+            arenas=_training_arenas(train_variant, train_levels),
+            lives=lives,
+            life_recovery_stages=life_recovery_stages,
+        ),
+        "life2": lambda: Life2Selector(
             arenas=_training_arenas(train_variant, train_levels),
             lives=lives,
             life_recovery_stages=life_recovery_stages,

@@ -9,6 +9,8 @@ set -eux
 #               blink   -> level 01 を点滅の記憶の課題にしたもの（env_factory.blink_dark_steps_increment）
 #               life    -> ライフ制のステージ（env_factory.mode=life）。レベルと版とライフの数は
 #                          configs/env/animalai.yaml のデフォルト通り
+#               life2   -> life と同じだが、前のゲームが終わったステージに成功するまではライフを
+#                          使わない（env_factory.mode=life2）
 #               normal  -> configs/env/animalai.yaml のデフォルト通り
 difficulty=${1}
 agent=${2}
@@ -88,11 +90,18 @@ case ${difficulty} in
       episode_limit=2000
     )
     ;;
+  life2)
+    # ライフ制のステージで、各ゲームが前のゲームより先へ進む（configs/env/animalai.yaml の mode の life2）
+    difficulty_overrides=(
+      env_factory.mode=life2
+      episode_limit=2000
+    )
+    ;;
   normal)
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, 15, blink, life or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, 15, blink, life, life2 or normal)" >&2
     exit 1
     ;;
 esac
