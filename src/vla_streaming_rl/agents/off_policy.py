@@ -80,6 +80,7 @@ class OffPolicyAgent:
         actor_lr: float,
         critic_lr: float,
         lora_lr: float,
+        lora_beta1: float,
         weight_decay: float,
         buffer_size: int,
         buffer_device: str,
@@ -103,7 +104,14 @@ class OffPolicyAgent:
         self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
         self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay)
         self.lora_optimizer = (
-            optim.AdamW(self.lora_params, lr=lora_lr, weight_decay=weight_decay)
+            # LoRA の勾配は1ティックごとにはばらつきが大きく、一定の向きは数百ティック分を
+            # 平均して初めて見えるので、1次のモーメントを長く平均する
+            optim.AdamW(
+                self.lora_params,
+                lr=lora_lr,
+                betas=(lora_beta1, 0.999),
+                weight_decay=weight_decay,
+            )
             if streaming_update
             else None
         )

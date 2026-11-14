@@ -9,6 +9,7 @@ batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
 lora_lr: 1e-5
+lora_beta1: 0.999
 weight_decay: 0.01
 streaming_update: false
 

@@ -46,6 +46,7 @@ def build_all(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         lora_lr=args.lora_lr,
+        lora_beta1=args.lora_beta1,
         weight_decay=args.weight_decay,
         buffer_size=args.replay_buffer.size,
         buffer_device=args.replay_buffer.device,
