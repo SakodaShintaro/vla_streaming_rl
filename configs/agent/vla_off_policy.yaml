@@ -37,7 +37,7 @@ vla:
   # full attention の層の KV に残す直近のステップの数。指示の文は sink として
   # 常に残す。GDN の層の再帰状態は窓に関係なくエピソードの間ずっと持ち越す。
   # 0 なら毎ステップ流れを空にし、GDN の層の状態も持ち越さない（履歴を使わない）
-  stream_window_steps: 0
+  stream_window_steps: 256
   # streaming_update なら、ヘッドが読む層（image_layer_start の1層）の直前の num_lora_gdn_layers 層の
   # GDN に LoRA を付け、その LoRA を RTRL で学ぶ（2層以上では層ごとに閉じた近似）
   # LoRA 付きの GDN の層の数。image_layer_start が 23 なら 3 で層 20〜22（言語モデルの確認では3層で初めて記憶が効いた）
