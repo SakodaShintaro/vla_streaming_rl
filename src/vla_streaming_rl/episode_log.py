@@ -22,10 +22,12 @@ class EpisodeRecord:
     observations: list[np.ndarray]
     texts: list[dict[str, str]]
     xyzs: list[tuple[float, float, float]]
+    # 位置と一緒に記録する、エージェントの向き（yaw、度）
+    yaws: list[float]
     # エージェントが画像と並べて読むスカラーの観測（SCALAR_OBS_NAMES の並び）
     scalar_obs: list[np.ndarray]
-    # 位置を記録するか。Animal-AI はアリーナの中の位置を毎ステップ出すが、出さない環境では
-    # xyzs は空のまま
+    # 位置と向きを記録するか。Animal-AI はアリーナの中の位置と向きを毎ステップ出すが、出さない
+    # 環境では xyzs と yaws は空のまま
     log_position: bool
 
     @classmethod
@@ -40,6 +42,7 @@ class EpisodeRecord:
             observations=[obs["image"].copy()],
             texts=[texts],
             xyzs=[],
+            yaws=[],
             scalar_obs=[],
             log_position="agent_xyz" in reset_info,
         )
@@ -60,6 +63,8 @@ class EpisodeRecord:
         self.observations.append(obs["image"].copy())
         if self.log_position:
             self.xyzs.append(info["agent_xyz"])
+            # agent_rotation は (pitch, yaw, roll)
+            self.yaws.append(info["agent_rotation"][1])
         self.scalar_obs.append(read_scalar_obs(obs))
         self.frames.append(frame)
         self.texts.append(texts)
@@ -135,9 +140,10 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
     save_episode_texts(episode_log_dir, record.texts)
 
     # One row per step: the action taken, the reward it drew, where the
-    # agent stood after it and the scalar observation it came back with, so an
-    # episode's trajectory can be drawn from the run rather than re-simulated. ``xyzs`` is empty for an env that reports
-    # no position, and the x/y/z columns are then left out rather than filled
+    # agent stood after it and which way it faced, and the scalar observation
+    # it came back with, so an episode's trajectory can be drawn from the run
+    # rather than re-simulated. ``xyzs`` is empty for an env that reports no
+    # position, and the x/y/z/yaw columns are then left out rather than filled
     # with a stand-in.
     columns = [f"action{i}" for i in range(len(record.actions[0]))] + ["reward"]
     rows = [
@@ -145,8 +151,11 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
         for action, reward in zip(record.actions, record.rewards)
     ]
     if record.xyzs:
-        columns = columns + ["x", "y", "z"]
-        rows = [row + [f"{float(v):.4f}" for v in xyz] for row, xyz in zip(rows, record.xyzs)]
+        columns = columns + ["x", "y", "z", "yaw"]
+        rows = [
+            row + [f"{float(v):.4f}" for v in xyz] + [f"{float(yaw):.2f}"]
+            for row, xyz, yaw in zip(rows, record.xyzs, record.yaws, strict=True)
+        ]
     # 行動を取ったあとに返った観測のスカラー
     columns = columns + list(SCALAR_OBS_NAMES)
     rows = [
