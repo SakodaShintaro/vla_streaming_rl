@@ -87,14 +87,14 @@ case ${difficulty} in
     # ライフ制のステージ（configs/env/animalai.yaml の mode の life）
     difficulty_overrides=(
       env_factory.mode=life
-      episode_limit=2000
+      episode_limit=1000
     )
     ;;
   life2)
     # ライフ制のステージで、各ゲームが前のゲームより先へ進む（configs/env/animalai.yaml の mode の life2）
     difficulty_overrides=(
       env_factory.mode=life2
-      episode_limit=2000
+      episode_limit=1000
     )
     ;;
   normal)
