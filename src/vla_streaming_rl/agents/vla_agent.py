@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
-"""Off-policy learning mode: act now, learn later from a large replay buffer.
+"""The VLA agent: a frozen VLM reads the observation, heads learn off-policy
+from a large replay buffer.
 
 Every tick is stored; once ``learning_starts`` ticks have gone by, one gradient
 step on a ``batch_size`` sample of the buffer fires every tick, after the tick
@@ -20,7 +21,6 @@ the previous update, so that gradient is evaluated at the weights one update
 old.
 """
 
-from dataclasses import dataclass
 from typing import Any
 
 import gymnasium as gym
@@ -28,6 +28,7 @@ import numpy as np
 import torch
 from torch import nn, optim
 
+from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.vla_actor_critic_with_action_value import (
     InferInput,
 )
@@ -36,34 +37,7 @@ from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs
 
 
-@dataclass
-class StepResult:
-    """Structured return value of the agent's ``select_action`` / ``step``.
-
-    - ``action``: the env action to execute this tick.
-    - ``metrics``: flat scalar telemetry, logged verbatim to wandb.
-    - ``panels``: named RGB image panels (HxWx3) for the render strip. The
-      trainer concatenates whatever panels are present, in insertion order,
-      so the agent can contribute extra panels (e.g. the next-frame prediction
-      or a bird's-eye trajectory view) without the trainer knowing about them.
-      Stable-panel contract: the agent must emit the SAME set of panel keys with
-      the SAME shapes on every step of a run (use a blank placeholder when the
-      content does not exist yet, e.g. before the first prediction). The render
-      frames are encoded into a single video, which requires a constant size.
-    - ``texts``: named free-form text, written to the episode's ``texts.tsv``.
-      What a panel shows as pixels this keeps as characters, so a chain of
-      thought can be read back and searched after the run. The agent puts the
-      instruction its policy read this tick under ``"prompt"``, which is also
-      what the trainer captions the render with.
-    """
-
-    action: np.ndarray
-    metrics: dict[str, float]
-    panels: dict[str, np.ndarray]
-    texts: dict[str, str]
-
-
-class OffPolicyAgent:
+class VLAAgent:
     def __init__(
         self,
         *,

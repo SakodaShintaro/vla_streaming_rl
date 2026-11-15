@@ -3,7 +3,7 @@ set -ux
 
 # Usage: ./compare_animalai.sh <seed> [hydra overrides...]
 # 主比較の手法を同じシードで順に実行する。
-#   vla_off_policy : VLA（画像1枚と指示文を読む凍結 VLM の表現）からヘッドが行動を出す
+#   vla            : VLA（画像1枚と指示文を読む凍結 VLM の表現）からヘッドが行動を出す
 # 比較の指標は Testbed なので終了時評価は常に入れる。
 # 追加の引数はすべての手法に渡り、後ろにあるので上の指定も上書きできる
 # （例: env_factory.train_levels=[01,02]）。
@@ -16,7 +16,7 @@ result_dir=results/compare_${stamp}_seed${seed}
 
 # 1手法が落ちても残りは走らせ、最後に失敗したものを報告する
 failed=()
-for agent in vla_off_policy; do
+for agent in vla; do
   ./train_animalai.sh normal ${agent} seed${seed} \
     seed=${seed} \
     final_evaluation=true \

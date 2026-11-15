@@ -5,13 +5,15 @@ defaults:
   - /prediction_head: td_jepa
   - _self_
 
+# この設定のエージェント（build.py が組み立てるネットワークとエージェントを選ぶ）
+agent_type: vla
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
 lora_lr: 1e-5
 lora_beta1: 0.999
 weight_decay: 0.01
-streaming_update: false
+streaming_update: true
 
 vla:
   model_id: Qwen/Qwen3.5-0.8B

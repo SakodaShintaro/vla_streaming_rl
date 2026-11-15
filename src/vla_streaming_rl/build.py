@@ -4,16 +4,39 @@ from gymnasium import Env
 from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.instruction import ENV_INSTRUCTIONS, TOPDOWN_INSTRUCTION
-from vla_streaming_rl.agents.off_policy import OffPolicyAgent
+from vla_streaming_rl.agents.vla_agent import VLAAgent
+from vla_streaming_rl.agents.wan_agent import WanAgent
 from vla_streaming_rl.image_obs import image_obs_names
 from vla_streaming_rl.networks.vla_actor_critic_with_action_value import (
     VLAActorCriticWithActionValue,
 )
+from vla_streaming_rl.networks.wan_actor_critic_with_action_value import (
+    WanActorCriticWithActionValue,
+)
 from vla_streaming_rl.reward_scaler import build_reward_scaler
 
 
-def build_all(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue, OffPolicyAgent]:
-    """config が表すネットワークとエージェントを、どの入口のスクリプトでも同じようにつないだもの。"""
+def build_all(
+    env: Env, args: DictConfig
+) -> (
+    tuple[VLAActorCriticWithActionValue, VLAAgent] | tuple[WanActorCriticWithActionValue, WanAgent]
+):
+    """config の agent が表すネットワークとエージェントを、どの入口のスクリプトでも同じように
+    つないだもの。"""
+    if args.agent_type == "vla":
+        return build_vla(env, args)
+    assert args.agent_type == "wan", args.agent_type
+    return build_wan(env, args)
+
+
+def _instruction(env: Env, args: DictConfig) -> str:
+    instruction = ENV_INSTRUCTIONS[args.env_id]
+    if "topdown_image" in image_obs_names(env.observation_space):
+        instruction = f"{instruction} {TOPDOWN_INSTRUCTION}"
+    return instruction
+
+
+def build_vla(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue, VLAAgent]:
     image_names = image_obs_names(env.observation_space)
     # ヘッドのクラスと設定は config の policy_head / value_head / prediction_head が決め、
     # ネットワークは自分しか知らない状態の幅と action_dim を呼び出し時に渡す。
@@ -29,10 +52,7 @@ def build_all(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         # LoRA 付きの GDN の層は streaming の更新の RTRL で学ぶので、そのときだけ持つ
         use_lora_gdn=args.streaming_update,
     )
-    instruction = ENV_INSTRUCTIONS[args.env_id]
-    if "topdown_image" in image_names:
-        instruction = f"{instruction} {TOPDOWN_INSTRUCTION}"
-    agent = OffPolicyAgent(
+    agent = VLAAgent(
         action_space=env.action_space,
         image_names=image_names,
         network=network,
@@ -55,6 +75,42 @@ def build_all(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         priority_epsilon=args.replay_buffer.priority_epsilon,
         reset_on_episode_end=args.reset_on_episode_end,
         streaming_update=args.streaming_update,
+        instruction=_instruction(env, args),
+    )
+    return network, agent
+
+
+def build_wan(env: Env, args: DictConfig) -> tuple[WanActorCriticWithActionValue, WanAgent]:
+    image_names = image_obs_names(env.observation_space)
+    instruction = _instruction(env, args)
+    network = WanActorCriticWithActionValue(
+        image_shapes=[env.observation_space[name].shape for name in image_names],
+        action_space_shape=env.action_space.shape,
+        value_head_factory=hydra.utils.instantiate(args.value_head),
+        policy_head_factory=hydra.utils.instantiate(args.policy_head),
+        prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
+        critic_loss_weight=args.critic_loss_weight,
+        wan_config=args.wan,
+        instruction=instruction,
+    )
+    agent = WanAgent(
+        action_space=env.action_space,
+        image_names=image_names,
+        network=network,
+        normalizing_by_return=args.normalizing_by_return,
+        reward_scaler=build_reward_scaler(args.reward_scale_mode, args.fixed_reward_scale),
+        learning_starts=args.learning_starts,
+        batch_size=args.batch_size,
+        max_grad_norm=args.max_grad_norm,
+        use_done=args.use_done,
+        actor_lr=args.actor_lr,
+        critic_lr=args.critic_lr,
+        weight_decay=args.weight_decay,
+        buffer_size=args.replay_buffer.size,
+        buffer_device=args.replay_buffer.device,
+        priority_alpha=args.replay_buffer.priority_alpha,
+        priority_beta=args.replay_buffer.priority_beta,
+        priority_epsilon=args.replay_buffer.priority_epsilon,
         instruction=instruction,
     )
     return network, agent

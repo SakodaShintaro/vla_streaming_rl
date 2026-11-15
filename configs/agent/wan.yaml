@@ -1,0 +1,41 @@
+# @package _global_
+defaults:
+  - /policy_head: tanh
+  - /value_head: token_dueling  # [dueling, token_dueling, simbav2]
+  - /prediction_head: td_jepa
+  - _self_
+
+# この設定のエージェント（build.py が組み立てるネットワークとエージェントを選ぶ）
+agent_type: wan
+batch_size: 16
+actor_lr: 1e-5
+critic_lr: 1e-5
+weight_decay: 0.01
+
+replay_buffer:
+  # 表現が 1 ステップ 64 x 1536（bfloat16 で 200KB）あり、学習の窓は seq_len + 1 ステップなので、
+  # CPU から毎回写さずに GPU に置く（size 20000 で約 4GB）
+  device: cuda
+
+wan:
+  # 元の形式の重み（DiT・VAE・umt5-xxl）。diffusers_id は diffusers の設定ファイルだけを読む
+  model_id: Wan-AI/Wan2.1-T2V-1.3B
+  diffusers_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+  # 特徴を取る DiT の層（0 から数える。全 30 層）
+  feature_block: 15
+  # 潜在に足すノイズの割合 sigma（x_t = (1 - sigma) x_0 + sigma * noise）。DiT の時刻は sigma * 1000
+  noise_level: 0.1
+  # パッチの格子（256px で 16x16）を平均でまとめる幅。2 なら 8x8
+  token_pool: 2
+  # 状態を作るのにバッファから読む窓の長さ。GRU は窓の頭の 0 の状態から読む
+  seq_len: 32
+  rnn_layers: 1
+  # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする
+  token_dim: 64
+  # スカラーをトークンにする sin/cos の周期の範囲
+  scalar_min_period: 0.5
+  scalar_max_period: 4096.0
+  # ステップごとにトークンどうしを混ぜる Transformer の層の数、注意のヘッドの数、残差の layer scale の初期値
+  token_mixer_layers: 2
+  token_mixer_heads: 4
+  token_mixer_layer_scale_init: 0.0001

@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - agent: vla_off_policy
+  - agent: vla
   - env: car_racing
 
 hydra:

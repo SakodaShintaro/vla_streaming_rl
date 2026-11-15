@@ -10,14 +10,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from vla_streaming_rl.agents.off_policy import OffPolicyAgent
+from vla_streaming_rl.agents.vla_agent import VLAAgent
+from vla_streaming_rl.agents.wan_agent import WanAgent
 from vla_streaming_rl.envs.animalai.curriculum import seen_in_training
 from vla_streaming_rl.episode_log import EpisodeRecord, save_episode_data
 from vla_streaming_rl.render import render_frame
 
 
 def run_arena(
-    agent: OffPolicyAgent,
+    agent: VLAAgent | WanAgent,
     env,
     seed: int,
     render: bool,
@@ -31,7 +32,7 @@ def run_arena(
     the action the agent returned last, which it reads at the next reset.
 
     `global_step` is the training step the checkpoint was written at. Below
-    `learning_starts` OffPolicyAgent treats every step as warmup and lets the
+    `learning_starts` the agent treats every step as warmup and lets the
     network act as it does while the buffer fills, which a trained checkpoint
     is always past.
     """
@@ -66,7 +67,7 @@ def run_arena(
 
 
 def run_testbed(
-    agent: OffPolicyAgent,
+    agent: VLAAgent | WanAgent,
     env,
     seed: int,
     render: bool,
