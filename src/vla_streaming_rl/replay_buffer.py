@@ -44,7 +44,6 @@ class ReplayBuffer:
         self,
         size: int,
         seq_len: int,
-        horizon: int,
         obs_shape: tuple[int, ...],
         action_shape: tuple[int, ...],
         output_device: torch.device,
@@ -58,13 +57,12 @@ class ReplayBuffer:
         self.priority_beta = priority_beta
         self.priority_epsilon = priority_epsilon
         self.seq_len = seq_len
-        self.horizon = horizon
         self.action_shape = action_shape
         self.output_device = output_device
         self.storage_device = storage_device
 
         assert self.seq_len <= self.size, "Replay buffer size must be >= sequence length."
-        assert self.horizon < self.seq_len, "The window needs a state slot before the chunk."
+        assert self.seq_len >= 2, "The window needs a state slot before the transition's end."
 
         def init_tensor(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
             return torch.zeros(
@@ -154,17 +152,16 @@ class ReplayBuffer:
         """Window starts a learning batch may be drawn from.
 
         ``seq_len`` here is the whole window the learner reads: the state window
-        plus the ``horizon`` slots of the action chunk's transitions that follow
-        it. Two things make a start invalid.
+        plus the one slot of the transition's result that follows it. Two things
+        make a start invalid.
 
         A ``done`` on the current state slot (the last of the state window)
-        means the chunk's first action was never taken in the episode its state
+        means the transition's action was never taken in the episode its state
         belongs to. A ``done`` earlier in the state window is allowed: the state
         encoder then sees frames of the previous episode, which is what it sees
-        at every episode start anyway. A ``done`` inside the chunk is allowed
-        too -- the episode ends on that action -- and the value head drops the
-        rewards after it and the bootstrap itself; otherwise the states fewer
-        than ``horizon`` ticks before an episode's end would never be learned.
+        at every episode start anyway. A ``done`` on the last slot is the wanted
+        case -- the episode ends on the transition's action -- and the value
+        head truncates the bootstrap there itself.
 
         A window containing the write head has the same problem in time: the
         slots on either side of it are the newest and the oldest transitions in
@@ -176,8 +173,16 @@ class ReplayBuffer:
         )
 
         # Done on slot ``start + state_slot`` (the current state slot).
-        state_slot = self.seq_len - self.horizon - 1
-        crosses_episode = self.dones[starts + state_slot, 0] > 0
+        state_slot = self.seq_len - 2
+        cumulative_dones = torch.cat(
+            [
+                torch.zeros(1, device=self.storage_device),
+                self.dones[:curr_size, 0].cumsum(dim=0),
+            ]
+        )
+        crosses_episode = (
+            cumulative_dones[starts + self.seq_len - 1] - cumulative_dones[starts + state_slot]
+        ) > 0
 
         if self.full:
             # The head sits between slot ``idx - 1`` (newest) and ``idx`` (oldest).

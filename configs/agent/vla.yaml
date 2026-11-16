@@ -14,7 +14,6 @@ lora_lr: 1e-5
 lora_beta1: 0.999
 weight_decay: 0.01
 streaming_update: false
-horizon: 1
 
 vla:
   model_id: Qwen/Qwen3.5-0.8B

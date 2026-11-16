@@ -51,7 +51,6 @@ class VLAAgent:
         max_grad_norm: float,
         use_done: bool,
         seq_len: int,
-        horizon: int,
         actor_lr: float,
         critic_lr: float,
         lora_lr: float,
@@ -96,7 +95,6 @@ class VLAAgent:
         self.network = network
         self.instruction = instruction
         self.seq_len = seq_len
-        self.horizon = horizon
         self.normalizing_by_return = normalizing_by_return
         self.use_done = use_done
         self.reset_on_episode_end = reset_on_episode_end
@@ -115,9 +113,8 @@ class VLAAgent:
 
         self.rb = ReplayBuffer(
             size=buffer_size,
-            # 状態の窓と、その後の行動チャンクの遷移の結果の horizon 行
-            seq_len=seq_len + horizon,
-            horizon=horizon,
+            # 状態の窓と、その後の遷移の結果の1行
+            seq_len=seq_len + 1,
             obs_shape=network.stored_image_shape(),
             action_shape=action_space.shape,
             output_device=self.device,
@@ -202,7 +199,7 @@ class VLAAgent:
     def _learn(self, global_step: int) -> dict[str, float]:
         """リプレイのバッチ（``streaming_update`` なら最新の窓をつないだもの）の損失で1回
         更新する。metrics を返す。"""
-        window_len = self.seq_len + self.horizon
+        window_len = self.seq_len + 1
         if not self.is_learning:
             print(f"Start learning at global step {global_step}.")
             self.is_learning = True
