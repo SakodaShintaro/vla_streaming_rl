@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
-"""The Wan agent: a frozen Wan2.1 reads each observation frame, an RNN over the
-replayed window builds the state, and the heads learn off-policy from a large
-replay buffer.
+"""The Wan agent: a frozen Wan2.1 reads the latest observation frames as a video,
+an RNN over the replayed window builds the state, and the heads learn off-policy
+from a large replay buffer.
 
-Every tick the frame's Wan features are stored; once ``learning_starts`` ticks
+Every tick the Wan features of the clip ending at the current frame are stored; once ``learning_starts`` ticks
 have gone by, one gradient step on a ``batch_size`` sample of windows fires
 every tick, after the tick is stored and before its action is chosen. Below
 ``learning_starts`` the network returns uniform random actions. Wan is frozen,
@@ -94,6 +94,9 @@ class WanAgent:
 
         # 最後に環境へ渡した行動。エピソードをまたいで持ち越す
         self.prev_action = np.zeros(action_space.shape, dtype=np.float32)
+        # 画像ごとの現在までの過去のフレーム (clip_frames, 3, H, W)。エピソードをまたいで持ち越し、
+        # 最初の観測ではその1枚で埋める
+        self.clips: list[torch.Tensor] | None = None
         # Shared representation fed to policy/value/prediction heads on the most
         # recent inference (used by scripts/collect_probe_data.py).
         self.last_features: torch.Tensor | None = None
@@ -206,9 +209,17 @@ class WanAgent:
             "processed_reward": self.reward_scaler.normalize(torch.tensor(shaped_reward)).item(),
         }
         images = [torch.from_numpy(obs[name]).to(self.device) for name in self.image_names]
+        if self.clips is None:
+            self.clips = [
+                image.unsqueeze(0).expand(self.network.clip_frames, -1, -1, -1) for image in images
+            ]
+        self.clips = [
+            torch.cat([clip[1:], image.unsqueeze(0)])
+            for clip, image in zip(self.clips, images, strict=True)
+        ]
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            self.network.represent(images),
+            self.network.represent(self.clips),
             shaped_reward,
             episode_done if self.use_done else False,
             torch.from_numpy(normalized_action).to(self.device),

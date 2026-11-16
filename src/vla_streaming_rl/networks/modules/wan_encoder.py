@@ -86,10 +86,12 @@ class WanEncoder(nn.Module):
     """観測の画像を凍結した Wan2.1 の動画の拡散モデルに読ませた特徴を表現にし、その上の RNN で
     ステップをまたいで状態を作るエンコーダ。
 
-    ``represent`` は画像1枚ずつを1フレームの動画として VAE で潜在にし、少しノイズを足した潜在を
-    DiT の ``feature_block`` 番目の層まで通した活性を表現にする（文の条件は指示の文で固定）。
-    パッチの格子を ``token_pool`` x ``token_pool`` ずつ平均してバッファに保存する。Wan は学習
-    しないので、バッファの表現は古くならない。
+    ``represent`` は画像ごとに、現在のフレームまでの過去 ``clip_frames`` 枚を動画として VAE で
+    潜在にし、少しノイズを足した潜在を DiT の ``feature_block`` 番目の層まで通す（文の条件は
+    指示の文で固定）。DiT はフレームどうしにも注意するので、最後の潜在のフレームの活性は前の
+    フレームとのつながりを読んだものになる。その活性のパッチの格子を ``token_pool`` x
+    ``token_pool`` ずつ平均してバッファに保存する。Wan は学習しないので、バッファの表現は
+    古くならない。
 
     ``window_states`` は窓 (B, T) の表現を、ステップごとに射影して前の行動・報酬・スカラーの
     観測のトークンと並べ、トークンを混ぜる Transformer の層で混ぜてから、トークンの位置ごとに
@@ -108,6 +110,9 @@ class WanEncoder(nn.Module):
         self.device = device
         self.seq_len = wan_config.seq_len
         self.token_pool = wan_config.token_pool
+        # VAE は最初のフレームを1枚で、以降を 4 枚ずつ潜在の1フレームにする
+        self.clip_frames = wan_config.clip_frames
+        assert (self.clip_frames - 1) % 4 == 0, self.clip_frames
         model_dir = snapshot_download(wan_config.model_id)
         self.vae = AutoencoderKLWan.from_single_file(
             f"{model_dir}/Wan2.1_VAE.pth",
@@ -158,7 +163,7 @@ class WanEncoder(nn.Module):
         latent_shape = (
             1,
             self.vae.config.z_dim,
-            1,
+            1 + (self.clip_frames - 1) // 4,
             image_shapes[0][1] // 8,
             image_shapes[0][2] // 8,
         )
@@ -209,18 +214,21 @@ class WanEncoder(nn.Module):
         return (self.num_positions, self.feature_dim)
 
     @torch.no_grad()
-    def represent(self, images: list[torch.Tensor]) -> torch.Tensor:
-        """[0, 1] の画像 (3, H, W) の並びの表現 (num_positions, feature_dim)。画像ごとの
-        パッチの格子を平均でまとめたものを、画像の順に、それぞれラスター順に並べる。"""
-        assert len(images) == self.images_num, (len(images), self.images_num)
-        video = torch.stack(images).to(self.device, torch.float32).unsqueeze(2) * 2.0 - 1.0
+    def represent(self, clips: list[torch.Tensor]) -> torch.Tensor:
+        """画像ごとの [0, 1] の過去のフレームの並び (clip_frames, 3, H, W)（最後が現在）の表現
+        (num_positions, feature_dim)。画像ごとに、最後の潜在のフレームのパッチの格子を平均で
+        まとめたものを、画像の順に、それぞれラスター順に並べる。"""
+        assert len(clips) == self.images_num, (len(clips), self.images_num)
+        assert clips[0].shape[0] == self.clip_frames, clips[0].shape
+        video = torch.stack(clips).to(self.device, torch.float32).transpose(1, 2) * 2.0 - 1.0
         latents = self.vae.encode(video).latent_dist.mode()
         latents = (latents - self.latents_mean) / self.latents_std
         latents = (1.0 - self.noise_level) * latents + self.noise_level * self.noise
-        features = self._block_features(latents.to(torch.bfloat16))  # (N, h * w, C)
+        features = self._block_features(latents.to(torch.bfloat16))  # (N, frames * h * w, C)
         pooled = []
         for feature, (h, w) in zip(features, self.grids, strict=True):
-            grid = feature.view(1, h, w, -1).permute(0, 3, 1, 2).float()
+            # パッチは潜在のフレームの順に並ぶので、最後の h * w 個が現在のフレームを含む潜在
+            grid = feature[-h * w :].view(1, h, w, -1).permute(0, 3, 1, 2).float()
             grid = F.avg_pool2d(grid, self.token_pool)
             pooled.append(grid.flatten(2).transpose(1, 2)[0])
         return torch.cat(pooled, dim=0)
@@ -271,7 +279,7 @@ class WanEncoder(nn.Module):
         return torch.cat([image_tokens, action_tokens, reward_token, scalar_tokens], dim=1)
 
     def _block_features(self, latents: torch.Tensor) -> torch.Tensor:
-        """潜在 (N, C, 1, H, W) を DiT の残した層まで通した活性 (N, patches, feature_dim)。
+        """潜在 (N, C, F, H, W) を DiT の残した層まで通した活性 (N, patches, feature_dim)。
         ``WanTransformer3DModel.forward`` の層の手前までと同じ計算。"""
         transformer = self.transformer
         N = latents.shape[0]

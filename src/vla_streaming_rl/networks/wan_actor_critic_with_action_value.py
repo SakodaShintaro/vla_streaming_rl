@@ -34,7 +34,8 @@ class WanLoss:
 class WanActorCriticWithActionValue(nn.Module):
     """凍結した Wan2.1 を観測のエンコーダにし、その上の RNN で状態を作るアクタークリティック。
 
-    毎ステップ、観測の画像を Wan に読ませて表現を作り（``represent``）、バッファに保存する。
+    毎ステップ、観測の画像ごとに現在までの過去 ``clip_frames`` 枚を動画として Wan に読ませて
+    表現を作り（``represent``）、バッファに保存する。
     推論も学習もバッファの窓（``seq_len`` ステップ）の保存した表現を読み戻し、Wan を通さない。
     エンコーダの ``window_states`` が窓から最後のステップまでの状態を作り、方策ヘッド・
     行動価値ヘッド・予測ヘッドがその状態を読む。リプレイの窓は ``seq_len + 1`` ステップで、
@@ -66,6 +67,8 @@ class WanActorCriticWithActionValue(nn.Module):
         )
         # 状態を作るのにバッファから読む窓の長さ
         self.seq_len = self.encoder.seq_len
+        # Wan に動画として通す、現在までのフレームの数
+        self.clip_frames = self.encoder.clip_frames
         state_dim = self.encoder.output_dim
         self.policy_head = policy_head_factory(
             state_dim=state_dim, action_dim=action_dim, token_dim=self.encoder.token_dim
@@ -81,9 +84,9 @@ class WanActorCriticWithActionValue(nn.Module):
         """バッファに保存する、画像の表現の形。"""
         return self.encoder.representation_shape()
 
-    def represent(self, images: list[torch.Tensor]) -> torch.Tensor:
-        """観測の画像の並びの、バッファに保存する表現。"""
-        return self.encoder.represent(images)
+    def represent(self, clips: list[torch.Tensor]) -> torch.Tensor:
+        """画像ごとの過去のフレームの並び (clip_frames, 3, H, W) の、バッファに保存する表現。"""
+        return self.encoder.represent(clips)
 
     @torch.inference_mode()
     def infer(self, window: ReplayBufferData, warmup: bool) -> WanInference:
