@@ -118,7 +118,9 @@ class CNNActorCriticWithActionValue(nn.Module):
         )
         # 内発報酬は遷移の報酬に足す。TD の目標にだけ入る
         reward = reward + intrinsic_reward.view(-1, 1)
-        target_value = self.value_head.compute_target_value(next_q, reward, data.dones[:, -1])
+        target_value = self.value_head.compute_target_value(
+            next_q, reward.unsqueeze(1), data.dones[:, -1:]
+        )
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
             state, action, target_value, data.weights
         )

@@ -59,6 +59,7 @@ def build_vla(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         vla_config=args.vla,
         # LoRA 付きの GDN の層は streaming の更新の RTRL で学ぶので、そのときだけ持つ
         use_lora_gdn=args.streaming_update,
+        horizon=args.horizon,
     )
     agent = VLAAgent(
         action_space=env.action_space,
@@ -71,6 +72,7 @@ def build_vla(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         max_grad_norm=args.max_grad_norm,
         use_done=args.use_done,
         seq_len=network.seq_len,
+        horizon=network.horizon,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         lora_lr=args.lora_lr,

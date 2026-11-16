@@ -84,6 +84,7 @@ class CNNAgent:
             size=buffer_size,
             # 状態の窓と、その後の遷移の結果の1行
             seq_len=network.seq_len + 1,
+            horizon=1,
             obs_shape=network.stored_image_shape(),
             action_shape=action_space.shape,
             output_device=self.device,

@@ -170,13 +170,22 @@ class DistributionalValueHead(nn.Module):
 
     @torch.no_grad()
     def compute_target_value(
-        self, next_q: torch.Tensor, reward: torch.Tensor, done: torch.Tensor
+        self, next_q: torch.Tensor, chunk_rewards: torch.Tensor, chunk_dones: torch.Tensor
     ) -> torch.Tensor:
-        """割引率ごとの TD の目標 (B, num_gammas)。``next_q`` は次の状態での割引率ごとの
-        価値 (B, num_gammas)（:meth:`gamma_values`）、``reward`` と ``done`` は遷移の報酬と
-        終端 (B, 1)。"""
-        gammas = self.gammas_tensor.to(reward.device)  # (G,)
-        return reward + (1 - done) * gammas.unsqueeze(0) * next_q
+        """割引率ごとの TD の目標 (B, num_gammas)。``next_q`` は行動チャンクの後の状態での
+        割引率ごとの価値 (B, num_gammas)（:meth:`gamma_values`）、``chunk_rewards`` と
+        ``chunk_dones`` はチャンクの各ステップの遷移の報酬と終端 (B, H, 1)。チャンクの途中で
+        終端になったら、その後の報酬とブートストラップは入れない。"""
+        batch_size, horizon = chunk_rewards.shape[:2]
+        gammas = self.gammas_tensor.to(chunk_rewards.device)  # (G,)
+        discounted_reward = torch.zeros(batch_size, self.num_gammas, device=chunk_rewards.device)
+        gamma_power = torch.ones(self.num_gammas, device=chunk_rewards.device)  # (G,)
+        continuing = torch.ones(batch_size, 1, device=chunk_rewards.device)  # (B, 1)
+        for i in range(horizon):
+            discounted_reward += continuing * gamma_power.unsqueeze(0) * chunk_rewards[:, i]
+            gamma_power = gamma_power * gammas
+            continuing = continuing * (1 - chunk_dones[:, i])
+        return discounted_reward + continuing * gamma_power.unsqueeze(0) * next_q
 
     def compute_critic_loss(
         self,
