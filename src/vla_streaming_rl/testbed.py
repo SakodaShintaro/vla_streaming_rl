@@ -10,6 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from vla_streaming_rl.agents.cnn_agent import CNNAgent
 from vla_streaming_rl.agents.vla_agent import VLAAgent
 from vla_streaming_rl.agents.wan_agent import WanAgent
 from vla_streaming_rl.envs.animalai.curriculum import seen_in_training
@@ -18,7 +19,7 @@ from vla_streaming_rl.render import render_frame
 
 
 def run_arena(
-    agent: VLAAgent | WanAgent,
+    agent: VLAAgent | WanAgent | CNNAgent,
     env,
     seed: int,
     render: bool,
@@ -67,7 +68,7 @@ def run_arena(
 
 
 def run_testbed(
-    agent: VLAAgent | WanAgent,
+    agent: VLAAgent | WanAgent | CNNAgent,
     env,
     seed: int,
     render: bool,

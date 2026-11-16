@@ -1,0 +1,35 @@
+# @package _global_
+defaults:
+  - /policy_head: tanh
+  # 状態はトークンに分かれていない LSTM の出力なので、トークンを読まない価値ヘッドにする
+  - /value_head: dueling  # [dueling, token_dueling, simbav2]
+  - /prediction_head: td_jepa
+  - _self_
+
+# この設定のエージェント（build.py が組み立てるネットワークとエージェントを選ぶ）
+agent_type: cnn
+batch_size: 16
+actor_lr: 1e-5
+critic_lr: 1e-5
+weight_decay: 0.01
+
+replay_buffer:
+  # 画素は 1 ステップ 3 x 84 x 84（bfloat16 で 42KB）なので GPU に置く（size 20000 で約 850MB）
+  device: cuda
+
+cnn:
+  # 画像を縮める一辺の画素数
+  resolution: 84
+  # バックボーンの段ごとのチャネル数（1 位の提出した方策と同じ）。段ごとに格子は半分になり、84 なら 6x6
+  depths: [16, 32, 64, 128]
+  # 格子を平らにしてまとめる全結合の幅と、LSTM の幅（1 位の提出した方策と同じ）
+  hidden_dim: 1024
+  lstm_units: 512
+  # 前の行動・報酬・スカラーの観測をまとめる全結合の幅（1 位は速度を 128 にしていた）
+  scalar_hidden_dim: 128
+  # スカラー1つを埋め込む sin/cos の幅と、その周期の範囲
+  scalar_embed_dim: 64
+  scalar_min_period: 0.5
+  scalar_max_period: 4096.0
+  # 状態を作るのにバッファから読む窓の長さ。LSTM は窓の頭の 0 の状態から読む
+  seq_len: 32
