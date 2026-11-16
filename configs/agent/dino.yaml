@@ -17,9 +17,14 @@ replay_buffer:
   device: cuda
 
 dino:
-  model_id: facebook/dinov2-base
-  # DINOv2 に入れる画像の一辺。パッチは 14 なので 224 ならパッチの格子は 16x16
-  resolution: 224
+  # 画像を読む凍結したバックボーン [dinov2, siglip2]
+  # dinov2 なら model_id: facebook/dinov2-base, resolution: 224（パッチ 14 で格子 16x16、token_pool 2 で 8x8 = 64 トークン）
+  # siglip2 なら model_id: google/siglip2-base-patch16-256, resolution: 256（パッチ 16 で格子 16x16、token_pool 2 で 8x8 = 64 トークン）
+  backbone: siglip2
+  model_id: google/siglip2-base-patch16-256
+  # バックボーンに入れる画像の一辺。DINOv2 はパッチが 14 なので 224 ならパッチの格子は 16x16。
+  # SigLIP2 は位置の埋め込みが固定なので model_id の解像度と同じにする
+  resolution: 256
   # パッチの格子を平均でまとめる幅。2 なら 8x8 = 64 トークン（VLM の 256px の画像と同じ数）
   token_pool: 2
   # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする

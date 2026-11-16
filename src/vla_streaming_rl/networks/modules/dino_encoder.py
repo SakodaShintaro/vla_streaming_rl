@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 from torch import nn
-from transformers import Dinov2Model
+from transformers import Dinov2Model, SiglipVisionModel
 
 from vla_streaming_rl.networks.modules.reward_embed import embed_reward
 from vla_streaming_rl.networks.modules.self_attention import (
@@ -17,10 +17,13 @@ from vla_streaming_rl.networks.modules.vlm_encoder import STATE_SCALAR_INDICES
 # DINOv2 の事前学習の画像の正規化（ImageNet の平均と標準偏差）
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+# SigLIP2 の事前学習の画像の正規化（[-1, 1] にする）
+SIGLIP_MEAN = (0.5, 0.5, 0.5)
+SIGLIP_STD = (0.5, 0.5, 0.5)
 
 
 class DinoEncoder(nn.Module):
-    """観測の画像を1枚ずつ凍結した DINOv2 に読ませ、最後の層のパッチの特徴をそのまま
+    """観測の画像を1枚ずつ凍結した DINOv2（``backbone`` が siglip2 なら SigLIP2 の画像の塔）に読ませ、最後の層のパッチの特徴をそのまま
     1ステップ分の状態にするエンコーダ。
 
     ``represent`` は画像を ``resolution`` 四方に縮めて DINOv2 に通し、最後の層（正規化の後）の
@@ -42,16 +45,24 @@ class DinoEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.device = device
-        self.model = Dinov2Model.from_pretrained(dino_config.model_id).to(device)
-        self.model.eval().requires_grad_(False)
-        self.register_buffer(
-            "pixel_mean", torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
-        )
-        self.register_buffer(
-            "pixel_std", torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
-        )
-        # パッチの格子は resolution / patch_size 四方で、それを token_pool 四方ずつ平均する
+        self.backbone = dino_config.backbone
         self.resolution = dino_config.resolution
+        if self.backbone == "dinov2":
+            self.model = Dinov2Model.from_pretrained(dino_config.model_id).to(device)
+            pixel_mean, pixel_std = IMAGENET_MEAN, IMAGENET_STD
+        else:
+            assert self.backbone == "siglip2", self.backbone
+            self.model = SiglipVisionModel.from_pretrained(dino_config.model_id).to(device)
+            pixel_mean, pixel_std = SIGLIP_MEAN, SIGLIP_STD
+            # SigLIP2 の位置の埋め込みは事前学習の解像度の格子のものなので、解像度はそれに合わせる
+            assert self.resolution == self.model.config.image_size, (
+                self.resolution,
+                self.model.config.image_size,
+            )
+        self.model.eval().requires_grad_(False)
+        self.register_buffer("pixel_mean", torch.tensor(pixel_mean, device=device).view(1, 3, 1, 1))
+        self.register_buffer("pixel_std", torch.tensor(pixel_std, device=device).view(1, 3, 1, 1))
+        # パッチの格子は resolution / patch_size 四方で、それを token_pool 四方ずつ平均する
         self.token_pool = dino_config.token_pool
         patch_size = self.model.config.patch_size
         assert self.resolution % (patch_size * self.token_pool) == 0, self.resolution
@@ -108,8 +119,13 @@ class DinoEncoder(nn.Module):
             antialias=True,
         )
         pixels = (pixels - self.pixel_mean) / self.pixel_std
-        # 最初のトークンは CLS で、残りがラスター順のパッチ
-        patches = self.model(pixel_values=pixels).last_hidden_state[:, 1:]
+        hidden = self.model(pixel_values=pixels).last_hidden_state
+        if self.backbone == "dinov2":
+            # 最初のトークンは CLS で、残りがラスター順のパッチ
+            patches = hidden[:, 1:]
+        else:
+            # SigLIP2 は CLS を持たず、全てがラスター順のパッチ
+            patches = hidden
         grid = patches.view(self.images_num, self.grid, self.grid, -1).permute(0, 3, 1, 2)
         grid = F.avg_pool2d(grid, self.token_pool)
         return grid.flatten(2).transpose(1, 2).reshape(self.num_positions, self.feature_dim)
