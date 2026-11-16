@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: MIT
-"""The Wan agent: the frozen Wan2.1 VAE reads the observation frames as one
-continuing video, the latest latent becomes the state, and the heads learn
-off-policy from a large replay buffer.
+"""The DINOv2 agent: the frozen DINOv2 reads each observation frame on its own,
+its patch features become the state, and the heads learn off-policy from a
+large replay buffer.
 
-Every tick the latent containing the current frame is stored; once ``learning_starts`` ticks
+Every tick the features of the current frame are stored; once ``learning_starts`` ticks
 have gone by, one gradient step on a ``batch_size`` sample of windows fires
 every tick, after the tick is stored and before its action is chosen. Below
-``learning_starts`` the network returns uniform random actions. The VAE is
-frozen, so the stored latents never go stale; the heads are trained on them.
+``learning_starts`` the network returns uniform random actions. DINOv2 is
+frozen, so the stored features never go stale; the heads are trained on them.
 """
 
 from typing import Any
@@ -18,21 +18,21 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
-from vla_streaming_rl.networks.wan_actor_critic_with_action_value import (
-    WanActorCriticWithActionValue,
+from vla_streaming_rl.networks.dino_actor_critic_with_action_value import (
+    DinoActorCriticWithActionValue,
 )
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs
 
 
-class WanAgent:
+class DinoAgent:
     def __init__(
         self,
         *,
         action_space: gym.spaces.Box,
         image_names: tuple[str, ...],
-        network: WanActorCriticWithActionValue,
+        network: DinoActorCriticWithActionValue,
         normalizing_by_return: bool,
         reward_scaler: RewardScaler | FixedRewardScaler,
         learning_starts: int,
@@ -191,7 +191,7 @@ class WanAgent:
     def _observe(
         self, obs: dict[str, Any], terminated: bool, truncated: bool, info: dict
     ) -> dict[str, float]:
-        """このティックの観測を VAE の流れに足して、バッファに1行積む。metrics を返す。"""
+        """このティックの観測を DINOv2 で読み、バッファに1行積む。metrics を返す。"""
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]

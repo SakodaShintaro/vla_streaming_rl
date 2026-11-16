@@ -7,13 +7,13 @@ from omegaconf import DictConfig
 from torch import nn
 
 from ..replay_buffer import ReplayBufferData
+from .modules.dino_encoder import DinoEncoder
 from .modules.prediction_head import LatentTDPredictionHead
 from .modules.value_head import DistributionalValueHead
-from .modules.wan_encoder import WanEncoder
 
 
 @dataclass
-class WanInference:
+class DinoInference:
     """``infer`` の出力。"""
 
     action: torch.Tensor  # (1, action_dim)
@@ -22,7 +22,7 @@ class WanInference:
 
 
 @dataclass
-class WanLoss:
+class DinoLoss:
     """``compute_replay_loss`` の出力。``info`` は ``名前 -> 値`` の記録で、そのまま wandb に
     出す。"""
 
@@ -31,12 +31,12 @@ class WanLoss:
     td_error: torch.Tensor  # (B,) 窓ごとの TD 誤差。リプレイの優先度の更新に使う
 
 
-class WanActorCriticWithActionValue(nn.Module):
-    """凍結した Wan2.1 の VAE で観測のフレームの流れを読み、最新の潜在から状態を作る
+class DinoActorCriticWithActionValue(nn.Module):
+    """凍結した DINOv2 で観測のフレームを1枚ずつ読み、そのパッチの特徴から状態を作る
     アクタークリティック。
 
-    毎ティック、エンコーダがフレームを VAE の流れに足して現在のフレームを含む潜在を作り
-    （``represent``）、バッファに保存する。推論も学習も保存した表現を読み戻し、VAE を通さない。
+    毎ティック、エンコーダが現在のフレームを読んだ特徴を作り（``represent``）、バッファに
+    保存する。推論も学習も保存した表現を読み戻し、DINOv2 を通さない。
     状態はステップごとに ``to_state`` で作り、時間方向には何もしない。リプレイの窓は 2 ステップで、
     最初のステップの状態が現在の状態、最後のステップの状態が次の状態。
     """
@@ -50,7 +50,7 @@ class WanActorCriticWithActionValue(nn.Module):
         policy_head_factory,
         prediction_head_factory: Callable[..., LatentTDPredictionHead],
         critic_loss_weight: float,
-        wan_config: DictConfig,
+        dino_config: DictConfig,
     ) -> None:
         super().__init__()
         # 表現はバッファに保存するので、バッファから読む窓は今のステップだけでよい
@@ -58,10 +58,10 @@ class WanActorCriticWithActionValue(nn.Module):
         self.critic_loss_weight = critic_loss_weight
         device = "cuda"
         action_dim = action_space_shape[0]
-        self.encoder = WanEncoder(
+        self.encoder = DinoEncoder(
             image_shapes=image_shapes,
             action_dim=action_dim,
-            wan_config=wan_config,
+            dino_config=dino_config,
             device=device,
         )
         state_dim = self.encoder.output_dim
@@ -80,11 +80,11 @@ class WanActorCriticWithActionValue(nn.Module):
         return self.encoder.representation_shape()
 
     def represent(self, images: list[torch.Tensor]) -> torch.Tensor:
-        """このティックの画像 (3, H, W) の並びを VAE の流れに足した、バッファに保存する表現。"""
+        """このティックの画像 (3, H, W) の並びを DINOv2 で読んだ、バッファに保存する表現。"""
         return self.encoder.represent(images)
 
     @torch.inference_mode()
-    def infer(self, window: ReplayBufferData, warmup: bool) -> WanInference:
+    def infer(self, window: ReplayBufferData, warmup: bool) -> DinoInference:
         """バッファの最新の窓 (1, seq_len) の最後のステップの状態から行動を出す。``warmup``
         （バッファを貯めている間）なら一様乱数の行動を返す。"""
         assert window.observations.shape[0] == 1, "Batch size must be 1 for inference"
@@ -93,9 +93,9 @@ class WanActorCriticWithActionValue(nn.Module):
         value_report = self.value_head.value_report(self.value_head(state, action).output)
         if warmup:
             action = torch.rand_like(action) * 2.0 - 1.0
-        return WanInference(action=action, value_report=value_report, state=state)
+        return DinoInference(action=action, value_report=value_report, state=state)
 
-    def compute_replay_loss(self, data: ReplayBufferData) -> WanLoss:
+    def compute_replay_loss(self, data: ReplayBufferData) -> DinoLoss:
         """リプレイの窓の損失。"""
         state = self._state(data, -2)
         with torch.no_grad():
@@ -124,7 +124,7 @@ class WanActorCriticWithActionValue(nn.Module):
             f"losses/{key}": value
             for key, value in {**critic_info, **actor_info, **state_prediction_info}.items()
         }
-        return WanLoss(
+        return DinoLoss(
             loss=self.critic_loss_weight * critic_loss + actor_loss + state_prediction_loss,
             info=info,
             td_error=td_error,

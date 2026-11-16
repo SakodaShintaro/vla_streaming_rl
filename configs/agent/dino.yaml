@@ -6,25 +6,22 @@ defaults:
   - _self_
 
 # この設定のエージェント（build.py が組み立てるネットワークとエージェントを選ぶ）
-agent_type: wan
+agent_type: dino
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
 weight_decay: 0.01
 
 replay_buffer:
-  # 表現が 1 ステップ 64 x 256（bfloat16 で 32KB）なので GPU に置く（size 20000 で約 650MB）
+  # 表現が 1 ステップ 64 x 768（bfloat16 で 96KB）なので GPU に置く（size 20000 で約 2GB）
   device: cuda
 
-wan:
-  # 元の形式の重み（VAE だけ使う）。diffusers_id は diffusers の設定ファイルだけを読む
-  model_id: Wan-AI/Wan2.1-T2V-1.3B
-  diffusers_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-  # 潜在をトークンに分けるときに、1 つのトークンが受け持つ潜在の縦横の画素数。
-  # 256px の画像の潜在は 32x32 の格子で各画素 16 チャネル。4 にすると 32x32 を 4x4 ずつに
-  # 区切るのでトークンは 8x8 = 64 個になり、各トークンは 4x4 画素 x 16 チャネル = 256 個の
-  # 値を並べたベクトルになる
-  latent_patch: 4
+dino:
+  model_id: facebook/dinov2-base
+  # DINOv2 に入れる画像の一辺。パッチは 14 なので 224 ならパッチの格子は 16x16
+  resolution: 224
+  # パッチの格子を平均でまとめる幅。2 なら 8x8 = 64 トークン（VLM の 256px の画像と同じ数）
+  token_pool: 2
   # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする
   token_dim: 64
   # スカラーをトークンにする sin/cos の周期の範囲

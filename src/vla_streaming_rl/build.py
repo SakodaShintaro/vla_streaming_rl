@@ -4,18 +4,18 @@ from gymnasium import Env
 from omegaconf import DictConfig
 
 from vla_streaming_rl.agents.cnn_agent import CNNAgent
+from vla_streaming_rl.agents.dino_agent import DinoAgent
 from vla_streaming_rl.agents.instruction import ENV_INSTRUCTIONS, TOPDOWN_INSTRUCTION
 from vla_streaming_rl.agents.vla_agent import VLAAgent
-from vla_streaming_rl.agents.wan_agent import WanAgent
 from vla_streaming_rl.image_obs import image_obs_names
 from vla_streaming_rl.networks.cnn_actor_critic_with_action_value import (
     CNNActorCriticWithActionValue,
 )
+from vla_streaming_rl.networks.dino_actor_critic_with_action_value import (
+    DinoActorCriticWithActionValue,
+)
 from vla_streaming_rl.networks.vla_actor_critic_with_action_value import (
     VLAActorCriticWithActionValue,
-)
-from vla_streaming_rl.networks.wan_actor_critic_with_action_value import (
-    WanActorCriticWithActionValue,
 )
 from vla_streaming_rl.reward_scaler import build_reward_scaler
 
@@ -24,15 +24,15 @@ def build_all(
     env: Env, args: DictConfig
 ) -> (
     tuple[VLAActorCriticWithActionValue, VLAAgent]
-    | tuple[WanActorCriticWithActionValue, WanAgent]
+    | tuple[DinoActorCriticWithActionValue, DinoAgent]
     | tuple[CNNActorCriticWithActionValue, CNNAgent]
 ):
     """config の agent が表すネットワークとエージェントを、どの入口のスクリプトでも同じように
     つないだもの。"""
     if args.agent_type == "vla":
         return build_vla(env, args)
-    if args.agent_type == "wan":
-        return build_wan(env, args)
+    if args.agent_type == "dino":
+        return build_dino(env, args)
     assert args.agent_type == "cnn", args.agent_type
     return build_cnn(env, args)
 
@@ -88,19 +88,19 @@ def build_vla(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
     return network, agent
 
 
-def build_wan(env: Env, args: DictConfig) -> tuple[WanActorCriticWithActionValue, WanAgent]:
+def build_dino(env: Env, args: DictConfig) -> tuple[DinoActorCriticWithActionValue, DinoAgent]:
     image_names = image_obs_names(env.observation_space)
     instruction = _instruction(env, args)
-    network = WanActorCriticWithActionValue(
+    network = DinoActorCriticWithActionValue(
         image_shapes=[env.observation_space[name].shape for name in image_names],
         action_space_shape=env.action_space.shape,
         value_head_factory=hydra.utils.instantiate(args.value_head),
         policy_head_factory=hydra.utils.instantiate(args.policy_head),
         prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
         critic_loss_weight=args.critic_loss_weight,
-        wan_config=args.wan,
+        dino_config=args.dino,
     )
-    agent = WanAgent(
+    agent = DinoAgent(
         action_space=env.action_space,
         image_names=image_names,
         network=network,
