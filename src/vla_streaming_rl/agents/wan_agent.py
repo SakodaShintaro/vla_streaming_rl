@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: MIT
-"""The Wan agent: a frozen Wan2.1 reads the latest observation frames as a video,
-an RNN over the replayed window builds the state, and the heads learn off-policy
-from a large replay buffer.
+"""The Wan agent: the frozen Wan2.1 VAE reads the observation frames as one
+continuing video, the latest latent becomes the state, and the heads learn
+off-policy from a large replay buffer.
 
-Every tick the Wan features of the clip ending at the current frame are stored; once ``learning_starts`` ticks
+Every tick the latent containing the current frame is stored; once ``learning_starts`` ticks
 have gone by, one gradient step on a ``batch_size`` sample of windows fires
 every tick, after the tick is stored and before its action is chosen. Below
-``learning_starts`` the network returns uniform random actions. Wan is frozen,
-so the stored features never go stale; the RNN and the heads are trained on
-them.
+``learning_starts`` the network returns uniform random actions. The VAE is
+frozen, so the stored latents never go stale; the heads are trained on them.
 """
 
 from typing import Any
@@ -50,7 +49,7 @@ class WanAgent:
         priority_epsilon: float,
         instruction: str,
     ) -> None:
-        # 最適化は actor（エンコーダの RNN などを含む）と critic（価値ヘッド）の2つに分ける
+        # 最適化は actor（エンコーダの射影などを含む）と critic（価値ヘッド）の2つに分ける
         critic_params = list(network.value_head.parameters())
         critic_ids = {id(p) for p in critic_params}
         actor_params = [
@@ -63,7 +62,7 @@ class WanAgent:
         # 観測から読んでネットワークに渡す画像の名前（IMAGE_OBS_NAMES の並び）
         self.image_names = image_names
         self.network = network
-        # Wan が文の条件として読む指示の文。描画の見出しにも使う
+        # 描画の見出しに出す指示の文
         self.instruction = instruction
         self.normalizing_by_return = normalizing_by_return
         self.use_done = use_done
@@ -94,9 +93,6 @@ class WanAgent:
 
         # 最後に環境へ渡した行動。エピソードをまたいで持ち越す
         self.prev_action = np.zeros(action_space.shape, dtype=np.float32)
-        # 画像ごとの現在までの過去のフレーム (clip_frames, 3, H, W)。エピソードをまたいで持ち越し、
-        # 最初の観測ではその1枚で埋める
-        self.clips: list[torch.Tensor] | None = None
         # Shared representation fed to policy/value/prediction heads on the most
         # recent inference (used by scripts/collect_probe_data.py).
         self.last_features: torch.Tensor | None = None
@@ -195,7 +191,7 @@ class WanAgent:
     def _observe(
         self, obs: dict[str, Any], terminated: bool, truncated: bool, info: dict
     ) -> dict[str, float]:
-        """このティックの観測を Wan に読ませて、バッファに1行積む。metrics を返す。"""
+        """このティックの観測を VAE の流れに足して、バッファに1行積む。metrics を返す。"""
         episode_done = terminated or truncated
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
@@ -209,17 +205,9 @@ class WanAgent:
             "processed_reward": self.reward_scaler.normalize(torch.tensor(shaped_reward)).item(),
         }
         images = [torch.from_numpy(obs[name]).to(self.device) for name in self.image_names]
-        if self.clips is None:
-            self.clips = [
-                image.unsqueeze(0).expand(self.network.clip_frames, -1, -1, -1) for image in images
-            ]
-        self.clips = [
-            torch.cat([clip[1:], image.unsqueeze(0)])
-            for clip, image in zip(self.clips, images, strict=True)
-        ]
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
         self.rb.add(
-            self.network.represent(self.clips),
+            self.network.represent(images),
             shaped_reward,
             episode_done if self.use_done else False,
             torch.from_numpy(normalized_action).to(self.device),

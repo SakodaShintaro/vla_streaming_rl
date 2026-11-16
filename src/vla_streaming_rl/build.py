@@ -99,7 +99,6 @@ def build_wan(env: Env, args: DictConfig) -> tuple[WanActorCriticWithActionValue
         prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
         critic_loss_weight=args.critic_loss_weight,
         wan_config=args.wan,
-        instruction=instruction,
     )
     agent = WanAgent(
         action_space=env.action_space,

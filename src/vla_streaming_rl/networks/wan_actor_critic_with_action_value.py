@@ -32,14 +32,13 @@ class WanLoss:
 
 
 class WanActorCriticWithActionValue(nn.Module):
-    """凍結した Wan2.1 を観測のエンコーダにし、その上の RNN で状態を作るアクタークリティック。
+    """凍結した Wan2.1 の VAE で観測のフレームの流れを読み、最新の潜在から状態を作る
+    アクタークリティック。
 
-    毎ステップ、観測の画像ごとに現在までの過去 ``clip_frames`` 枚を動画として Wan に読ませて
-    表現を作り（``represent``）、バッファに保存する。
-    推論も学習もバッファの窓（``seq_len`` ステップ）の保存した表現を読み戻し、Wan を通さない。
-    エンコーダの ``window_states`` が窓から最後のステップまでの状態を作り、方策ヘッド・
-    行動価値ヘッド・予測ヘッドがその状態を読む。リプレイの窓は ``seq_len + 1`` ステップで、
-    最後から2番目のステップの状態が現在の状態、最後のステップの状態が次の状態。
+    毎ティック、エンコーダがフレームを VAE の流れに足して現在のフレームを含む潜在を作り
+    （``represent``）、バッファに保存する。推論も学習も保存した表現を読み戻し、VAE を通さない。
+    状態はステップごとに ``to_state`` で作り、時間方向には何もしない。リプレイの窓は 2 ステップで、
+    最初のステップの状態が現在の状態、最後のステップの状態が次の状態。
     """
 
     def __init__(
@@ -52,9 +51,10 @@ class WanActorCriticWithActionValue(nn.Module):
         prediction_head_factory: Callable[..., LatentTDPredictionHead],
         critic_loss_weight: float,
         wan_config: DictConfig,
-        instruction: str,
     ) -> None:
         super().__init__()
+        # 表現はバッファに保存するので、バッファから読む窓は今のステップだけでよい
+        self.seq_len = 1
         self.critic_loss_weight = critic_loss_weight
         device = "cuda"
         action_dim = action_space_shape[0]
@@ -62,13 +62,8 @@ class WanActorCriticWithActionValue(nn.Module):
             image_shapes=image_shapes,
             action_dim=action_dim,
             wan_config=wan_config,
-            instruction=instruction,
             device=device,
         )
-        # 状態を作るのにバッファから読む窓の長さ
-        self.seq_len = self.encoder.seq_len
-        # Wan に動画として通す、現在までのフレームの数
-        self.clip_frames = self.encoder.clip_frames
         state_dim = self.encoder.output_dim
         self.policy_head = policy_head_factory(
             state_dim=state_dim, action_dim=action_dim, token_dim=self.encoder.token_dim
@@ -84,18 +79,16 @@ class WanActorCriticWithActionValue(nn.Module):
         """バッファに保存する、画像の表現の形。"""
         return self.encoder.representation_shape()
 
-    def represent(self, clips: list[torch.Tensor]) -> torch.Tensor:
-        """画像ごとの過去のフレームの並び (clip_frames, 3, H, W) の、バッファに保存する表現。"""
-        return self.encoder.represent(clips)
+    def represent(self, images: list[torch.Tensor]) -> torch.Tensor:
+        """このティックの画像 (3, H, W) の並びを VAE の流れに足した、バッファに保存する表現。"""
+        return self.encoder.represent(images)
 
     @torch.inference_mode()
     def infer(self, window: ReplayBufferData, warmup: bool) -> WanInference:
         """バッファの最新の窓 (1, seq_len) の最後のステップの状態から行動を出す。``warmup``
         （バッファを貯めている間）なら一様乱数の行動を返す。"""
         assert window.observations.shape[0] == 1, "Batch size must be 1 for inference"
-        state = self.encoder.window_states(
-            window.observations, window.actions, window.rewards, window.scalar_obs
-        )[:, -1]
+        state = self._state(window, -1)
         action = self.policy_head.get_action(state)
         value_report = self.value_head.value_report(self.value_head(state, action).output)
         if warmup:
@@ -104,10 +97,9 @@ class WanActorCriticWithActionValue(nn.Module):
 
     def compute_replay_loss(self, data: ReplayBufferData) -> WanLoss:
         """リプレイの窓の損失。"""
-        states = self.encoder.window_states(
-            data.observations, data.actions, data.rewards, data.scalar_obs
-        )
-        state, next_state = states[:, -2], states[:, -1].detach()
+        state = self._state(data, -2)
+        with torch.no_grad():
+            next_state = self._state(data, -1)
         action = data.actions[:, -1]
         reward = data.rewards[:, -1]
         with torch.no_grad():
@@ -136,4 +128,14 @@ class WanActorCriticWithActionValue(nn.Module):
             loss=self.critic_loss_weight * critic_loss + actor_loss + state_prediction_loss,
             info=info,
             td_error=td_error,
+        )
+
+    def _state(self, data: ReplayBufferData, step: int) -> torch.Tensor:
+        """窓 (B, T, ...) の ``step`` 番目のステップの、保存した表現・前の行動・報酬・スカラーの
+        観測から状態を作る。"""
+        return self.encoder.to_state(
+            data.observations[:, step],
+            data.actions[:, step],
+            data.rewards[:, step],
+            data.scalar_obs[:, step],
         )

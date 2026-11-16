@@ -13,26 +13,18 @@ critic_lr: 1e-5
 weight_decay: 0.01
 
 replay_buffer:
-  # 表現が 1 ステップ 64 x 1536（bfloat16 で 200KB）あり、学習の窓は seq_len + 1 ステップなので、
-  # CPU から毎回写さずに GPU に置く（size 20000 で約 4GB）
+  # 表現が 1 ステップ 64 x 256（bfloat16 で 32KB）なので GPU に置く（size 20000 で約 650MB）
   device: cuda
 
 wan:
-  # 元の形式の重み（DiT・VAE・umt5-xxl）。diffusers_id は diffusers の設定ファイルだけを読む
+  # 元の形式の重み（VAE だけ使う）。diffusers_id は diffusers の設定ファイルだけを読む
   model_id: Wan-AI/Wan2.1-T2V-1.3B
   diffusers_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-  # Wan に動画として通す、現在までのフレームの数。VAE が最初の1枚と以降 4 枚ずつを潜在の
-  # 1フレームにするので 1 + 4k。表現は最後の潜在のフレーム（最新の 4 枚）の活性
-  clip_frames: 9
-  # 特徴を取る DiT の層（0 から数える。全 30 層）
-  feature_block: 15
-  # 潜在に足すノイズの割合 sigma（x_t = (1 - sigma) x_0 + sigma * noise）。DiT の時刻は sigma * 1000
-  noise_level: 0.1
-  # パッチの格子（256px で 16x16）を平均でまとめる幅。2 なら 8x8
-  token_pool: 2
-  # 状態を作るのにバッファから読む窓の長さ。GRU は窓の頭の 0 の状態から読む
-  seq_len: 32
-  rnn_layers: 1
+  # 潜在をトークンに分けるときに、1 つのトークンが受け持つ潜在の縦横の画素数。
+  # 256px の画像の潜在は 32x32 の格子で各画素 16 チャネル。4 にすると 32x32 を 4x4 ずつに
+  # 区切るのでトークンは 8x8 = 64 個になり、各トークンは 4x4 画素 x 16 チャネル = 256 個の
+  # 値を並べたベクトルになる
+  latent_patch: 4
   # 位置ごとに射影する幅。スカラーの観測も1つずつこの幅のトークンにする
   token_dim: 64
   # スカラーをトークンにする sin/cos の周期の範囲
