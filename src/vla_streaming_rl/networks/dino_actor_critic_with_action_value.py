@@ -23,7 +23,7 @@ class DinoInference:
 
 @dataclass
 class DinoLoss:
-    """``compute_replay_loss`` の出力。``info`` は ``名前 -> 値`` の記録で、そのまま wandb に
+    """``compute_replay_loss`` と ``compute_replay_and_streaming_loss`` の出力。``info`` は ``名前 -> 値`` の記録で、そのまま wandb に
     出す。"""
 
     loss: torch.Tensor
@@ -39,6 +39,15 @@ class DinoActorCriticWithActionValue(nn.Module):
     保存する。推論も学習も保存した表現を読み戻し、DINOv2 を通さない。
     状態はステップごとに ``to_state`` で作り、時間方向には何もしない。リプレイの窓は 2 ステップで、
     最初のステップの状態が現在の状態、最後のステップの状態が次の状態。
+
+    ``dino.num_gdn_layers`` が 0 より大きければ、ステップのトークンを GDN の層（``DinoEncoder``）に
+    1本の流れとして読ませてから混ぜる。毎ティック ``stream_step`` が流れを1ステップ進め、バッファに
+    特徴と読む前の再帰の状態をつないだ1行を保存する。推論はその出力から行動を出す。リプレイの窓は
+    ``gdn_burn_in_steps + gdn_bptt_steps + 1`` ステップで、最初の行に保存した再帰の状態から始め、
+    burn-in のステップを勾配なしで読んで状態を今の重みに馴染ませてから、続くステップを BPTT で
+    読む。その最後のステップが現在の状態、窓の最後のステップが次の状態。GDN の層の元の重みは
+    この BPTT で、LoRA は ``compute_replay_and_streaming_loss`` の最新のステップの分で RTRL で学ぶ。
+    ``reset_on_episode_end`` なら、窓の中のエピソードの境目で再帰の状態を空にする。
     """
 
     def __init__(
@@ -51,10 +60,17 @@ class DinoActorCriticWithActionValue(nn.Module):
         prediction_head_factory: Callable[..., LatentTDPredictionHead],
         critic_loss_weight: float,
         dino_config: DictConfig,
+        reset_on_episode_end: bool,
     ) -> None:
         super().__init__()
-        # 表現はバッファに保存するので、バッファから読む窓は今のステップだけでよい
-        self.seq_len = 1
+        self.use_gdn = dino_config.num_gdn_layers > 0
+        self.burn_in_steps = dino_config.gdn_burn_in_steps
+        # 表現はバッファに保存するので、GDN の層がなければバッファから読む窓は今のステップだけで
+        # よい。あれば burn-in と BPTT のステップ
+        self.seq_len = (
+            dino_config.gdn_burn_in_steps + dino_config.gdn_bptt_steps if self.use_gdn else 1
+        )
+        self.reset_on_episode_end = reset_on_episode_end
         self.critic_loss_weight = critic_loss_weight
         device = "cuda"
         action_dim = action_space_shape[0]
@@ -76,19 +92,50 @@ class DinoActorCriticWithActionValue(nn.Module):
         ).to(device)
 
     def stored_image_shape(self) -> tuple[int, ...]:
-        """バッファに保存する、画像の表現の形。"""
+        """バッファに保存する1行の形。GDN の層があれば、特徴を平らにしたものと読む前の再帰の状態を
+        つないだもの。"""
+        if self.use_gdn:
+            positions, feature_dim = self.encoder.representation_shape()
+            return (positions * feature_dim + self.encoder.gdn_state_size(),)
         return self.encoder.representation_shape()
 
     def represent(self, images: list[torch.Tensor]) -> torch.Tensor:
         """このティックの画像 (3, H, W) の並びを DINOv2 で読んだ、バッファに保存する表現。"""
         return self.encoder.represent(images)
 
+    def stream_step(
+        self,
+        images: list[torch.Tensor],
+        action: torch.Tensor,
+        reward: torch.Tensor,
+        scalar_obs: torch.Tensor,
+        reset_state: bool,
+        use_trace: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """GDN の層の流れをこのティックの分だけ進める。前の行動 (action_dim,)、正規化した報酬
+        (1,)、スカラーの観測 (SCALAR_OBS_DIM,)。バッファに保存する1行と、GDN の層の出力
+        (tokens_num, token_dim) を返す。``use_trace`` なら出力は LoRA までの計算グラフ付きで、
+        でなければ勾配なしで読む。"""
+        features = self.encoder.represent(images)
+        with torch.set_grad_enabled(use_trace):
+            state_before, output = self.encoder.stream_step(
+                features, action, reward, scalar_obs, reset_state, use_trace
+            )
+        return torch.cat([features.flatten(), state_before.detach()]), output
+
     @torch.inference_mode()
     def infer(self, window: ReplayBufferData, warmup: bool) -> DinoInference:
         """バッファの最新の窓 (1, seq_len) の最後のステップの状態から行動を出す。``warmup``
         （バッファを貯めている間）なら一様乱数の行動を返す。"""
         assert window.observations.shape[0] == 1, "Batch size must be 1 for inference"
-        state = self._state(window, -1)
+        return self._infer_state(self._state(window, -1), warmup)
+
+    @torch.inference_mode()
+    def infer_from_stream(self, output: torch.Tensor, warmup: bool) -> DinoInference:
+        """``stream_step`` が返した GDN の層の出力 (tokens_num, token_dim) から行動を出す。"""
+        return self._infer_state(self.encoder.mix(output[None]), warmup)
+
+    def _infer_state(self, state: torch.Tensor, warmup: bool) -> DinoInference:
         action = self.policy_head.get_action(state)
         value_report = self.value_head.value_report(self.value_head(state, action).output)
         if warmup:
@@ -97,11 +144,85 @@ class DinoActorCriticWithActionValue(nn.Module):
 
     def compute_replay_loss(self, data: ReplayBufferData) -> DinoLoss:
         """リプレイの窓の損失。"""
-        state = self._state(data, -2)
+        state, next_state = self._replay_states(data)
+        return self._head_terms(
+            state,
+            next_state,
+            data.actions[:, -1],
+            data.rewards[:, -1],
+            data.dones[:, -1],
+            data.weights,
+        )
+
+    def compute_replay_and_streaming_loss(
+        self,
+        data: ReplayBufferData,
+        previous_output: torch.Tensor,
+        latest_output: torch.Tensor,
+        latest: ReplayBufferData,
+    ) -> DinoLoss:
+        """リプレイの窓 ``data`` と最新の遷移を1つのバッチにつないだ損失。最新の遷移の現在の状態は、
+        前のティックの ``stream_step`` の出力 ``previous_output``（LoRA までの計算グラフ付き）から、
+        次の状態はこのティックの出力 ``latest_output`` から作る。遷移の行動・報酬・終端は最新の
+        窓 ``latest`` (1, 2) の最後の行。TD 誤差はリプレイの窓の分だけ返す。"""
+        replay_state, replay_next_state = self._replay_states(data)
+        streaming_state = self.encoder.mix(previous_output[None])
         with torch.no_grad():
-            next_state = self._state(data, -1)
-        action = data.actions[:, -1]
-        reward = data.rewards[:, -1]
+            streaming_next_state = self.encoder.mix(latest_output.detach()[None])
+        result = self._head_terms(
+            torch.cat([replay_state, streaming_state]),
+            torch.cat([replay_next_state, streaming_next_state]),
+            torch.cat([data.actions[:, -1], latest.actions[:, -1]]),
+            torch.cat([data.rewards[:, -1], latest.rewards[:, -1]]),
+            torch.cat([data.dones[:, -1], latest.dones[:, -1]]),
+            torch.cat([data.weights, latest.weights]),
+        )
+        result.td_error = result.td_error[: data.weights.shape[0]]
+        return result
+
+    def _replay_states(self, data: ReplayBufferData) -> tuple[torch.Tensor, torch.Tensor]:
+        """リプレイの窓の現在の状態（最後から2番目のステップ）と次の状態（最後のステップ、
+        勾配なし）。"""
+        if not self.use_gdn:
+            with torch.no_grad():
+                next_state = self._state(data, -1)
+            return self._state(data, -2), next_state
+        batch, window_len = data.observations.shape[:2]
+        positions, feature_dim = self.encoder.representation_shape()
+        features = data.observations[..., : positions * feature_dim].view(
+            batch, window_len, positions, feature_dim
+        )
+        recurrent = data.observations[:, 0, positions * feature_dim :]
+        for step in range(window_len):
+            if step > 0 and self.reset_on_episode_end:
+                # 前の行が終端なら、この行から新しいエピソードの流れ
+                recurrent = recurrent * (1.0 - data.dones[:, step - 1])
+            # burn-in と、次の状態の行は勾配なしで読む
+            with torch.set_grad_enabled(self.burn_in_steps <= step < window_len - 1):
+                tokens = self.encoder.step_tokens(
+                    features[:, step],
+                    data.actions[:, step],
+                    data.rewards[:, step],
+                    data.scalar_obs[:, step],
+                )
+                output, recurrent = self.encoder.gdn_step(tokens, recurrent, False)
+                if step == window_len - 2:
+                    state = self.encoder.mix(output)
+        with torch.no_grad():
+            next_state = self.encoder.mix(output)
+        return state, next_state
+
+    def _head_terms(
+        self,
+        state: torch.Tensor,
+        next_state: torch.Tensor,
+        action: torch.Tensor,
+        reward: torch.Tensor,
+        done: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> DinoLoss:
+        """現在の状態 ``state``（勾配あり）と次の状態 ``next_state`` (B, state_dim)、遷移の行動
+        (B, action_dim)、報酬と終端 (B, 1)、重要度の重み (B,) から、ヘッドの損失。"""
         with torch.no_grad():
             # TD の目標は割引率ごとに、その割引率の方策の次の行動で作る。最後が主の割引率の
             # 方策の行動で、状態の予測にはそれを使う
@@ -113,9 +234,9 @@ class DinoActorCriticWithActionValue(nn.Module):
         )
         # 内発報酬は遷移の報酬に足す。TD の目標にだけ入る
         reward = reward + intrinsic_reward.view(-1, 1)
-        target_value = self.value_head.compute_target_value(next_q, reward, data.dones[:, -1])
+        target_value = self.value_head.compute_target_value(next_q, reward, done)
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
-            state, action, target_value, data.weights
+            state, action, target_value, weights
         )
         actor_loss, actor_info = self.policy_head.compute_actor_loss(
             state, action, value_head=self.value_head

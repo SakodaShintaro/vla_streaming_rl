@@ -143,6 +143,7 @@ class VLMEncoder(nn.Module):
                         LORA_TARGETS,
                         vla_config.gdn_lora_rank,
                         vla_config.gdn_lora_alpha,
+                        False,
                     )
                     for index in lora_gdn_indices
                 ]

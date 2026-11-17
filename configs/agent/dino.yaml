@@ -11,6 +11,11 @@ batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
 weight_decay: 0.01
+# dino.num_gdn_layers > 0 のとき、GDN の層の LoRA を最新のステップの streaming の更新で RTRL で学ぶか。
+# LoRA の学習率と1次のモーメント
+streaming_update: false
+lora_lr: 1e-5
+lora_beta1: 0.999
 
 replay_buffer:
   # 表現が 1 ステップ 64 x 768（bfloat16 で 96KB）なので GPU に置く（size 20000 で約 2GB）
@@ -36,3 +41,16 @@ dino:
   token_mixer_layers: 2
   token_mixer_heads: 4
   token_mixer_layer_scale_init: 0.0001
+  # 混ぜる層の手前に置き、ステップのトークンを1本の流れとして読む GDN の層の数（0 なら置かない）。
+  # 幅は token_dim。元の重みはリプレイの窓の BPTT で学ぶ
+  num_gdn_layers: 0
+  gdn_heads: 4
+  gdn_head_dim: 32
+  gdn_mlp_dim: 256
+  # streaming_update で学ぶ LoRA のランクと alpha
+  gdn_lora_rank: 8
+  gdn_lora_alpha: 16.0
+  # リプレイの窓。保存した再帰の状態から burn-in のステップを勾配なしで読み、続く BPTT のステップの
+  # 最後を現在の状態にする
+  gdn_burn_in_steps: 8
+  gdn_bptt_steps: 8

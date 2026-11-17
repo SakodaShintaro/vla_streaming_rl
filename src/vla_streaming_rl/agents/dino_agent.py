@@ -8,6 +8,14 @@ have gone by, one gradient step on a ``batch_size`` sample of windows fires
 every tick, after the tick is stored and before its action is chosen. Below
 ``learning_starts`` the network returns uniform random actions. DINOv2 is
 frozen, so the stored features never go stale; the heads are trained on them.
+
+With ``dino.num_gdn_layers`` the step's tokens pass through GDN layers that
+carry their recurrent state across ticks. Every tick advances that stream and
+stores the features together with the recurrent state before the tick; the
+replayed windows rebuild the state from it (burn-in, then BPTT) and train the
+layers' weights. With ``streaming_update`` the agent also keeps the previous
+tick's output of those layers with its graph and appends the newest transition
+to the replayed batch, whose gradient trains their LoRA by RTRL.
 """
 
 from typing import Any
@@ -48,16 +56,37 @@ class DinoAgent:
         priority_beta: float,
         priority_epsilon: float,
         instruction: str,
+        reset_on_episode_end: bool,
+        streaming_update: bool,
+        lora_lr: float,
+        lora_beta1: float,
     ) -> None:
-        # 最適化は actor（エンコーダの射影などを含む）と critic（価値ヘッド）の2つに分ける
+        # 最適化は actor（エンコーダの射影や GDN の層の元の重みなどを含む）と critic（価値ヘッド）と、
+        # streaming_update なら GDN の層の LoRA の3つに分ける
+        assert network.use_gdn or not streaming_update
         critic_params = list(network.value_head.parameters())
-        critic_ids = {id(p) for p in critic_params}
+        self.lora_params = network.encoder.lora_parameters() if network.use_gdn else []
+        separate_ids = {id(p) for p in critic_params + self.lora_params}
         actor_params = [
-            p for p in network.parameters() if p.requires_grad and id(p) not in critic_ids
+            p for p in network.parameters() if p.requires_grad and id(p) not in separate_ids
         ]
         self.head_params = actor_params + critic_params
         self.actor_optimizer = optim.AdamW(actor_params, lr=actor_lr, weight_decay=weight_decay)
         self.critic_optimizer = optim.AdamW(critic_params, lr=critic_lr, weight_decay=weight_decay)
+        self.lora_optimizer = (
+            # LoRA の勾配は streaming の 1 サンプルからしか来ず、ばらつきが大きいので、1次の
+            # モーメントを長く平均する
+            optim.AdamW(
+                self.lora_params,
+                lr=lora_lr,
+                betas=(lora_beta1, 0.999),
+                weight_decay=weight_decay,
+            )
+            if streaming_update
+            else None
+        )
+        self.streaming_update = streaming_update
+        self.reset_on_episode_end = reset_on_episode_end
         self.device = torch.device("cuda")
         # 観測から読んでネットワークに渡す画像の名前（IMAGE_OBS_NAMES の並び）
         self.image_names = image_names
@@ -93,6 +122,13 @@ class DinoAgent:
 
         # 最後に環境へ渡した行動。エピソードをまたいで持ち越す
         self.prev_action = np.zeros(action_space.shape, dtype=np.float32)
+        # the first observation of a run starts an episode
+        self._previous_done = True
+        # このティックがエピソードの最初のティックか
+        self._episode_start = True
+        # 最新とその前のティックの GDN の層の出力。streaming_update なら計算グラフが付いている
+        self.latest_output: torch.Tensor | None = None
+        self.previous_output: torch.Tensor | None = None
         # Shared representation fed to policy/value/prediction heads on the most
         # recent inference (used by scripts/collect_probe_data.py).
         self.last_features: torch.Tensor | None = None
@@ -137,45 +173,70 @@ class DinoAgent:
     def optimizer_state_dict(self) -> dict:
         """Optimizer states to checkpoint. The trainer stores and restores this
         verbatim."""
-        return {
+        state = {
             "actor": self.actor_optimizer.state_dict(),
             "critic": self.critic_optimizer.state_dict(),
         }
+        if self.streaming_update:
+            state["lora"] = self.lora_optimizer.state_dict()
+        return state
 
     def load_optimizer_state_dict(self, state: dict) -> None:
         self.actor_optimizer.load_state_dict(state["actor"])
         self.critic_optimizer.load_state_dict(state["critic"])
+        if self.streaming_update:
+            self.lora_optimizer.load_state_dict(state["lora"])
 
     ####################
     # Internal methods #
     ####################
 
     def _learn(self, global_step: int) -> dict[str, float]:
-        """リプレイのバッチの損失で1回更新する。metrics を返す。"""
+        """リプレイのバッチ（``streaming_update`` なら最新の遷移をつないだもの）の損失で1回
+        更新する。metrics を返す。"""
         if not self.is_learning:
             print(f"Start learning at global step {global_step}.")
             self.is_learning = True
         data = self.rb.sample(self.batch_size)
         metrics = self.rb.batch_stats(data)
         data.rewards = self.reward_scaler.normalize(data.rewards)
-        result = self.network.compute_replay_loss(data)
+        # streaming_update なら最新の遷移もつなぐ。エピソードをまたぐ遷移では学習しない
+        if self.streaming_update and not self._episode_start:
+            latest = self.rb.get_latest(2)
+            latest.rewards = self.reward_scaler.normalize(latest.rewards)
+            result = self.network.compute_replay_and_streaming_loss(
+                data, self.previous_output, self.latest_output, latest
+            )
+        else:
+            result = self.network.compute_replay_loss(data)
         metrics.update(result.info)
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
+        if self.streaming_update:
+            self.lora_optimizer.zero_grad(set_to_none=True)
         result.loss.backward()
         metrics["losses/head_grad_norm"] = nn.utils.clip_grad_norm_(
             self.head_params, self.max_grad_norm
         ).item()
         self.actor_optimizer.step()
         self.critic_optimizer.step()
+        if self.streaming_update:
+            metrics["losses/lora_grad_norm"] = nn.utils.clip_grad_norm_(
+                self.lora_params, self.max_grad_norm
+            ).item()
+            self.lora_optimizer.step()
         self.rb.update_priorities(data.start_indices, result.td_error)
         return metrics
 
     def _act(self, global_step: int, metrics: dict) -> StepResult:
         """バッファの最新の窓から推論した行動を、環境の行動空間に写して実行する。"""
-        window = self.rb.get_latest(self.network.seq_len)
-        window.rewards = self.reward_scaler.normalize(window.rewards)
-        inference = self.network.infer(window, global_step < self.learning_starts)
+        warmup = global_step < self.learning_starts
+        if self.network.use_gdn:
+            inference = self.network.infer_from_stream(self.latest_output.detach(), warmup)
+        else:
+            window = self.rb.get_latest(self.network.seq_len)
+            window.rewards = self.reward_scaler.normalize(window.rewards)
+            inference = self.network.infer(window, warmup)
         self.last_features = inference.state
         metrics.update(inference.value_report)
         action = np.clip(
@@ -193,6 +254,10 @@ class DinoAgent:
     ) -> dict[str, float]:
         """このティックの観測を DINOv2 で読み、バッファに1行積む。metrics を返す。"""
         episode_done = terminated or truncated
+        # A terminal observation still belongs to the episode that ended, so the
+        # recurrent state is reset on the tick after it rather than on it.
+        self._episode_start = self._previous_done
+        self._previous_done = episode_done
         # What the agent trains on, against what the env reported as its score.
         shaped_reward = info["shaped_reward"]
         if not self.normalizing_by_return:
@@ -206,11 +271,25 @@ class DinoAgent:
         }
         images = [torch.from_numpy(obs[name]).to(self.device) for name in self.image_names]
         normalized_action = (self.prev_action - self.action_bias) / self.action_scale
+        scalar_obs = read_scalar_obs(obs)
+        if self.network.use_gdn:
+            row, output = self.network.stream_step(
+                images,
+                torch.from_numpy(normalized_action).to(self.device),
+                self.reward_scaler.normalize(torch.tensor([shaped_reward], device=self.device)),
+                torch.from_numpy(scalar_obs).to(self.device),
+                self._episode_start and self.reset_on_episode_end,
+                self.streaming_update,
+            )
+            self.previous_output = self.latest_output
+            self.latest_output = output
+        else:
+            row = self.network.represent(images)
         self.rb.add(
-            self.network.represent(images),
+            row,
             shaped_reward,
             episode_done if self.use_done else False,
             torch.from_numpy(normalized_action).to(self.device),
-            read_scalar_obs(obs),
+            scalar_obs,
         )
         return metrics

@@ -99,6 +99,7 @@ def build_dino(env: Env, args: DictConfig) -> tuple[DinoActorCriticWithActionVal
         prediction_head_factory=hydra.utils.instantiate(args.prediction_head),
         critic_loss_weight=args.critic_loss_weight,
         dino_config=args.dino,
+        reset_on_episode_end=args.reset_on_episode_end,
     )
     agent = DinoAgent(
         action_space=env.action_space,
@@ -119,6 +120,10 @@ def build_dino(env: Env, args: DictConfig) -> tuple[DinoActorCriticWithActionVal
         priority_beta=args.replay_buffer.priority_beta,
         priority_epsilon=args.replay_buffer.priority_epsilon,
         instruction=instruction,
+        reset_on_episode_end=args.reset_on_episode_end,
+        streaming_update=args.streaming_update,
+        lora_lr=args.lora_lr,
+        lora_beta1=args.lora_beta1,
     )
     return network, agent
 

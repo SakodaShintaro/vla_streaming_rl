@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT
 """ステップをまたぐ記憶を持つ、Qwen3.5 の GDN の層1つ。
 
-事前学習の重みは凍結し、LoRA だけを学習する。RTRL は層1つの構造化 RTRL で、LoRA の B に
-対する再帰状態 S の感度を、1ステップ分のトークンをまとめて進める。
+LoRA は streaming の更新で RTRL で学習する。RTRL は層1つの構造化 RTRL で、LoRA の B に
+対する再帰状態 S の感度を、1ステップ分のトークンをまとめて進める。元の重みは、事前学習の
+ものなら凍結し、``train_base`` ならリプレイの窓の BPTT で学習する。
 
 層の計算（transformers の Qwen3_5DecoderLayer と同じ）::
 
@@ -44,18 +45,28 @@ def silu_grad(c: torch.Tensor) -> torch.Tensor:
 
 
 class LoRAGDNLayer(nn.Module):
-    """凍結した GDN の層に LoRA を付け、再帰状態をステップをまたいで持ち越す層。
+    """GDN の層に LoRA を付け、再帰状態をステップをまたいで持ち越す層。
 
     ``forward`` は1ステップ分のトークンを、前のステップから持ち越した再帰状態 S と、畳み込みが
-    読む直前のトークンの正規化した入力から読む。前の状態の勾配は常に切る。``use_trace`` なら
+    読む直前のトークンの正規化した入力から読む。
+
+    ``use_trace``（streaming）なら、学習するのは LoRA だけで、元の重みと前の状態の勾配は切る。
     RTRL で、LoRA の B に対する S の感度（トレース）を前向きに運び、今のステップの損失の勾配に
-    過去のステップを通る分を足す。層の入力は凍結した下の層の出力で学習するパラメータに
-    よらないので、k の対角近似を除けば勾配は厳密（トレースを運ぶ間にパラメータが変わる分を除く）。
-    トレースは1本の流れを順に進めるので、バッチは 1 で、1ステップに1回だけ進める。
+    過去のステップを通る分を足す。層の入力は学習するパラメータによらないとし、k の対角近似を
+    除けば勾配は厳密（トレースを運ぶ間にパラメータが変わる分を除く）。トレースは1本の流れを
+    順に進めるので、バッチは 1 で、1ステップに1回だけ進める。
+
+    ``use_trace`` でなければ（リプレイ）、LoRA の勾配を切り、元の重み（``train_base`` なら）と
+    前の状態に勾配を流して、窓のステップをまたいで BPTT する。
     """
 
     def __init__(
-        self, hf_layer: nn.Module, lora_targets: tuple[str, ...], lora_rank: int, lora_alpha: float
+        self,
+        hf_layer: nn.Module,
+        lora_targets: tuple[str, ...],
+        lora_rank: int,
+        lora_alpha: float,
+        train_base: bool,
     ) -> None:
         super().__init__()
         attention = hf_layer.linear_attn
@@ -66,8 +77,9 @@ class LoRAGDNLayer(nn.Module):
         self.conv_size = attention.conv_kernel_size
         self.eps = attention.layer_norm_epsilon
         self.hidden_size = attention.hidden_size
-        # 事前学習の重みは float32 の凍結したバッファ。VLM から毎回写すので保存しない
-        frozen = {
+        # 元の重みは float32。train_base でなければ凍結したバッファで、VLM から毎回写すので
+        # 保存しない。train_base なら学習するパラメータ
+        base = {
             "input_norm": hf_layer.input_layernorm.weight,
             "qkv": attention.in_proj_qkv.weight,
             "conv": attention.conv1d.weight,  # (C, 1, conv_size)。最後の列が今のトークンに掛かる
@@ -83,16 +95,23 @@ class LoRAGDNLayer(nn.Module):
             "up": hf_layer.mlp.up_proj.weight,
             "down": hf_layer.mlp.down_proj.weight,
         }
-        for name, weight in frozen.items():
-            self.register_buffer(f"w_{name}", weight.detach().float().clone(), persistent=False)
+        for name, weight in base.items():
+            if train_base:
+                self.register_parameter(f"w_{name}", nn.Parameter(weight.detach().float().clone()))
+            else:
+                self.register_buffer(f"w_{name}", weight.detach().float().clone(), persistent=False)
+        self.train_base = train_base
+        # forward が streaming（use_trace）で読んでいるか。勾配をどこで切るかを決める
+        self.streaming = False
         H, dk, dv = self.num_heads, self.key_dim, self.value_dim
         self.qkv_split = [H * dk, H * dk, H * dv]
+        device = self.w_qkv.device
         # LoRA: delta W = (alpha / rank) B A。A は一様乱数、B は 0 で始め、学習の始めは凍結した層と同じ
         assert set(lora_targets) <= set(LORA_TARGETS), lora_targets
         self.lora_targets = lora_targets
         self.lora_rank = lora_rank
         self.lora_scale = lora_alpha / lora_rank
-        q_weight, k_weight, v_weight = torch.split(self.w_qkv, self.qkv_split, dim=0)
+        q_weight, k_weight, v_weight = torch.split(self.w_qkv.detach(), self.qkv_split, dim=0)
         target_weights = {
             "q": q_weight,
             "k": k_weight,
@@ -110,16 +129,12 @@ class LoRAGDNLayer(nn.Module):
         for target in lora_targets:
             out_features, in_features = target_weights[target].shape
             bound = in_features**-0.5
-            A = torch.empty(lora_rank, in_features, device=self.w_qkv.device).uniform_(
-                -bound, bound
-            )
+            A = torch.empty(lora_rank, in_features, device=device).uniform_(-bound, bound)
             if target in RECURRENT_TARGETS:
                 self.register_buffer(f"lora_A_frozen_{target}", A)
             else:
                 self.lora_A[target] = nn.Parameter(A)
-            self.lora_B[target] = nn.Parameter(
-                torch.zeros(out_features, lora_rank, device=self.w_qkv.device)
-            )
+            self.lora_B[target] = nn.Parameter(torch.zeros(out_features, lora_rank, device=device))
         # B_v, B_a, B_b, B_k に対する S の感度 (1, H, d_k, d_v, rank)。None はまだ 0
         self.trace: dict[str, torch.Tensor] | None = None
 
@@ -135,12 +150,27 @@ class LoRAGDNLayer(nn.Module):
     def lora_A_weight(self, target: str) -> torch.Tensor:
         if target in RECURRENT_TARGETS:
             return self.get_buffer(f"lora_A_frozen_{target}")
-        return self.lora_A[target].clone()
+        return self._lora(self.lora_A[target])
 
     def lora_B_weight(self, target: str) -> torch.Tensor:
-        """学習する重みは複製を読む。計算グラフは複製を保存するので、次のティックで backward
-        する前に optimizer が重みをその場で更新しても使える（勾配は1回前の重みで評価したもの）。"""
-        return self.lora_B[target].clone()
+        return self._lora(self.lora_B[target])
+
+    def _lora(self, weight: torch.Tensor) -> torch.Tensor:
+        """streaming なら LoRA の重みの複製を読む。計算グラフは複製を保存するので、次のティックで
+        backward する前に optimizer が重みをその場で更新しても使える（勾配は1回前の重みで評価した
+        もの）。リプレイなら LoRA は学習しないので勾配を切る。"""
+        return weight.clone() if self.streaming else weight.detach()
+
+    def _base(self, weight: torch.Tensor) -> torch.Tensor:
+        """元の重み。streaming なら学習しないので勾配を切る。``train_base`` なら元の重みはリプレイの
+        更新でその場で変わるので、LoRA と同じ理由で複製を読む。"""
+        if not self.streaming:
+            return weight
+        return weight.detach().clone() if self.train_base else weight.detach()
+
+    def _cut(self, x: torch.Tensor) -> torch.Tensor:
+        """前のステップから持ち越す量。streaming なら勾配を切り、リプレイなら BPTT で流す。"""
+        return x.detach() if self.streaming else x
 
     def _proj(self, target: str, weight: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """凍結した線形写像に、LoRA があればその差分を足したもの。"""
@@ -176,10 +206,10 @@ class LoRAGDNLayer(nn.Module):
         conv_size - 1 トークンの正規化した入力 (B, conv_size - 1, D)。"""
         B, L, _ = x.shape
         H, dk, dv = self.num_heads, self.key_dim, self.value_dim
-        h = zc_rms_norm(x, self.w_input_norm, self.eps)
+        h = zc_rms_norm(x, self._base(self.w_input_norm), self.eps)
         # 直前のステップの入力に続けて、このステップの入力を畳み込む
-        h_all = torch.cat([h_prev.detach(), h], dim=1)  # (B, cs - 1 + L, D)
-        q_weight, k_weight, v_weight = torch.split(self.w_qkv, self.qkv_split, dim=0)
+        h_all = torch.cat([self._cut(h_prev), h], dim=1)  # (B, cs - 1 + L, D)
+        q_weight, k_weight, v_weight = torch.split(self._base(self.w_qkv), self.qkv_split, dim=0)
         qkv_pre = torch.cat(
             [
                 self._proj("q", q_weight, h_all),
@@ -188,12 +218,12 @@ class LoRAGDNLayer(nn.Module):
             ],
             dim=-1,
         )
-        conv = F.conv1d(qkv_pre.transpose(1, 2), self.w_conv, groups=qkv_pre.shape[-1])
+        conv = F.conv1d(qkv_pre.transpose(1, 2), self._base(self.w_conv), groups=qkv_pre.shape[-1])
         conv = conv.transpose(1, 2)  # (B, L, C)、SiLU の前
         q, k, v = torch.split(F.silu(conv), self.qkv_split, dim=-1)
-        beta = torch.sigmoid(self._proj("b", self.w_b, h))
-        a_pre = self._proj("a", self.w_a, h) + self.w_dt_bias
-        log_alpha = -torch.exp(self.w_A_log) * F.softplus(a_pre)
+        beta = torch.sigmoid(self._proj("b", self._base(self.w_b), h))
+        a_pre = self._proj("a", self._base(self.w_a), h) + self._base(self.w_dt_bias)
+        log_alpha = -torch.exp(self._base(self.w_A_log)) * F.softplus(a_pre)
         return {
             "h_all": h_all,
             "conv": conv,
@@ -203,22 +233,28 @@ class LoRAGDNLayer(nn.Module):
             "log_alpha": torch.where(valid[..., None], log_alpha, torch.zeros_like(log_alpha)),
             "beta": torch.where(valid[..., None], beta, torch.zeros_like(beta)),
             "a_pre": a_pre,
-            "z": self._proj("z", self.w_z, h).view(B, L, H, dv),
+            "z": self._proj("z", self._base(self.w_z), h).view(B, L, H, dv),
         }
 
     def _output(self, x: torch.Tensor, o: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """再帰の出力 o (B, L, H, d_v) をゲートして射影し、残差と MLP を通した層の出力 (B, L, D)。"""
-        o = o * torch.rsqrt(o.pow(2).mean(dim=-1, keepdim=True) + self.eps) * self.w_out_norm
+        o = (
+            o
+            * torch.rsqrt(o.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+            * self._base(self.w_out_norm)
+        )
         o = o * F.silu(z)
-        y = x + self._proj("out", self.w_out, o.flatten(2))
-        post = zc_rms_norm(y, self.w_post_norm, self.eps)
-        mlp = F.silu(self._proj("gate", self.w_gate, post)) * self._proj("up", self.w_up, post)
-        return y + self._proj("down", self.w_down, mlp)
+        y = x + self._proj("out", self._base(self.w_out), o.flatten(2))
+        post = zc_rms_norm(y, self._base(self.w_post_norm), self.eps)
+        mlp = F.silu(self._proj("gate", self._base(self.w_gate), post)) * self._proj(
+            "up", self._base(self.w_up), post
+        )
+        return y + self._proj("down", self._base(self.w_down), mlp)
 
     def _last_inputs(self, h_all: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
         """次のステップの畳み込みが読む、最後の conv_size - 1 トークンの正規化した入力。"""
         last = lengths[:, None] + torch.arange(self.conv_size - 1, device=h_all.device)
-        return torch.gather(h_all, 1, last[..., None].expand(-1, -1, h_all.shape[-1])).detach()
+        return self._cut(torch.gather(h_all, 1, last[..., None].expand(-1, -1, h_all.shape[-1])))
 
     def forward(
         self,
@@ -231,12 +267,13 @@ class LoRAGDNLayer(nn.Module):
         """1ステップ分のトークンの層の入力 x (B, L, D) を、fla の chunk カーネルでまとめて読む。
         ``valid`` (B, L) は詰め物でないトークンで、各行の先頭に詰めてある。前の状態は
         S_prev (B, H, d_k, d_v) と、直前の conv_size - 1 トークンの正規化した入力
-        h_prev (B, conv_size - 1, D)。
+        h_prev (B, conv_size - 1, D)。``use_trace`` は streaming で読むか（クラスの説明を参照）。
 
         層の出力 (B, L, D) と、次の S と h を返す。"""
         B, L, _ = x.shape
+        self.streaming = use_trace
         lengths = valid.sum(dim=1)
-        S = S_prev.detach()
+        S = self._cut(S_prev)
         if use_trace:
             assert B == 1, B
             assert set(self.lora_targets) == set(LORA_TARGETS), self.lora_targets
@@ -268,7 +305,7 @@ class LoRAGDNLayer(nn.Module):
                 S_prev.detach(),
                 int(lengths[0]),
             )
-        return y, S_next.detach(), self._last_inputs(p["h_all"], lengths)
+        return y, self._cut(S_next), self._last_inputs(p["h_all"], lengths)
 
     @torch.no_grad()
     def _advance_trace(
