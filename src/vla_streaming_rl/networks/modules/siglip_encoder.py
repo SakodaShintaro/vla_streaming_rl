@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 from torch import nn
-from transformers import Dinov2Model, SiglipVisionModel
+from transformers import SiglipVisionModel
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer
 
@@ -17,21 +17,18 @@ from vla_streaming_rl.networks.modules.self_attention import (
 )
 from vla_streaming_rl.networks.modules.vlm_encoder import STATE_SCALAR_INDICES
 
-# DINOv2 の事前学習の画像の正規化（ImageNet の平均と標準偏差）
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
 # SigLIP2 の事前学習の画像の正規化（[-1, 1] にする）
 SIGLIP_MEAN = (0.5, 0.5, 0.5)
 SIGLIP_STD = (0.5, 0.5, 0.5)
 
 
-class DinoEncoder(nn.Module):
-    """観測の画像を1枚ずつ凍結した DINOv2（``backbone`` が siglip2 なら SigLIP2 の画像の塔）に読ませ、最後の層のパッチの特徴をそのまま
+class SiglipEncoder(nn.Module):
+    """観測の画像を1枚ずつ凍結した SigLIP2 の画像の塔に読ませ、最後の層のパッチの特徴をそのまま
     1ステップ分の状態にするエンコーダ。
 
-    ``represent`` は画像を ``resolution`` 四方に縮めて DINOv2 に通し、最後の層（正規化の後）の
+    ``represent`` は画像を ``resolution`` 四方に縮めて SigLIP2 に通し、最後の層（正規化の後）の
     パッチのトークンの格子を ``token_pool`` x ``token_pool`` ずつ平均してバッファに保存する。
-    DINOv2 は学習しないので、バッファの表現は古くならない。
+    SigLIP2 は学習しないので、バッファの表現は古くならない。
 
     ``to_state`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測をそれぞれ ``token_dim`` 幅のトークンにしたものを並べ、
@@ -48,30 +45,25 @@ class DinoEncoder(nn.Module):
         self,
         image_shapes: list[tuple[int, ...]],
         action_dim: int,
-        dino_config: DictConfig,
+        siglip_config: DictConfig,
         device: str,
     ) -> None:
         super().__init__()
         self.device = device
-        self.backbone = dino_config.backbone
-        self.resolution = dino_config.resolution
-        if self.backbone == "dinov2":
-            self.model = Dinov2Model.from_pretrained(dino_config.model_id).to(device)
-            pixel_mean, pixel_std = IMAGENET_MEAN, IMAGENET_STD
-        else:
-            assert self.backbone == "siglip2", self.backbone
-            self.model = SiglipVisionModel.from_pretrained(dino_config.model_id).to(device)
-            pixel_mean, pixel_std = SIGLIP_MEAN, SIGLIP_STD
-            # SigLIP2 の位置の埋め込みは事前学習の解像度の格子のものなので、解像度はそれに合わせる
-            assert self.resolution == self.model.config.image_size, (
-                self.resolution,
-                self.model.config.image_size,
-            )
+        self.resolution = siglip_config.resolution
+        self.model = SiglipVisionModel.from_pretrained(siglip_config.model_id).to(device)
+        # SigLIP2 の位置の埋め込みは事前学習の解像度の格子のものなので、解像度はそれに合わせる
+        assert self.resolution == self.model.config.image_size, (
+            self.resolution,
+            self.model.config.image_size,
+        )
         self.model.eval().requires_grad_(False)
-        self.register_buffer("pixel_mean", torch.tensor(pixel_mean, device=device).view(1, 3, 1, 1))
-        self.register_buffer("pixel_std", torch.tensor(pixel_std, device=device).view(1, 3, 1, 1))
+        self.register_buffer(
+            "pixel_mean", torch.tensor(SIGLIP_MEAN, device=device).view(1, 3, 1, 1)
+        )
+        self.register_buffer("pixel_std", torch.tensor(SIGLIP_STD, device=device).view(1, 3, 1, 1))
         # パッチの格子は resolution / patch_size 四方で、それを token_pool 四方ずつ平均する
-        self.token_pool = dino_config.token_pool
+        self.token_pool = siglip_config.token_pool
         patch_size = self.model.config.patch_size
         assert self.resolution % (patch_size * self.token_pool) == 0, self.resolution
         self.grid = self.resolution // patch_size
@@ -79,14 +71,14 @@ class DinoEncoder(nn.Module):
         self.num_positions = self.images_num * (self.grid // self.token_pool) ** 2
         self.feature_dim = self.model.config.hidden_size
 
-        self.token_dim = dino_config.token_dim
+        self.token_dim = siglip_config.token_dim
         self.state_out_proj = nn.Linear(self.feature_dim, self.token_dim).to(device)
         # スカラーをトークンにする sin/cos の角周波数。周期を scalar_max_period から
         # scalar_min_period まで対数等間隔にとり、sin と cos で token_dim 幅にする
         assert self.token_dim % 2 == 0, self.token_dim
         periods = torch.logspace(
-            math.log10(dino_config.scalar_max_period),
-            math.log10(dino_config.scalar_min_period),
+            math.log10(siglip_config.scalar_max_period),
+            math.log10(siglip_config.scalar_min_period),
             self.token_dim // 2,
         )
         self.register_buffer("scalar_frequencies", (2.0 * math.pi / periods).to(device))
@@ -101,26 +93,26 @@ class DinoEncoder(nn.Module):
             *[
                 SpatialTransformerBlock(
                     self.token_dim,
-                    dino_config.token_mixer_heads,
+                    siglip_config.token_mixer_heads,
                     tokens_num,
-                    dino_config.token_mixer_layer_scale_init,
+                    siglip_config.token_mixer_layer_scale_init,
                 )
-                for _ in range(dino_config.token_mixer_layers)
+                for _ in range(siglip_config.token_mixer_layers)
             ]
         ).to(device)
 
-        self.num_gdn_layers = dino_config.num_gdn_layers
+        self.num_gdn_layers = siglip_config.num_gdn_layers
         assert self.num_gdn_layers >= 0, self.num_gdn_layers
         if self.num_gdn_layers > 0:
             gdn_config = Qwen3_5TextConfig(
                 hidden_size=self.token_dim,
-                intermediate_size=dino_config.gdn_mlp_dim,
+                intermediate_size=siglip_config.gdn_mlp_dim,
                 num_hidden_layers=self.num_gdn_layers,
                 layer_types=["linear_attention"] * self.num_gdn_layers,
-                linear_num_key_heads=dino_config.gdn_heads,
-                linear_num_value_heads=dino_config.gdn_heads,
-                linear_key_head_dim=dino_config.gdn_head_dim,
-                linear_value_head_dim=dino_config.gdn_head_dim,
+                linear_num_key_heads=siglip_config.gdn_heads,
+                linear_num_value_heads=siglip_config.gdn_heads,
+                linear_key_head_dim=siglip_config.gdn_head_dim,
+                linear_value_head_dim=siglip_config.gdn_head_dim,
                 linear_conv_kernel_dim=4,
                 hidden_act="silu",
                 rms_norm_eps=1e-6,
@@ -130,8 +122,8 @@ class DinoEncoder(nn.Module):
                     LoRAGDNLayer(
                         self._zero_residual_layer(Qwen3_5DecoderLayer(gdn_config, index)),
                         LORA_TARGETS,
-                        dino_config.gdn_lora_rank,
-                        dino_config.gdn_lora_alpha,
+                        siglip_config.gdn_lora_rank,
+                        siglip_config.gdn_lora_alpha,
                         True,
                     )
                     for index in range(self.num_gdn_layers)
@@ -183,13 +175,8 @@ class DinoEncoder(nn.Module):
             antialias=True,
         )
         pixels = (pixels - self.pixel_mean) / self.pixel_std
-        hidden = self.model(pixel_values=pixels).last_hidden_state
-        if self.backbone == "dinov2":
-            # 最初のトークンは CLS で、残りがラスター順のパッチ
-            patches = hidden[:, 1:]
-        else:
-            # SigLIP2 は CLS を持たず、全てがラスター順のパッチ
-            patches = hidden
+        # SigLIP2 は CLS を持たず、全てがラスター順のパッチ
+        patches = self.model(pixel_values=pixels).last_hidden_state
         grid = patches.view(self.images_num, self.grid, self.grid, -1).permute(0, 3, 1, 2)
         grid = F.avg_pool2d(grid, self.token_pool)
         return grid.flatten(2).transpose(1, 2).reshape(self.num_positions, self.feature_dim)

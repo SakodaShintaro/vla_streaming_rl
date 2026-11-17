@@ -7,13 +7,13 @@ from omegaconf import DictConfig
 from torch import nn
 
 from ..replay_buffer import ReplayBufferData
-from .modules.dino_encoder import DinoEncoder
 from .modules.prediction_head import LatentTDPredictionHead
+from .modules.siglip_encoder import SiglipEncoder
 from .modules.value_head import DistributionalValueHead
 
 
 @dataclass
-class DinoInference:
+class SiglipInference:
     """``infer`` の出力。"""
 
     action: torch.Tensor  # (1, action_dim)
@@ -22,25 +22,29 @@ class DinoInference:
 
 
 @dataclass
-class DinoLoss:
+class SiglipLoss:
     """``compute_replay_loss`` と ``compute_replay_and_streaming_loss`` の出力。``info`` は ``名前 -> 値`` の記録で、そのまま wandb に
     出す。"""
 
     loss: torch.Tensor
     info: dict  # scalar name -> float
     td_error: torch.Tensor  # (B,) 窓ごとの TD 誤差。リプレイの優先度の更新に使う
+    # GDN の層があるとき、リプレイの窓の 2 行目以降を読む前の再帰の状態を今の重みで計算し直した
+    # もの (B, window_len - 1, gdn_state_size)。バッファの保存した状態をこれで置き換える。
+    # GDN の層がなければ None
+    recurrent_states: torch.Tensor | None
 
 
-class DinoActorCriticWithActionValue(nn.Module):
-    """凍結した DINOv2 で観測のフレームを1枚ずつ読み、そのパッチの特徴から状態を作る
+class SiglipActorCriticWithActionValue(nn.Module):
+    """凍結した SigLIP2 で観測のフレームを1枚ずつ読み、そのパッチの特徴から状態を作る
     アクタークリティック。
 
     毎ティック、エンコーダが現在のフレームを読んだ特徴を作り（``represent``）、バッファに
-    保存する。推論も学習も保存した表現を読み戻し、DINOv2 を通さない。
+    保存する。推論も学習も保存した表現を読み戻し、SigLIP2 を通さない。
     状態はステップごとに ``to_state`` で作り、時間方向には何もしない。リプレイの窓は 2 ステップで、
     最初のステップの状態が現在の状態、最後のステップの状態が次の状態。
 
-    ``dino.num_gdn_layers`` が 0 より大きければ、ステップのトークンを GDN の層（``DinoEncoder``）に
+    ``siglip.num_gdn_layers`` が 0 より大きければ、ステップのトークンを GDN の層（``SiglipEncoder``）に
     1本の流れとして読ませてから混ぜる。毎ティック ``stream_step`` が流れを1ステップ進め、バッファに
     特徴と読む前の再帰の状態をつないだ1行を保存する。推論はその出力から行動を出す。リプレイの窓は
     ``gdn_burn_in_steps + gdn_bptt_steps + 1`` ステップで、最初の行に保存した再帰の状態から始め、
@@ -48,6 +52,9 @@ class DinoActorCriticWithActionValue(nn.Module):
     読む。その最後のステップが現在の状態、窓の最後のステップが次の状態。GDN の層の元の重みは
     この BPTT で、LoRA は ``compute_replay_and_streaming_loss`` の最新のステップの分で RTRL で学ぶ。
     ``reset_on_episode_end`` なら、窓の中のエピソードの境目で再帰の状態を空にする。
+    保存した再帰の状態は書き込んだときの重みで計算したもので、重みが動くと古くなるので、窓を
+    読むたびに 2 行目以降の分を今の重みで計算し直したものを返し、エージェントがバッファに書き戻す
+    （``SiglipLoss.recurrent_states``）。
     """
 
     def __init__(
@@ -59,25 +66,25 @@ class DinoActorCriticWithActionValue(nn.Module):
         policy_head_factory,
         prediction_head_factory: Callable[..., LatentTDPredictionHead],
         critic_loss_weight: float,
-        dino_config: DictConfig,
+        siglip_config: DictConfig,
         reset_on_episode_end: bool,
     ) -> None:
         super().__init__()
-        self.use_gdn = dino_config.num_gdn_layers > 0
-        self.burn_in_steps = dino_config.gdn_burn_in_steps
+        self.use_gdn = siglip_config.num_gdn_layers > 0
+        self.burn_in_steps = siglip_config.gdn_burn_in_steps
         # 表現はバッファに保存するので、GDN の層がなければバッファから読む窓は今のステップだけで
         # よい。あれば burn-in と BPTT のステップ
         self.seq_len = (
-            dino_config.gdn_burn_in_steps + dino_config.gdn_bptt_steps if self.use_gdn else 1
+            siglip_config.gdn_burn_in_steps + siglip_config.gdn_bptt_steps if self.use_gdn else 1
         )
         self.reset_on_episode_end = reset_on_episode_end
         self.critic_loss_weight = critic_loss_weight
         device = "cuda"
         action_dim = action_space_shape[0]
-        self.encoder = DinoEncoder(
+        self.encoder = SiglipEncoder(
             image_shapes=image_shapes,
             action_dim=action_dim,
-            dino_config=dino_config,
+            siglip_config=siglip_config,
             device=device,
         )
         state_dim = self.encoder.output_dim
@@ -100,7 +107,7 @@ class DinoActorCriticWithActionValue(nn.Module):
         return self.encoder.representation_shape()
 
     def represent(self, images: list[torch.Tensor]) -> torch.Tensor:
-        """このティックの画像 (3, H, W) の並びを DINOv2 で読んだ、バッファに保存する表現。"""
+        """このティックの画像 (3, H, W) の並びを SigLIP2 で読んだ、バッファに保存する表現。"""
         return self.encoder.represent(images)
 
     def stream_step(
@@ -124,28 +131,28 @@ class DinoActorCriticWithActionValue(nn.Module):
         return torch.cat([features.flatten(), state_before.detach()]), output
 
     @torch.inference_mode()
-    def infer(self, window: ReplayBufferData, warmup: bool) -> DinoInference:
+    def infer(self, window: ReplayBufferData, warmup: bool) -> SiglipInference:
         """バッファの最新の窓 (1, seq_len) の最後のステップの状態から行動を出す。``warmup``
         （バッファを貯めている間）なら一様乱数の行動を返す。"""
         assert window.observations.shape[0] == 1, "Batch size must be 1 for inference"
         return self._infer_state(self._state(window, -1), warmup)
 
     @torch.inference_mode()
-    def infer_from_stream(self, output: torch.Tensor, warmup: bool) -> DinoInference:
+    def infer_from_stream(self, output: torch.Tensor, warmup: bool) -> SiglipInference:
         """``stream_step`` が返した GDN の層の出力 (tokens_num, token_dim) から行動を出す。"""
         return self._infer_state(self.encoder.mix(output[None]), warmup)
 
-    def _infer_state(self, state: torch.Tensor, warmup: bool) -> DinoInference:
+    def _infer_state(self, state: torch.Tensor, warmup: bool) -> SiglipInference:
         action = self.policy_head.get_action(state)
         value_report = self.value_head.value_report(self.value_head(state, action).output)
         if warmup:
             action = torch.rand_like(action) * 2.0 - 1.0
-        return DinoInference(action=action, value_report=value_report, state=state)
+        return SiglipInference(action=action, value_report=value_report, state=state)
 
-    def compute_replay_loss(self, data: ReplayBufferData) -> DinoLoss:
+    def compute_replay_loss(self, data: ReplayBufferData) -> SiglipLoss:
         """リプレイの窓の損失。"""
-        state, next_state = self._replay_states(data)
-        return self._head_terms(
+        state, next_state, recurrent_states = self._replay_states(data)
+        result = self._head_terms(
             state,
             next_state,
             data.actions[:, -1],
@@ -153,6 +160,8 @@ class DinoActorCriticWithActionValue(nn.Module):
             data.dones[:, -1],
             data.weights,
         )
+        result.recurrent_states = recurrent_states
+        return result
 
     def compute_replay_and_streaming_loss(
         self,
@@ -160,12 +169,12 @@ class DinoActorCriticWithActionValue(nn.Module):
         previous_output: torch.Tensor,
         latest_output: torch.Tensor,
         latest: ReplayBufferData,
-    ) -> DinoLoss:
+    ) -> SiglipLoss:
         """リプレイの窓 ``data`` と最新の遷移を1つのバッチにつないだ損失。最新の遷移の現在の状態は、
         前のティックの ``stream_step`` の出力 ``previous_output``（LoRA までの計算グラフ付き）から、
         次の状態はこのティックの出力 ``latest_output`` から作る。遷移の行動・報酬・終端は最新の
         窓 ``latest`` (1, 2) の最後の行。TD 誤差はリプレイの窓の分だけ返す。"""
-        replay_state, replay_next_state = self._replay_states(data)
+        replay_state, replay_next_state, recurrent_states = self._replay_states(data)
         streaming_state = self.encoder.mix(previous_output[None])
         with torch.no_grad():
             streaming_next_state = self.encoder.mix(latest_output.detach()[None])
@@ -178,25 +187,32 @@ class DinoActorCriticWithActionValue(nn.Module):
             torch.cat([data.weights, latest.weights]),
         )
         result.td_error = result.td_error[: data.weights.shape[0]]
+        result.recurrent_states = recurrent_states
         return result
 
-    def _replay_states(self, data: ReplayBufferData) -> tuple[torch.Tensor, torch.Tensor]:
+    def _replay_states(
+        self, data: ReplayBufferData
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """リプレイの窓の現在の状態（最後から2番目のステップ）と次の状態（最後のステップ、
-        勾配なし）。"""
+        勾配なし）。GDN の層があれば、2 行目以降を読む前の再帰の状態
+        (B, window_len - 1, gdn_state_size) も返す（``SiglipLoss.recurrent_states``）。"""
         if not self.use_gdn:
             with torch.no_grad():
                 next_state = self._state(data, -1)
-            return self._state(data, -2), next_state
+            return self._state(data, -2), next_state, None
         batch, window_len = data.observations.shape[:2]
         positions, feature_dim = self.encoder.representation_shape()
         features = data.observations[..., : positions * feature_dim].view(
             batch, window_len, positions, feature_dim
         )
         recurrent = data.observations[:, 0, positions * feature_dim :]
+        recomputed = []
         for step in range(window_len):
-            if step > 0 and self.reset_on_episode_end:
-                # 前の行が終端なら、この行から新しいエピソードの流れ
-                recurrent = recurrent * (1.0 - data.dones[:, step - 1])
+            if step > 0:
+                if self.reset_on_episode_end:
+                    # 前の行が終端なら、この行から新しいエピソードの流れ
+                    recurrent = recurrent * (1.0 - data.dones[:, step - 1])
+                recomputed.append(recurrent.detach())
             # burn-in と、次の状態の行は勾配なしで読む
             with torch.set_grad_enabled(self.burn_in_steps <= step < window_len - 1):
                 tokens = self.encoder.step_tokens(
@@ -210,7 +226,7 @@ class DinoActorCriticWithActionValue(nn.Module):
                     state = self.encoder.mix(output)
         with torch.no_grad():
             next_state = self.encoder.mix(output)
-        return state, next_state
+        return state, next_state, torch.stack(recomputed, dim=1)
 
     def _head_terms(
         self,
@@ -220,7 +236,7 @@ class DinoActorCriticWithActionValue(nn.Module):
         reward: torch.Tensor,
         done: torch.Tensor,
         weights: torch.Tensor,
-    ) -> DinoLoss:
+    ) -> SiglipLoss:
         """現在の状態 ``state``（勾配あり）と次の状態 ``next_state`` (B, state_dim)、遷移の行動
         (B, action_dim)、報酬と終端 (B, 1)、重要度の重み (B,) から、ヘッドの損失。"""
         with torch.no_grad():
@@ -245,10 +261,11 @@ class DinoActorCriticWithActionValue(nn.Module):
             f"losses/{key}": value
             for key, value in {**critic_info, **actor_info, **state_prediction_info}.items()
         }
-        return DinoLoss(
+        return SiglipLoss(
             loss=self.critic_loss_weight * critic_loss + actor_loss + state_prediction_loss,
             info=info,
             td_error=td_error,
+            recurrent_states=None,
         )
 
     def _state(self, data: ReplayBufferData, step: int) -> torch.Tensor:

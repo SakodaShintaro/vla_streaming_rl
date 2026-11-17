@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from vla_streaming_rl.agents.cnn_agent import CNNAgent
-from vla_streaming_rl.agents.dino_agent import DinoAgent
+from vla_streaming_rl.agents.siglip_agent import SiglipAgent
 from vla_streaming_rl.agents.vla_agent import VLAAgent
 from vla_streaming_rl.envs.animalai.curriculum import seen_in_training
 from vla_streaming_rl.episode_log import EpisodeRecord, save_episode_data
@@ -19,7 +19,7 @@ from vla_streaming_rl.render import render_frame
 
 
 def run_arena(
-    agent: VLAAgent | DinoAgent | CNNAgent,
+    agent: VLAAgent | SiglipAgent | CNNAgent,
     env,
     seed: int,
     render: bool,
@@ -68,7 +68,7 @@ def run_arena(
 
 
 def run_testbed(
-    agent: VLAAgent | DinoAgent | CNNAgent,
+    agent: VLAAgent | SiglipAgent | CNNAgent,
     env,
     seed: int,
     render: bool,

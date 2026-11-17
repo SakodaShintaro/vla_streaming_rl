@@ -6,12 +6,12 @@ defaults:
   - _self_
 
 # この設定のエージェント（build.py が組み立てるネットワークとエージェントを選ぶ）
-agent_type: dino
+agent_type: siglip
 batch_size: 16
 actor_lr: 1e-5
 critic_lr: 1e-5
 weight_decay: 0.01
-# dino.num_gdn_layers > 0 のとき、GDN の層の LoRA を最新のステップの streaming の更新で RTRL で学ぶか。
+# siglip.num_gdn_layers > 0 のとき、GDN の層の LoRA を最新のステップの streaming の更新で RTRL で学ぶか。
 # LoRA の学習率と1次のモーメント
 streaming_update: false
 lora_lr: 1e-5
@@ -21,14 +21,10 @@ replay_buffer:
   # 表現が 1 ステップ 64 x 768（bfloat16 で 96KB）なので GPU に置く（size 20000 で約 2GB）
   device: cuda
 
-dino:
-  # 画像を読む凍結したバックボーン [dinov2, siglip2]
-  # dinov2 なら model_id: facebook/dinov2-base, resolution: 224（パッチ 14 で格子 16x16、token_pool 2 で 8x8 = 64 トークン）
-  # siglip2 なら model_id: google/siglip2-base-patch16-256, resolution: 256（パッチ 16 で格子 16x16、token_pool 2 で 8x8 = 64 トークン）
-  backbone: siglip2
+siglip:
+  # 画像を読む凍結した SigLIP2 の画像の塔。パッチ 16 で格子 16x16、token_pool 2 で 8x8 = 64 トークン
   model_id: google/siglip2-base-patch16-256
-  # バックボーンに入れる画像の一辺。DINOv2 はパッチが 14 なので 224 ならパッチの格子は 16x16。
-  # SigLIP2 は位置の埋め込みが固定なので model_id の解像度と同じにする
+  # SigLIP2 に入れる画像の一辺。位置の埋め込みが固定なので model_id の解像度と同じにする
   resolution: 256
   # パッチの格子を平均でまとめる幅。2 なら 8x8 = 64 トークン（VLM の 256px の画像と同じ数）
   token_pool: 2

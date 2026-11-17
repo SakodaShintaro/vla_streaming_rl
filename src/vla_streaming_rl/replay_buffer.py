@@ -222,6 +222,17 @@ class ReplayBuffer:
         self.priorities[start_indices.to(self.storage_device)] = priorities
         self.max_priority = max(self.max_priority, float(priorities.max()))
 
+    def overwrite_observation_tail(
+        self, rows: torch.Tensor, column: int, values: torch.Tensor
+    ) -> None:
+        """行 ``rows`` (any shape) の保存した観測の ``column`` 列目から後ろを ``values``
+        (*rows.shape, obs_dim - column) で置き換える。同じ行が何度か出たときは、どれか1つの値が
+        残る。"""
+        flat_rows = rows.reshape(-1).to(self.storage_device)
+        self.observations[flat_rows, column:] = values.reshape(flat_rows.shape[0], -1).to(
+            self.storage_device, self.observations.dtype
+        )
+
     def batch_stats(self, data: ReplayBufferData) -> dict[str, float]:
         """引いたバッチがバッファ全体と比べてどこに偏っているか。``data`` は :meth:`sample`
         が返したもので、報酬を正規化する前のもの。"""

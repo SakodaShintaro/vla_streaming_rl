@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: MIT
-"""The DINOv2 agent: the frozen DINOv2 reads each observation frame on its own,
+"""The SigLIP2 agent: the frozen SigLIP2 vision tower reads each observation frame on its own,
 its patch features become the state, and the heads learn off-policy from a
 large replay buffer.
 
 Every tick the features of the current frame are stored; once ``learning_starts`` ticks
 have gone by, one gradient step on a ``batch_size`` sample of windows fires
 every tick, after the tick is stored and before its action is chosen. Below
-``learning_starts`` the network returns uniform random actions. DINOv2 is
+``learning_starts`` the network returns uniform random actions. SigLIP2 is
 frozen, so the stored features never go stale; the heads are trained on them.
 
-With ``dino.num_gdn_layers`` the step's tokens pass through GDN layers that
+With ``siglip.num_gdn_layers`` the step's tokens pass through GDN layers that
 carry their recurrent state across ticks. Every tick advances that stream and
 stores the features together with the recurrent state before the tick; the
 replayed windows rebuild the state from it (burn-in, then BPTT) and train the
@@ -26,21 +26,21 @@ import torch
 from torch import nn, optim
 
 from vla_streaming_rl.agents.step_result import StepResult
-from vla_streaming_rl.networks.dino_actor_critic_with_action_value import (
-    DinoActorCriticWithActionValue,
+from vla_streaming_rl.networks.siglip_actor_critic_with_action_value import (
+    SiglipActorCriticWithActionValue,
 )
 from vla_streaming_rl.replay_buffer import ReplayBuffer
 from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs
 
 
-class DinoAgent:
+class SiglipAgent:
     def __init__(
         self,
         *,
         action_space: gym.spaces.Box,
         image_names: tuple[str, ...],
-        network: DinoActorCriticWithActionValue,
+        network: SiglipActorCriticWithActionValue,
         normalizing_by_return: bool,
         reward_scaler: RewardScaler | FixedRewardScaler,
         learning_starts: int,
@@ -226,6 +226,16 @@ class DinoAgent:
             ).item()
             self.lora_optimizer.step()
         self.rb.update_priorities(data.start_indices, result.td_error)
+        if self.network.use_gdn:
+            # 保存した再帰の状態を、今の重みで計算し直したもので置き換える。行の先頭は特徴で、
+            # その後ろが再帰の状態
+            positions, feature_dim = self.network.encoder.representation_shape()
+            self.rb.overwrite_observation_tail(
+                data.start_indices[:, None]
+                + torch.arange(1, self.rb.seq_len, device=data.start_indices.device),
+                positions * feature_dim,
+                result.recurrent_states,
+            )
         return metrics
 
     def _act(self, global_step: int, metrics: dict) -> StepResult:
@@ -252,7 +262,7 @@ class DinoAgent:
     def _observe(
         self, obs: dict[str, Any], terminated: bool, truncated: bool, info: dict
     ) -> dict[str, float]:
-        """このティックの観測を DINOv2 で読み、バッファに1行積む。metrics を返す。"""
+        """このティックの観測を SigLIP2 で読み、バッファに1行積む。metrics を返す。"""
         episode_done = terminated or truncated
         # A terminal observation still belongs to the episode that ended, so the
         # recurrent state is reset on the tick after it rather than on it.
