@@ -44,8 +44,9 @@ class SiglipActorCriticWithActionValue(nn.Module):
     状態はステップごとに ``to_state`` で作り、時間方向には何もしない。リプレイの窓は 2 ステップで、
     最初のステップの状態が現在の状態、最後のステップの状態が次の状態。
 
-    ``siglip.num_gdn_layers`` が 0 より大きければ、ステップのトークンを GDN の層（``SiglipEncoder``）に
-    1本の流れとして読ませてから混ぜる。毎ティック ``stream_step`` が流れを1ステップ進め、バッファに
+    ``siglip.num_gdn_layers`` が 0 より大きければ、ステップのトークンを潜在のトークンにまとめて
+    GDN の層（``SiglipEncoder``）に1本の流れとして読ませ、その出力の記憶のトークンをステップの
+    トークンに付け足してから混ぜる。毎ティック ``stream_step`` が流れを1ステップ進め、バッファに
     特徴と読む前の再帰の状態をつないだ1行を保存する。推論はその出力から行動を出す。リプレイの窓は
     ``gdn_burn_in_steps + gdn_bptt_steps + 1`` ステップで、最初の行に保存した再帰の状態から始め、
     burn-in のステップを勾配なしで読んで状態を今の重みに馴染ませてから、続くステップを BPTT で
@@ -120,8 +121,8 @@ class SiglipActorCriticWithActionValue(nn.Module):
         use_trace: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """GDN の層の流れをこのティックの分だけ進める。前の行動 (action_dim,)、正規化した報酬
-        (1,)、スカラーの観測 (SCALAR_OBS_DIM,)。バッファに保存する1行と、GDN の層の出力
-        (tokens_num, token_dim) を返す。``use_trace`` なら出力は LoRA までの計算グラフ付きで、
+        (1,)、スカラーの観測 (SCALAR_OBS_DIM,)。バッファに保存する1行と、記憶のトークンを
+        付け足した混ぜる層の入力 (tokens_num + memory_tokens, token_dim) を返す。``use_trace`` なら出力は LoRA までの計算グラフ付きで、
         でなければ勾配なしで読む。"""
         features = self.encoder.represent(images)
         with torch.set_grad_enabled(use_trace):
@@ -139,7 +140,7 @@ class SiglipActorCriticWithActionValue(nn.Module):
 
     @torch.inference_mode()
     def infer_from_stream(self, output: torch.Tensor, warmup: bool) -> SiglipInference:
-        """``stream_step`` が返した GDN の層の出力 (tokens_num, token_dim) から行動を出す。"""
+        """``stream_step`` が返した混ぜる層の入力から行動を出す。"""
         return self._infer_state(self.encoder.mix(output[None]), warmup)
 
     def _infer_state(self, state: torch.Tensor, warmup: bool) -> SiglipInference:
@@ -221,7 +222,7 @@ class SiglipActorCriticWithActionValue(nn.Module):
                     data.rewards[:, step],
                     data.scalar_obs[:, step],
                 )
-                output, recurrent = self.encoder.gdn_step(tokens, recurrent, False)
+                output, recurrent = self.encoder.read_step(tokens, recurrent)
                 if step == window_len - 2:
                     state = self.encoder.mix(output)
         with torch.no_grad():

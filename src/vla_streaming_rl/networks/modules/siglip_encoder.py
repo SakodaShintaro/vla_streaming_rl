@@ -35,10 +35,13 @@ class SiglipEncoder(nn.Module):
     ``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが読む状態にする
     （VLM のエンコーダの ``to_state`` と同じ）。``num_gdn_layers`` が 0 なら時間方向には何もしない。
 
-    ``num_gdn_layers`` が 0 より大きければ、混ぜる層の手前に、乱数で初期化した GDN の層
-    （Qwen3.5 の linear_attention の層と同じ形、幅は ``token_dim``）を置き、ステップのトークンを
-    1本の流れとして読ませて再帰の状態をステップをまたいで持ち越す。元の重みはリプレイの窓の
-    BPTT で、LoRA は ``stream_step`` の出力の損失で RTRL で学ぶ（``LoRAGDNLayer``）。
+    ``num_gdn_layers`` が 0 より大きければ、ステップのトークンを学習したクエリの cross-attention
+    （Perceiver / Set Transformer のプーリング、``PerceiverPooling``）で ``gdn_memory_tokens`` 個の
+    潜在のトークンにまとめ、乱数で初期化した GDN の層（Qwen3.5 の linear_attention の層と同じ形、
+    幅は ``token_dim``）にその列を読ませて、再帰の状態をステップをまたいで持ち越す。GDN の層の
+    出力を記憶のトークンとしてステップのトークンの後ろに付け足し、混ぜる層に通す。元の重みと
+    プーリングはリプレイの窓の BPTT で、LoRA は ``stream_step`` の出力の損失で RTRL で学ぶ
+    （``LoRAGDNLayer``）。
     """
 
     def __init__(
@@ -84,7 +87,11 @@ class SiglipEncoder(nn.Module):
         self.register_buffer("scalar_frequencies", (2.0 * math.pi / periods).to(device))
         # 表現の位置、前の行動の成分ごと、報酬、スカラーの観測ごとに1トークン
         tokens_num = self.num_positions + action_dim + 1 + len(STATE_SCALAR_INDICES)
-        self.output_dim = tokens_num * self.token_dim
+        self.num_gdn_layers = siglip_config.num_gdn_layers
+        assert self.num_gdn_layers >= 0, self.num_gdn_layers
+        # GDN の層があれば、その出力の記憶のトークンを混ぜる層の入力に付け足す
+        self.memory_tokens = siglip_config.gdn_memory_tokens if self.num_gdn_layers > 0 else 0
+        self.output_dim = (tokens_num + self.memory_tokens) * self.token_dim
         # 位置の埋め込みは 0、残差は layer scale で小さく始める
         self.token_position = nn.Parameter(
             torch.zeros(1, tokens_num, self.token_dim, device=device)
@@ -94,16 +101,24 @@ class SiglipEncoder(nn.Module):
                 SpatialTransformerBlock(
                     self.token_dim,
                     siglip_config.token_mixer_heads,
-                    tokens_num,
+                    tokens_num + self.memory_tokens,
                     siglip_config.token_mixer_layer_scale_init,
                 )
                 for _ in range(siglip_config.token_mixer_layers)
             ]
         ).to(device)
 
-        self.num_gdn_layers = siglip_config.num_gdn_layers
-        assert self.num_gdn_layers >= 0, self.num_gdn_layers
         if self.num_gdn_layers > 0:
+            self.pooling = PerceiverPooling(
+                self.token_dim, siglip_config.token_mixer_heads, self.memory_tokens
+            ).to(device)
+            # 1ステップ（記憶のトークンの数だけのトークン）を読む間の減衰を、ヘッドごとに
+            # gdn_step_decay_min から gdn_step_decay_max まで散らす
+            step_decays = torch.logspace(
+                math.log10(-math.log(siglip_config.gdn_step_decay_min)),
+                math.log10(-math.log(siglip_config.gdn_step_decay_max)),
+                siglip_config.gdn_heads,
+            )
             gdn_config = Qwen3_5TextConfig(
                 hidden_size=self.token_dim,
                 intermediate_size=siglip_config.gdn_mlp_dim,
@@ -120,7 +135,11 @@ class SiglipEncoder(nn.Module):
             self.gdn_layers = nn.ModuleList(
                 [
                     LoRAGDNLayer(
-                        self._zero_residual_layer(Qwen3_5DecoderLayer(gdn_config, index)),
+                        self._init_layer(
+                            Qwen3_5DecoderLayer(gdn_config, index),
+                            step_decays,
+                            self.memory_tokens,
+                        ),
                         LORA_TARGETS,
                         siglip_config.gdn_lora_rank,
                         siglip_config.gdn_lora_alpha,
@@ -133,12 +152,24 @@ class SiglipEncoder(nn.Module):
             self.gdn_state = self.initial_gdn_state(1)
 
     @staticmethod
-    def _zero_residual_layer(layer: Qwen3_5DecoderLayer) -> Qwen3_5DecoderLayer:
-        """残差に足す2つの射影（再帰の出力の out と MLP の down）を 0 にした層。学習の始めは
-        入力をそのまま通し、乱数の重みと過去のステップで決まる成分をトークンに足さない。"""
+    def _init_layer(
+        layer: Qwen3_5DecoderLayer, step_decays: torch.Tensor, tokens_per_step: int
+    ) -> Qwen3_5DecoderLayer:
+        """乱数で作った層の初期化を2つ変える。
+
+        残差に足す2つの射影（再帰の出力の out と MLP の down）を 0 にし、学習の始めは入力を
+        そのまま通して、乱数の重みと過去のステップで決まる成分をトークンに足さない。
+
+        Qwen3.5 の初期化の減衰（A が最大 16）は言語のトークン1つずつに合わせた強さで、
+        トークン1つで状態がほぼ消える。a の射影が 0 のときの1ステップ（``tokens_per_step``
+        トークン）分の減衰の log が、ヘッドごとに ``-step_decays`` (heads,) になるよう A を小さく
+        する。"""
+        attention = layer.linear_attn
         with torch.no_grad():
-            layer.linear_attn.out_proj.weight.zero_()
+            attention.out_proj.weight.zero_()
             layer.mlp.down_proj.weight.zero_()
+            per_token = step_decays.to(attention.A_log) / tokens_per_step
+            attention.A_log.copy_((per_token / F.softplus(attention.dt_bias)).log())
         return layer
 
     def gdn_state_size(self) -> int:
@@ -195,8 +226,8 @@ class SiglipEncoder(nn.Module):
         return self.mix(self.step_tokens(image, actions, rewards, scalar_obs))
 
     def mix(self, tokens: torch.Tensor) -> torch.Tensor:
-        """ステップのトークン (B, tokens_num, token_dim) を混ぜる層に通し、ヘッドが読む状態
-        (B, output_dim) にする。"""
+        """ステップのトークン (B, tokens_num, token_dim)（GDN の層があれば記憶のトークンを
+        付け足したもの）を混ぜる層に通し、ヘッドが読む状態 (B, output_dim) にする。"""
         return self.token_mixer(tokens).flatten(start_dim=1)
 
     def step_tokens(
@@ -221,12 +252,13 @@ class SiglipEncoder(nn.Module):
         return tokens + self.token_position
 
     def gdn_step(
-        self, tokens: torch.Tensor, state: torch.Tensor, use_trace: bool
+        self, latents: torch.Tensor, state: torch.Tensor, use_trace: bool
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """1ステップ分のトークン (B, tokens_num, token_dim) を、前の再帰の状態 (B, gdn_state_size)
-        から GDN の層に下から順に読ませ、最も上の層の出力 (B, tokens_num, token_dim) と次の状態を
-        返す。``use_trace`` は streaming で読むか（``LoRAGDNLayer.forward`` を参照）。"""
-        x = tokens
+        """1ステップ分の潜在のトークン (B, memory_tokens, token_dim)（``pool`` の出力）を、前の
+        再帰の状態 (B, gdn_state_size) から GDN の層に下から順に読ませ、最も上の層の出力
+        (B, memory_tokens, token_dim) と次の状態を返す。``use_trace`` は streaming で読むか
+        （``LoRAGDNLayer.forward`` を参照）。"""
+        x = latents
         valid = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
         layer_states = state.split([layer.recurrent_size() for layer in self.gdn_layers], dim=1)
         next_states = []
@@ -243,6 +275,20 @@ class SiglipEncoder(nn.Module):
             next_states += [S.flatten(start_dim=1), h.flatten(start_dim=1)]
         return x, torch.cat(next_states, dim=1)
 
+    def pool(self, tokens: torch.Tensor) -> torch.Tensor:
+        """ステップのトークン (B, tokens_num, token_dim) を潜在のトークン
+        (B, memory_tokens, token_dim) にまとめる。"""
+        return self.pooling(tokens)
+
+    def read_step(
+        self, tokens: torch.Tensor, state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """リプレイの窓の1ステップ分のトークン (B, tokens_num, token_dim) を、前の再帰の状態
+        から読み、記憶のトークンを付け足した混ぜる層の入力 (B, tokens_num + memory_tokens,
+        token_dim) と次の状態を返す。"""
+        memory, next_state = self.gdn_step(self.pool(tokens), state, False)
+        return torch.cat([tokens, memory], dim=1), next_state
+
     def stream_step(
         self,
         features: torch.Tensor,
@@ -254,9 +300,10 @@ class SiglipEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """このティックの特徴 (num_positions, feature_dim) と前の行動・報酬・スカラーの観測を流れに
         積む。``reset_state`` なら先に再帰の状態と感度を空にする。読む前の再帰の状態
-        (gdn_state_size,) と、GDN の層の出力 (tokens_num, token_dim) を返す。``use_trace`` なら
-        RTRL の感度を進め、出力は次のティックの損失が勾配を LoRA まで流せるよう計算グラフ付き
-        （呼ぶ側が勾配を有効にする）。トークンは LoRA だけを学ぶように勾配なしで作る。"""
+        (gdn_state_size,) と、記憶のトークンを付け足した混ぜる層の入力
+        (tokens_num + memory_tokens, token_dim) を返す。``use_trace`` なら RTRL の感度を進め、
+        記憶のトークンは次のティックの損失が勾配を LoRA まで流せるよう計算グラフ付き（呼ぶ側が
+        勾配を有効にする）。トークンと潜在のトークンは LoRA だけを学ぶように勾配なしで作る。"""
         if reset_state:
             # 空の状態はパラメータによらないので、感度も 0 に戻す
             self.gdn_state = self.initial_gdn_state(1)
@@ -266,6 +313,32 @@ class SiglipEncoder(nn.Module):
             tokens = self.step_tokens(
                 features[None], action[None], reward.view(1, 1), scalar_obs[None]
             )
+            latents = self.pool(tokens)
         state_before = self.gdn_state[0]
-        output, self.gdn_state = self.gdn_step(tokens, self.gdn_state, use_trace)
-        return state_before, output[0]
+        memory, self.gdn_state = self.gdn_step(latents, self.gdn_state, use_trace)
+        return state_before, torch.cat([tokens, memory], dim=1)[0]
+
+
+class PerceiverPooling(nn.Module):
+    """学習したクエリ ``num_queries`` 個の cross-attention でトークンの集合を同じ数の潜在の
+    トークンにまとめる（Perceiver の cross-attention、Set Transformer の PMA）。pre-norm の
+    注意と MLP を残差でつなぐ。"""
+
+    def __init__(self, dim: int, heads: int, num_queries: int) -> None:
+        super().__init__()
+        self.queries = nn.Parameter(torch.randn(1, num_queries, dim) * 0.02)
+        self.query_norm = nn.LayerNorm(dim)
+        self.input_norm = nn.LayerNorm(dim)
+        self.attention = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.mlp_norm = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(nn.Linear(dim, 4 * dim), nn.GELU(), nn.Linear(4 * dim, dim))
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        """トークン (B, N, dim) を潜在のトークン (B, num_queries, dim) にまとめる。"""
+        queries = self.queries.expand(tokens.shape[0], -1, -1)
+        inputs = self.input_norm(tokens)
+        x = (
+            queries
+            + self.attention(self.query_norm(queries), inputs, inputs, need_weights=False)[0]
+        )
+        return x + self.mlp(self.mlp_norm(x))

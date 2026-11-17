@@ -37,9 +37,15 @@ siglip:
   token_mixer_layers: 2
   token_mixer_heads: 4
   token_mixer_layer_scale_init: 0.0001
-  # 混ぜる層の手前に置き、ステップのトークンを1本の流れとして読む GDN の層の数（0 なら置かない）。
-  # 幅は token_dim。元の重みはリプレイの窓の BPTT で学ぶ
+  # ステップのトークンを潜在のトークンにまとめて読み、再帰の状態をステップをまたいで持ち越す GDN の
+  # 層の数（0 なら置かない）。幅は token_dim。元の重みはリプレイの窓の BPTT で学ぶ
   num_gdn_layers: 0
+  # ステップのトークンを Perceiver のプーリングでまとめる潜在のトークンの数。GDN の層の出力は
+  # 記憶のトークンとして混ぜる層の入力に付け足す
+  gdn_memory_tokens: 8
+  # 1ステップを読む間の再帰の状態の減衰の初期値の範囲（ヘッドごとにこの間に散らす）
+  gdn_step_decay_min: 0.5
+  gdn_step_decay_max: 0.99
   gdn_heads: 4
   gdn_head_dim: 32
   gdn_mlp_dim: 256
