@@ -18,6 +18,7 @@ class SiglipInference:
 
     action: torch.Tensor  # (1, action_dim)
     value_report: dict[str, float]  # value head diagnostics (incl. "value")
+    action_report: dict[str, float]  # 行動を選んだ方策の分布の要約
     state: torch.Tensor  # (1, state_dim) ヘッドが読んだ状態
 
 
@@ -146,9 +147,12 @@ class SiglipActorCriticWithActionValue(nn.Module):
     def _infer_state(self, state: torch.Tensor, warmup: bool) -> SiglipInference:
         action = self.policy_head.get_action(state)
         value_report = self.value_head.value_report(self.value_head(state, action).output)
+        action_report = self.policy_head.action_report(state)
         if warmup:
             action = torch.rand_like(action) * 2.0 - 1.0
-        return SiglipInference(action=action, value_report=value_report, state=state)
+        return SiglipInference(
+            action=action, value_report=value_report, action_report=action_report, state=state
+        )
 
     def compute_replay_loss(self, data: ReplayBufferData) -> SiglipLoss:
         """リプレイの窓の損失。"""

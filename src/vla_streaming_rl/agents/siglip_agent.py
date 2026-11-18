@@ -249,6 +249,7 @@ class SiglipAgent:
             inference = self.network.infer(window, warmup)
         self.last_features = inference.state
         metrics.update(inference.value_report)
+        metrics.update(inference.action_report)
         action = np.clip(
             inference.action[0].cpu().numpy() * self.action_scale + self.action_bias,
             self.action_low,

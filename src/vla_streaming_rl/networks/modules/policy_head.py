@@ -191,6 +191,10 @@ class DiffusionPolicy(nn.Module):
         """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
 
+    def action_report(self, x: torch.Tensor) -> dict[str, float]:
+        """行動を選んだ分布の要約。この方策は分布を閉じた形で持たないので空。"""
+        return {}
+
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
         """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
         return self._denoise(*_repeat_over_gammas(x, self.gamma_features)).view(
@@ -352,6 +356,10 @@ class QF3Policy(nn.Module):
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
         """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
+
+    def action_report(self, x: torch.Tensor) -> dict[str, float]:
+        """行動を選んだ分布の要約。この方策は分布を閉じた形で持たないので空。"""
+        return {}
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
         """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
@@ -521,6 +529,10 @@ class TokenDiffusionPolicy(nn.Module):
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
         """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._denoise(x, self.gamma_tokens[-1:].expand(x.size(0), -1, -1))
+
+    def action_report(self, x: torch.Tensor) -> dict[str, float]:
+        """行動を選んだ分布の要約。この方策は分布を閉じた形で持たないので空。"""
+        return {}
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
         """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
@@ -713,6 +725,10 @@ class CFGDiffusionPolicy(nn.Module):
         """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._denoise(x, self.gamma_features[-1:].expand(x.size(0), -1))
 
+    def action_report(self, x: torch.Tensor) -> dict[str, float]:
+        """行動を選んだ分布の要約。この方策は分布を閉じた形で持たないので空。"""
+        return {}
+
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
         """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
         return self._denoise(*_repeat_over_gammas(x, self.gamma_features)).view(
@@ -843,6 +859,10 @@ class IMLEPolicy(nn.Module):
     def get_action(self, x: torch.Tensor) -> torch.Tensor:
         """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         return self._generate(x, self.gamma_features[-1:].expand(x.size(0), -1))
+
+    def action_report(self, x: torch.Tensor) -> dict[str, float]:
+        """行動を選んだ分布の要約。この方策は分布を閉じた形で持たないので空。"""
+        return {}
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
         """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
@@ -1011,6 +1031,17 @@ class TanhPolicy(nn.Module):
         """主の割引率の方策の行動 (B, action_dim)。環境で実行するのはこれ。"""
         action, _, _, _ = self._sample(x, self.gamma_features[-1:].expand(x.size(0), -1))
         return action
+
+    def action_report(self, x: torch.Tensor) -> dict[str, float]:
+        """主の割引率の方策が状態 (1, state_dim) で持つ分布の要約。行動の成分ごとに、tanh を
+        通した平均と、tanh の前の標準偏差。"""
+        assert x.shape[0] == 1, f"action_report expects B == 1, got B={x.shape[0]}"
+        mean, log_std = self.forward(x, self.gamma_features[-1:]).output.chunk(2, dim=-1)
+        report = {}
+        for i in range(self.action_dim):
+            report[f"policy_mean_{i}"] = torch.tanh(mean[0, i]).item()
+            report[f"policy_std_{i}"] = log_std[0, i].exp().item()
+        return report
 
     def get_gamma_actions(self, x: torch.Tensor) -> torch.Tensor:
         """割引率ごとの方策の行動 (B, num_gammas, action_dim)。最後が主の割引率。"""
