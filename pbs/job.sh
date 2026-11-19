@@ -18,8 +18,6 @@ singularity exec --nv \
   --bind ${HOME}:${HOME} \
   --bind ${CUDA_HOME}:${CUDA_HOME} \
   --env CUDA_HOME="${CUDA_HOME}" \
-  --env WANDB_API_KEY="${WANDB_API_KEY}" \
-  --env HF_TOKEN="${HF_TOKEN}" \
   ${HOME}/work/vla_streaming_rl/pbs/container/xvfb.sif \
   bash -c "
     Xvfb :1 -screen 0 1024x768x24 &
