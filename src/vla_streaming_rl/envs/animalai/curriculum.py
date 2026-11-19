@@ -19,13 +19,15 @@ field (see `build_selector`):
   - "life2"   "life", except that a game retries without losing a life until it
               clears the stage the previous game ended on, so the number of
               stages a game clears goes up every game (`Life2Selector`).
-  - "eval"    every configs/competition/ arena of `eval_levels` and
+  - "eval"    every arena of `eval_levels` and
               `eval_variants` once, in order -- with every level and variant,
               the 900-arena Testbed sweep (`SequentialSelector`, which ends
               after one pass).
 
-Every arena comes from configs/competition/, whose files are named
-XX-YY-ZZ.yaml for level, task and variant. Each of the 300 tasks ships three
+Every arena comes from configs/competition/ or from CUSTOM_ARENA_DIR, whose
+files are named LEVEL-YY-ZZ.yaml for level, task and variant. The competition
+levels are "01" to "10"; the arenas written by scripts/make_*_arenas.py have
+word levels ("bridge", "food", ...). Each of the 300 competition tasks ships three
 variants; the training modes serve one variant of each (`train_variant`: 300
 arenas, 30 per level) while eval sweeps all 900. Training and eval therefore
 overlap by construction -- the trained variant is scored again, and within a
@@ -43,6 +45,8 @@ import numpy as np
 import yaml
 
 COMPETITION_DIR = Path("./external/animal-ai/configs/competition")
+# scripts/make_*_arenas.py が書く自作のアリーナ
+CUSTOM_ARENA_DIR = Path("./external/animal-ai/configs/custom")
 
 
 # Animal-AI yaml uses custom !ArenaConfig/!Item/!Vector3/!RGB tags. We register
@@ -125,17 +129,20 @@ class Arena:
     variant: str
 
 
-def _competition_arenas() -> list[Arena]:
-    """Every arena of the Olympics set, labeled by its "XX-YY-ZZ" stem.
+def _all_arenas() -> list[Arena]:
+    """Every arena of the Olympics set and of CUSTOM_ARENA_DIR, labeled by its
+    "LEVEL-YY-ZZ" stem.
 
     The three fields are level, task and variant, so the label carries the
-    curriculum stage ("01") and the task family ("01-24") an arena belongs to.
+    curriculum stage ("01", "food") and the task family ("01-24", "food-04")
+    an arena belongs to.
     It is also what names per-arena files (train.py writes a video per arena)
     and wandb metrics, so training and eval report the same arena under the
     same name.
     """
-    paths = sorted(COMPETITION_DIR.glob("*.yaml"))
-    assert paths, f"no arena yamls under {COMPETITION_DIR}"
+    competition = sorted(COMPETITION_DIR.glob("*.yaml"))
+    assert competition, f"no arena yamls under {COMPETITION_DIR}"
+    paths = competition + sorted(CUSTOM_ARENA_DIR.glob("*.yaml"))
     arenas = []
     for path in paths:
         level, task, variant = path.stem.split("-")
@@ -148,11 +155,9 @@ def _competition_arenas() -> list[Arena]:
 def _eval_arenas(levels: list[str], variants: list[str]) -> list[Arena]:
     """評価で回すアリーナ。`levels` のレベルの、`variants` の版だけに絞る。"""
     arenas = [
-        arena
-        for arena in _competition_arenas()
-        if arena.level in levels and arena.variant in variants
+        arena for arena in _all_arenas() if arena.level in levels and arena.variant in variants
     ]
-    assert arenas, f"no competition arena has a level in {levels} and a variant in {variants}"
+    assert arenas, f"no arena has a level in {levels} and a variant in {variants}"
     return arenas
 
 
@@ -163,8 +168,8 @@ def _variant_arenas(variant: str) -> list[Arena]:
     per family -- 300 of the 900, which is the arena set the paper's
     curriculum trains on. The other variants are what eval scores.
     """
-    arenas = [arena for arena in _competition_arenas() if arena.variant == variant]
-    assert arenas, f"no competition arena has variant {variant!r}"
+    arenas = [arena for arena in _all_arenas() if arena.variant == variant]
+    assert arenas, f"no arena has variant {variant!r}"
     return arenas
 
 
@@ -248,9 +253,7 @@ def seen_in_training(variant: str, levels: list[str]) -> set[str]:
     rest.
     """
     trained = {_arena_signature(arena.path) for arena in _training_arenas(variant, levels)}
-    return {
-        arena.name for arena in _competition_arenas() if _arena_signature(arena.path) in trained
-    }
+    return {arena.name for arena in _all_arenas() if _arena_signature(arena.path) in trained}
 
 
 class ArenaSelector:

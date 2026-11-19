@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: MIT
-"""暗転の課題（レベル 14）のアリーナの YAML を書き出す。
+"""暗転の課題（レベル blackout）のアリーナの YAML を書き出す。
 
 エージェントはアリーナの角から対角線の向きに置く。緑と赤を最大の大きさで 1 個ずつ、エージェントの
-すぐ前の左右に置き、14-01-01 では緑が右前で赤が左前、14-02-01 ではその逆にする。最初の
+すぐ前の左右に置き、blackout-01-01 では緑が右前で赤が左前、blackout-02-01 ではその逆にする。最初の
 1 ステップだけ止まったまま明るい画面で配置を見て、そこから最後まで暗転し、同時に動けるように
 なる。暗転の中で、見えていた緑の側を覚えて取りに行き、赤を避ける。
 暗転（``blackouts``）と停止（``frozenAgentDelays``）は Python の環境の側でステップ数として行う
-（env.py の ``lights_on`` と ``without_python_side_keys``）。競技のアリーナと同じ
-``external/animal-ai/configs/competition`` に書く。表を変えたら、これを実行し直す。
+（env.py の ``lights_on`` と ``without_python_side_keys``）。
+``external/animal-ai/configs/custom`` に書く。表を変えたら、これを実行し直す。
 
     uv run python scripts/make_blackout_arenas.py
 """
 
 import math
 
-from vla_streaming_rl.envs.animalai.curriculum import COMPETITION_DIR
+from vla_streaming_rl.envs.animalai.curriculum import CUSTOM_ARENA_DIR
 
 # 体力が尽きるまでのステップ数。全開で進めば 20 ステップで 27 ほど進むので、対角線の端（約 55）
 # まで届く
@@ -38,7 +38,7 @@ BLACKOUT_GOAL_FORWARD = 7.0
 BLACKOUT_GOAL_SIDE = 4.0
 
 # 課題ごとの、緑を右前に置くか（False なら左前。赤はその反対側）
-BLACKOUT_TASKS = {"14-01-01": True, "14-02-01": False}
+BLACKOUT_TASKS = {"blackout-01-01": True, "blackout-02-01": False}
 
 
 def _goal_position(side: float) -> tuple[float, float]:
@@ -86,7 +86,7 @@ arenas:
 
 
 if __name__ == "__main__":
-    COMPETITION_DIR.mkdir(parents=True, exist_ok=True)
+    CUSTOM_ARENA_DIR.mkdir(parents=True, exist_ok=True)
     for name, green_on_right in BLACKOUT_TASKS.items():
-        (COMPETITION_DIR / f"{name}.yaml").write_text(blackout_arena_yaml(green_on_right))
-    print(f"wrote {len(BLACKOUT_TASKS)} arenas to {COMPETITION_DIR}")
+        (CUSTOM_ARENA_DIR / f"{name}.yaml").write_text(blackout_arena_yaml(green_on_right))
+    print(f"wrote {len(BLACKOUT_TASKS)} arenas to {CUSTOM_ARENA_DIR}")

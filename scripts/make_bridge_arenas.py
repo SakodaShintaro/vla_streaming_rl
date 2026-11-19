@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: MIT
 """左右の橋の課題のアリーナの YAML を書き出す。
 
-レベル 11 は課題の組とバリアントの表（組ごとの道幅、バリアントごとの報酬）から作る 30 個、
-レベル 12 は振る舞いを調整するための 1 個（``12-01-01``）。競技のアリーナと同じ
-``XX-YY-ZZ.yaml`` の名前で、競技のアリーナと同じ ``external/animal-ai/configs/competition``
-に書く。表を変えたら、これを実行し直してアリーナを作り直す。どちらの道を選んだかを終わりの
-位置から判定する ``bridge_path`` も、あとの分析のためにここに置く。
+レベル bridge は課題の組とバリアントの表（組ごとの道幅、バリアントごとの報酬）から作る 30 個、
+レベル bridgetune は振る舞いを調整するための 1 個（``bridgetune-01-01``）。
+``LEVEL-YY-ZZ.yaml`` の名前で ``external/animal-ai/configs/custom`` に書く。表を変えたら、
+これを実行し直してアリーナを作り直す。どちらの道を選んだかを終わりの位置から判定する ``bridge_path`` も、あとの分析のためにここに置く。
 
     uv run python scripts/make_bridge_arenas.py
 """
@@ -13,7 +12,7 @@
 import math
 from dataclasses import dataclass
 
-from vla_streaming_rl.envs.animalai.curriculum import COMPETITION_DIR
+from vla_streaming_rl.envs.animalai.curriculum import CUSTOM_ARENA_DIR
 
 # 橋のアリーナの寸法（アリーナは 40 x 40、x が右、z が前）。エージェントは中央から前を
 # 向いて始まる。スタートからマグマの手前までは全幅が安全な床、マグマの区間は左右の橋以外が
@@ -28,12 +27,12 @@ BRIDGE_SLICE_Z = 1.0
 # ハイリスク側の橋の縁に並べる赤い球の大きさと、奥行きの間隔
 BRIDGE_EDGE_SPHERE_SIZE = 1.0
 BRIDGE_EDGE_SPHERE_SPACING_Z = 2.0
-# レベル 11 のマグマの区間、報酬の奥行き、橋の角度
+# レベル bridge のマグマの区間、報酬の奥行き、橋の角度
 BRIDGE_LAVA_START_Z = 10.0
 BRIDGE_LAVA_END_Z = 32.0
 BRIDGE_GOAL_Z = 36.0
 BRIDGE_ANGLE_DEG = 20.0
-# レベル 11 の橋の課題。タスク番号 YY の組は (YY + 1) // 2 で、奇数はハイリスク側が左、
+# レベル bridge の橋の課題。タスク番号 YY の組は (YY + 1) // 2 で、奇数はハイリスク側が左、
 # 偶数はその左右反転。組ごとの (ハイリスク側の道幅, ローリスク側の道幅) と、ローリスク側の
 # 報酬（組 5 だけ報酬なし）
 BRIDGE_PAIR_WIDTHS = {
@@ -73,7 +72,7 @@ class BridgeTask:
 
 
 def _level11_task(task: int, variant: str) -> BridgeTask:
-    """レベル 11 のタスク番号とバリアントの課題。"""
+    """レベル bridge のタスク番号とバリアントの課題。"""
     pair = (task + 1) // 2
     width_high, width_low = BRIDGE_PAIR_WIDTHS[pair]
     return BridgeTask(
@@ -92,17 +91,17 @@ def _level11_task(task: int, variant: str) -> BridgeTask:
     )
 
 
-# アリーナ名ごとの課題。レベル 12 は、1回目は大きい報酬のハイリスク側を選んで落ち、
+# アリーナ名ごとの課題。レベル bridgetune は、1回目は大きい報酬のハイリスク側を選んで落ち、
 # 振り返りのあとでローリスク側に切り替える、という振る舞いを引き出すための調整用。
 # ハイリスク側は細く、角度を回転の刻みの倍数からずらして直進だけでは渡れなくする。
 # ローリスク側の小さい報酬はマグマの手前の床に置き、橋を渡らずに確実に取れるようにする
 BRIDGE_TASKS = {
     **{
-        f"11-{task:02d}-{variant}": _level11_task(task, variant)
+        f"bridge-{task:02d}-{variant}": _level11_task(task, variant)
         for task in range(1, 2 * len(BRIDGE_PAIR_WIDTHS) + 1)
         for variant in BRIDGE_VARIANT_HIGH_REWARD
     },
-    "12-01-01": BridgeTask(
+    "bridgetune-01-01": BridgeTask(
         high_on_right=True,
         width_high=1.5,
         width_low=0.0,
@@ -263,7 +262,7 @@ def bridge_path(task: BridgeTask, x: float, z: float) -> int:
 
 
 if __name__ == "__main__":
-    COMPETITION_DIR.mkdir(parents=True, exist_ok=True)
+    CUSTOM_ARENA_DIR.mkdir(parents=True, exist_ok=True)
     for name, task in BRIDGE_TASKS.items():
-        (COMPETITION_DIR / f"{name}.yaml").write_text(bridge_arena_yaml(task))
-    print(f"wrote {len(BRIDGE_TASKS)} arenas to {COMPETITION_DIR}")
+        (CUSTOM_ARENA_DIR / f"{name}.yaml").write_text(bridge_arena_yaml(task))
+    print(f"wrote {len(BRIDGE_TASKS)} arenas to {CUSTOM_ARENA_DIR}")

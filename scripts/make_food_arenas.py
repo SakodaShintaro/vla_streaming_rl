@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: MIT
-"""黄色を集める課題（レベル 16）のアリーナの YAML を書き出す。
+"""黄色を集める課題（レベル food）のアリーナの YAML を書き出す。
 
 01-23-01（黄色 10 個と赤 10 個がランダムな位置にある）へ段階的に近づけるための 33 ステージ。
 
-- 16-01-01: 黄色 1 個が目の前にある（01-01-01 の緑を黄色にしたもの）
-- 16-02-01: 自分の位置と向きも黄色の位置もランダム
-- 16-03-01: 自分は 01-16-01 と同じ隅で壁向き、黄色の位置はランダム
-- 16-04-01 から 16-33-01: 黄色 n 個と赤 n 個（n = 1 から 30）。自分の位置と向きも全部の玉の
+- food-01-01: 黄色 1 個が目の前にある（01-01-01 の緑を黄色にしたもの）
+- food-02-01: 自分の位置と向きも黄色の位置もランダム
+- food-03-01: 自分は 01-16-01 と同じ隅で壁向き、黄色の位置はランダム
+- food-04-01 から food-33-01: 黄色 n 個と赤 n 個（n = 1 から 30）。自分の位置と向きも全部の玉の
   位置もランダム
 
 位置を書かない物は Unity がエピソードごとにランダムに置く。玉の大きさは 01-23-01 と同じ 1。
 pass_mark は黄色の数から 1 を引いた値で、01-2x と同じく合計 t ステップ以内に全部取れば合格する
-（体力は黄色を取るたびに戻るが、報酬からは毎ステップ 1/t が引かれ続ける）。競技のアリーナと同じ
-``external/animal-ai/configs/competition`` に書く。表を変えたら、これを実行し直す。
+（体力は黄色を取るたびに戻るが、報酬からは毎ステップ 1/t が引かれ続ける）。
+``external/animal-ai/configs/custom`` に書く。表を変えたら、これを実行し直す。
 
     uv run python scripts/make_food_arenas.py
 """
 
-from vla_streaming_rl.envs.animalai.curriculum import COMPETITION_DIR
+from vla_streaming_rl.envs.animalai.curriculum import CUSTOM_ARENA_DIR
 
 FOOD_GOAL_SIZE = 1
 # 黄色と赤を n 個ずつ置くステージの n
@@ -85,18 +85,18 @@ CORNER_AGENT = """    - !Item
 
 def food_arenas() -> dict[str, str]:
     arenas = {
-        "16-01-01": food_arena_yaml(CENTER_AGENT, 1, 0, FRONT_POSITION),
-        "16-02-01": food_arena_yaml("", 1, 0, ""),
-        "16-03-01": food_arena_yaml(CORNER_AGENT, 1, 0, ""),
+        "food-01-01": food_arena_yaml(CENTER_AGENT, 1, 0, FRONT_POSITION),
+        "food-02-01": food_arena_yaml("", 1, 0, ""),
+        "food-03-01": food_arena_yaml(CORNER_AGENT, 1, 0, ""),
     }
     for task, n in enumerate(FOOD_COUNTS, start=len(arenas) + 1):
-        arenas[f"16-{task:02d}-01"] = food_arena_yaml("", n, n, "")
+        arenas[f"food-{task:02d}-01"] = food_arena_yaml("", n, n, "")
     return arenas
 
 
 if __name__ == "__main__":
-    COMPETITION_DIR.mkdir(parents=True, exist_ok=True)
+    CUSTOM_ARENA_DIR.mkdir(parents=True, exist_ok=True)
     arenas = food_arenas()
     for name, text in arenas.items():
-        (COMPETITION_DIR / f"{name}.yaml").write_text(text)
-    print(f"wrote {len(arenas)} arenas to {COMPETITION_DIR}")
+        (CUSTOM_ARENA_DIR / f"{name}.yaml").write_text(text)
+    print(f"wrote {len(arenas)} arenas to {CUSTOM_ARENA_DIR}")

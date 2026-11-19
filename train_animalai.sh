@@ -3,9 +3,9 @@ set -eux
 
 # Usage: ./train_animalai.sh <difficulty> <agent> <exp_name> [hydra overrides...]
 #   difficulty: easy    -> level 01 の variant 01 だけ（簡易な検証用）
-#               14      -> 暗転の課題 14-01-01（最初の 1 ステップだけ見える）
-#               15      -> 迷路の記憶の課題 15-01-01 から 15-04-01（始めにルールで左右を1周ずつ走る）
-#               16      -> 黄色を集める課題 16-01-01 から 16-33-01（scripts/make_food_arenas.py）を
+#               blackout -> 暗転の課題 blackout-01-01 と blackout-02-01（最初の 1 ステップだけ見える）
+#               maze    -> 迷路の記憶の課題 maze-01-01 から maze-04-01（始めにルールで左右を1周ずつ走る）
+#               food    -> 黄色を集める課題 food-01-01 から food-33-01（scripts/make_food_arenas.py）を
 #                          ライフ制のステージにしたもの
 #               blink   -> level 01 を点滅の記憶の課題にしたもの（env_factory.blink_dark_steps_increment）
 #               life    -> ライフ制のステージ（env_factory.mode=life）。レベルと版とライフの数は
@@ -52,27 +52,27 @@ case ${difficulty} in
       episode_limit=30
     )
     ;;
-  14)
-    # 暗転の課題（scripts/make_blackout_arenas.py で作る 14-01-01）
+  blackout)
+    # 暗転の課題（scripts/make_blackout_arenas.py で作る blackout-01-01 と blackout-02-01）
     difficulty_overrides=(
-      'env_factory.train_levels=["14"]'
+      'env_factory.train_levels=["blackout"]'
       'env_factory.train_variant="01"'
       episode_limit=1200
     )
     ;;
-  15)
-    # 迷路の記憶の課題（scripts/make_maze_arenas.py で作る 15-01-01 から 15-04-01）
+  maze)
+    # 迷路の記憶の課題（scripts/make_maze_arenas.py で作る maze-01-01 から maze-04-01）
     difficulty_overrides=(
-      'env_factory.train_levels=["15"]'
+      'env_factory.train_levels=["maze"]'
       'env_factory.train_variant="01"'
       episode_limit=1200
     )
     ;;
-  16)
-    # 黄色を集める課題（scripts/make_food_arenas.py で作る 16-01-01 から 16-33-01）をライフ制で
+  food)
+    # 黄色を集める課題（scripts/make_food_arenas.py で作る food-01-01 から food-33-01）をライフ制で
     difficulty_overrides=(
       env_factory.mode=life
-      'env_factory.train_levels=["16"]'
+      'env_factory.train_levels=["food"]'
       'env_factory.train_variant="01"'
       episode_limit=1000
     )
@@ -104,7 +104,7 @@ case ${difficulty} in
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 14, 15, 16, blink, life, life2 or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, blackout, maze, food, blink, life, life2 or normal)" >&2
     exit 1
     ;;
 esac

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""迷路の走行を手がかりにする記憶の課題（レベル 15）のアリーナの YAML を書き出す。
+"""迷路の走行を手がかりにする記憶の課題（レベル maze）のアリーナの YAML を書き出す。
 
 「日」の字を横に倒した形の迷路で、中央レーンの上端から左右に分かれ、外側の廊下をぐるっと回って
 中央レーンの下端に戻ってこられる。左右の外側の廊下の中ほどに、ブロックへ少しくぼませた所を
@@ -9,14 +9,14 @@
 ``demo_action``）。2周して中央レーンの最初の位置に戻ってから操作できるようになる。観測の履歴に
 2周が入っているので、玉を見た側を覚えていれば、いきなり正しい側へ曲がれる。
 
-課題は、先に回る側と玉の側の 4 通り（15-01 から 15-04）。版はコースの大きさで、
-``MAZE_SIZES`` に足せば増える。競技のアリーナと同じ ``external/animal-ai/configs/competition``
+課題は、先に回る側と玉の側の 4 通り（maze-01 から maze-04）。版はコースの大きさで、
+``MAZE_SIZES`` に足せば増える。``external/animal-ai/configs/custom``
 に書く。表を変えたら、これを実行し直す。
 
     uv run python scripts/make_maze_arenas.py
 """
 
-from vla_streaming_rl.envs.animalai.curriculum import COMPETITION_DIR
+from vla_streaming_rl.envs.animalai.curriculum import CUSTOM_ARENA_DIR
 
 # 迷路の中心（アリーナは 40 x 40）
 MAZE_CENTER = 20.0
@@ -36,7 +36,7 @@ MAZE_GOAL_SIZE = 1.0
 MAZE_SIZES = {"01": (3.0, 3.0, 10.0, 400)}
 
 # 課題ごとの (先に回る側, 玉の側)。-1 が左（-x）、+1 が右（+x）
-MAZE_TASKS = {"15-01": (-1, -1), "15-02": (-1, 1), "15-03": (1, -1), "15-04": (1, 1)}
+MAZE_TASKS = {"maze-01": (-1, -1), "maze-02": (-1, 1), "maze-03": (1, -1), "maze-04": (1, 1)}
 
 
 def _n(value: float) -> str:
@@ -122,10 +122,10 @@ arenas:
 
 
 if __name__ == "__main__":
-    COMPETITION_DIR.mkdir(parents=True, exist_ok=True)
+    CUSTOM_ARENA_DIR.mkdir(parents=True, exist_ok=True)
     for variant, (corridor, block_width, block_length, t) in MAZE_SIZES.items():
         for task, (first, goal) in MAZE_TASKS.items():
-            (COMPETITION_DIR / f"{task}-{variant}.yaml").write_text(
+            (CUSTOM_ARENA_DIR / f"{task}-{variant}.yaml").write_text(
                 maze_arena_yaml(corridor, block_width, block_length, t, first, goal)
             )
-    print(f"wrote {len(MAZE_SIZES) * len(MAZE_TASKS)} arenas to {COMPETITION_DIR}")
+    print(f"wrote {len(MAZE_SIZES) * len(MAZE_TASKS)} arenas to {CUSTOM_ARENA_DIR}")
