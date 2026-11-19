@@ -6,6 +6,8 @@ set -eux
 #               1301    -> 13-01-01 だけ
 #               14      -> 暗転の課題 14-01-01（最初の 1 ステップだけ見える）
 #               15      -> 迷路の記憶の課題 15-01-01 から 15-04-01（始めにルールで左右を1周ずつ走る）
+#               16      -> 黄色を集める課題 16-01-01 から 16-33-01（scripts/make_food_arenas.py）を
+#                          ライフ制のステージにしたもの
 #               blink   -> level 01 を点滅の記憶の課題にしたもの（env_factory.blink_dark_steps_increment）
 #               life    -> ライフ制のステージ（env_factory.mode=life）。前のゲームが終わった
 #                          ステージに成功するまではライフを使わない。レベルと版とライフの数は
@@ -73,6 +75,15 @@ case ${difficulty} in
       episode_limit=1200
     )
     ;;
+  16)
+    # 黄色を集める課題（scripts/make_food_arenas.py で作る 16-01-01 から 16-33-01）をライフ制で
+    difficulty_overrides=(
+      env_factory.mode=life
+      'env_factory.train_levels=["16"]'
+      'env_factory.train_variant="01"'
+      episode_limit=1000
+    )
+    ;;
   blink)
     # 点滅の記憶の課題に作り変えたレベル 01（configs/env/animalai.yaml の blink_dark_steps_increment）
     difficulty_overrides=(
@@ -93,7 +104,7 @@ case ${difficulty} in
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, 15, blink, life or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, 15, 16, blink, life or normal)" >&2
     exit 1
     ;;
 esac
