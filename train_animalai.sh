@@ -3,7 +3,6 @@ set -eux
 
 # Usage: ./train_animalai.sh <difficulty> <agent> <exp_name> [hydra overrides...]
 #   difficulty: easy    -> level 01 の variant 01 だけ（簡易な検証用）
-#               1301    -> 13-01-01 だけ
 #               14      -> 暗転の課題 14-01-01（最初の 1 ステップだけ見える）
 #               15      -> 迷路の記憶の課題 15-01-01 から 15-04-01（始めにルールで左右を1周ずつ走る）
 #               16      -> 黄色を集める課題 16-01-01 から 16-33-01（scripts/make_food_arenas.py）を
@@ -51,13 +50,6 @@ case ${difficulty} in
       'env_factory.train_levels=["01"]'
       'env_factory.train_variant="01"'
       episode_limit=30
-    )
-    ;;
-  1301)
-    difficulty_overrides=(
-      'env_factory.train_levels=["13-01"]'
-      'env_factory.train_variant="01"'
-      episode_limit=1200
     )
     ;;
   14)
@@ -112,7 +104,7 @@ case ${difficulty} in
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, 15, 16, blink, life, life2 or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 14, 15, 16, blink, life, life2 or normal)" >&2
     exit 1
     ;;
 esac
