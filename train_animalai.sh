@@ -7,10 +7,9 @@ set -eux
 #               14      -> 暗転の課題 14-01-01（最初の 1 ステップだけ見える）
 #               15      -> 迷路の記憶の課題 15-01-01 から 15-04-01（始めにルールで左右を1周ずつ走る）
 #               blink   -> level 01 を点滅の記憶の課題にしたもの（env_factory.blink_dark_steps_increment）
-#               life    -> ライフ制のステージ（env_factory.mode=life）。レベルと版とライフの数は
+#               life    -> ライフ制のステージ（env_factory.mode=life）。前のゲームが終わった
+#                          ステージに成功するまではライフを使わない。レベルと版とライフの数は
 #                          configs/env/animalai.yaml のデフォルト通り
-#               life2   -> life と同じだが、前のゲームが終わったステージに成功するまではライフを
-#                          使わない（env_factory.mode=life2）
 #               normal  -> configs/env/animalai.yaml のデフォルト通り
 difficulty=${1}
 agent=${2}
@@ -84,16 +83,9 @@ case ${difficulty} in
     )
     ;;
   life)
-    # ライフ制のステージ（configs/env/animalai.yaml の mode の life）
+    # ライフ制のステージで、各ゲームが前のゲームより先へ進む（configs/env/animalai.yaml の mode の life）
     difficulty_overrides=(
       env_factory.mode=life
-      episode_limit=1000
-    )
-    ;;
-  life2)
-    # ライフ制のステージで、各ゲームが前のゲームより先へ進む（configs/env/animalai.yaml の mode の life2）
-    difficulty_overrides=(
-      env_factory.mode=life2
       episode_limit=1000
     )
     ;;
@@ -101,7 +93,7 @@ case ${difficulty} in
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, 15, blink, life, life2 or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, 1301, 14, 15, blink, life or normal)" >&2
     exit 1
     ;;
 esac
