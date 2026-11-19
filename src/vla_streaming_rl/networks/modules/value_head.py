@@ -294,10 +294,7 @@ class TokenActionValueHead(DistributionalValueHead):
     小さく始めるので、学習の始めは「状態のトークンと行動のトークンを並べて MLP で読む」のと
     ほぼ同じ。注意が、どの行動がどの観測のトークンと関わるかを学ぶ分だけ育つ。
 
-    混ぜた後は、状態のトークンの分と、行動のトークンの分に行動の値そのものを足したものを、それぞれ
-    ``hidden_dim`` の半分の幅に射影して正規化してから、つないで MLP で読む。状態のトークンは行動の
-    トークンよりずっと多いので、1つの層にまとめて入れると行動の分が薄まる。別々に同じ幅・同じ
-    大きさにして、MLP が状態と行動から同じくらいの大きさを受け取るようにする。
+    混ぜた後は、混ぜたトークンと行動の値そのものをつないで1本の MLP で読む。
     """
 
     def __init__(
@@ -325,20 +322,12 @@ class TokenActionValueHead(DistributionalValueHead):
         self.token_dim = token_dim
         total_action_dim = action_dim
         tokens_num = in_channels // token_dim + total_action_dim
+        mixed_dim = tokens_num * token_dim
         out_dim = len(gammas) * num_bins
 
         self.state_norm = nn.LayerNorm(in_channels, elementwise_affine=False)
-        # 混ぜた状態のトークンと、混ぜた行動のトークンに行動の値を足したものを、それぞれ半分の幅に
-        # 射影して正規化する
-        assert hidden_dim % 2 == 0, hidden_dim
-        self.state_in = nn.Sequential(
-            nn.Linear(in_channels, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2, elementwise_affine=False),
-        )
-        self.action_in = nn.Sequential(
-            nn.Linear(total_action_dim * token_dim + total_action_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2, elementwise_affine=False),
-        )
+        # 混ぜたトークンと行動の値をつないで読む
+        self.fc_in = nn.Linear(mixed_dim + total_action_dim, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
         self.fc_out = nn.Linear(hidden_dim, out_dim)
 
@@ -373,14 +362,9 @@ class TokenActionValueHead(DistributionalValueHead):
             self.token_dim, a.reshape(bs, 1, -1).to(x.dtype)
         )[:, 0]  # (B, action_dim, token_dim)
         tokens = torch.cat([state_tokens, action_tokens], dim=1) + self.token_position
-        mixed = self.token_mixer(tokens)
-        state_tokens_num = state_tokens.size(1)
-        state_part = self.state_in(mixed[:, :state_tokens_num].flatten(start_dim=1))
-        action_part = self.action_in(
-            torch.cat([mixed[:, state_tokens_num:].flatten(start_dim=1), a_flat], dim=1)
-        )
+        mixed = self.token_mixer(tokens).flatten(start_dim=1)
 
-        h = self.fc_mid(torch.cat([state_part, action_part], dim=1))
+        h = self.fc_mid(self.fc_in(torch.cat([mixed, a_flat], dim=1)))
         output = self._shape_logits(self.fc_out(h))
         return HeadOutput(output=output, activation=h)
 
