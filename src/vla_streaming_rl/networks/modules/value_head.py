@@ -325,10 +325,10 @@ class TokenActionValueHead(DistributionalValueHead):
         mixed_dim = tokens_num * token_dim
         out_dim = len(gammas) * num_bins
 
+        self.state_norm = nn.LayerNorm(in_channels, elementwise_affine=False)
         # 混ぜたトークンと行動の値をつないで読む
         self.fc_in = nn.Linear(mixed_dim + total_action_dim, hidden_dim)
         self.fc_mid = nn.Sequential(*[SimbaBlock(hidden_dim) for _ in range(block_num)])
-        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.fc_out = nn.Linear(hidden_dim, out_dim)
 
         self.apply(weights_init_)
@@ -357,14 +357,14 @@ class TokenActionValueHead(DistributionalValueHead):
         """
         bs = a.size(0)
         a_flat = a.view(bs, -1)  # (B, action_dim)
-        state_tokens = x.view(bs, -1, self.token_dim)
+        state_tokens = self.state_norm(x).view(bs, -1, self.token_dim)
         action_tokens = get_fourier_embeds_from_coordinates(
             self.token_dim, a.reshape(bs, 1, -1).to(x.dtype)
         )[:, 0]  # (B, action_dim, token_dim)
         tokens = torch.cat([state_tokens, action_tokens], dim=1) + self.token_position
         mixed = self.token_mixer(tokens).flatten(start_dim=1)
 
-        h = self.norm(self.fc_mid(self.fc_in(torch.cat([mixed, a_flat], dim=1))))
+        h = self.fc_mid(self.fc_in(torch.cat([mixed, a_flat], dim=1)))
         output = self._shape_logits(self.fc_out(h))
         return HeadOutput(output=output, activation=h)
 
