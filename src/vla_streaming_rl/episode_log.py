@@ -128,14 +128,16 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
     assert len(obs_sizes) == 1, (
         f"Episode '{name}' produced observations of differing sizes {obs_sizes}"
     )
-    obs_h, obs_w = obs_rgb_images[0].shape[:2]
-    if obs_h % 2 or obs_w % 2:
-        obs_rgb_images = [
-            np.pad(img, ((0, obs_h % 2), (0, obs_w % 2), (0, 0)), mode="constant")
-            for img in obs_rgb_images
-        ]
     obs_video_path = episode_log_dir / "obs.mp4"
-    imageio.mimsave(str(obs_video_path), obs_rgb_images, fps=10, macro_block_size=1)
+    imageio.mimsave(
+        str(obs_video_path),
+        obs_rgb_images,
+        fps=10,
+        macro_block_size=1,
+        codec="libx264rgb",
+        pixelformat="rgb24",
+        output_params=["-crf", "0"],
+    )
 
     save_episode_texts(episode_log_dir, record.texts)
 

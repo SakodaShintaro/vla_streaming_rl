@@ -8,7 +8,7 @@ env_id: AnimalAI-v0
 # steps_per_stage; the values below keep that ratio at 1/1000 scale.
 step_limit: 800_000
 episode_limit: 1200
-save_interval: 1
+save_interval: 10
 final_evaluation: false
 
 env_factory:
