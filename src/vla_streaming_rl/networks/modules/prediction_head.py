@@ -21,6 +21,16 @@ class _MLP(nn.Module):
         return self.fc_out(self.norm(self.fc_mid(self.fc_in(x))))
 
 
+def _weights_as_buffers(module: nn.Module) -> nn.Module:
+    """``module`` の重みをすべて buffer に付け替えて返す。勾配では学習しないが学習中に更新される
+    重み（指数移動平均の目標）を、パラメータではなく状態として持たせて、チェックポイントに載せる。"""
+    for submodule in module.modules():
+        for name, param in list(submodule.named_parameters(recurse=False)):
+            delattr(submodule, name)
+            submodule.register_buffer(name, param.detach().clone())
+    return module
+
+
 class LatentTDPredictionHead(nn.Module):
     """ヘッドが読む状態そのものを予測先にした TD-JEPA (Bagatella et al., 2025) の対称版。
 
@@ -71,18 +81,17 @@ class LatentTDPredictionHead(nn.Module):
             predictor_block_num,
             len(gammas) * state_dim,
         )
-        # ブートストラップに使う目標の予測器。勾配では学習せず、予測器を指数移動平均で追う
-        self.target_predictor = copy.deepcopy(self.predictor).requires_grad_(False)
+        # ブートストラップに使う目標の予測器。勾配では学習せず、予測器を指数移動平均で追う。
+        # 重みは buffer なので、チェックポイントに載る
+        self.target_predictor = _weights_as_buffers(copy.deepcopy(self.predictor))
         self.inverse_dynamics = _MLP(
             2 * state_dim, predictor_hidden_dim, predictor_block_num, action_dim
         )
 
     @torch.no_grad()
     def _update_target(self) -> None:
-        for target, online in zip(
-            self.target_predictor.parameters(), self.predictor.parameters(), strict=True
-        ):
-            target.lerp_(online, self.TARGET_EMA_RATE)
+        for name, online in self.predictor.named_parameters():
+            self.target_predictor.get_buffer(name).lerp_(online, self.TARGET_EMA_RATE)
 
     @staticmethod
     def _collapse_info(state: torch.Tensor, target: torch.Tensor) -> dict:
