@@ -13,12 +13,20 @@ from vla_streaming_rl.scalar_obs import SCALAR_OBS_NAMES, read_scalar_obs
 
 @dataclass
 class EpisodeRecord:
-    """Everything one episode leaves behind for ``save_episode_data``."""
+    """エピソードの中でエージェントが行動を決めた観測ごとに、並びの順に1つずつ積む。最初はリセット
+    直後の観測で、そのあとはステップごとに返った観測。どのリストも同じ位置が同じ観測の分で、
+    リプレイバッファの1行と同じく、その観測で行動を決めるときにエージェントが読んだもの（観測、
+    前の行動、観測と一緒に返った報酬）と、そのときの位置を持つ。"""
 
     # 描画したフレーム（RGB）
     frames: list[np.ndarray]
-    actions: list[np.ndarray]
+    # その観測が返る前に実行した行動（エージェントが前の行動として読むもの）。リセット直後の分は
+    # 前のエピソードの最後の行動
+    prev_actions: list[np.ndarray]
+    # その観測と一緒に返った環境の報酬と、エージェントが読む整形した報酬。リセット直後の環境の
+    # 報酬は 0
     rewards: list[float]
+    shaped_rewards: list[float]
     observations: list[np.ndarray]
     texts: list[dict[str, str]]
     xyzs: list[tuple[float, float, float]]
@@ -40,17 +48,13 @@ class EpisodeRecord:
         prev_action: np.ndarray,
     ) -> "EpisodeRecord":
         """リセット直後の描画と観測から、エピソードの記録を始める。``prev_action`` はリセット直後の
-        観測でエージェントが前の行動として読んだもの（前のエピソードの最後の行動）。
-
-        行動・報酬・位置・スカラーの観測の最初の1行を、リセットの分にする。行動は
-        ``prev_action``、報酬はリセットでは無いので 0、位置と観測はリセット直後のもの。これで
-        各フレームでエージェントが読んだ前の行動・報酬・スカラーの観測が、どれも1つ前の行に
-        揃う。"""
+        観測でエージェントが前の行動として読んだもの（前のエピソードの最後の行動）。"""
         log_position = "agent_xyz" in reset_info
         return cls(
             frames=[frame],
-            actions=[prev_action.copy()],
+            prev_actions=[prev_action.copy()],
             rewards=[0.0],
+            shaped_rewards=[reset_info["shaped_reward"]],
             observations=[obs["image"].copy()],
             texts=[texts],
             xyzs=[reset_info["agent_xyz"]] if log_position else [],
@@ -70,8 +74,9 @@ class EpisodeRecord:
     ) -> None:
         """1ステップ分を足す。``action`` を取って ``reward`` と ``obs`` が返り、その観測に
         エージェントが応えたあとの描画が ``frame``。"""
-        self.actions.append(action.copy())
+        self.prev_actions.append(action.copy())
         self.rewards.append(reward)
+        self.shaped_rewards.append(info["shaped_reward"])
         self.observations.append(obs["image"].copy())
         if self.log_position:
             self.xyzs.append(info["agent_xyz"])
@@ -153,19 +158,15 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
 
     save_episode_texts(episode_log_dir, record.texts)
 
-    # One row per step: the action taken, the reward it drew, where the
-    # agent stood after it and which way it faced, and the scalar observation
-    # it came back with, so an episode's trajectory can be drawn from the run
-    # rather than re-simulated. The first row, step -1, is the reset: the
-    # previous action the agent read there, no reward, and the reset's
-    # position and scalar observation, so the inputs the agent read at frame k
-    # are all in the row of step k - 1. ``xyzs`` is empty for an env that reports no
-    # position, and the x/y/z/yaw columns are then left out rather than filled
-    # with a stand-in.
-    columns = [f"action{i}" for i in range(len(record.actions[0]))] + ["reward"]
+    columns = [f"prev_action{i}" for i in range(len(record.prev_actions[0]))] + [
+        "reward",
+        "shaped_reward",
+    ]
     rows = [
-        [f"{float(a):.6f}" for a in action] + [f"{float(reward):.6f}"]
-        for action, reward in zip(record.actions, record.rewards)
+        [f"{float(a):.6f}" for a in prev_action] + [f"{float(reward):.6f}", f"{float(shaped):.6f}"]
+        for prev_action, reward, shaped in zip(
+            record.prev_actions, record.rewards, record.shaped_rewards, strict=True
+        )
     ]
     if record.xyzs:
         columns = columns + ["x", "y", "z", "yaw"]
@@ -173,7 +174,7 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
             row + [f"{float(v):.4f}" for v in xyz] + [f"{float(yaw):.2f}"]
             for row, xyz, yaw in zip(rows, record.xyzs, record.yaws, strict=True)
         ]
-    # 行動を取ったあとに返った観測のスカラー
+    # 観測のスカラー
     columns = columns + list(SCALAR_OBS_NAMES)
     rows = [
         row + [f"{float(v):.6f}" for v in scalar_obs]
@@ -182,5 +183,5 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
 
     with open(episode_log_dir / "log.tsv", "w", encoding="utf-8") as f:
         f.write("step\t" + "\t".join(columns) + "\n")
-        for step, row in enumerate(rows, start=-1):
+        for step, row in enumerate(rows):
             f.write(f"{step}\t" + "\t".join(row) + "\n")
