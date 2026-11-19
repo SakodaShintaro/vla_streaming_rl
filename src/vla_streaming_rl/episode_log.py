@@ -32,19 +32,31 @@ class EpisodeRecord:
 
     @classmethod
     def start(
-        cls, frame: np.ndarray, obs: dict, texts: dict[str, str], reset_info: dict
+        cls,
+        frame: np.ndarray,
+        obs: dict,
+        texts: dict[str, str],
+        reset_info: dict,
+        prev_action: np.ndarray,
     ) -> "EpisodeRecord":
-        """リセット直後の描画と観測から、エピソードの記録を始める。"""
+        """リセット直後の描画と観測から、エピソードの記録を始める。``prev_action`` はリセット直後の
+        観測でエージェントが前の行動として読んだもの（前のエピソードの最後の行動）。
+
+        行動・報酬・位置・スカラーの観測の最初の1行を、リセットの分にする。行動は
+        ``prev_action``、報酬はリセットでは無いので 0、位置と観測はリセット直後のもの。これで
+        各フレームでエージェントが読んだ前の行動・報酬・スカラーの観測が、どれも1つ前の行に
+        揃う。"""
+        log_position = "agent_xyz" in reset_info
         return cls(
             frames=[frame],
-            actions=[],
-            rewards=[],
+            actions=[prev_action.copy()],
+            rewards=[0.0],
             observations=[obs["image"].copy()],
             texts=[texts],
-            xyzs=[],
-            yaws=[],
-            scalar_obs=[],
-            log_position="agent_xyz" in reset_info,
+            xyzs=[reset_info["agent_xyz"]] if log_position else [],
+            yaws=[reset_info["agent_rotation"][1]] if log_position else [],
+            scalar_obs=[read_scalar_obs(obs)],
+            log_position=log_position,
         )
 
     def add_step(
@@ -144,7 +156,10 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
     # One row per step: the action taken, the reward it drew, where the
     # agent stood after it and which way it faced, and the scalar observation
     # it came back with, so an episode's trajectory can be drawn from the run
-    # rather than re-simulated. ``xyzs`` is empty for an env that reports no
+    # rather than re-simulated. The first row, step -1, is the reset: the
+    # previous action the agent read there, no reward, and the reset's
+    # position and scalar observation, so the inputs the agent read at frame k
+    # are all in the row of step k - 1. ``xyzs`` is empty for an env that reports no
     # position, and the x/y/z/yaw columns are then left out rather than filled
     # with a stand-in.
     columns = [f"action{i}" for i in range(len(record.actions[0]))] + ["reward"]
@@ -167,5 +182,5 @@ def save_episode_data(episode_dir: Path, name: str, record: EpisodeRecord) -> No
 
     with open(episode_log_dir / "log.tsv", "w", encoding="utf-8") as f:
         f.write("step\t" + "\t".join(columns) + "\n")
-        for step, row in enumerate(rows):
+        for step, row in enumerate(rows, start=-1):
             f.write(f"{step}\t" + "\t".join(row) + "\n")

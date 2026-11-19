@@ -45,6 +45,7 @@ def run_arena(
         obs,
         result.texts,
         reset_info,
+        prev_action,
     )
     action = result.action
 

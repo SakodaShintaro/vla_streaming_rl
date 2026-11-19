@@ -432,6 +432,7 @@ def main(args: DictConfig, exp_name: str, seed: int, result_dir: Path) -> None:
             obs,
             result.texts,
             reset_info,
+            action,
         )
         action = result.action
 
