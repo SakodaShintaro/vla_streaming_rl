@@ -56,7 +56,7 @@ env_factory:
   #   evaluation sweeps. The paper's Testbed is every level ("01" to "10") and
   #   every variant ("01" to "03"), 900 arenas; the values below are the 60
   #   arenas of the training set.
-  eval_levels: ["01", "02", "bridge"]
+  eval_levels: ["01", "02"]
   eval_variants: ["01"]
   # - steps_per_stage ("staged"): how long each of the 11 stages lasts.
   steps_per_stage: 20_000
