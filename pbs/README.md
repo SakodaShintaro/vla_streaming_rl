@@ -8,6 +8,12 @@ singularity build --fakeroot pbs/container/xvfb.sif pbs/container/xvfb.def
 
 ## run
 
+`args` holds the script's arguments as one string, taken from the environment so that Hydra
+overrides (which contain `=`) pass through untouched.
+
 ```bash
-qsub -v script=train_animalai.sh,agent_id=vla,exp_name=trial001 pbs/job.sh
+args="life2 siglip trial001 siglip.num_gdn_layers=1" qsub -v script=train_animalai.sh,args pbs/job.sh
 ```
+
+The container has no `unzip`, so run `./setup_animalai.sh` once on the login node before the
+first Animal-AI job.
