@@ -14,17 +14,8 @@
 
 ## 状態（反復をまたいで残るもの）
 
-最初に必ず読む。
-
-Git 管理するもの（`ralph/log/`。更新したら `ralph: log <exp_name>` のようなメッセージでコミットする）:
-
 - `log.md`: 実験ごとの 1 行の表（exp_name, commit, 変更点, 仮説, episodes, max_stage_reached, reached_at_episode, games_ended, 採否）と、その下の考察のメモ。毎回追記する
 - `best.json`: 今の最良の {exp_name, commit, max_stage_reached, reached_at_episode, games_ended}。最初はベースライン（wandb から選んだときは run id と run の commit も持つ）
-
-Git 管理しないもの（`results` に置く。`results` は .gitignore 済み）:
-
-- `results/current.json`: 走っている実験の {exp_name, commit, pid, stdout} 。走っていなければ無い
-- `results/stdout/<exp_name>.log`: 学習の標準出力
 
 ## 1 反復の手順
 
@@ -47,14 +38,17 @@ Git 管理しないもの（`results` に置く。`results` は .gitignore 済�
 ## 変えてよいもの・いけないもの
 
 - 試す値はコマンドラインの上書きではなく yaml のデフォルトに書く（コミットが実行と一致するように）。
-- `src/vla_streaming_rl/` の学習側のコード（agent、network、replay buffer など）は変えてよい。新しい仕組みを足すときは config のキーで切り替え、default.yaml の値は今の挙動のままにして siglip.yaml で有効にする。頼まれていないリファクタや整理はしない
-- 変えてはいけない: `train_animalai.sh`、`scripts/train.py` の記録と集計、`src/vla_streaming_rl/envs/`、`configs/env/`（ライフの数 `lives`、ステージにするレベルと版を含む）、`episode_limit`、アリーナ、pass mark、`ralph/summary.py`。指標を良く見せるだけの変更は禁止
+- `src/vla_streaming_rl/` の学習側のコード（agent、network、replay buffer など）は変えてよい
+- 変えてはいけない: `train_animalai.sh`、`scripts/train.py` の記録と集計、`src/vla_streaming_rl/envs/`、`configs/env/`、アリーナ、pass mark、`ralph/summary.py`。指標を良く見せるだけの変更は禁止
 - main ブランチには触らない。push しない
 
 ## その他
 
 - できればGated DeltaNetを使っていきたい。しかし、今までGDNを入れた方が良い結果になったことはない。メモリを使うようにドロップアウトとかする必要があるかもしれない
 - 学習率の調整はかなりどうでもいいので、よっぽど手法を変えたときに必要であるか、他にやることがないときにだけやる
+- このPCでは2つあるいは3つ、もしかするともっと並列実行できるかもしれません
+- コード差分はgit worktreeで管理してください
+- 結果が良かったものは差分をできるだけ小さくしてからmainブランチへのプルリクエストとしてください
 
 行動の表現がイマイチだと思われていたので、最近は以下の変更を試していた
 
