@@ -17,6 +17,10 @@ streaming_update: false
 lora_lr: 1e-5
 lora_beta1: 0.999
 
+# 補助の割引率（AMAGO の multi-gamma）。critic は割引率ごとの価値を同じ幹から出し、割引率ごとの
+# 方策がそれぞれの価値を最大にする。環境で動くのは主の割引率 gamma の方策
+multi_gammas: [0.9, 0.95]
+
 replay_buffer:
   # 表現が 1 ステップ 64 x 768（bfloat16 で 96KB）なので GPU に置く（size 20000 で約 2GB）
   device: cuda
