@@ -126,6 +126,7 @@ def build_siglip(
         streaming_update=args.streaming_update,
         lora_lr=args.lora_lr,
         lora_beta1=args.lora_beta1,
+        combined_replay=args.combined_replay,
     )
     return network, agent
 

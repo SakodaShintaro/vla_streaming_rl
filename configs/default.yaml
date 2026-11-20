@@ -32,6 +32,8 @@ gamma: 0.99
 multi_gammas: []
 learning_starts: 2000
 critic_loss_weight: 1.0
+# 最新の遷移を毎回のバッチに足す（combined experience replay、siglip のみ）
+combined_replay: false
 use_done: true
 reset_on_episode_end: true
 normalizing_by_return: false
