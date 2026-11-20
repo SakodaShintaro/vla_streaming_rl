@@ -29,11 +29,14 @@ time_limit_hour: 1_000_000_000
 max_grad_norm: 5.0
 sparsity: 0.0
 gamma: 0.99
-multi_gammas: []
+# 補助の割引率（AMAGO の multi-gamma）。critic は割引率ごとの価値を同じ幹から出し、割引率ごとの
+# 方策がそれぞれの価値を最大にする。環境で動くのは主の割引率 gamma の方策
+multi_gammas: [0.9, 0.95]
 learning_starts: 2000
 critic_loss_weight: 1.0
-# 最新の遷移を毎回のバッチに足す（combined experience replay、siglip と vla）
-combined_replay: false
+# 最新の遷移を毎回のバッチに足す（combined experience replay、siglip と vla）。streaming_update の
+# ときは streaming の更新が最新の遷移を足す。siglip で GDN の層を streaming_update なしで使うなら false
+combined_replay: true
 use_done: true
 reset_on_episode_end: true
 normalizing_by_return: false

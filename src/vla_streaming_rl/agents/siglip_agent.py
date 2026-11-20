@@ -66,8 +66,8 @@ class SiglipAgent:
         # streaming_update なら GDN の層の LoRA の3つに分ける
         assert network.use_gdn or not streaming_update
         # combined experience replay（Zhang & Sutton 2017）: 最新の遷移を毎回のバッチに足す。
-        # GDN の層があるときの最新の遷移は streaming_update が扱う
-        assert not (combined_replay and network.use_gdn)
+        # GDN の層があるときの最新の遷移は streaming_update が扱い、そのときはそちらの経路で足す
+        assert not (combined_replay and network.use_gdn and not streaming_update)
         self.combined_replay = combined_replay
         critic_params = list(network.value_head.parameters())
         self.lora_params = network.encoder.lora_parameters() if network.use_gdn else []

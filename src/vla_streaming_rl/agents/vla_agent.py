@@ -106,8 +106,7 @@ class VLAAgent:
         self.is_learning = False
         self.streaming_update = streaming_update
         # combined experience replay（Zhang & Sutton 2017）: 最新の窓を毎回のバッチに足す。
-        # streaming_update はもともと最新の窓をつなぐので、併用しない
-        assert not (combined_replay and streaming_update)
+        # streaming_update はもともと最新の窓をつなぐので、そのときはそちらの経路で足す
         self.combined_replay = combined_replay
 
         # 方策の行動は [-1, 1] に正規化した空間にあり、環境の行動空間へはこれで写す
