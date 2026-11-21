@@ -1,8 +1,8 @@
 """Summarize max_stage_reached of an Animal-AI run in life mode.
 
 Usage:
-    uv run python ralph/summary.py tsv <result_dir>
-    uv run python ralph/summary.py wandb <run_id>
+    uv run python scripts/summary.py tsv <result_dir>
+    uv run python scripts/summary.py wandb <run_id>
 
 max_stage_reached is the furthest stage any game of the run has reached so far
 (1-based; the number of stages + 1 once a game has cleared them all), so it never
