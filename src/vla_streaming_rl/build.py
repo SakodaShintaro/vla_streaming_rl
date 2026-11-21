@@ -83,6 +83,7 @@ def build_vla(env: Env, args: DictConfig) -> tuple[VLAActorCriticWithActionValue
         priority_epsilon=args.replay_buffer.priority_epsilon,
         reset_on_episode_end=args.reset_on_episode_end,
         streaming_update=args.streaming_update,
+        combined_replay=args.combined_replay,
         instruction=_instruction(env, args),
     )
     return network, agent
@@ -126,6 +127,7 @@ def build_siglip(
         streaming_update=args.streaming_update,
         lora_lr=args.lora_lr,
         lora_beta1=args.lora_beta1,
+        combined_replay=args.combined_replay,
     )
     return network, agent
 

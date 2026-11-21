@@ -32,7 +32,7 @@ from vla_streaming_rl.agents.step_result import StepResult
 from vla_streaming_rl.networks.vla_actor_critic_with_action_value import (
     InferInput,
 )
-from vla_streaming_rl.replay_buffer import ReplayBuffer
+from vla_streaming_rl.replay_buffer import ReplayBuffer, ReplayBufferData
 from vla_streaming_rl.reward_scaler import FixedRewardScaler, RewardScaler
 from vla_streaming_rl.scalar_obs import read_scalar_obs
 
@@ -63,6 +63,7 @@ class VLAAgent:
         priority_epsilon: float,
         reset_on_episode_end: bool,
         streaming_update: bool,
+        combined_replay: bool,
         instruction: str,
     ) -> None:
         # 最適化は actor・critic（価値ヘッド）・LoRA 付きの GDN の層の LoRA の3つに分ける
@@ -104,6 +105,9 @@ class VLAAgent:
         self.max_grad_norm = max_grad_norm
         self.is_learning = False
         self.streaming_update = streaming_update
+        # combined experience replay（Zhang & Sutton 2017）: 最新の窓を毎回のバッチに足す。
+        # streaming_update はもともと最新の窓をつなぐので、そのときはそちらの経路で足す
+        self.combined_replay = combined_replay
 
         # 方策の行動は [-1, 1] に正規化した空間にあり、環境の行動空間へはこれで写す
         self.action_low = action_space.low
@@ -213,6 +217,22 @@ class VLAAgent:
             result = self.network.compute_replay_and_streaming_loss(
                 data, self.previous_image, latest
             )
+        elif self.combined_replay and not self._episode_start:
+            # 最新の窓をバッチの最後に足す。重要度の重みは 1
+            latest = self.rb.get_latest(window_len)
+            latest.rewards = self.reward_scaler.normalize(latest.rewards)
+            result = self.network.compute_replay_loss(
+                ReplayBufferData(
+                    observations=torch.cat([data.observations, latest.observations]),
+                    rewards=torch.cat([data.rewards, latest.rewards]),
+                    dones=torch.cat([data.dones, latest.dones]),
+                    actions=torch.cat([data.actions, latest.actions]),
+                    scalar_obs=torch.cat([data.scalar_obs, latest.scalar_obs]),
+                    start_indices=torch.cat([data.start_indices, latest.start_indices]),
+                    weights=torch.cat([data.weights, latest.weights.to(data.weights)]),
+                )
+            )
+            result.td_error = result.td_error[: data.weights.shape[0]]
         else:
             result = self.network.compute_replay_loss(data)
         metrics.update(result.info)
