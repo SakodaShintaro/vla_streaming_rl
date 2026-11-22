@@ -74,7 +74,7 @@ case ${difficulty} in
       env_factory.mode=life
       'env_factory.train_levels=["food"]'
       'env_factory.train_variant="01"'
-      episode_limit=1000
+      episode_limit=2000
     )
     ;;
   blink)
