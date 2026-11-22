@@ -56,3 +56,6 @@ siglip:
   # 最後を現在の状態にする
   gdn_burn_in_steps: 8
   gdn_bptt_steps: 8
+  # advantage learning の係数。critic の TD の目標から alpha (V(s) - Q(s, a)) を引き、方策の行動と
+  # それ以外の行動の価値の差（action gap）を広げる。0 なら引かない
+  advantage_learning_alpha: 0.9

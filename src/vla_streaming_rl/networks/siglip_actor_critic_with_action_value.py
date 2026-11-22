@@ -81,6 +81,10 @@ class SiglipActorCriticWithActionValue(nn.Module):
         )
         self.reset_on_episode_end = reset_on_episode_end
         self.critic_loss_weight = critic_loss_weight
+        # advantage learning（Baird 1999, Bellemare et al. 2016）の係数。TD の目標から
+        # alpha (V(s) - Q(s, a)) を引き、方策の行動とそれ以外の行動の価値の差を広げる。0 なら引かない
+        self.advantage_learning_alpha = siglip_config.advantage_learning_alpha
+        assert 0.0 <= self.advantage_learning_alpha < 1.0, self.advantage_learning_alpha
         device = "cuda"
         action_dim = action_space_shape[0]
         self.encoder = SiglipEncoder(
@@ -256,6 +260,15 @@ class SiglipActorCriticWithActionValue(nn.Module):
         # 内発報酬は遷移の報酬に足す。TD の目標にだけ入る
         reward = reward + intrinsic_reward.view(-1, 1)
         target_value = self.value_head.compute_target_value(next_q, reward, done)
+        with torch.no_grad():
+            # V(s) は今の方策の行動（割引率ごと）での Q、Q(s, a) は遷移の行動での Q（どちらも勾配なし）
+            state_value = self.value_head.gamma_values(
+                state, self.policy_head.get_gamma_actions(state)
+            )
+            taken_value = self.value_head.to_values(self.value_head(state, action).output)
+            target_value = target_value - self.advantage_learning_alpha * (
+                state_value - taken_value
+            )
         critic_loss, critic_info, td_error = self.value_head.compute_critic_loss(
             state, action, target_value, weights
         )
