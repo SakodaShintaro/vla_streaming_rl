@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 import math
+from collections import deque
 
 import numpy as np
 import torch
@@ -83,6 +84,10 @@ class VLMEncoder(nn.Module):
     始めでだけ空にし、full attention の層の KV は指示の文（attention sink）と直近の
     ``stream_window_steps`` ステップの分だけ残す。
 
+    ``fresh_window_steps`` が 1 以上なら流れを積まず、毎ステップ、指示の文と直近
+    ``fresh_window_steps`` ステップ分の文と画像を、空の状態から 1 回の順伝播で読み直す。GDN の層の
+    再帰状態も持ち越さないので、VLM が見る履歴はこのステップ数で打ち切られる。
+
     ``to_state`` は保存した表現を位置ごとに ``token_dim`` へ射影し、同じステップの前の行動・
     報酬・スカラーの観測（global_step を除く）をそれぞれ ``token_dim`` 幅のトークンにした
     ものを並べ、``token_mixer_layers`` 層の Transformer でトークンどうしを混ぜて、ヘッドが
@@ -124,6 +129,14 @@ class VLMEncoder(nn.Module):
         assert vla_config.stream_window_steps >= 0, vla_config.stream_window_steps
         self.stream_window_steps = vla_config.stream_window_steps
         self._reset_stream()
+        assert vla_config.fresh_window_steps >= 0, vla_config.fresh_window_steps
+        # 毎ステップ読み直すと再帰の状態を持ち越さないので、RTRL の LoRA とは併用しない
+        assert not (use_lora_gdn and vla_config.fresh_window_steps > 0)
+        self.fresh_window_steps = vla_config.fresh_window_steps
+        # 読み直す直近のステップごとの (文, 画像の並び)
+        self.fresh_steps: deque[tuple[str, list[torch.Tensor]]] = deque(
+            maxlen=max(vla_config.fresh_window_steps, 1)
+        )
         self.image_layers = slice(vla_config.image_layer_start, vla_config.image_layer_stop)
         self.image_pad_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         self.use_lora_gdn = use_lora_gdn
@@ -221,8 +234,10 @@ class VLMEncoder(nn.Module):
         VLM は勾配なしで読み、GDN の層の出力は、次のティックの損失が勾配を LoRA まで流せるよう
         計算グラフ付きで返す。再帰の状態は層ごとの S と、畳み込みが読む直前のトークンの入力 h を
         並べたもの。各層が自分の LoRA の感度だけを運ぶ（層ごとに閉じた近似）。"""
+        assert len(images) == self.images_num, (len(images), self.images_num)
+        if self.fresh_window_steps > 0:
+            return self._represent_fresh(images, scalar_obs, prev_action, reward, text, reset_state)
         with torch.no_grad():
-            assert len(images) == self.images_num, (len(images), self.images_num)
             if reset_state or self.stream_window_steps == 0:
                 self._reset_stream()
             if self.stream_next_position == 0:
@@ -278,10 +293,53 @@ class VLMEncoder(nn.Module):
             image_position = inputs["input_ids"][0] == self.image_pad_id
             return x[0, image_position].view(self.num_positions, -1)
 
+    @torch.no_grad()
+    def _represent_fresh(
+        self,
+        images: list[torch.Tensor],
+        scalar_obs: np.ndarray,
+        prev_action: np.ndarray,
+        reward: float,
+        text: str,
+        reset_state: bool,
+    ) -> torch.Tensor:
+        """指示の文と直近 ``fresh_window_steps`` ステップ分の文と画像を、空の状態から 1 回の
+        順伝播で読み、最後のステップの画像のトークンの表現を返す。流れに 1 ステップずつ積んで
+        読んだときと同じ並びのトークンになる。"""
+        if reset_state:
+            self.fresh_steps.clear()
+        self.fresh_steps.append((self._step_text(scalar_obs, prev_action, reward), list(images)))
+        inputs = self.processor(
+            text=[f"{IM_START}user\n{text}\n" + "".join(step for step, _ in self.fresh_steps)],
+            images=[image for _, step_images in self.fresh_steps for image in step_images],
+            return_tensors="pt",
+            do_rescale=False,
+        ).to(self.device)
+        outputs = self.vlm(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            pixel_values=inputs["pixel_values"],
+            image_grid_thw=inputs["image_grid_thw"],
+            mm_token_type_ids=inputs["mm_token_type_ids"],
+            output_hidden_states=True,
+            logits_to_keep=1,
+        )
+        # 最後のステップの画像のトークンだけを残す
+        image_position = torch.nonzero(inputs["input_ids"][0] == self.image_pad_id)[:, 0]
+        return self._image_tokens_at(image_position[-self.num_positions :], outputs)
+
+    def _step_text(self, scalar_obs: np.ndarray, prev_action: np.ndarray, reward: float) -> str:
+        """1 ステップ分の文。前の行動・報酬・スカラーの観測に続けて画像の場所。"""
+        scalars = ", ".join(item for _, item in step_text_items(scalar_obs, prev_action, reward))
+        return f"{scalars}\n{IMAGE_PLACEHOLDER * self.images_num}"
+
     def _image_tokens(self, input_ids: torch.Tensor, outputs) -> torch.Tensor:
         """画像のトークンの位置の活性の ``image_layers`` の層での平均。画像のトークンは、
         画像の順に、それぞれ統合後の格子のラスター順に並ぶ。"""
-        image_position = input_ids[0] == self.image_pad_id
+        return self._image_tokens_at(input_ids[0] == self.image_pad_id, outputs)
+
+    def _image_tokens_at(self, image_position: torch.Tensor, outputs) -> torch.Tensor:
+        """``image_position``（マスクか添字）の位置の活性の ``image_layers`` の層での平均。"""
         image_layers = outputs.hidden_states[self.image_layers]
         return sum(depth[0, image_position].to(torch.float32) for depth in image_layers) / len(
             image_layers
@@ -339,9 +397,8 @@ class VLMEncoder(nn.Module):
     ) -> tuple[dict, torch.Tensor]:
         """このステップの文と画像のプロセッサの入力と、流れの位置 ``start_position`` から続ける
         M-RoPE の位置 (3, 1, L)。"""
-        scalars = ", ".join(item for _, item in step_text_items(scalar_obs, prev_action, reward))
         inputs = self.processor(
-            text=[f"{scalars}\n{IMAGE_PLACEHOLDER * len(images)}"],
+            text=[self._step_text(scalar_obs, prev_action, reward)],
             images=list(images),
             return_tensors="pt",
             do_rescale=False,
