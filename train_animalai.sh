@@ -5,7 +5,9 @@ set -eux
 #   difficulty: easy    -> level 01 の variant 01 だけ（簡易な検証用）
 #               blackout -> 暗転の課題 blackout-01-01 と blackout-02-01（最初の 1 ステップだけ見える）
 #               maze    -> 迷路の記憶の課題 maze-01-01 から maze-04-01（始めにルールで左右を1周ずつ走る）
-#               food    -> 黄色を集める課題 food-01-01 から food-33-01（scripts/make_food_arenas.py）を
+#               food    -> 黄色を集める課題 food-01-01 から food-33-01 の 35 面（scripts/make_food_arenas.py）を
+#                          ライフ制のステージにしたもの
+#               moving  -> 動く玉の課題 moving-01-01 から moving-10-01（scripts/make_moving_arenas.py）を
 #                          ライフ制のステージにしたもの
 #               blink   -> level 01 を点滅の記憶の課題にしたもの（env_factory.blink_dark_steps_increment）
 #               life    -> ライフ制のステージ（env_factory.mode=life）。レベルと版とライフの数は
@@ -69,10 +71,19 @@ case ${difficulty} in
     )
     ;;
   food)
-    # 黄色を集める課題（scripts/make_food_arenas.py で作る food-01-01 から food-33-01）をライフ制で
+    # 黄色を集める課題（scripts/make_food_arenas.py で作る food-01-01 から food-33-01 の 35 面）をライフ制で
     difficulty_overrides=(
       env_factory.mode=life
       'env_factory.train_levels=["food"]'
+      'env_factory.train_variant="01"'
+      episode_limit=2000
+    )
+    ;;
+  moving)
+    # 動く玉の課題（scripts/make_moving_arenas.py で作る moving-01-01 から moving-10-01）をライフ制で
+    difficulty_overrides=(
+      env_factory.mode=life
+      'env_factory.train_levels=["moving"]'
       'env_factory.train_variant="01"'
       episode_limit=2000
     )
@@ -104,7 +115,7 @@ case ${difficulty} in
     difficulty_overrides=()
     ;;
   *)
-    echo "Unknown difficulty: ${difficulty} (easy, one_lap, blackout, maze, food, blink, life, life2 or normal)" >&2
+    echo "Unknown difficulty: ${difficulty} (easy, one_lap, blackout, maze, food, moving, blink, life, life2 or normal)" >&2
     exit 1
     ;;
 esac
