@@ -81,6 +81,16 @@ class SiglipActorCriticWithActionValue(nn.Module):
         )
         self.reset_on_episode_end = reset_on_episode_end
         self.critic_loss_weight = critic_loss_weight
+        # リプレイの損失で、現在のステップから遡った直近の観測を隠す確率と、隠す長さの上限
+        self.obs_mask_prob = siglip_config.obs_mask_prob
+        self.obs_mask_max_steps = siglip_config.obs_mask_max_steps
+        assert 0.0 <= self.obs_mask_prob <= 1.0, self.obs_mask_prob
+        if self.obs_mask_prob > 0.0:
+            # 隠した分を補えるのは GDN の記憶だけで、その記憶に勾配が届くのは BPTT のステップまで
+            assert self.use_gdn
+            assert 1 <= self.obs_mask_max_steps <= siglip_config.gdn_bptt_steps, (
+                self.obs_mask_max_steps
+            )
         device = "cuda"
         action_dim = action_space_shape[0]
         self.encoder = SiglipEncoder(
@@ -211,13 +221,18 @@ class SiglipActorCriticWithActionValue(nn.Module):
             batch, window_len, positions, feature_dim
         )
         recurrent = data.observations[:, 0, positions * feature_dim :]
+        hide_from = self._hide_from(batch, window_len)
         recomputed = []
         for step in range(window_len):
             if step > 0:
                 if self.reset_on_episode_end:
                     # 前の行が終端なら、この行から新しいエピソードの流れ
                     recurrent = recurrent * (1.0 - data.dones[:, step - 1])
-                recomputed.append(recurrent.detach())
+                # 観測を隠した行を読んだ後の状態は、バッファには書き戻さず、保存してあるものを残す
+                stored = data.observations[:, step, positions * feature_dim :].to(recurrent.dtype)
+                recomputed.append(
+                    torch.where((step <= hide_from)[:, None], recurrent.detach(), stored)
+                )
             # burn-in と、次の状態の行は勾配なしで読む
             with torch.set_grad_enabled(self.burn_in_steps <= step < window_len - 1):
                 tokens = self.encoder.step_tokens(
@@ -226,12 +241,25 @@ class SiglipActorCriticWithActionValue(nn.Module):
                     data.rewards[:, step],
                     data.scalar_obs[:, step],
                 )
+                # hide_from の行から現在の行までの観測を隠す。次の状態の行は隠さない
+                tokens = self.encoder.hide_observation(
+                    tokens, (hide_from <= step) & (step < window_len - 1)
+                )
                 output, recurrent = self.encoder.read_step(tokens, recurrent)
                 if step == window_len - 2:
                     state = self.encoder.mix(output)
         with torch.no_grad():
             next_state = self.encoder.mix(output)
         return state, next_state, torch.stack(recomputed, dim=1)
+
+    def _hide_from(self, batch: int, window_len: int) -> torch.Tensor:
+        """サンプルごとの、観測を隠し始める行の番号 (B,)。確率 ``obs_mask_prob`` で、現在の行（窓の
+        最後から2番目）までの直近 1〜``obs_mask_max_steps`` 行を隠す。隠さないサンプルは
+        ``window_len``（どの行にも当たらない）。"""
+        device = self.encoder.device
+        length = torch.randint(1, self.obs_mask_max_steps + 1, (batch,), device=device)
+        masked = torch.rand(batch, device=device) < self.obs_mask_prob
+        return torch.where(masked, window_len - 1 - length, torch.full_like(length, window_len))
 
     def _head_terms(
         self,

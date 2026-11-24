@@ -87,6 +87,10 @@ class SiglipEncoder(nn.Module):
         self.register_buffer("scalar_frequencies", (2.0 * math.pi / periods).to(device))
         # 表現の位置、前の行動の成分ごと、報酬、スカラーの観測ごとに1トークン
         tokens_num = self.num_positions + action_dim + 1 + len(STATE_SCALAR_INDICES)
+        # 前の行動のトークンの位置。観測を隠すときも残す
+        action_token = torch.zeros(tokens_num, dtype=torch.bool, device=device)
+        action_token[self.num_positions : self.num_positions + action_dim] = True
+        self.register_buffer("action_token", action_token, persistent=False)
         self.num_gdn_layers = siglip_config.num_gdn_layers
         assert self.num_gdn_layers >= 0, self.num_gdn_layers
         # GDN の層があれば、その出力の記憶のトークンを混ぜる層の入力に付け足す
@@ -250,6 +254,15 @@ class SiglipEncoder(nn.Module):
         scalar_tokens = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
         tokens = torch.cat([projected, action_tokens, reward_token, scalar_tokens], dim=1)
         return tokens + self.token_position
+
+    def hide_observation(self, tokens: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        """``step_tokens`` のトークン (B, tokens_num, token_dim) のうち、``hidden`` (B,) が真の行の
+        観測のトークン（画像・報酬・スカラーの観測）を位置の埋め込みだけにする。前の行動の
+        トークンは残す。"""
+        blank = torch.where(
+            self.action_token[None, :, None], tokens, self.token_position.expand_as(tokens)
+        )
+        return torch.where(hidden[:, None, None], blank, tokens)
 
     def gdn_step(
         self, latents: torch.Tensor, state: torch.Tensor, use_trace: bool

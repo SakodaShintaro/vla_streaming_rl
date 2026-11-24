@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: MIT
 import copy
+import math
 
 import torch
 import torch.nn as nn
+from timm.models.vision_transformer import Block
 
 from .blocks import SimbaBlock
 
@@ -180,3 +182,169 @@ class LatentTDPredictionHead(nn.Module):
         self.error_mean.lerp_(batch_mean, self.INTRINSIC_EMA_RATE)
         self.error_var.lerp_((error - self.error_mean).pow(2).mean(), self.INTRINSIC_EMA_RATE)
         return reward
+
+
+class MeanFlowPredictionHead(nn.Module):
+    """次の状態を、今の状態と行動を条件に MeanFlow (Geng et al., 2025) で生成する予測ヘッド。
+
+    予測先は次の 1 ステップの状態そのもので、割引和もブートストラップも使わない。状態は
+    ``token_dim`` 幅のトークンの並びとして扱い、次元ごとの指数移動平均の平均と分散で標準化
+    してから予測先にする。Transformer が、ノイズを混ぜた予測先 z と 2 つの時刻 t >= r から、
+    区間 [r, t] の平均の速度 u と、時刻 t の瞬間の速度 v を出す。
+
+    損失は i-MeanFlow の形。z = (1 - t) x + t e、本当の速度は e - x。v はそのまま回帰し、u は
+    u + (t - r) du/dt が本当の速度に合うようにする。du/dt は (dz/dt, dt, dr) = (予測した v, 1, 0)
+    の向きの方向微分で、勾配は流さない。どちらの項も、誤差の大きさで割る重みを掛ける。
+    生成は 1 ステップで、z を標準正規分布から引いて x = z - u(z, t = 1, r = 0)。
+
+    遷移ごとの内発報酬は、1 ステップで生成した次の状態と本当の次の状態の二乗誤差を、その指数
+    移動平均の平均と分散で標準化して ``intrinsic_reward_weight`` を掛けたもの。"""
+
+    # 予測先と内発報酬を標準化する統計が、バッチの値を指数移動平均で追う刻み
+    EMA_RATE = 0.01
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        token_dim: int,
+        width: int,
+        block_num: int,
+        heads: int,
+        time_mu: float,
+        time_sigma: float,
+        adaptive_c: float,
+        loss_weight: float,
+        intrinsic_reward_weight: float,
+    ) -> None:
+        super().__init__()
+        assert state_dim % token_dim == 0, (state_dim, token_dim)
+        self.token_dim = token_dim
+        self.tokens_num = state_dim // token_dim
+        self.width = width
+        self.time_mu = time_mu
+        self.time_sigma = time_sigma
+        self.adaptive_c = adaptive_c
+        self.loss_weight = loss_weight
+        self.intrinsic_reward_weight = intrinsic_reward_weight
+        self.register_buffer("target_mean", torch.zeros(state_dim))
+        self.register_buffer("target_var", torch.ones(state_dim))
+        self.register_buffer("error_mean", torch.zeros(()))
+        self.register_buffer("error_var", torch.ones(()))
+        self.state_in = nn.Linear(token_dim, width)
+        self.target_in = nn.Linear(token_dim, width)
+        self.state_position = nn.Parameter(torch.zeros(1, self.tokens_num, width))
+        self.target_position = nn.Parameter(torch.zeros(1, self.tokens_num, width))
+        # 2 つの時刻（t と t - r）の特徴と行動を、予測先のトークンに足す条件にする
+        self.condition = nn.Sequential(
+            nn.Linear(2 * width + action_dim, width), nn.SiLU(), nn.Linear(width, width)
+        )
+        self.blocks = nn.ModuleList([Block(dim=width, num_heads=heads) for _ in range(block_num)])
+        for block in self.blocks:
+            # 組み込みの注意（scaled_dot_product_attention）は方向微分（JVP）を通せない
+            block.attn.fused_attn = False
+        self.norm = nn.LayerNorm(width)
+        self.out_u = nn.Linear(width, token_dim)
+        self.out_v = nn.Linear(width, token_dim)
+        for out in (self.out_u, self.out_v):
+            nn.init.zeros_(out.weight)
+            nn.init.zeros_(out.bias)
+
+    def _time_features(self, time: torch.Tensor) -> torch.Tensor:
+        half = self.width // 2
+        freqs = torch.exp(-math.log(1000.0) * torch.arange(half, device=time.device) / half)
+        angles = time[:, None] * 1000.0 * freqs[None]
+        return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+
+    def _velocities(
+        self,
+        state: torch.Tensor,
+        action: torch.Tensor,
+        noisy: torch.Tensor,
+        t: torch.Tensor,
+        r: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """状態のトークン (B, tokens_num, token_dim)、行動、ノイズを混ぜた予測先（同じ形）、
+        時刻 t, r (B,) から、平均の速度 u と瞬間の速度 v（予測先と同じ形）。"""
+        condition = self.condition(
+            torch.cat([self._time_features(t), self._time_features(t - r), action], dim=-1)
+        )
+        x = torch.cat(
+            [
+                self.state_in(state) + self.state_position,
+                self.target_in(noisy) + self.target_position + condition[:, None],
+            ],
+            dim=1,
+        )
+        for block in self.blocks:
+            x = block(x)
+        hidden = self.norm(x[:, self.tokens_num :])
+        return self.out_u(hidden), self.out_v(hidden)
+
+    def _adaptive_l2(self, error: torch.Tensor) -> torch.Tensor:
+        """サンプルごとの二乗誤差に、その大きさで割る重み（勾配なし）を掛けたもの (B,)。"""
+        squared = error.pow(2).mean(dim=(1, 2))
+        return squared / (squared.detach() + self.adaptive_c)
+
+    def compute_loss(
+        self,
+        state: torch.Tensor,
+        action: torch.Tensor,
+        next_state: torch.Tensor,
+        next_action: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
+        """``state`` (B, state_dim) と ``action`` (B, action_dim) から ``next_state``
+        (B, state_dim、勾配なしで作ったもの) を生成する MeanFlow の損失と、遷移ごとの内発報酬
+        (B,)。``next_action`` は使わない。"""
+        del next_action
+        batch = state.shape[0]
+        with torch.no_grad():
+            if batch > 1:
+                self.target_mean.lerp_(next_state.mean(dim=0), self.EMA_RATE)
+                self.target_var.lerp_(next_state.var(dim=0), self.EMA_RATE)
+            target = (next_state - self.target_mean) / torch.sqrt(self.target_var + 1e-4)
+            target = target.view(batch, self.tokens_num, self.token_dim)
+            samples = torch.sigmoid(
+                torch.randn(batch, 2, device=state.device) * self.time_sigma + self.time_mu
+            )
+            t, r = samples.max(dim=1).values, samples.min(dim=1).values
+            noise = torch.randn_like(target)
+            level = t.view(-1, 1, 1)
+            noisy = (1.0 - level) * target + level * noise
+            velocity = noise - target
+        tokens = state.view(batch, self.tokens_num, self.token_dim)
+        frozen = tokens.detach()
+        with torch.no_grad():
+            _, v_now = self._velocities(frozen, action, noisy, t, r)
+        _, dudt = torch.func.jvp(
+            lambda z_, t_, r_: self._velocities(frozen, action, z_, t_, r_)[0],
+            (noisy, t, r),
+            (v_now, torch.ones_like(t), torch.zeros_like(r)),
+        )
+        u, v = self._velocities(tokens, action, noisy, t, r)
+        mean_loss = self._adaptive_l2(u + (t - r).view(-1, 1, 1) * dudt.detach() - velocity)
+        flow_loss = self._adaptive_l2(v - velocity)
+        loss = self.loss_weight * (mean_loss + flow_loss).mean()
+        with torch.no_grad():
+            # 1 ステップで生成した次の状態の、本当の次の状態からの外れ方
+            start = torch.randn_like(target)
+            ones, zeros = torch.ones_like(t), torch.zeros_like(t)
+            generated = start - self._velocities(frozen, action, start, ones, zeros)[0]
+            error = (generated - target).pow(2).mean(dim=(1, 2))
+            intrinsic_reward = (
+                self.intrinsic_reward_weight
+                * (error - self.error_mean)
+                / torch.sqrt(self.error_var + 1e-8)
+            )
+            self.error_mean.lerp_(error.mean(), self.EMA_RATE)
+            self.error_var.lerp_((error - self.error_mean).pow(2).mean(), self.EMA_RATE)
+        info = {
+            "seq_loss": loss.item(),
+            "seq_mean_flow_loss": mean_loss.mean().item(),
+            "seq_flow_loss": flow_loss.mean().item(),
+            "seq_velocity_error": (v.detach() - velocity).pow(2).mean().item(),
+            "seq_sample_error": error.mean().item(),
+            "intrinsic_reward": intrinsic_reward.mean().item(),
+            **LatentTDPredictionHead._collapse_info(state, next_state),
+        }
+        return loss, info, intrinsic_reward

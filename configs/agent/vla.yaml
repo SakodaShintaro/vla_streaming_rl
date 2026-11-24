@@ -2,7 +2,7 @@
 defaults:
   - /policy_head: tanh
   - /value_head: token_dueling  # [dueling, token_dueling, simbav2]
-  - /prediction_head: td_jepa
+  - /prediction_head: meanflow  # [meanflow, td_jepa]
   - _self_
 
 # この設定のエージェント（build.py が組み立てるネットワークとエージェントを選ぶ）

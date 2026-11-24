@@ -2,7 +2,7 @@
 defaults:
   - /policy_head: tanh
   - /value_head: token_dueling  # [dueling, token_dueling, simbav2]
-  - /prediction_head: td_jepa
+  - /prediction_head: meanflow  # [meanflow, td_jepa]
   - _self_
 
 # この設定のエージェント（build.py が組み立てるネットワークとエージェントを選ぶ）
@@ -56,3 +56,11 @@ siglip:
   # 最後を現在の状態にする
   gdn_burn_in_steps: 8
   gdn_bptt_steps: 8
+  # リプレイの損失で、現在のステップから遡った直近の観測を隠す（GDN の層があるときだけ）。サンプルごとに
+  # 確率 obs_mask_prob で、現在のステップまでの直近 1〜obs_mask_max_steps ステップ（一様乱数）の観測の
+  # トークン（画像・報酬・スカラーの観測）を位置の埋め込みだけにする。前の行動のトークンは残す。
+  # 隠した状態は全てのヘッドが読むので、隠された分は GDN の記憶と行動から補うしかなくなる。
+  # 次の状態（TD と状態の予測の目標）の観測は隠さない。行動するときも隠さない。
+  # obs_mask_prob が 0 なら隠さない。obs_mask_max_steps は勾配の届く gdn_bptt_steps 以下にする
+  obs_mask_prob: 0.0
+  obs_mask_max_steps: 4

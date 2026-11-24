@@ -1,0 +1,16 @@
+_target_: vla_streaming_rl.networks.modules.prediction_head.MeanFlowPredictionHead
+_partial_: true
+# 状態をトークンに分ける幅。エンコーダの token_dim と同じにする
+token_dim: 64
+# 速度を出す Transformer の幅、ブロックの数、注意のヘッドの数
+width: 256
+block_num: 4
+heads: 4
+# 時刻 t, r は logit-normal(time_mu, time_sigma) を 2 つ引いた大きいほうと小さいほう
+time_mu: -0.4
+time_sigma: 1.0
+# 誤差の大きさで割る重み 1 / (誤差 + adaptive_c)
+adaptive_c: 0.01
+loss_weight: 1.0
+# 1 ステップで生成した次の状態の誤差を標準化した内発報酬の重み。TD の目標の報酬に足す
+intrinsic_reward_weight: 0.01
