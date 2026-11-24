@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 """黄色を集める課題（レベル food）のアリーナの YAML を書き出す。
 
-01-23-01（黄色 10 個と赤 10 個がランダムな位置にある）へ段階的に近づけるための 35 ステージ。
+01-23-01（黄色 10 個と赤 10 個がランダムな位置にある）へ段階的に近づけるための 40 ステージ。
 
-- food-01-01: 黄色 1 個が目の前にある（01-01-01 の緑を黄色にしたもの）
+- food-01-01: 黄色 1 個が目の前 2 m にある（01-01-01 の緑を黄色にしたもの）
+- food-01far04-01 から food-01far18-01: 同じ配置で、玉までの距離を 4、7、10、14、18 m と離していく。
+  まっすぐ進めば取れる
 - food-02-01: 自分の位置と向きも黄色の位置もランダム
 - food-03-01: 自分は 01-16-01 と同じ隅で壁向き、黄色の位置はランダム
 - food-03left-01, food-03right-01: 黄色 1 個が目の前から左へ（右へ）動いていく（moving-09-01、
@@ -12,8 +14,9 @@
 - food-04-01 から food-33-01: 黄色 n 個と赤 n 個（n = 1 から 30）。自分の位置と向きも全部の玉の
   位置もランダム
 
-ステージはラベルの文字列の順に並ぶので、food-03left と food-03right は food-03 と food-04 の間に
-入る。番号を振り直さないのは、food-04 以降のアリーナの名前（と名前ごとの記録）を変えないため。
+ステージはラベルの文字列の順に並ぶので、food-01far?? は food-01 と food-02 の間に、food-03left と
+food-03right は food-03 と food-04 の間に入る。番号を振り直さないのは、food-02 以降のアリーナの名前
+（と名前ごとの記録）を変えないため。
 
 位置を書かない物は Unity がエピソードごとにランダムに置く。玉の大きさは 01-23-01 と同じ 1。
 pass_mark は黄色の数から 1 を引いた値で、01-2x と同じく合計 t ステップ以内に全部取れば合格する
@@ -30,6 +33,10 @@ FOOD_GOAL_SIZE = 1
 FOOD_COUNTS = range(1, 31)
 # t の最小値。01-2x では黄色 5 個が 250
 FOOD_MIN_T = 250
+# 目の前の玉を離していくステージの、自分から玉までの距離（m）。food-01-01 は FOOD_FRONT_DISTANCE。自分は
+# 中央（z = 20）で +z 向き、壁は z = 40 なので、玉の中心は 38 まで置ける
+FOOD_FRONT_DISTANCE = 2
+FOOD_FAR_DISTANCES = (4, 7, 10, 14, 18)
 # 玉が動くステージの t。4 ステップ止めた場合、出た側へ回れば止めている分を含めて 20 ステップ前後で
 # 取れる。逆へ 1〜2 ステップ回ってから切り返しても 30 ステップ前後で取れるので、出た側を覚えていなくても
 # 間に合う。逆へ回り続けて一周すると 40 ステップを超える
@@ -109,10 +116,15 @@ CENTER_AGENT = """    - !Item
       - !Vector3 {x: 20, y: 0, z: 20}
       rotations: [0]
 """
-# 01-01-01 の緑と同じ、目の前
-FRONT_POSITION = """      positions:
-      - !Vector3 {x: 20, y: 0, z: 22}
+
+
+def front_position(distance: int) -> str:
+    """CENTER_AGENT の正面 ``distance`` m の位置。2 なら 01-01-01 の緑と同じ。"""
+    return f"""      positions:
+      - !Vector3 {{x: 20, y: 0, z: {20 + distance}}}
 """
+
+
 # 01-16-01 と同じ、隅で壁向き
 CORNER_AGENT = """    - !Item
       name: Agent
@@ -124,12 +136,16 @@ CORNER_AGENT = """    - !Item
 
 def food_arenas() -> dict[str, str]:
     arenas = {
-        "food-01-01": food_arena_yaml(CENTER_AGENT, 1, 0, FRONT_POSITION),
+        "food-01-01": food_arena_yaml(CENTER_AGENT, 1, 0, front_position(FOOD_FRONT_DISTANCE)),
         "food-02-01": food_arena_yaml("", 1, 0, ""),
         "food-03-01": food_arena_yaml(CORNER_AGENT, 1, 0, ""),
     }
     for task, n in enumerate(FOOD_COUNTS, start=len(arenas) + 1):
         arenas[f"food-{task:02d}-01"] = food_arena_yaml("", n, n, "")
+    for distance in FOOD_FAR_DISTANCES:
+        arenas[f"food-01far{distance:02d}-01"] = food_arena_yaml(
+            CENTER_AGENT, 1, 0, front_position(distance)
+        )
     arenas["food-03left-01"] = moving_arena_yaml(270, FOOD_MOVING_FROZEN_STEPS)
     arenas["food-03right-01"] = moving_arena_yaml(90, FOOD_MOVING_FROZEN_STEPS)
     return arenas

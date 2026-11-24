@@ -5,7 +5,7 @@ set -eux
 #   difficulty: easy    -> level 01 の variant 01 だけ（簡易な検証用）
 #               blackout -> 暗転の課題 blackout-01-01 と blackout-02-01（最初の 1 ステップだけ見える）
 #               maze    -> 迷路の記憶の課題 maze-01-01 から maze-04-01（始めにルールで左右を1周ずつ走る）
-#               food    -> 黄色を集める課題 food-01-01 から food-33-01 の 35 面（scripts/make_food_arenas.py）を
+#               food    -> 黄色を集める課題 food-01-01 から food-33-01 の 40 面（scripts/make_food_arenas.py）を
 #                          ライフ制のステージにしたもの
 #               moving  -> 動く玉の課題 moving-01-01 から moving-10-01（scripts/make_moving_arenas.py）を
 #                          ライフ制のステージにしたもの
@@ -71,7 +71,7 @@ case ${difficulty} in
     )
     ;;
   food)
-    # 黄色を集める課題（scripts/make_food_arenas.py で作る food-01-01 から food-33-01 の 35 面）をライフ制で
+    # 黄色を集める課題（scripts/make_food_arenas.py で作る food-01-01 から food-33-01 の 40 面）をライフ制で
     difficulty_overrides=(
       env_factory.mode=life
       'env_factory.train_levels=["food"]'
