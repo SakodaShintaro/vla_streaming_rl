@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /policy_head: tanh
+  - /policy_head: diffusion
   # 状態はトークンに分かれていない LSTM の出力なので、トークンを読まない価値ヘッドにする
   - /value_head: dueling  # [dueling, token_dueling, simbav2]
   - /prediction_head: td_jepa
